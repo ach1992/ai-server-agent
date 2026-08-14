@@ -17,6 +17,7 @@ PORT="${AI_SERVER_AGENT_PORT:-3210}"
 MODE="${AI_SERVER_AGENT_BIND_MODE:-local}"
 NONINTERACTIVE="${AI_SERVER_AGENT_NONINTERACTIVE:-0}"
 CHECK_ONLY=0
+RESOLVE_REF_ONLY=0
 
 trap 'echo "[ERROR] Installation failed at line $LINENO. Review the output above; existing project files were not intentionally modified." >&2' ERR
 
@@ -25,7 +26,40 @@ die(){ printf '[ai-server-agent] ERROR: %s\n' "$*" >&2; exit 1; }
 need_root(){ [ "$(id -u)" -eq 0 ] || die "Run this installer as root (for example: sudo bash install.sh)."; }
 version_ge(){ dpkg --compare-versions "$1" ge "$2"; }
 
-if [ "${1:-}" = "--check" ]; then CHECK_ONLY=1; fi
+urlencode_ref(){
+  local input="$1" output="" ch hex i
+  LC_ALL=C
+  for ((i=0; i<${#input}; i++)); do
+    ch="${input:i:1}"
+    case "$ch" in
+      [a-zA-Z0-9.~_-]) output+="$ch" ;;
+      *) printf -v hex '%%%02X' "'$ch"; output+="$hex" ;;
+    esac
+  done
+  printf '%s' "$output"
+}
+
+resolve_source_ref(){
+  local ref="$1" encoded json sha
+  if [[ "$ref" =~ ^[0-9a-fA-F]{40}$ ]]; then
+    printf '%s\n' "${ref,,}"
+    return 0
+  fi
+  command -v curl >/dev/null || die "curl is required to resolve source ref '$ref'"
+  encoded="$(urlencode_ref "$ref")"
+  json="$(curl -fsSL \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "https://api.github.com/repos/$REPO/commits/$encoded")" || die "Could not resolve GitHub source ref '$ref'"
+  sha="$(printf '%s' "$json" | grep -oE '"sha"[[:space:]]*:[[:space:]]*"[0-9a-f]{40}"' | head -n1 | grep -oE '[0-9a-f]{40}' || true)"
+  [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || die "GitHub source ref '$ref' did not resolve to a commit SHA"
+  printf '%s\n' "$sha"
+}
+
+case "${1:-}" in
+  --check) CHECK_ONLY=1 ;;
+  --resolve-ref) RESOLVE_REF_ONLY=1 ;;
+esac
 need_root
 [ -r /etc/os-release ] || die "/etc/os-release not found"
 # shellcheck disable=SC1091
@@ -37,6 +71,11 @@ case "${ID:-}" in
 esac
 command -v systemctl >/dev/null || die "systemd/systemctl is required"
 case "$(uname -m)" in x86_64) ARCH=amd64; GOARCH=amd64 ;; aarch64|arm64) ARCH=arm64; GOARCH=arm64 ;; *) die "Unsupported architecture: $(uname -m)" ;; esac
+
+if [ "$RESOLVE_REF_ONLY" -eq 1 ]; then
+  resolve_source_ref "$REF"
+  exit 0
+fi
 
 if [ "$CHECK_ONLY" -eq 1 ]; then
   log "Compatibility check passed: $PRETTY_NAME, $ARCH, systemd available."
@@ -81,10 +120,16 @@ chmod 0640 "$CONFIG_DIR"/*.token
 
 build_from_source(){ (
   set -Eeuo pipefail
-  local tmp go_url go_sha
+  local tmp go_url go_sha resolved_ref
   tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-  log "Building a self-contained binary from GitHub ref '$REF' using a temporary Go toolchain..."
-  curl -fsSL "https://codeload.github.com/$REPO/tar.gz/refs/heads/$REF" -o "$tmp/src.tgz"
+  resolved_ref="$(resolve_source_ref "$REF")"
+  log "Resolved source ref '$REF' to commit '$resolved_ref'."
+  log "Building a self-contained binary from immutable commit '$resolved_ref' using a temporary Go toolchain..."
+  curl -fsSL \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2022-11-28' \
+    "https://api.github.com/repos/$REPO/tarball/$resolved_ref" \
+    -o "$tmp/src.tgz"
   mkdir "$tmp/src"; tar -xzf "$tmp/src.tgz" -C "$tmp/src" --strip-components=1
   case "$GOARCH" in
     amd64) go_sha="5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053" ;;
