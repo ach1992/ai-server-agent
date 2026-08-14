@@ -71,13 +71,19 @@ The policy guard requires explicit approval for obvious actions that can cut con
 
 ## Browser automation
 
-The browser is not a core dependency. On first use, `browser_setup` installs a private Node.js/Playwright/Chromium runtime under:
+The browser is not a core dependency. On first use, `browser_setup` installs an isolated Node.js/Playwright/Chromium engine under:
+
+```text
+/opt/ai-server-agent/browser
+```
+
+The engine is root-owned and read-only to the normal project worker. Writable browser profiles and session data live separately under:
 
 ```text
 /var/lib/ai-server-agent/runtime/browser
 ```
 
-This leaves system Node and web-server packages untouched. `browser_run` can then execute Playwright code for E2E, UI, console, network, upload/download, authentication, and production-readiness checks.
+This leaves the system Node installation and web-server packages untouched. Removing the optional browser runtime disables browser tools but does not stop the MCP core. `browser_run` can execute Playwright code for E2E, UI, console, network, upload/download, authentication, and production-readiness checks.
 
 ## Uninstall
 
@@ -85,13 +91,13 @@ This leaves system Node and web-server packages untouched. `browser_run` can the
 sudo ./uninstall.sh
 ```
 
-This preserves config/state/users/workspace by default. To remove agent state and service users too:
+This preserves config/state/users/workspace and optional runtimes by default. To remove agent-owned config/state/logs/runtime and the `aiagent` account too:
 
 ```bash
 sudo ./uninstall.sh --purge
 ```
 
-`/srv/ai-workspace` is preserved even with `--purge` to reduce accidental project-data loss.
+`/srv/ai-workspace` and the `aiworker` account are preserved even with `--purge` to reduce accidental project-data loss.
 
 ## Status
 
