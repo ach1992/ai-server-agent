@@ -75,10 +75,11 @@ func (s *Server) handle(c net.Conn) {
 	_ = c.SetDeadline(time.Now().Add(10 * time.Minute))
 	var req Request
 	if err := json.NewDecoder(io.LimitReader(c, 8<<20)).Decode(&req); err != nil {
-		_ = json.NewEncoder(c).Encode(Response{Error: "invalid request: " + err.Error()})
+		_ = json.NewEncoder(c).Encode(Response{Error: "invalid request: " + err.Error(), GeneratedAt: time.Now().UTC()})
 		return
 	}
 	resp := s.dispatch(req)
+	resp.GeneratedAt = time.Now().UTC()
 	_ = json.NewEncoder(c).Encode(resp)
 }
 
@@ -115,7 +116,9 @@ func (s *Server) dispatch(req Request) Response {
 func (s *Server) command(req Request) (*exec.Cmd, policy.Decision) {
 	dec := s.guard.Evaluate(req.Command, req.Root)
 	cmd := exec.Command("/bin/bash", "-lc", req.Command)
-	if !req.Root {
+	if req.Root {
+		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 0, Gid: 0, Groups: []uint32{0}}}
+	} else {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: s.workerUID, Gid: s.workerGID, Groups: []uint32{s.workerGID}}}
 	}
 	cmd.Dir = s.cfg.WorkspaceDir
