@@ -36,3 +36,15 @@ jobs:
           test "$enable_line" -gt "$daemon_line"
           test "$restart_line" -gt "$enable_line"
           test "$active_line" -gt "$restart_line"
+      - name: Source ref resolution contract
+        run: |
+          branch_sha="$(sudo AI_SERVER_AGENT_REF='feat/v0.1-agent' bash install.sh --resolve-ref)"
+          [[ "$branch_sha" =~ ^[0-9a-f]{40}$ ]]
+          immutable='97aa670f1e72279349aea557bf25abaf6c2fd7ab'
+          test "$(sudo AI_SERVER_AGENT_REF="$immutable" bash install.sh --resolve-ref)" = "$immutable"
+          grep -qF 'https://api.github.com/repos/$REPO/tarball/$resolved_ref' install.sh
+          grep -qF 'https://api.github.com/repos/$REPO/contents/install.sh?ref=$RESOLVED_REF' update.sh
+          if grep -qF 'raw.githubusercontent.com' update.sh; then
+            echo 'update.sh must not bootstrap from a mutable raw ref' >&2
+            exit 1
+          fi
