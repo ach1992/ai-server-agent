@@ -57,17 +57,30 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 	if len(res.Tools) < 10 {
 		t.Fatalf("got %d tools, want at least 10", len(res.Tools))
 	}
-	found := false
+	foundEnvironment := false
+	foundRoot := false
+	foundBrowser := false
 	for _, tool := range res.Tools {
-		if tool.Name == "agent_environment" {
-			found = true
+		switch tool.Name {
+		case "agent_environment":
+			foundEnvironment = true
 			if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint {
 				t.Fatal("agent_environment must advertise readOnlyHint")
 			}
+		case "run_root_command":
+			foundRoot = true
+			if tool.Annotations == nil || tool.Annotations.DestructiveHint == nil || !*tool.Annotations.DestructiveHint {
+				t.Fatal("run_root_command must advertise destructiveHint")
+			}
+		case "browser_run":
+			foundBrowser = true
+			if tool.Annotations == nil || tool.Annotations.DestructiveHint == nil || !*tool.Annotations.DestructiveHint || tool.Annotations.OpenWorldHint == nil || !*tool.Annotations.OpenWorldHint {
+				t.Fatal("browser_run must advertise destructive/open-world hints")
+			}
 		}
 	}
-	if !found {
-		t.Fatal("agent_environment tool missing")
+	if !foundEnvironment || !foundRoot || !foundBrowser {
+		t.Fatalf("required tools missing: environment=%v root=%v browser=%v", foundEnvironment, foundRoot, foundBrowser)
 	}
 }
 
