@@ -98,6 +98,21 @@ func TestBearerAuthRejectsMissingToken(t *testing.T) {
 	}
 }
 
+func TestBearerAuthAcceptsValidToken(t *testing.T) {
+	cfg := testConfig(t, "bearer")
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodGet, "/agent-environment.json", nil)
+	r.Header.Set("Authorization", "Bearer mcp-token")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want %d", w.Code, http.StatusOK)
+	}
+}
+
 func TestHealthDoesNotRequireMCPAuth(t *testing.T) {
 	cfg := testConfig(t, "bearer")
 	s, err := New(cfg)
