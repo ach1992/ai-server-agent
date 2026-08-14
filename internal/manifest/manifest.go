@@ -33,6 +33,8 @@ type Manifest struct {
 }
 
 func Build(c config.Config) Manifest {
+	browserEngine := "/opt/ai-server-agent/browser"
+	browserData := filepath.Join(c.StateDir, "runtime/browser")
 	return Manifest{
 		SchemaVersion: 1,
 		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
@@ -47,8 +49,8 @@ func Build(c config.Config) Manifest {
 		},
 		Optional: []Component{
 			{Name: "download-utilities", Required: false, Installed: fileExists("/usr/bin/curl") && fileExists("/usr/bin/tar"), Paths: []string{"/usr/bin/curl", "/usr/bin/tar", "/usr/bin/xz"}, Notes: "Used for updates and optional browser setup. Safe to remove without stopping the running MCP core, but update/browser installation will need them restored."},
-			{Name: "terminal", Required: false, Installed: fileExists("/usr/bin/tmux"), Paths: []string{"/usr/bin/tmux"}, Notes: "Optional. Installed only when interactive persistent terminals are requested."},
-			{Name: "browser", Required: false, Installed: fileExists(filepath.Join(c.StateDir, "runtime/browser", "node", "bin", "node")), Paths: []string{filepath.Join(c.StateDir, "runtime/browser")}, Notes: "Optional isolated Playwright/Node runtime owned by the agent. It does not bind public ports and must not replace system web servers."},
+			{Name: "terminal", Required: false, Installed: fileExists("/usr/bin/tmux"), Paths: []string{"/usr/bin/tmux"}, Notes: "Optional. AI may install tmux only when an interactive persistent terminal is needed; the MCP core does not depend on it."},
+			{Name: "browser", Required: false, Installed: fileExists(filepath.Join(browserEngine, "node/bin/node")), Paths: []string{browserEngine, browserData}, Notes: "Optional Playwright/Chromium capability. The executable engine is root-owned under /opt; writable browser profile data is isolated under agent state. Removing it disables browser tools but does not stop the MCP core."},
 		},
 		Rules: []string{
 			"Before host-wide package, firewall, network, service, disk, user, or web-stack changes, call agent_environment and preserve all critical components.",
@@ -57,6 +59,7 @@ func Build(c config.Config) Manifest {
 			"Do not stop or disable ai-server-agent.service or ai-server-agent-executor.service during ordinary project work.",
 			"Do not remove the agent users, state directory, executor socket, configuration, token files, or the configured MCP listen endpoint.",
 			"If a requested change could cut the active MCP path (firewall, route, interface, tunnel, DNS, TLS, listen address, agent service), explain the risk and obtain explicit user confirmation first.",
+			"Optional capabilities may be installed, upgraded, or removed without changing the MCP core; update this manifest implementation when an optional capability gains a new persistent dependency.",
 			"Prefer reversible changes, backups, and staged validation before destructive production-like operations.",
 		},
 	}
