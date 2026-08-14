@@ -3,7 +3,7 @@ set -Eeuo pipefail
 
 REPO="ach1992/ai-server-agent"
 REF="${AI_SERVER_AGENT_REF:-main}"
-VERSION="${AI_SERVER_AGENT_VERSION:-source}"
+AGENT_VERSION="${AI_SERVER_AGENT_VERSION:-source}"
 GO_VERSION="1.26.5"
 INSTALL_BIN="/usr/local/bin/ai-server-agent"
 CONFIG_DIR="/etc/ai-server-agent"
@@ -102,9 +102,9 @@ download_release(){ (
   set -Eeuo pipefail
   local tmp url asset bin
   tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
-  asset="ai-server-agent_${VERSION#v}_linux_${ARCH}.tar.gz"
-  url="https://github.com/$REPO/releases/download/$VERSION"
-  log "Downloading release $VERSION ($ARCH)..."
+  asset="ai-server-agent_${AGENT_VERSION#v}_linux_${ARCH}.tar.gz"
+  url="https://github.com/$REPO/releases/download/$AGENT_VERSION"
+  log "Downloading release $AGENT_VERSION ($ARCH)..."
   curl -fsSL "$url/$asset" -o "$tmp/$asset"
   curl -fsSL "$url/SHA256SUMS" -o "$tmp/SHA256SUMS"
   (cd "$tmp" && grep "  $asset$" SHA256SUMS | sha256sum -c -)
@@ -117,7 +117,7 @@ download_release(){ (
 if [ -n "${AI_SERVER_AGENT_BINARY:-}" ]; then
   [ -x "$AI_SERVER_AGENT_BINARY" ] || die "AI_SERVER_AGENT_BINARY is not executable"
   install -m 0755 "$AI_SERVER_AGENT_BINARY" "$INSTALL_BIN"
-elif [ "$VERSION" = "source" ]; then build_from_source; else download_release; fi
+elif [ "$AGENT_VERSION" = "source" ]; then build_from_source; else download_release; fi
 
 BIND="127.0.0.1:$PORT"; AUTH_MODE="none"
 if [ "$MODE" = "public" ]; then BIND="0.0.0.0:$PORT"; AUTH_MODE="bearer"; fi
