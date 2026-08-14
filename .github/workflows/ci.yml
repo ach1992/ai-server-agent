@@ -1,0 +1,28 @@
+name: CI
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - name: Format
+        run: test -z "$(gofmt -l .)"
+      - name: Vet
+        run: go vet ./...
+      - name: Unit tests
+        run: go test -race ./...
+      - name: Build static binary
+        run: CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
+      - name: Shell syntax
+        run: bash -n install.sh update.sh uninstall.sh scripts/build-release.sh
+      - name: Installer compatibility check
+        run: sudo bash install.sh --check
