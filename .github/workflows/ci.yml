@@ -26,3 +26,13 @@ jobs:
         run: bash -n install.sh update.sh uninstall.sh scripts/build-release.sh
       - name: Installer compatibility check
         run: sudo bash install.sh --check
+      - name: Installer restart contract
+        run: |
+          daemon_line="$(grep -nF 'systemctl daemon-reload' install.sh | cut -d: -f1)"
+          enable_line="$(grep -nF 'systemctl enable ai-server-agent-executor.service ai-server-agent.service' install.sh | cut -d: -f1)"
+          restart_line="$(grep -nF 'systemctl restart ai-server-agent-executor.service ai-server-agent.service' install.sh | cut -d: -f1)"
+          active_line="$(grep -nF 'systemctl is-active --quiet ai-server-agent-executor.service' install.sh | cut -d: -f1)"
+          test -n "$daemon_line" && test -n "$enable_line" && test -n "$restart_line" && test -n "$active_line"
+          test "$enable_line" -gt "$daemon_line"
+          test "$restart_line" -gt "$enable_line"
+          test "$active_line" -gt "$restart_line"
