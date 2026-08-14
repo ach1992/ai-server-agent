@@ -1,0 +1,128 @@
+package mcp
+
+import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"os"
+	"path/filepath"
+	"testing"
+
+	"github.com/ach1992/ai-server-agent/internal/config"
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+func testConfig(t *testing.T, authMode string) config.Config {
+	t.Helper()
+	d := t.TempDir()
+	et := filepath.Join(d, "exec")
+	bt := filepath.Join(d, "mcp")
+	if err := os.WriteFile(et, []byte("exec-token\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bt, []byte("mcp-token\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	c := config.Default()
+	c.ExecutorToken = et
+	c.BearerTokenFile = bt
+	c.StateDir = d
+	c.LogDir = d
+	c.WorkspaceDir = d
+	c.AuthMode = authMode
+	return c
+}
+
+func TestOfficialSDKCanDiscoverTools(t *testing.T) {
+	cfg := testConfig(t, "none")
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	ctx := context.Background()
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "ai-server-agent-test", Version: "v0"}, nil)
+	session, err := client.Connect(ctx, &mcpsdk.StreamableClientTransport{Endpoint: ts.URL + cfg.MCPPath}, nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
+	}
+	defer session.Close()
+
+	res, err := session.ListTools(ctx, &mcpsdk.ListToolsParams{})
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+	if len(res.Tools) < 10 {
+		t.Fatalf("got %d tools, want at least 10", len(res.Tools))
+	}
+	foundEnvironment := false
+	foundRoot := false
+	foundBrowser := false
+	for _, tool := range res.Tools {
+		switch tool.Name {
+		case "agent_environment":
+			foundEnvironment = true
+			if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint {
+				t.Fatal("agent_environment must advertise readOnlyHint")
+			}
+		case "run_root_command":
+			foundRoot = true
+			if tool.Annotations == nil || tool.Annotations.DestructiveHint == nil || !*tool.Annotations.DestructiveHint {
+				t.Fatal("run_root_command must advertise destructiveHint")
+			}
+		case "browser_run":
+			foundBrowser = true
+			if tool.Annotations == nil || tool.Annotations.DestructiveHint == nil || !*tool.Annotations.DestructiveHint || tool.Annotations.OpenWorldHint == nil || !*tool.Annotations.OpenWorldHint {
+				t.Fatal("browser_run must advertise destructive/open-world hints")
+			}
+		}
+	}
+	if !foundEnvironment || !foundRoot || !foundBrowser {
+		t.Fatalf("required tools missing: environment=%v root=%v browser=%v", foundEnvironment, foundRoot, foundBrowser)
+	}
+}
+
+func TestBearerAuthRejectsMissingToken(t *testing.T) {
+	cfg := testConfig(t, "bearer")
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodPost, cfg.MCPPath, nil)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestBearerAuthAcceptsValidToken(t *testing.T) {
+	cfg := testConfig(t, "bearer")
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodGet, "/agent-environment.json", nil)
+	r.Header.Set("Authorization", "Bearer mcp-token")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want %d", w.Code, http.StatusOK)
+	}
+}
+
+func TestHealthDoesNotRequireMCPAuth(t *testing.T) {
+	cfg := testConfig(t, "bearer")
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodGet, cfg.HealthPath, nil)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want %d", w.Code, http.StatusOK)
+	}
+}

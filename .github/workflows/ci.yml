@@ -1,0 +1,59 @@
+name: CI
+on:
+  push:
+    branches: [main, "feat/**"]
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - name: Format
+        run: test -z "$(gofmt -l .)"
+      - name: Vet
+        run: go vet ./...
+      - name: Unit tests
+        run: go test -race ./...
+      - name: Build static binary
+        run: CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
+      - name: Shell syntax
+        run: bash -n install.sh update.sh uninstall.sh scripts/build-release.sh
+      - name: Installer compatibility check
+        run: sudo bash install.sh --check
+      - name: Installer restart contract
+        run: |
+          daemon_line="$(grep -nF 'systemctl daemon-reload' install.sh | cut -d: -f1)"
+          enable_line="$(grep -nF 'systemctl enable ai-server-agent-executor.service ai-server-agent.service' install.sh | cut -d: -f1)"
+          restart_line="$(grep -nF 'systemctl restart ai-server-agent-executor.service ai-server-agent.service' install.sh | cut -d: -f1)"
+          active_line="$(grep -nF 'systemctl is-active --quiet ai-server-agent-executor.service' install.sh | cut -d: -f1)"
+          test -n "$daemon_line" && test -n "$enable_line" && test -n "$restart_line" && test -n "$active_line"
+          test "$enable_line" -gt "$daemon_line"
+          test "$restart_line" -gt "$enable_line"
+          test "$active_line" -gt "$restart_line"
+      - name: Local MCP authentication contract
+        run: |
+          grep -qF 'AUTH_MODE="bearer"' install.sh
+          grep -qF 'MCP_AUTH_HEADER_FILE="$CONFIG_DIR/mcp.authorization"' install.sh
+          grep -qF "printf 'Bearer %s\\n'" install.sh
+          if grep -qF 'AUTH_MODE="none"' install.sh; then
+            echo 'loopback MCP must not disable authentication' >&2
+            exit 1
+          fi
+      - name: Source ref resolution contract
+        run: |
+          branch_sha="$(sudo AI_SERVER_AGENT_REF='feat/v0.1-agent' bash install.sh --resolve-ref)"
+          [[ "$branch_sha" =~ ^[0-9a-f]{40}$ ]]
+          immutable='97aa670f1e72279349aea557bf25abaf6c2fd7ab'
+          test "$(sudo AI_SERVER_AGENT_REF="$immutable" bash install.sh --resolve-ref)" = "$immutable"
+          grep -qF 'https://api.github.com/repos/$REPO/tarball/$resolved_ref' install.sh
+          grep -qF 'https://api.github.com/repos/$REPO/contents/install.sh?ref=$RESOLVED_REF' update.sh
+          if grep -qF 'raw.githubusercontent.com' update.sh; then
+            echo 'update.sh must not bootstrap from a mutable raw ref' >&2
+            exit 1
+          fi
