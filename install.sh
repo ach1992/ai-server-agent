@@ -184,7 +184,8 @@ WantedBy=multi-user.target
 EOF_UNIT
 
 systemctl daemon-reload
-systemctl enable --now ai-server-agent-executor.service ai-server-agent.service
+systemctl enable ai-server-agent-executor.service ai-server-agent.service
+systemctl restart ai-server-agent-executor.service ai-server-agent.service
 sleep 1
 systemctl is-active --quiet ai-server-agent-executor.service || die "privileged executor did not start"
 systemctl is-active --quiet ai-server-agent.service || die "MCP service did not start"
