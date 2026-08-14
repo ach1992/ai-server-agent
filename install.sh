@@ -4,7 +4,7 @@ set -Eeuo pipefail
 REPO="ach1992/ai-server-agent"
 REF="${AI_SERVER_AGENT_REF:-main}"
 VERSION="${AI_SERVER_AGENT_VERSION:-source}"
-GO_VERSION="1.26.4"
+GO_VERSION="1.26.5"
 INSTALL_BIN="/usr/local/bin/ai-server-agent"
 CONFIG_DIR="/etc/ai-server-agent"
 STATE_DIR="/var/lib/ai-server-agent"
@@ -87,8 +87,8 @@ build_from_source(){ (
   curl -fsSL "https://codeload.github.com/$REPO/tar.gz/refs/heads/$REF" -o "$tmp/src.tgz"
   mkdir "$tmp/src"; tar -xzf "$tmp/src.tgz" -C "$tmp/src" --strip-components=1
   case "$GOARCH" in
-    amd64) go_sha="1153d3d50e0ac764b447adfe05c2bcf08e889d42a02e0fe0259bd47f6733ad7f" ;;
-    arm64) go_sha="ef758ae7c6cf9267c9c0ef080b8965f453d89ab2d25d9eb22de4405925238768" ;;
+    amd64) go_sha="5c2c3b16caefa1d968a94c1daca04a7ca301a496d9b086e17ad77bb81393f053" ;;
+    arm64) go_sha="fe4789e92b1f33358680864bbe8704289e7bb5fc207d80623c308935bd696d49" ;;
   esac
   go_url="https://go.dev/dl/go${GO_VERSION}.linux-${GOARCH}.tar.gz"
   curl -fsSL "$go_url" -o "$tmp/go.tgz"
