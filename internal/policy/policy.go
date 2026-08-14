@@ -29,12 +29,17 @@ func New(protected []string) *Guard {
 	return &Guard{
 		protected: protected,
 		critical: compile([]string{
-			`(?i)\bsystemctl\s+(stop|disable|mask)\s+ai-server-agent`,
+			`(?i)\bsystemctl\s+(stop|disable|mask|restart)\s+ai-server-agent`,
 			`(?i)\bpkill\b.*ai-server-agent`, `(?i)\bkillall\b.*ai-server-agent`,
 			`(?i)\b(reboot|shutdown|poweroff|halt)\b`,
-			`(?i)\b(iptables|nft)\b.*\b(flush|-F)\b`,
-			`(?i)\bufw\s+(disable|reset)\b`,
-			`(?i)\b(systemctl\s+(stop|disable)\s+ssh|sshd)\b`,
+			`(?i)\b(iptables|ip6tables)\b.*(?:\s-F\b|\s-P\s+(?:INPUT|OUTPUT)\s+DROP\b)`,
+			`(?i)\bnft\b.*\bflush\b`,
+			`(?i)\bufw\s+(disable|reset|enable)\b`,
+			`(?i)\bsystemctl\s+(stop|disable|restart)\s+(?:ssh|sshd|networking|NetworkManager|systemd-networkd)\b`,
+			`(?i)\bip\s+(?:addr|route)\s+flush\b`,
+			`(?i)\bip\s+link\s+set\b.*\bdown\b`,
+			`(?i)\bnmcli\s+networking\s+off\b`,
+			`(?i)\b(?:apt|apt-get)\s+(?:remove|purge)\b[^\n;&|]*(?:\bsystemd\b|\bbash\b)`,
 		}),
 		dangerous: compile([]string{
 			`(?i)\brm\s+(-[^ ]*r[^ ]*f|-[^ ]*f[^ ]*r)\b`,
