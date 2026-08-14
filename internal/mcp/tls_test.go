@@ -61,7 +61,7 @@ func writeTestCertificate(t *testing.T, dir string) (string, string) {
 	return certPath, keyPath
 }
 
-func TestNativeTLSServesHealthEndpoint(t *testing.T) {
+func TestNativeTLSPreservesHealthAndBearerAuth(t *testing.T) {
 	cfg := testConfig(t, "bearer")
 	certPath, keyPath := writeTestCertificate(t, cfg.StateDir)
 	cfg.TLSCertFile = certPath
@@ -78,10 +78,10 @@ func TestNativeTLSServesHealthEndpoint(t *testing.T) {
 	client := &http.Client{Transport: transport, Timeout: 2 * time.Second}
 	defer transport.CloseIdleConnections()
 
-	url := "https://" + ln.Addr().String() + cfg.HealthPath
+	baseURL := "https://" + ln.Addr().String()
 	var resp *http.Response
 	for i := 0; i < 20; i++ {
-		resp, err = client.Get(url)
+		resp, err = client.Get(baseURL + cfg.HealthPath)
 		if err == nil {
 			break
 		}
@@ -91,15 +91,47 @@ func TestNativeTLSServesHealthEndpoint(t *testing.T) {
 		ln.Close()
 		t.Fatalf("TLS health request failed: %v", err)
 	}
-	defer resp.Body.Close()
 	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
 		ln.Close()
-		t.Fatalf("got status %d, want %d", resp.StatusCode, http.StatusOK)
+		t.Fatalf("got health status %d, want %d", resp.StatusCode, http.StatusOK)
 	}
 	if resp.TLS == nil || resp.TLS.Version < tls.VersionTLS12 {
+		resp.Body.Close()
 		ln.Close()
 		t.Fatal("expected TLS 1.2 or newer")
 	}
+	resp.Body.Close()
+
+	resp, err = client.Get(baseURL + "/agent-environment.json")
+	if err != nil {
+		ln.Close()
+		t.Fatalf("unauthenticated TLS request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusUnauthorized {
+		resp.Body.Close()
+		ln.Close()
+		t.Fatalf("got unauthenticated status %d, want %d", resp.StatusCode, http.StatusUnauthorized)
+	}
+	resp.Body.Close()
+
+	req, err := http.NewRequest(http.MethodGet, baseURL+"/agent-environment.json", nil)
+	if err != nil {
+		ln.Close()
+		t.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer mcp-token")
+	resp, err = client.Do(req)
+	if err != nil {
+		ln.Close()
+		t.Fatalf("authenticated TLS request failed: %v", err)
+	}
+	if resp.StatusCode != http.StatusOK {
+		resp.Body.Close()
+		ln.Close()
+		t.Fatalf("got authenticated status %d, want %d", resp.StatusCode, http.StatusOK)
+	}
+	resp.Body.Close()
 
 	_ = ln.Close()
 	select {
