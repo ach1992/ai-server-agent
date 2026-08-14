@@ -1,6 +1,6 @@
 # Release Test Plan
 
-A stable release must not be published until this plan has passed on clean, snapshot-backed servers. Keep the PR draft and Issue #1 open while any required item is unverified.
+A stable release must not be published until the applicable release matrix and end-to-end connectivity checks have passed on clean, snapshot-backed servers. Pre-release implementation may merge to `main` after current CI, code/security review, and the primary validated platform pass; keep Issue #1 open for remaining stable-release gates.
 
 ## Supported server matrix
 
@@ -14,10 +14,15 @@ Run the core installation and MCP tests on:
 
 ## 1. Fresh installation
 
-On a disposable server:
+On a disposable server, fetch the installer through the GitHub Contents API so slash-containing branch refs are handled correctly:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/feat/v0.1-agent/install.sh | sudo AI_SERVER_AGENT_REF=feat/v0.1-agent bash
+REF='feat/v0.1-agent'
+curl -fsSLG \
+  -H 'Accept: application/vnd.github.raw+json' \
+  --data-urlencode "ref=$REF" \
+  'https://api.github.com/repos/ach1992/ai-server-agent/contents/install.sh' | \
+  sudo AI_SERVER_AGENT_REF="$REF" bash
 ```
 
 For the first validation choose `local` bind mode and the default port `3210`.
@@ -43,7 +48,7 @@ Acceptance:
 
 ## 2. ChatGPT Business MCP connection
 
-Connect the local `/mcp` endpoint through the current OpenAI-supported private/remote MCP connectivity path. In ChatGPT Business Developer Mode, scan the custom app tools.
+Connect the local `/mcp` endpoint through the current OpenAI-supported private/remote MCP connectivity path. For a private/on-premises server, current OpenAI guidance supports Secure MCP Tunnel. In ChatGPT Business Developer Mode, create the custom MCP app and scan its tools.
 
 Acceptance:
 
@@ -132,14 +137,17 @@ For aaPanel validation, use a fresh snapshot/VM and follow the panel's supported
 
 ## 8. Update
 
-Run the development updater with the same branch ref:
+For reproducible validation, update from an immutable commit SHA:
 
 ```bash
-sudo AI_SERVER_AGENT_REF=feat/v0.1-agent ./update.sh
+sudo AI_SERVER_AGENT_REF='<40-character-commit-sha>' ./update.sh
 ```
+
+Branch and tag refs are also accepted; the updater resolves them to a commit SHA before fetching the installer and source archive.
 
 Acceptance:
 
+- the requested ref is reported as a resolved immutable commit;
 - existing bind mode and port are preserved;
 - both services are restarted onto the newly installed binary;
 - health succeeds after restart;
@@ -161,6 +169,10 @@ Acceptance:
 - `/srv/ai-workspace` and `aiworker` remain intentionally preserved;
 - unrelated host software and ports are untouched.
 
-## Release gate
+## Merge gate
 
-Only after the supported-server matrix and end-to-end ChatGPT connection pass should the draft PR become review-ready, merge to `main`, and a version tag/release be created. Any failure is fixed on the feature branch and the affected test is rerun before release.
+A pre-release implementation may merge to `main` once the current head passes CI and final code/security review, and the primary validated platform has passed the core install/MCP/root/job/browser/update/non-interference flows. Merge does not imply stable-release support for untested OS/architecture/panel combinations.
+
+## Stable release gate
+
+Do not create a stable version tag/release until the supported-server matrix, arm64 coverage for any arm64 support claim, aaPanel compatibility claim (if retained), and end-to-end ChatGPT connection are validated. Any failure is fixed and the affected test is rerun before stable release.
