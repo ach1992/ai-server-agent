@@ -62,7 +62,7 @@ ai-server-agent-executor      (root, no TCP listener)
         +-- persistent systemd jobs
 ```
 
-The MCP endpoint defaults to `127.0.0.1:3210/mcp`. This avoids collisions with hosting software. Keep it private and use a secure MCP tunnel whenever possible.
+The MCP endpoint defaults to bearer-authenticated `127.0.0.1:3210/mcp`. Loopback avoids web-stack collisions but is not treated as an authentication boundary: untrusted local project/browser code must not be able to call root-capable MCP tools. The installer creates a protected `/etc/ai-server-agent/mcp.authorization` header file for Secure MCP Tunnel or another trusted local client. Keep the endpoint private and use a secure MCP tunnel whenever possible.
 
 ## Self-preservation
 
