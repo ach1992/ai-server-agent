@@ -45,6 +45,18 @@ jobs:
             echo 'loopback MCP must not disable authentication' >&2
             exit 1
           fi
+      - name: Native TLS public-mode contract
+        run: |
+          grep -qF 'Public mode requires native TLS.' install.sh
+          grep -qF '"tls_cert_file": "$TLS_CERT_FILE"' install.sh
+          grep -qF '"tls_key_file": "$TLS_KEY_FILE"' install.sh
+          grep -qF 'AI_SERVER_AGENT_TLS_CERT_FILE="$TLS_CERT_FILE"' update.sh
+          grep -qF 'AI_SERVER_AGENT_TLS_KEY_FILE="$TLS_KEY_FILE"' update.sh
+          grep -qF 'ServeTLS(cfg)' cmd/ai-server-agent/main.go
+          if grep -Eq 'apt-get install.*(nginx|apache2|caddy|cloudflared)' install.sh; then
+            echo 'Agent installer must not add a web proxy or tunnel daemon' >&2
+            exit 1
+          fi
       - name: Source ref resolution contract
         run: |
           branch_sha="$(sudo AI_SERVER_AGENT_REF='feat/v0.1-agent' bash install.sh --resolve-ref)"
