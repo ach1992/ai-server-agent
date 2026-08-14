@@ -10,10 +10,11 @@ import (
 	"github.com/ach1992/ai-server-agent/internal/executor"
 )
 
-// Manager owns an optional browser runtime isolated below StateDir. The core
-// control plane has no Node.js or browser dependency. The engine is root-owned
-// so untrusted project code running as aiworker cannot replace code later
-// executed during privileged browser maintenance.
+// Manager owns an optional browser runtime. The browser engine is root-owned
+// under /opt so untrusted project code running as aiworker cannot replace code
+// later executed during privileged browser maintenance. Writable browser data
+// stays under the agent state directory. The MCP core has no browser or Node.js
+// dependency.
 type Manager struct {
 	cfg   config.Config
 	token string
@@ -21,9 +22,8 @@ type Manager struct {
 }
 
 func New(cfg config.Config, token string) *Manager { return &Manager{cfg: cfg, token: token} }
-func (m *Manager) runtimeDir() string              { return filepath.Join(m.cfg.StateDir, "runtime", "browser") }
-func (m *Manager) engineDir() string               { return filepath.Join(m.runtimeDir(), "engine") }
-func (m *Manager) dataDir() string                 { return filepath.Join(m.runtimeDir(), "data") }
+func (m *Manager) engineDir() string               { return "/opt/ai-server-agent/browser" }
+func (m *Manager) dataDir() string                 { return filepath.Join(m.cfg.StateDir, "runtime", "browser") }
 
 func (m *Manager) Setup(approval bool) (executor.Response, error) {
 	if !approval {
