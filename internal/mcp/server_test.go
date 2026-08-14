@@ -1,60 +1,100 @@
 package mcp
 
 import (
-	"encoding/json"
+	"context"
+	"net/http"
 	"net/http/httptest"
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 
 	"github.com/ach1992/ai-server-agent/internal/config"
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func testServer(t *testing.T) *Server {
+func testConfig(t *testing.T, authMode string) config.Config {
 	t.Helper()
 	d := t.TempDir()
 	et := filepath.Join(d, "exec")
 	bt := filepath.Join(d, "mcp")
-	os.WriteFile(et, []byte("exec-token\n"), 0600)
-	os.WriteFile(bt, []byte("mcp-token\n"), 0600)
+	if err := os.WriteFile(et, []byte("exec-token\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(bt, []byte("mcp-token\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	c := config.Default()
 	c.ExecutorToken = et
 	c.BearerTokenFile = bt
 	c.StateDir = d
 	c.LogDir = d
 	c.WorkspaceDir = d
-	c.AuthMode = "bearer"
-	s, err := New(c)
+	c.AuthMode = authMode
+	return c
+}
+
+func TestOfficialSDKCanDiscoverTools(t *testing.T) {
+	cfg := testConfig(t, "none")
+	s, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
 	}
-	return s
-}
-func TestToolsList(t *testing.T) {
-	s := testServer(t)
-	body := `{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`
-	r := httptest.NewRequest("POST", "/mcp", strings.NewReader(body))
-	r.Header.Set("Authorization", "Bearer mcp-token")
-	w := httptest.NewRecorder()
-	s.Handler().ServeHTTP(w, r)
-	if w.Code != 200 {
-		t.Fatalf("status %d %s", w.Code, w.Body.String())
+	ts := httptest.NewServer(s.Handler())
+	defer ts.Close()
+
+	ctx := context.Background()
+	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "ai-server-agent-test", Version: "v0"}, nil)
+	session, err := client.Connect(ctx, &mcpsdk.StreamableClientTransport{Endpoint: ts.URL + cfg.MCPPath}, nil)
+	if err != nil {
+		t.Fatalf("connect: %v", err)
 	}
-	var v map[string]any
-	if err := json.Unmarshal(w.Body.Bytes(), &v); err != nil {
+	defer session.Close()
+
+	res, err := session.ListTools(ctx, &mcpsdk.ListToolsParams{})
+	if err != nil {
+		t.Fatalf("list tools: %v", err)
+	}
+	if len(res.Tools) < 10 {
+		t.Fatalf("got %d tools, want at least 10", len(res.Tools))
+	}
+	found := false
+	for _, tool := range res.Tools {
+		if tool.Name == "agent_environment" {
+			found = true
+			if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint {
+				t.Fatal("agent_environment must advertise readOnlyHint")
+			}
+		}
+	}
+	if !found {
+		t.Fatal("agent_environment tool missing")
+	}
+}
+
+func TestBearerAuthRejectsMissingToken(t *testing.T) {
+	cfg := testConfig(t, "bearer")
+	s, err := New(cfg)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if v["result"] == nil {
-		t.Fatal("missing result")
-	}
-}
-func TestUnauthorized(t *testing.T) {
-	s := testServer(t)
-	r := httptest.NewRequest("POST", "/mcp", strings.NewReader(`{"jsonrpc":"2.0","id":1,"method":"tools/list"}`))
+	r := httptest.NewRequest(http.MethodPost, cfg.MCPPath, nil)
 	w := httptest.NewRecorder()
 	s.Handler().ServeHTTP(w, r)
-	if w.Code != 401 {
-		t.Fatalf("got %d", w.Code)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+}
+
+func TestHealthDoesNotRequireMCPAuth(t *testing.T) {
+	cfg := testConfig(t, "bearer")
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodGet, cfg.HealthPath, nil)
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusOK {
+		t.Fatalf("got %d, want %d", w.Code, http.StatusOK)
 	}
 }
