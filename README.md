@@ -15,6 +15,7 @@ A small self-hosted MCP control plane that turns a **dedicated Ubuntu/Debian tes
 - Optional isolated Playwright browser runtime.
 - Machine-readable self-preservation manifest so AI knows what not to break.
 - No dependency on nginx, Apache, PHP, MySQL, Docker, Node.js, Python, aaPanel, or ports 80/443.
+- Optional native TLS on the Agent's dedicated high port for direct remote MCP deployments.
 
 ## What ChatGPT gets
 
@@ -31,7 +32,7 @@ This intentionally keeps the MCP surface small. Anything not covered by a struct
 ## Install from the current development branch
 
 ```bash
-REF='feat/v0.1-agent'
+REF='main'
 curl -fsSLG \
   -H 'Accept: application/vnd.github.raw+json' \
   --data-urlencode "ref=$REF" \
@@ -48,7 +49,7 @@ For stable releases, the same installer will download prebuilt release artifacts
 ## Service isolation
 
 ```text
-ChatGPT / MCP tunnel
+remote MCP client
         |
         v
 ai-server-agent.service       (aiagent, no root)
@@ -62,7 +63,19 @@ ai-server-agent-executor      (root, no TCP listener)
         +-- persistent systemd jobs
 ```
 
-The MCP endpoint defaults to bearer-authenticated `127.0.0.1:3210/mcp`. Loopback avoids web-stack collisions but is not treated as an authentication boundary: untrusted local project/browser code must not be able to call root-capable MCP tools. The installer creates a protected `/etc/ai-server-agent/mcp.authorization` header file for Secure MCP Tunnel or another trusted local client. Keep the endpoint private and use a secure MCP tunnel whenever possible.
+The default MCP endpoint is bearer-authenticated `127.0.0.1:3210/mcp`. Loopback avoids web-stack collisions but is not treated as an authentication boundary: untrusted local project/browser code must not be able to call root-capable MCP tools. The installer creates a protected `/etc/ai-server-agent/mcp.authorization` header file for a trusted local client.
+
+For a direct remote deployment, use `public` bind mode together with native TLS. Public mode refuses to start without both a certificate and private key, and still uses the Agent's configurable high port rather than reserving 80/443:
+
+```bash
+sudo AI_SERVER_AGENT_BIND_MODE=public \
+  AI_SERVER_AGENT_PORT=3210 \
+  AI_SERVER_AGENT_TLS_CERT_FILE=/etc/ai-server-agent/tls/origin.crt \
+  AI_SERVER_AGENT_TLS_KEY_FILE=/etc/ai-server-agent/tls/origin.key \
+  bash install.sh
+```
+
+The TLS files must already exist at absolute paths readable by the `aiagent` service identity. Keep bearer authentication enabled end-to-end. An external edge may map standard HTTPS to the Agent's origin port, but the Agent itself does not install or own a reverse proxy.
 
 ## Self-preservation
 
