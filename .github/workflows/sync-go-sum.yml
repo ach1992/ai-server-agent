@@ -1,0 +1,29 @@
+name: Sync Go checksums
+on:
+  push:
+    branches: [feat/v0.1-agent]
+permissions:
+  contents: write
+jobs:
+  sync:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/v0.1-agent
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - run: go mod tidy
+      - name: Commit checksums
+        run: |
+          if git diff --quiet -- go.mod go.sum; then
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add go.mod go.sum
+          git commit -m 'build: sync Go module checksums'
+          git push origin HEAD:feat/v0.1-agent
