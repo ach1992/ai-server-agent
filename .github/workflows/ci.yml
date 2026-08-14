@@ -76,7 +76,7 @@ jobs:
           fi
       - name: Source ref resolution contract
         run: |
-          branch_sha="$(sudo AI_SERVER_AGENT_REF='feat/v0.1-agent' bash install.sh --resolve-ref)"
+          branch_sha="$(sudo AI_SERVER_AGENT_REF='main' bash install.sh --resolve-ref)"
           [[ "$branch_sha" =~ ^[0-9a-f]{40}$ ]]
           immutable='97aa670f1e72279349aea557bf25abaf6c2fd7ab'
           test "$(sudo AI_SERVER_AGENT_REF="$immutable" bash install.sh --resolve-ref)" = "$immutable"
