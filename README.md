@@ -1,13 +1,17 @@
 # AI Server Agent
 
-A small self-hosted MCP control plane that turns a **dedicated Ubuntu/Debian test server** into a machine ChatGPT can inspect, configure, test, and operate.
+A small self-hosted MCP control plane that turns a **dedicated Ubuntu 22.04 LTS amd64 test server** into a machine ChatGPT can inspect, configure, test, and operate.
 
 > **Pre-release:** do not use on production. The project intentionally exposes root-capable tools and must be validated on disposable/snapshot-backed servers first.
+
+## v0.1 support scope
+
+The stable v0.1 release supports **Ubuntu 22.04 LTS on amd64 only**. Ubuntu 24.04, Debian 11/12, arm64, and aaPanel compatibility are intentionally deferred until they receive release-grade validation. Development/source installer paths may remain technically usable on additional Ubuntu/Debian or arm64 environments, but they are not part of the v0.1 support claim and stable v0.1 artifacts are amd64-only.
 
 ## Design goals
 
 - One-command installation.
-- Ubuntu 22.04+ and Debian 11+ (`amd64` / `arm64`).
+- Release-grade support for Ubuntu 22.04 LTS (`amd64`) in v0.1.
 - Minimal host dependencies and no web-stack ownership.
 - Full root access when a task genuinely needs it.
 - Unprivileged default command execution.
@@ -42,9 +46,9 @@ curl -fsSLG \
 
 For source installs, `AI_SERVER_AGENT_REF` may be a branch, tag, or full commit SHA. The installer resolves mutable names to an immutable commit SHA before downloading the source archive. For the most reproducible validation, pass a full commit SHA.
 
-The installer validates OS/architecture, installs only small download/build utilities, builds a static Go binary using a temporary verified Go toolchain, creates isolated service users/directories, starts the two services, and performs a health check. The temporary Go toolchain is removed automatically.
+The installer validates OS/architecture compatibility, installs only small download/build utilities, builds a static Go binary using a temporary verified Go toolchain, creates isolated service users/directories, starts the two services, and performs a health check. The temporary Go toolchain is removed automatically.
 
-For stable releases, the same installer will download prebuilt release artifacts instead of building on the server.
+For stable releases, the same installer downloads prebuilt release artifacts instead of building on the server. v0.1 stable release artifacts are produced for Linux `amd64` only.
 
 ## Service isolation
 
@@ -111,14 +115,14 @@ This leaves the system Node installation and web-server packages untouched. Remo
 sudo ./uninstall.sh
 ```
 
-This preserves config/state/users/workspace and optional runtimes by default. To remove agent-owned config/state/logs/runtime and the `aiagent` account too:
+This preserves config/state/users/workspace and optional runtimes by default. To remove agent-owned config/state/logs/runtime and the `aiagent` service account/group too:
 
 ```bash
 sudo ./uninstall.sh --purge
 ```
 
-`/srv/ai-workspace` and the `aiworker` account are preserved even with `--purge` to reduce accidental project-data loss.
+`/srv/ai-workspace` and the `aiworker` account/group are preserved even with `--purge` to reduce accidental project-data loss.
 
 ## Status
 
-v0.1 is not release-ready until CI passes and clean-VM install/MCP/browser/root/recovery tests succeed on Ubuntu 22.04+, Ubuntu 24.04+, Debian 11+, and Debian 12+.
+v0.1 release readiness is intentionally narrow: CI must pass on Ubuntu 22.04 amd64, one disposable Ubuntu 22.04 amd64 lifecycle run must prove normal uninstall/purge/reinstall behavior, stable amd64 artifacts and `SHA256SUMS` must verify, and the final release review/human release gate must pass. Broader OS/architecture and aaPanel compatibility claims are deferred from v0.1.
