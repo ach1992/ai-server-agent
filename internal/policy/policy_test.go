@@ -11,8 +11,17 @@ func TestConnectionGuard(t *testing.T) {
 		{"apt-get install nginx", false},
 		{"systemctl restart nginx", false},
 		{"systemctl stop ai-server-agent.service", true},
+		{"systemctl restart ai-server-agent.service", true},
 		{"rm -rf /etc/ai-server-agent", true},
 		{"ufw reset", true},
+		{"ufw enable", true},
+		{"iptables -P INPUT DROP", true},
+		{"nft flush ruleset", true},
+		{"ip route flush table main", true},
+		{"ip link set eth0 down", true},
+		{"systemctl restart systemd-networkd", true},
+		{"apt-get purge systemd", true},
+		{"apt remove bash", true},
 		{"reboot", true},
 	}
 	for _, tc := range cases {
