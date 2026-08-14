@@ -31,8 +31,15 @@ This intentionally keeps the MCP surface small. Anything not covered by a struct
 ## Install from the current development branch
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/feat/v0.1-agent/install.sh | sudo AI_SERVER_AGENT_REF=feat/v0.1-agent bash
+REF='feat/v0.1-agent'
+curl -fsSLG \
+  -H 'Accept: application/vnd.github.raw+json' \
+  --data-urlencode "ref=$REF" \
+  'https://api.github.com/repos/ach1992/ai-server-agent/contents/install.sh' | \
+  sudo AI_SERVER_AGENT_REF="$REF" bash
 ```
+
+For source installs, `AI_SERVER_AGENT_REF` may be a branch, tag, or full commit SHA. The installer resolves mutable names to an immutable commit SHA before downloading the source archive. For the most reproducible validation, pass a full commit SHA.
 
 The installer validates OS/architecture, installs only small download/build utilities, builds a static Go binary using a temporary verified Go toolchain, creates isolated service users/directories, starts the two services, and performs a health check. The temporary Go toolchain is removed automatically.
 
