@@ -104,9 +104,9 @@ func instructions() string {
 func annotations(readOnly, destructive, idempotent, openWorld bool) *mcpsdk.ToolAnnotations {
 	return &mcpsdk.ToolAnnotations{
 		ReadOnlyHint:    readOnly,
-		DestructiveHint: destructive,
+		DestructiveHint: &destructive,
 		IdempotentHint:  idempotent,
-		OpenWorldHint:   openWorld,
+		OpenWorldHint:   &openWorld,
 	}
 }
 
