@@ -12,7 +12,8 @@ systemctl daemon-reload
 if [ "$PURGE" -eq 1 ]; then
   rm -rf /etc/ai-server-agent /var/lib/ai-server-agent /var/log/ai-server-agent /opt/ai-server-agent
   userdel aiagent 2>/dev/null || true
-  echo "Purged agent config, state, logs, optional runtimes, and the aiagent service account. Workspace /srv/ai-workspace and its aiworker account were intentionally preserved."
+  groupdel aiagent 2>/dev/null || true
+  echo "Purged agent config, state, logs, optional runtimes, and the aiagent service account/group. Workspace /srv/ai-workspace and its aiworker account/group were intentionally preserved."
 else
-  echo "Agent services and binary removed. Config, state, logs, optional runtimes, users, and workspace were preserved. Use --purge to remove agent-owned state/runtime and the aiagent service account; aiworker/workspace remain protected."
+  echo "Agent services and binary removed. Config, state, logs, optional runtimes, users, groups, and workspace were preserved. Use --purge to remove agent-owned state/runtime and the aiagent service account/group; aiworker/workspace remain protected."
 fi
