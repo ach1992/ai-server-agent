@@ -11,6 +11,7 @@ STATE_DIR="/var/lib/ai-server-agent"
 LOG_DIR="/var/log/ai-server-agent"
 WORKSPACE_DIR="/srv/ai-workspace"
 CONFIG_FILE="$CONFIG_DIR/config.json"
+MCP_AUTH_HEADER_FILE="$CONFIG_DIR/mcp.authorization"
 AGENT_USER="aiagent"
 WORKER_USER="aiworker"
 PORT="${AI_SERVER_AGENT_PORT:-3210}"
@@ -117,6 +118,9 @@ if [ ! -s "$CONFIG_DIR/executor.token" ]; then random_hex > "$CONFIG_DIR/executo
 if [ ! -s "$CONFIG_DIR/mcp.token" ]; then random_hex > "$CONFIG_DIR/mcp.token"; fi
 chown root:"$AGENT_USER" "$CONFIG_DIR"/*.token
 chmod 0640 "$CONFIG_DIR"/*.token
+printf 'Bearer %s\n' "$(cat "$CONFIG_DIR/mcp.token")" > "$MCP_AUTH_HEADER_FILE"
+chown root:"$AGENT_USER" "$MCP_AUTH_HEADER_FILE"
+chmod 0640 "$MCP_AUTH_HEADER_FILE"
 
 build_from_source(){ (
   set -Eeuo pipefail
@@ -164,8 +168,8 @@ if [ -n "${AI_SERVER_AGENT_BINARY:-}" ]; then
   install -m 0755 "$AI_SERVER_AGENT_BINARY" "$INSTALL_BIN"
 elif [ "$AGENT_VERSION" = "source" ]; then build_from_source; else download_release; fi
 
-BIND="127.0.0.1:$PORT"; AUTH_MODE="none"
-if [ "$MODE" = "public" ]; then BIND="0.0.0.0:$PORT"; AUTH_MODE="bearer"; fi
+BIND="127.0.0.1:$PORT"; AUTH_MODE="bearer"
+if [ "$MODE" = "public" ]; then BIND="0.0.0.0:$PORT"; fi
 cat > "$CONFIG_FILE" <<JSON
 {
   "listen_address": "$BIND",
@@ -255,12 +259,16 @@ Docker, language runtime, or hosting panel. Optional browser dependencies are
 installed only when ChatGPT calls browser_setup.
 EOF_SUMMARY
 if [ "$MODE" = "local" ]; then
-  cat <<'EOF_SUMMARY'
+  cat <<EOF_SUMMARY
 
 Recommended ChatGPT Business connection:
-  Keep this endpoint local and use OpenAI Secure MCP Tunnel. In ChatGPT,
-  create a custom MCP app in Developer Mode and point the tunnel at /mcp.
-  This avoids exposing a privileged control plane directly to the public Internet.
+  Keep this endpoint loopback-only and use OpenAI Secure MCP Tunnel.
+  MCP requests require the generated bearer token even on loopback so unprivileged
+  local project/browser code cannot call root-capable MCP tools directly.
+  For tunnel-client, configure the MCP Authorization header from this protected file:
+    $MCP_AUTH_HEADER_FILE
+  The tunnel-client supports a static MCP header value sourced from a file, for example:
+    Authorization: file:$MCP_AUTH_HEADER_FILE
 EOF_SUMMARY
 else
   TOKEN="$(cat "$CONFIG_DIR/mcp.token")"
