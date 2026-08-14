@@ -45,6 +45,17 @@ jobs:
             echo 'loopback MCP must not disable authentication' >&2
             exit 1
           fi
+      - name: Generated token formatting contract
+        run: |
+          token_file="$(mktemp)"
+          trap 'rm -f "$token_file"' EXIT
+          test "$(grep -c '^random_hex(){' install.sh)" -eq 1
+          eval "$(grep '^random_hex(){' install.sh)"
+          random_hex > "$token_file"
+          test "$(wc -c < "$token_file")" -eq 65
+          grep -Eq '^[0-9a-f]{64}$' "$token_file"
+          test "$(tr -cd '\n' < "$token_file" | wc -c)" -eq 1
+          test "$(tail -c 1 "$token_file" | od -An -tu1 | tr -d '[:space:]')" = "10"
       - name: Native TLS public-mode contract
         run: |
           grep -qF 'Public mode requires native TLS.' install.sh
