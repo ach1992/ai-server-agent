@@ -2,7 +2,7 @@
 
 A small self-hosted MCP control plane that turns a **dedicated Ubuntu 22.04 LTS amd64 test server** into a machine ChatGPT can inspect, configure, test, and operate.
 
-> **Pre-release:** do not use on production. The project intentionally exposes root-capable tools and must be validated on disposable/snapshot-backed servers first.
+> **Safety scope:** use only on dedicated development/test servers, not production. The project intentionally exposes root-capable tools; keep snapshots/backups and treat the Agent as privileged infrastructure.
 
 ## v0.1 support scope
 
