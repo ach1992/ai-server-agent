@@ -149,6 +149,9 @@ func (s *Server) run(req Request) Response {
 
 func (s *Server) startJob(req Request) Response {
 	_, dec := s.command(req)
+	if !dec.Allowed {
+		return Response{Error: dec.Reason}
+	}
 	if dec.RequiresApproval && !req.Approval {
 		return Response{Error: "approval_required", Approval: dec}
 	}
@@ -164,7 +167,7 @@ func (s *Server) startJob(req Request) Response {
 		mode = "--uid=" + s.cfg.WorkerUser
 	}
 	shell := fmt.Sprintf("/bin/bash -lc %s >>%s 2>&1; rc=$?; printf '%%s\n' \"$rc\" >%s; exit \"$rc\"", shellQuote(req.Command), shellQuote(logPath), shellQuote(statusPath))
-	args := []string{"--unit", unit, "--collect", "--property=WorkingDirectory=" + s.cfg.WorkspaceDir}
+	args := []string{"--unit", unit, "--collect", "--property=WorkingDirectory=" + s.cfg.WorkspaceDir, "--setenv=HOME=" + s.cfg.WorkspaceDir, "--setenv=AI_SERVER_AGENT=1"}
 	if mode != "" {
 		args = append(args, mode)
 	}
