@@ -4,73 +4,89 @@ import (
 	"encoding/base64"
 	"fmt"
 	"path/filepath"
+	"sync"
 
 	"github.com/ach1992/ai-server-agent/internal/config"
 	"github.com/ach1992/ai-server-agent/internal/executor"
 )
 
 // Manager owns an optional browser runtime isolated below StateDir. The core
-// control plane has no Node.js or browser dependency.
+// control plane has no Node.js or browser dependency. The engine is root-owned
+// so untrusted project code running as aiworker cannot replace code later
+// executed during privileged browser maintenance.
 type Manager struct {
 	cfg   config.Config
 	token string
+	mu    sync.Mutex
 }
 
 func New(cfg config.Config, token string) *Manager { return &Manager{cfg: cfg, token: token} }
 func (m *Manager) runtimeDir() string              { return filepath.Join(m.cfg.StateDir, "runtime", "browser") }
+func (m *Manager) engineDir() string               { return filepath.Join(m.runtimeDir(), "engine") }
+func (m *Manager) dataDir() string                 { return filepath.Join(m.runtimeDir(), "data") }
 
 func (m *Manager) Setup(approval bool) (executor.Response, error) {
 	if !approval {
-		return executor.Response{OK: false, Error: "approval_required", Approval: map[string]any{"category": "host-package-change", "reason": "browser setup downloads a private browser runtime and may install OS packages"}}, nil
+		return executor.Response{OK: false, Error: "approval_required", Approval: map[string]any{"category": "host-package-change", "reason": "browser setup downloads a private browser runtime and installs the shared OS libraries required by Chromium"}}, nil
 	}
-	d := m.runtimeDir()
-	workerSetup := fmt.Sprintf(`set -euo pipefail
-mkdir -p %[1]q
-cd %[1]q
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	engine := m.engineDir()
+	data := m.dataDir()
+	cmd := fmt.Sprintf(`set -euo pipefail
+engine=%[1]q
+data=%[2]q
+worker=%[3]q
+install -d -m 0755 -o root -g root "$engine"
+install -d -m 0750 -o "$worker" -g "$worker" "$data"
+cd "$engine"
 arch=$(uname -m)
 case "$arch" in x86_64) na=x64 ;; aarch64|arm64) na=arm64 ;; *) echo "Unsupported architecture: $arch" >&2; exit 2 ;; esac
-NODE_VERSION=v24.18.0
+NODE_VERSION=v24.18.1
+asset="node-${NODE_VERSION}-linux-${na}.tar.xz"
+base="https://nodejs.org/dist/${NODE_VERSION}"
 if [ ! -x node/bin/node ]; then
-  curl -fsSLo node.tar.xz "https://nodejs.org/dist/${NODE_VERSION}/node-${NODE_VERSION}-linux-${na}.tar.xz"
+  curl -fsSLo "$asset" "$base/$asset"
+  curl -fsSLo SHASUMS256.txt "$base/SHASUMS256.txt"
+  grep "  ${asset}$" SHASUMS256.txt | sha256sum -c -
   rm -rf node.tmp && mkdir node.tmp
-  tar -xJf node.tar.xz -C node.tmp --strip-components=1
-  rm -f node.tar.xz && mv node.tmp node
+  tar -xJf "$asset" -C node.tmp --strip-components=1
+  rm -f "$asset" SHASUMS256.txt
+  mv node.tmp node
 fi
-export PATH="$PWD/node/bin:$PATH"
+export PATH="$engine/node/bin:$PATH"
+export npm_config_cache="$engine/.npm-cache"
+export PLAYWRIGHT_BROWSERS_PATH="$engine/browsers"
 if [ ! -f package.json ]; then npm init -y >/dev/null 2>&1; fi
-npm install --no-audit --no-fund playwright@1.61.1
-PLAYWRIGHT_BROWSERS_PATH="$PWD/browsers" npx playwright install chromium
-printf 'browser runtime downloaded\n'`, d)
-	first, err := executor.ClientCall(m.cfg.ExecutorSocket, m.token, executor.Request{Action: "run", Command: workerSetup, Root: false, Approval: approval})
-	if err != nil || !first.OK {
-		return first, err
-	}
-
-	// Playwright's OS dependencies are installed only when browser support is
-	// explicitly requested. They are shared libraries, not long-running host
-	// services, and the web stack remains untouched.
-	deps := fmt.Sprintf(`set -euo pipefail; cd %q; export PATH="$PWD/node/bin:$PATH"; export PLAYWRIGHT_BROWSERS_PATH="$PWD/browsers"; npx playwright install-deps chromium`, d)
-	second, err := executor.ClientCall(m.cfg.ExecutorSocket, m.token, executor.Request{Action: "run", Command: deps, Root: true, Approval: approval})
-	if err != nil || !second.OK {
-		return second, err
-	}
-	second.Output = first.Output + "\n" + second.Output
-	return second, nil
+npm install --ignore-scripts --no-audit --no-fund playwright@1.61.1
+npx playwright install chromium
+npx playwright install-deps chromium
+chown -R root:root "$engine"
+chmod -R go-w "$engine"
+printf 'browser runtime installed in %%s\n' "$engine"`, engine, data, m.cfg.WorkerUser)
+	return executor.ClientCall(m.cfg.ExecutorSocket, m.token, executor.Request{Action: "run", Command: cmd, Root: true, Approval: true})
 }
 
 func (m *Manager) Run(script string) (executor.Response, error) {
-	d := m.runtimeDir()
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	engine := m.engineDir()
+	data := m.dataDir()
 	payload := base64.StdEncoding.EncodeToString([]byte(script))
 	cmd := fmt.Sprintf(`set -euo pipefail
-cd %[1]q
-export PATH="$PWD/node/bin:$PATH"
-export PLAYWRIGHT_BROWSERS_PATH="$PWD/browsers"
+engine=%[1]q
+data=%[2]q
+[ -x "$engine/node/bin/node" ] || { echo "Browser runtime is not installed. Call browser_setup first." >&2; exit 2; }
+cd "$data"
+export PLAYWRIGHT_BROWSERS_PATH="$engine/browsers"
 body=$(mktemp .ai-body.XXXXXX.js)
 runner=$(mktemp .ai-script.XXXXXX.mjs)
 trap 'rm -f "$body" "$runner"' EXIT
-printf '%%s' %[2]q | base64 -d > "$body"
+printf '%%s' %[3]q | base64 -d > "$body"
 {
-  printf '%%s\n' "import { chromium } from 'playwright';"
+  printf '%%s\n' "import { chromium } from 'file://$engine/node_modules/playwright/index.mjs';"
   printf '%%s\n' "const context = await chromium.launchPersistentContext('./profile', {headless:true, ignoreHTTPSErrors:true});"
   printf '%%s\n' "const browser = context.browser();"
   printf '%%s\n' "const pages = context.pages();"
@@ -79,6 +95,6 @@ printf '%%s' %[2]q | base64 -d > "$body"
   cat "$body"
   printf '%%s\n' "} finally { await context.close(); }"
 } > "$runner"
-node "$runner"`, d, payload)
+"$engine/node/bin/node" "$runner"`, engine, data, payload)
 	return executor.ClientCall(m.cfg.ExecutorSocket, m.token, executor.Request{Action: "run", Command: cmd, Root: false})
 }
