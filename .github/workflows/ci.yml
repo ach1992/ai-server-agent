@@ -53,6 +53,12 @@ jobs:
           grep -qF 'AI_SERVER_AGENT_TLS_CERT_FILE="$TLS_CERT_FILE"' update.sh
           grep -qF 'AI_SERVER_AGENT_TLS_KEY_FILE="$TLS_KEY_FILE"' update.sh
           grep -qF 'ServeTLS(cfg)' cmd/ai-server-agent/main.go
+          if sudo env AI_SERVER_AGENT_BIND_MODE=public AI_SERVER_AGENT_NONINTERACTIVE=1 bash install.sh >/tmp/public-no-tls.out 2>&1; then
+            echo 'public mode unexpectedly accepted plaintext configuration' >&2
+            cat /tmp/public-no-tls.out >&2
+            exit 1
+          fi
+          grep -qF 'Public mode requires native TLS.' /tmp/public-no-tls.out
           if grep -Eq 'apt-get install.*(nginx|apache2|caddy|cloudflared)' install.sh; then
             echo 'Agent installer must not add a web proxy or tunnel daemon' >&2
             exit 1
