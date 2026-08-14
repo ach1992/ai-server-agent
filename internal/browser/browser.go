@@ -65,16 +65,20 @@ func (m *Manager) Run(script string) (executor.Response, error) {
 cd %[1]q
 export PATH="$PWD/node/bin:$PATH"
 export PLAYWRIGHT_BROWSERS_PATH="$PWD/browsers"
-printf '%%s' %[2]q | base64 -d > .ai-body.js
+body=$(mktemp .ai-body.XXXXXX.js)
+runner=$(mktemp .ai-script.XXXXXX.mjs)
+trap 'rm -f "$body" "$runner"' EXIT
+printf '%%s' %[2]q | base64 -d > "$body"
 {
   printf '%%s\n' "import { chromium } from 'playwright';"
-  printf '%%s\n' "const browser = await chromium.launch({headless:true});"
+  printf '%%s\n' "const context = await chromium.launchPersistentContext('./profile', {headless:true, ignoreHTTPSErrors:true});"
+  printf '%%s\n' "const browser = context.browser();"
+  printf '%%s\n' "const pages = context.pages();"
+  printf '%%s\n' "const page = pages[0] || await context.newPage();"
   printf '%%s\n' "try {"
-  printf '%%s\n' "  const context = await browser.newContext({ ignoreHTTPSErrors: true });"
-  printf '%%s\n' "  const page = await context.newPage();"
-  cat .ai-body.js
-  printf '%%s\n' "} finally { await browser.close(); }"
-} > .ai-script.mjs
-node .ai-script.mjs`, d, payload)
+  cat "$body"
+  printf '%%s\n' "} finally { await context.close(); }"
+} > "$runner"
+node "$runner"`, d, payload)
 	return executor.ClientCall(m.cfg.ExecutorSocket, m.token, executor.Request{Action: "run", Command: cmd, Root: false})
 }
