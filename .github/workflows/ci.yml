@@ -45,6 +45,35 @@ jobs:
             echo 'loopback MCP must not disable authentication' >&2
             exit 1
           fi
+      - name: Generated token formatting contract
+        run: |
+          token_file="$(mktemp)"
+          trap 'rm -f "$token_file"' EXIT
+          test "$(grep -c '^random_hex(){' install.sh)" -eq 1
+          eval "$(grep '^random_hex(){' install.sh)"
+          random_hex > "$token_file"
+          test "$(wc -c < "$token_file")" -eq 65
+          grep -Eq '^[0-9a-f]{64}$' "$token_file"
+          test "$(tr -cd '\n' < "$token_file" | wc -c)" -eq 1
+          test "$(tail -c 1 "$token_file" | od -An -tu1 | tr -d '[:space:]')" = "10"
+      - name: Native TLS public-mode contract
+        run: |
+          grep -qF 'Public mode requires native TLS.' install.sh
+          grep -qF '"tls_cert_file": "$TLS_CERT_FILE"' install.sh
+          grep -qF '"tls_key_file": "$TLS_KEY_FILE"' install.sh
+          grep -qF 'AI_SERVER_AGENT_TLS_CERT_FILE="$TLS_CERT_FILE"' update.sh
+          grep -qF 'AI_SERVER_AGENT_TLS_KEY_FILE="$TLS_KEY_FILE"' update.sh
+          grep -qF 'ServeTLS(cfg)' cmd/ai-server-agent/main.go
+          if sudo env AI_SERVER_AGENT_BIND_MODE=public AI_SERVER_AGENT_NONINTERACTIVE=1 bash install.sh >/tmp/public-no-tls.out 2>&1; then
+            echo 'public mode unexpectedly accepted plaintext configuration' >&2
+            cat /tmp/public-no-tls.out >&2
+            exit 1
+          fi
+          grep -qF 'Public mode requires native TLS.' /tmp/public-no-tls.out
+          if grep -Eq 'apt-get install.*(nginx|apache2|caddy|cloudflared)' install.sh; then
+            echo 'Agent installer must not add a web proxy or tunnel daemon' >&2
+            exit 1
+          fi
       - name: Source ref resolution contract
         run: |
           branch_sha="$(sudo AI_SERVER_AGENT_REF='feat/v0.1-agent' bash install.sh --resolve-ref)"

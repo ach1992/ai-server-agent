@@ -16,6 +16,8 @@ AGENT_USER="aiagent"
 WORKER_USER="aiworker"
 PORT="${AI_SERVER_AGENT_PORT:-3210}"
 MODE="${AI_SERVER_AGENT_BIND_MODE:-local}"
+TLS_CERT_FILE="${AI_SERVER_AGENT_TLS_CERT_FILE:-}"
+TLS_KEY_FILE="${AI_SERVER_AGENT_TLS_KEY_FILE:-}"
 NONINTERACTIVE="${AI_SERVER_AGENT_NONINTERACTIVE:-0}"
 CHECK_ONLY=0
 RESOLVE_REF_ONLY=0
@@ -92,9 +94,22 @@ if [ "$NONINTERACTIVE" != "1" ] && [ -r /dev/tty ]; then
   [ -n "$ans" ] && MODE="$ans"
   read -r -p "MCP port [$PORT]: " ans </dev/tty
   [ -n "$ans" ] && PORT="$ans"
+  if [ "$MODE" = "public" ] && { [ -z "$TLS_CERT_FILE" ] || [ -z "$TLS_KEY_FILE" ]; }; then
+    read -r -p "TLS certificate file (required for public mode): " TLS_CERT_FILE </dev/tty
+    read -r -p "TLS private key file (required for public mode): " TLS_KEY_FILE </dev/tty
+  fi
 fi
 case "$MODE" in local|public) ;; *) die "Bind mode must be local or public" ;; esac
 [[ "$PORT" =~ ^[0-9]+$ ]] && [ "$PORT" -ge 1024 ] && [ "$PORT" -le 65535 ] || die "Port must be an integer between 1024 and 65535"
+if [ -n "$TLS_CERT_FILE" ] || [ -n "$TLS_KEY_FILE" ]; then
+  [ -n "$TLS_CERT_FILE" ] && [ -n "$TLS_KEY_FILE" ] || die "TLS certificate and private key must be configured together"
+  [[ "$TLS_CERT_FILE" = /* ]] && [[ "$TLS_KEY_FILE" = /* ]] || die "TLS certificate and private key paths must be absolute"
+  [ -r "$TLS_CERT_FILE" ] || die "TLS certificate is not readable: $TLS_CERT_FILE"
+  [ -r "$TLS_KEY_FILE" ] || die "TLS private key is not readable: $TLS_KEY_FILE"
+fi
+if [ "$MODE" = "public" ] && { [ -z "$TLS_CERT_FILE" ] || [ -z "$TLS_KEY_FILE" ]; }; then
+  die "Public mode requires native TLS. Set AI_SERVER_AGENT_TLS_CERT_FILE and AI_SERVER_AGENT_TLS_KEY_FILE."
+fi
 
 export DEBIAN_FRONTEND=noninteractive
 log "Installing minimal installation utilities (ca-certificates, curl, tar, xz-utils)..."
@@ -113,7 +128,7 @@ install -d -m 0750 -o "$WORKER_USER" -g "$WORKER_USER" "$WORKSPACE_DIR"
 install -d -m 0750 -o "$WORKER_USER" -g "$WORKER_USER" "$STATE_DIR/runtime"
 install -d -m 0750 -o "$WORKER_USER" -g "$WORKER_USER" "$STATE_DIR/jobs"
 
-random_hex(){ od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; }
+random_hex(){ od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; printf '\n'; }
 if [ ! -s "$CONFIG_DIR/executor.token" ]; then random_hex > "$CONFIG_DIR/executor.token"; fi
 if [ ! -s "$CONFIG_DIR/mcp.token" ]; then random_hex > "$CONFIG_DIR/mcp.token"; fi
 chown root:"$AGENT_USER" "$CONFIG_DIR"/*.token
@@ -168,8 +183,9 @@ if [ -n "${AI_SERVER_AGENT_BINARY:-}" ]; then
   install -m 0755 "$AI_SERVER_AGENT_BINARY" "$INSTALL_BIN"
 elif [ "$AGENT_VERSION" = "source" ]; then build_from_source; else download_release; fi
 
-BIND="127.0.0.1:$PORT"; AUTH_MODE="bearer"
+BIND="127.0.0.1:$PORT"; AUTH_MODE="bearer"; SCHEME="http"
 if [ "$MODE" = "public" ]; then BIND="0.0.0.0:$PORT"; fi
+if [ -n "$TLS_CERT_FILE" ]; then SCHEME="https"; fi
 cat > "$CONFIG_FILE" <<JSON
 {
   "listen_address": "$BIND",
@@ -177,6 +193,8 @@ cat > "$CONFIG_FILE" <<JSON
   "health_path": "/healthz",
   "auth_mode": "$AUTH_MODE",
   "bearer_token_file": "$CONFIG_DIR/mcp.token",
+  "tls_cert_file": "$TLS_CERT_FILE",
+  "tls_key_file": "$TLS_KEY_FILE",
   "executor_socket": "/run/ai-server-agent/executor.sock",
   "executor_token_file": "$CONFIG_DIR/executor.token",
   "state_dir": "$STATE_DIR",
@@ -238,7 +256,11 @@ systemctl restart ai-server-agent-executor.service ai-server-agent.service
 sleep 1
 systemctl is-active --quiet ai-server-agent-executor.service || die "privileged executor did not start"
 systemctl is-active --quiet ai-server-agent.service || die "MCP service did not start"
-curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null || die "health check failed"
+if [ "$SCHEME" = "https" ]; then
+  curl -kfsS "https://127.0.0.1:$PORT/healthz" >/dev/null || die "TLS health check failed"
+else
+  curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null || die "health check failed"
+fi
 
 cat <<EOF_SUMMARY
 
@@ -247,12 +269,13 @@ AI Server Agent installed successfully.
 Control plane:
   Service:       ai-server-agent.service
   Executor:      ai-server-agent-executor.service
-  MCP endpoint:  http://127.0.0.1:$PORT/mcp
-  Health:        http://127.0.0.1:$PORT/healthz
+  MCP endpoint:  $SCHEME://$BIND/mcp
+  Health:        $SCHEME://$BIND/healthz
   Environment:   $STATE_DIR/AI_ENVIRONMENT.json
   Workspace:     $WORKSPACE_DIR
   Bind mode:     $MODE
   Auth mode:     $AUTH_MODE
+  Native TLS:    $([ "$SCHEME" = "https" ] && printf 'enabled' || printf 'disabled')
 
 The agent does not use ports 80/443 and does not install a web server, database,
 Docker, language runtime, or hosting panel. Optional browser dependencies are
@@ -267,17 +290,14 @@ Recommended ChatGPT Business connection:
   local project/browser code cannot call root-capable MCP tools directly.
   For tunnel-client, configure the MCP Authorization header from this protected file:
     $MCP_AUTH_HEADER_FILE
-  The tunnel-client supports a static MCP header value sourced from a file, for example:
-    Authorization: file:$MCP_AUTH_HEADER_FILE
 EOF_SUMMARY
 else
-  TOKEN="$(cat "$CONFIG_DIR/mcp.token")"
   cat <<EOF_SUMMARY
 
-PUBLIC MODE WARNING:
-  The service is listening on all interfaces. Bearer authentication is enabled,
-  but plain HTTP is NOT safe on an untrusted network. Put it behind a secure
-  tunnel/TLS endpoint before connecting ChatGPT.
-  Bearer token: $TOKEN
+PUBLIC MODE:
+  Native TLS and bearer authentication are enabled on the Agent's dedicated port.
+  Keep ports 80/443 free for project web stacks. If an edge proxy maps standard HTTPS
+  to this origin port, keep encryption enabled from the edge to this Agent.
+  The bearer token remains protected at $CONFIG_DIR/mcp.token and is not printed.
 EOF_SUMMARY
 fi

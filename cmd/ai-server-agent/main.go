@@ -25,7 +25,12 @@ func main() {
 	}
 	switch args[0] {
 	case "serve":
-		if err := mcpserver.Serve(cfg); err != nil {
+		if cfg.TLSConfigured() {
+			err = mcpserver.ServeTLS(cfg)
+		} else {
+			err = mcpserver.Serve(cfg)
+		}
+		if err != nil {
 			log.Fatal(err)
 		}
 	case "executor":

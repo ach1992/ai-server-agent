@@ -14,6 +14,8 @@ type Config struct {
 	HealthPath      string `json:"health_path"`
 	AuthMode        string `json:"auth_mode"`
 	BearerTokenFile string `json:"bearer_token_file"`
+	TLSCertFile     string `json:"tls_cert_file,omitempty"`
+	TLSKeyFile      string `json:"tls_key_file,omitempty"`
 	ExecutorSocket  string `json:"executor_socket"`
 	ExecutorToken   string `json:"executor_token_file"`
 	StateDir        string `json:"state_dir"`
@@ -41,6 +43,20 @@ func Default() Config {
 	}
 }
 
+func (c Config) TLSConfigured() bool {
+	return c.TLSCertFile != "" && c.TLSKeyFile != ""
+}
+
+func (c Config) Validate() error {
+	if c.ListenAddress == "" || c.MCPPath == "" || c.ExecutorSocket == "" || c.StateDir == "" || c.WorkspaceDir == "" {
+		return errors.New("config contains empty required values")
+	}
+	if (c.TLSCertFile == "") != (c.TLSKeyFile == "") {
+		return errors.New("tls_cert_file and tls_key_file must be configured together")
+	}
+	return nil
+}
+
 func Load(path string) (Config, error) {
 	c := Default()
 	b, err := os.ReadFile(path)
@@ -50,13 +66,16 @@ func Load(path string) (Config, error) {
 	if err := json.Unmarshal(b, &c); err != nil {
 		return c, fmt.Errorf("parse config: %w", err)
 	}
-	if c.ListenAddress == "" || c.MCPPath == "" || c.ExecutorSocket == "" || c.StateDir == "" || c.WorkspaceDir == "" {
-		return c, errors.New("config contains empty required values")
+	if err := c.Validate(); err != nil {
+		return c, err
 	}
 	return c, nil
 }
 
 func Save(path string, c Config) error {
+	if err := c.Validate(); err != nil {
+		return err
+	}
 	b, err := json.MarshalIndent(c, "", "  ")
 	if err != nil {
 		return err
