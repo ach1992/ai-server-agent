@@ -10,6 +10,8 @@ import (
 	"github.com/ach1992/ai-server-agent/internal/executor"
 )
 
+const browserEnginePermissionsCommand = `chmod -R a+rX,go-w "$engine"`
+
 // Manager owns an optional browser runtime. The browser engine is root-owned
 // under /opt so untrusted project code running as aiworker cannot replace code
 // later executed during privileged browser maintenance. Writable browser data
@@ -63,8 +65,8 @@ npm install --ignore-scripts --no-audit --no-fund playwright@1.61.1
 npx playwright install chromium
 npx playwright install-deps chromium
 chown -R root:root "$engine"
-chmod -R go-w "$engine"
-printf 'browser runtime installed in %%s\n' "$engine"`, engine, data, m.cfg.WorkerUser)
+%[4]s
+printf 'browser runtime installed in %%s\n' "$engine"`, engine, data, m.cfg.WorkerUser, browserEnginePermissionsCommand)
 	return executor.ClientCall(m.cfg.ExecutorSocket, m.token, executor.Request{Action: "run", Command: cmd, Root: true, Approval: true})
 }
 
