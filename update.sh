@@ -18,3 +18,9 @@ TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 curl -fsSL "https://raw.githubusercontent.com/ach1992/ai-server-agent/$REF/install.sh" -o "$TMP/install.sh"
 chmod +x "$TMP/install.sh"
 AI_SERVER_AGENT_REF="$REF" AI_SERVER_AGENT_NONINTERACTIVE=1 AI_SERVER_AGENT_BIND_MODE="$MODE" AI_SERVER_AGENT_PORT="$PORT" bash "$TMP/install.sh"
+systemctl restart ai-server-agent-executor.service ai-server-agent.service
+sleep 1
+systemctl is-active --quiet ai-server-agent-executor.service
+systemctl is-active --quiet ai-server-agent.service
+curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null
+echo "AI Server Agent updated and restarted successfully."
