@@ -61,15 +61,17 @@ log "Installing minimal installation utilities (ca-certificates, curl, tar, xz-u
 apt-get update -qq
 apt-get install -y -qq ca-certificates curl tar xz-utils >/dev/null
 
-if ! id "$AGENT_USER" >/dev/null 2>&1; then useradd --system --home "$STATE_DIR" --shell /usr/sbin/nologin "$AGENT_USER"; fi
-if ! id "$WORKER_USER" >/dev/null 2>&1; then useradd --system --create-home --home-dir "$WORKSPACE_DIR" --shell /bin/bash "$WORKER_USER"; fi
+if ! getent group "$AGENT_USER" >/dev/null 2>&1; then groupadd --system "$AGENT_USER"; fi
+if ! getent group "$WORKER_USER" >/dev/null 2>&1; then groupadd --system "$WORKER_USER"; fi
+if ! id "$AGENT_USER" >/dev/null 2>&1; then useradd --system --gid "$AGENT_USER" --home "$STATE_DIR" --shell /usr/sbin/nologin "$AGENT_USER"; fi
+if ! id "$WORKER_USER" >/dev/null 2>&1; then useradd --system --gid "$WORKER_USER" --create-home --home-dir "$WORKSPACE_DIR" --shell /bin/bash "$WORKER_USER"; fi
 
 install -d -m 0750 -o root -g "$AGENT_USER" "$CONFIG_DIR"
-install -d -m 0750 -o "$AGENT_USER" -g "$AGENT_USER" "$STATE_DIR"
+install -d -m 0711 -o "$AGENT_USER" -g "$AGENT_USER" "$STATE_DIR"
 install -d -m 2750 -o root -g "$AGENT_USER" "$LOG_DIR"
 install -d -m 0750 -o "$WORKER_USER" -g "$WORKER_USER" "$WORKSPACE_DIR"
 install -d -m 0750 -o "$WORKER_USER" -g "$WORKER_USER" "$STATE_DIR/runtime"
-install -d -m 2750 -o "$WORKER_USER" -g "$AGENT_USER" "$STATE_DIR/jobs"
+install -d -m 0750 -o "$WORKER_USER" -g "$WORKER_USER" "$STATE_DIR/jobs"
 
 random_hex(){ od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; }
 if [ ! -s "$CONFIG_DIR/executor.token" ]; then random_hex > "$CONFIG_DIR/executor.token"; fi
