@@ -79,9 +79,10 @@ if [ ! -s "$CONFIG_DIR/mcp.token" ]; then random_hex > "$CONFIG_DIR/mcp.token"; 
 chown root:"$AGENT_USER" "$CONFIG_DIR"/*.token
 chmod 0640 "$CONFIG_DIR"/*.token
 
-build_from_source(){
-  local tmp src go_url go_sha
-  tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' RETURN
+build_from_source(){ (
+  set -Eeuo pipefail
+  local tmp go_url go_sha
+  tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
   log "Building a self-contained binary from GitHub ref '$REF' using a temporary Go toolchain..."
   curl -fsSL "https://codeload.github.com/$REPO/tar.gz/refs/heads/$REF" -o "$tmp/src.tgz"
   mkdir "$tmp/src"; tar -xzf "$tmp/src.tgz" -C "$tmp/src" --strip-components=1
@@ -95,17 +96,23 @@ build_from_source(){
   mkdir "$tmp/go"; tar -xzf "$tmp/go.tgz" -C "$tmp/go" --strip-components=1
   (cd "$tmp/src" && CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" "$tmp/go/bin/go" test ./... && CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" "$tmp/go/bin/go" build -trimpath -ldflags='-s -w' -o "$tmp/ai-server-agent" ./cmd/ai-server-agent)
   install -m 0755 "$tmp/ai-server-agent" "$INSTALL_BIN"
-}
+); }
 
-download_release(){
-  local tmp url
-  tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' RETURN
-  url="https://github.com/$REPO/releases/download/$VERSION/ai-server-agent_${VERSION#v}_linux_${ARCH}.tar.gz"
+download_release(){ (
+  set -Eeuo pipefail
+  local tmp url asset bin
+  tmp="$(mktemp -d)"; trap 'rm -rf "$tmp"' EXIT
+  asset="ai-server-agent_${VERSION#v}_linux_${ARCH}.tar.gz"
+  url="https://github.com/$REPO/releases/download/$VERSION"
   log "Downloading release $VERSION ($ARCH)..."
-  curl -fsSL "$url" -o "$tmp/release.tgz"
-  tar -xzf "$tmp/release.tgz" -C "$tmp"
-  install -m 0755 "$tmp/ai-server-agent" "$INSTALL_BIN"
-}
+  curl -fsSL "$url/$asset" -o "$tmp/$asset"
+  curl -fsSL "$url/SHA256SUMS" -o "$tmp/SHA256SUMS"
+  (cd "$tmp" && grep "  $asset$" SHA256SUMS | sha256sum -c -)
+  tar -xzf "$tmp/$asset" -C "$tmp"
+  bin="$(find "$tmp" -type f -name ai-server-agent -print -quit)"
+  [ -n "$bin" ] || die "release archive does not contain ai-server-agent"
+  install -m 0755 "$bin" "$INSTALL_BIN"
+); }
 
 if [ -n "${AI_SERVER_AGENT_BINARY:-}" ]; then
   [ -x "$AI_SERVER_AGENT_BINARY" ] || die "AI_SERVER_AGENT_BINARY is not executable"
