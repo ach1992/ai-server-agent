@@ -28,11 +28,15 @@ The manifest is also summarized in MCP server instructions, so an AI client rece
 
 ## Optional browser runtime
 
-Browser automation is optional. `browser_setup` creates a private Node.js + Playwright runtime below `/var/lib/ai-server-agent/runtime/browser`. It does not use the system Node installation and does not run a public web service. Browser dependencies may add shared OS libraries but do not take ownership of a web port.
+Browser automation is optional. `browser_setup` creates a root-owned private Node.js + Playwright + Chromium engine under `/opt/ai-server-agent/browser`. The normal `aiworker` cannot modify that engine. Persistent browser profiles and writable session data live separately under `/var/lib/ai-server-agent/runtime/browser`.
+
+The browser capability does not use the system Node installation, does not run a public web service, and does not take ownership of a web port. It may install shared OS libraries required by Chromium only after explicit approval. Removing the browser runtime disables browser automation without affecting the MCP core.
 
 ## Persistent work
 
 `start_job` creates a transient systemd unit (`ai-job-*`) and redirects output to the state directory. Jobs are independent of the MCP request and survive ChatGPT disconnections and MCP service restarts.
+
+Interactive terminal software such as `tmux` is deliberately optional rather than a core dependency. AI can install it through the root tool if an interactive long-lived TTY is required.
 
 ## Root safety boundary
 
