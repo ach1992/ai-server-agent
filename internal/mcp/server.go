@@ -219,7 +219,7 @@ func (s *Server) registerTools() {
 			return responseResult(resp)
 		})
 
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_setup", Description: "Install an optional private Node.js + Playwright + Chromium runtime below the agent state directory. It does not replace system Node or take over ports 80/443.", Annotations: annotations(false, true, true, true)},
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_setup", Description: "Install an optional root-owned Node.js + Playwright + Chromium engine under /opt/ai-server-agent/browser and keep writable browser profile/session data separately under the agent state directory. It does not replace system Node or take over ports 80/443.", Annotations: annotations(false, true, true, true)},
 		func(ctx context.Context, req *mcpsdk.CallToolRequest, input BrowserSetupInput) (*mcpsdk.CallToolResult, any, error) {
 			resp, err := s.browser.Setup(input.Approval)
 			if err != nil {
@@ -228,7 +228,7 @@ func (s *Server) registerTools() {
 			return responseResult(resp)
 		})
 
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_run", Description: "Run Playwright JavaScript in headless Chromium using a persistent browser profile. Variables browser, context, and page are pre-created; use console.log for observations.", Annotations: annotations(false, false, false, true)},
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_run", Description: "Run Playwright JavaScript in headless Chromium using a persistent browser profile. Variables browser, context, and page are pre-created; use console.log for observations. Scripts can interact with and modify external web applications, so treat this as an action-capable tool.", Annotations: annotations(false, true, false, true)},
 		func(ctx context.Context, req *mcpsdk.CallToolRequest, input BrowserRunInput) (*mcpsdk.CallToolResult, any, error) {
 			resp, err := s.browser.Run(input.Script)
 			if err != nil {
