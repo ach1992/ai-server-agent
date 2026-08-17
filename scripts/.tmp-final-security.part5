@@ -1,0 +1,80 @@
+
+old_cleanup_head = '''cloudflare_cleanup(){
+  local source zone_id dns_id dns_owned origin_ruleset_id origin_rule_id ssl_ruleset_id ssl_rule_id cert_id host tmp old previous_zone previous_cert
+  if [ -s "$CF_TXN_STATE" ]; then
+    host="$(json_get "$CF_TXN_STATE" '.hostname')"
+    printf 'Incomplete Cloudflare transaction for: %s\\n' "$host"
+    confirm "Retry the recorded rollback now?" no || { echo "Cancelled."; return 0; }
+    print_cf_token_guidance "$host"; load_cf_token
+    if recover_cloudflare_transaction; then CF_TOKEN=""; log "Recorded Cloudflare rollback completed."; return 0; fi
+    CF_TOKEN=""; die "Cloudflare rollback is still incomplete. Recovery state remains in $CF_TXN_STATE."
+  fi
+'''
+new_cleanup_head = '''cloudflare_cleanup(){
+  local source zone_id dns_id dns_owned origin_ruleset_id origin_rule_id ssl_ruleset_id ssl_rule_id cert_id host tmp old previous_zone previous_cert phase
+  if [ -e "$CF_TXN_STATE" ] || [ -L "$CF_TXN_STATE" ]; then
+    validate_cloudflare_transaction_state "$CF_TXN_STATE" || die "Cloudflare recovery journal is malformed/unsafe. It was left untouched; repair or inspect it explicitly before any cleanup mutation."
+    phase="$(jq -r '.phase' "$CF_TXN_STATE")"; host="$(jq -r '.hostname' "$CF_TXN_STATE")"
+    printf 'Incomplete Cloudflare transaction for: %s (phase: %s)\\n' "$host" "$phase"
+    if [ "$phase" = committed ] || [ "$phase" = rolled_back ]; then
+      recover_cloudflare_transaction || die "Could not finalize the completed Cloudflare transaction journal."
+      log "Completed Cloudflare transaction journal finalized without remote rollback."
+      return 0
+    fi
+    confirm "Retry the recorded rollback/recovery now?" no || { echo "Cancelled."; return 0; }
+    print_cf_token_guidance "$host"; load_cf_token
+    if recover_cloudflare_transaction; then CF_TOKEN=""; log "Recorded Cloudflare recovery completed."; return 0; fi
+    CF_TOKEN=""; die "Cloudflare recovery is still incomplete. Recovery state remains in $CF_TXN_STATE."
+  fi
+'''
+replace_once("manage.sh", old_cleanup_head, new_cleanup_head)
+
+# Tests: rebind new backup path in temporary test environments.
+replace_once(
+    "tests/cloudflare_transaction.sh",
+    '''STATE_DIR="$TMP/state"; CONFIG_DIR="$TMP/config"; CONTROL_DIR="$CONFIG_DIR/control"; TLS_DIR="$CONFIG_DIR/tls"; CONFIG_FILE="$CONFIG_DIR/config.json"; MANAGED_STATE="$CONFIG_DIR/managed.json"; CF_TXN_STATE="$CONTROL_DIR/cloudflare-transaction.json"; AUTH_HEADER_FILE="$CONFIG_DIR/mcp.authorization"
+''',
+    '''STATE_DIR="$TMP/state"; CONFIG_DIR="$TMP/config"; CONTROL_DIR="$CONFIG_DIR/control"; TLS_DIR="$CONFIG_DIR/tls"; CONFIG_FILE="$CONFIG_DIR/config.json"; MANAGED_STATE="$CONFIG_DIR/managed.json"; CF_TXN_STATE="$CONTROL_DIR/cloudflare-transaction.json"; CF_TXN_BACKUP_DIR="$CONTROL_DIR/cloudflare-transaction-backup"; AUTH_HEADER_FILE="$CONFIG_DIR/mcp.authorization"
+''')
+
+# Add TOCTOU regression: pending ruleset recovery may delete only its exact rule.
+append_once(
+    "tests/cloudflare_transaction.sh",
+    "pending ruleset recovery never deletes the ruleset container",
+    r'''# A response-lost ruleset create may recover its exact nonce-marked rule, but
+# must never delete the ruleset container: another writer can add a rule after
+# our inspection and before a whole-ruleset DELETE.
+: > "$DELETE_LOG"
+CF_PENDING_KIND=origin-ruleset-create; CF_PENDING_ZONE=zone1; CF_PENDING_HOST=mcp.example.com; CF_PENDING_VALUE=ai_server_agent_ruleset_test; CF_PENDING_PHASE=http_request_origin; CF_PENDING_MARKER=abcdef0123456789abcdef0123456789
+cf_find_ruleset_by_marker(){ printf 'marked-set\n'; }
+cf_api(){
+  case "$1:$2" in
+    GET:/zones/zone1/rulesets/marked-set)
+      printf '%s' '{"success":true,"result":{"rules":[{"id":"agent-rule","ref":"ai_server_agent_ruleset_test","description":"AI Server Agent origin port txn:abcdef0123456789abcdef0123456789"}]}}'
+      ;;
+    *) return 2 ;;
+  esac
+}
+cf_delete_owned(){ printf '%s\n' "$1" >> "$DELETE_LOG"; return 0; }
+cf_recover_pending_write
+grep -Fxq '/zones/zone1/rulesets/marked-set/rules/agent-rule' "$DELETE_LOG"
+if grep -Fxq '/zones/zone1/rulesets/marked-set' "$DELETE_LOG"; then echo 'pending recovery deleted a whole ruleset' >&2; exit 1; fi
+
+echo 'pending ruleset recovery never deletes the ruleset container'
+''')
+
+# crash recovery tests source manage.sh in fresh processes; rebind the backup path too.
+p = Path("tests/cloudflare_crash_recovery.sh")
+text = p.read_text()
+text = text.replace('CF_TXN_STATE="$TEST_CF_TXN_STATE"', 'CF_TXN_STATE="$TEST_CF_TXN_STATE"; CF_TXN_BACKUP_DIR="$TEST_CONTROL_DIR/cloudflare-transaction-backup"')
+p.write_text(text)
+
+# New durable phase-boundary tests.
+Path("tests/cloudflare_phase_recovery.sh").write_text(r'''#!/usr/bin/env bash
+set -Eeuo pipefail
+[ "$(id -u)" -eq 0 ] || { echo "run cloudflare_phase_recovery.sh as root" >&2; exit 1; }
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1
+source "$ROOT/manage.sh"
+TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
+AGENT_USER=root
