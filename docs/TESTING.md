@@ -34,7 +34,7 @@ These cover Go unit/behavior tests, race detection and the production binary bui
 
 ### Shell syntax
 
-CI validates the established installer, updater, uninstaller, management, release-builder and security-test paths. `tests/stable_bootstrap.sh` also syntax-checks the commit-pinned stable bootstrap before exercising it behaviorally.
+CI validates the established installer, updater, uninstaller, management, release-builder and security-test paths. `tests/stable_bootstrap.sh` also syntax-checks the stable bootstrap before exercising it behaviorally.
 
 ### Ubuntu 22.04 lifecycle integration
 
@@ -101,9 +101,9 @@ Go tests exercise root command environment isolation and the persistent-job comm
 
 ### Stable bootstrap
 
-Initial stable installation deliberately separates the bootstrap trust root from the release installer it authenticates. The supported one-line command fetches `scripts/install-stable.sh` from an exact Git commit, not from a mutable branch and not from the release asset that is about to be verified.
+Initial stable installation deliberately separates the bootstrap trust root from the release installer it authenticates. The supported one-line command loads `scripts/install-stable.sh` from a Git tag already bound to a published immutable GitHub Release (`v0.1.2` for this generation), not from a mutable branch, a transient feature commit, or the release asset that is about to be verified. The immutable-release tag is the durable source identity for the bootstrap after publication.
 
-`tests/stable_bootstrap.sh` uses a deterministic mocked GitHub HTTP surface plus a fake `sudo` boundary and verifies that the bootstrap:
+`tests/stable_bootstrap.sh` guards the documented immutable-tag source and uses a deterministic mocked GitHub HTTP surface plus a fake `sudo` boundary to verify that the bootstrap:
 
 - accepts a valid latest immutable release and an explicit valid stable tag;
 - requires exactly the expected tag-scoped `install.sh` asset representation;
