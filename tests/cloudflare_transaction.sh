@@ -86,10 +86,12 @@ test "$(jq -r '.cloudflare_previous_certificate.origin_certificate_id' "$MANAGED
 cf_delete_owned(){ return 0; }
 cleanup_old_cloudflare mcp.example.com zone1 '' false '' '' '' '' cert-old mcp.example.com cert-new zone1 >/dev/null
 test "$(jq -r '.cloudflare_previous_certificate.origin_certificate_id // empty' "$MANAGED_STATE")" = ''
+ORIG_CF_FIND_DNS_BY_MARKER="$(declare -f cf_find_dns_by_marker)"
+ORIG_CF_FIND_RULE_BY_MARKER="$(declare -f cf_find_rule_by_marker)"
 # Ambiguous POST recovery: semantic DNS signature is removed even when no response ID was captured.
 : > "$DELETE_LOG"
-CF_PENDING_KIND=dns-create; CF_PENDING_ZONE=zone1; CF_PENDING_HOST=mcp.example.com; CF_PENDING_VALUE=203.0.113.10; CF_PENDING_PHASE=""
-cf_find_dns_by_signature(){ printf 'dns-ambiguous\n'; }
+CF_PENDING_KIND=dns-create; CF_PENDING_ZONE=zone1; CF_PENDING_HOST=mcp.example.com; CF_PENDING_VALUE=203.0.113.10; CF_PENDING_PHASE=""; CF_PENDING_MARKER=marker-good
+cf_find_dns_by_marker(){ printf 'dns-ambiguous\n'; }
 cf_delete_owned(){ printf '%s\n' "$1" >> "$DELETE_LOG"; return 0; }
 rollback_new_cf_resources mcp.example.com zone1 '' '' '' '' '' '' '' '' 3210 '' '' '' ''
 grep -qF '/zones/zone1/dns_records/dns-ambiguous' "$DELETE_LOG"
@@ -97,13 +99,13 @@ test -z "$CF_PENDING_KIND"
 test ! -e "$CF_TXN_STATE"
 
 # If semantic recovery itself cannot read Cloudflare, pending intent is preserved for a later cleanup retry.
-CF_PENDING_KIND=dns-create; CF_PENDING_ZONE=zone1; CF_PENDING_HOST=mcp.example.com; CF_PENDING_VALUE=203.0.113.10; CF_PENDING_PHASE=""
-cf_find_dns_by_signature(){ return 2; }
+CF_PENDING_KIND=dns-create; CF_PENDING_ZONE=zone1; CF_PENDING_HOST=mcp.example.com; CF_PENDING_VALUE=203.0.113.10; CF_PENDING_PHASE=""; CF_PENDING_MARKER=marker-later
+cf_find_dns_by_marker(){ return 2; }
 if rollback_new_cf_resources mcp.example.com zone1 '' '' '' '' '' '' '' '' 3210 '' '' '' ''; then echo 'expected pending recovery journal' >&2; exit 1; fi
 test -s "$CF_TXN_STATE"
 test "$(jq -r '.pending.kind' "$CF_TXN_STATE")" = dns-create
 test "$(jq -r '.pending.hostname' "$CF_TXN_STATE")" = mcp.example.com
-cf_find_dns_by_signature(){ printf 'dns-later\n'; }
+cf_find_dns_by_marker(){ printf 'dns-later\n'; }
 cf_delete_owned(){ printf '%s\n' "$1" >> "$DELETE_LOG"; return 0; }
 recover_cloudflare_transaction
 test ! -e "$CF_TXN_STATE"
@@ -111,10 +113,45 @@ test -z "$CF_PENDING_KIND"
 
 # Deterministic rule refs also recover ambiguous rule creates without deleting an entire shared ruleset.
 : > "$DELETE_LOG"
-CF_PENDING_KIND=origin-rule-create; CF_PENDING_ZONE=zone1; CF_PENDING_HOST=mcp.example.com; CF_PENDING_VALUE=ai_server_agent_test; CF_PENDING_PHASE=http_request_origin
-cf_find_rule_by_ref(){ printf 'shared-set|ambiguous-rule\n'; }
+CF_PENDING_KIND=origin-rule-create; CF_PENDING_ZONE=zone1; CF_PENDING_HOST=mcp.example.com; CF_PENDING_VALUE=ai_server_agent_test; CF_PENDING_PHASE=http_request_origin; CF_PENDING_MARKER=rule-marker
+cf_find_rule_by_marker(){ printf 'shared-set|ambiguous-rule\n'; }
 rollback_new_cf_resources mcp.example.com zone1 '' '' '' '' '' '' '' '' 3210 '' '' '' ''
 grep -qF '/zones/zone1/rulesets/shared-set/rules/ambiguous-rule' "$DELETE_LOG"
 if grep -Fxq '/zones/zone1/rulesets/shared-set' "$DELETE_LOG"; then echo 'rollback deleted a whole ruleset' >&2; exit 1; fi
+
+
+eval "$ORIG_CF_FIND_DNS_BY_MARKER"
+eval "$ORIG_CF_FIND_RULE_BY_MARKER"
+
+# Durable pre-POST journal includes the unpredictable marker before any create request.
+rm -f "$CF_TXN_STATE"
+host=mcp.example.com; zone_id=zone1; old_port=3210; dns_id=""; dns_action=""; dns_old_content=""; dns_old_proxied=""; dns_old_ttl=""; origin_ruleset_id=""; origin_rule_id=""; origin_action=""; ssl_ruleset_id=""; ssl_rule_id=""; ssl_action=""; cert_id=""
+cf_set_pending_write dns-create zone1 mcp.example.com 203.0.113.10 "" nonce-before-post
+test -s "$CF_TXN_STATE"
+test "$(jq -r '.pending.marker' "$CF_TXN_STATE")" = nonce-before-post
+test "$(jq -r '.pending.kind' "$CF_TXN_STATE")" = dns-create
+clear_cloudflare_transaction_state; cf_clear_pending_write
+
+# A same-shape concurrent DNS record without our nonce is ambiguous and must never be deleted.
+cf_api(){ printf '%s' '{"success":true,"result":[{"id":"external-dns","type":"A","name":"mcp.example.com","content":"203.0.113.10","proxied":true,"comment":"Managed by AI Server Agent"}]}' ; }
+if cf_find_dns_by_marker zone1 mcp.example.com 203.0.113.10 our-secret-marker >/dev/null; then echo 'concurrent DNS was treated as owned' >&2; exit 1; else test "$?" -eq 2; fi
+
+# A matching deterministic ref without our nonce is ambiguous in both rule phases.
+cf_api(){
+  case "$2" in
+    '/zones/zone1/rulesets?per_page=100') printf '%s' '{"success":true,"result":[{"id":"origin-set-race","kind":"zone","phase":"http_request_origin"}]}' ;;
+    '/zones/zone1/rulesets/origin-set-race') printf '%s' '{"success":true,"result":{"rules":[{"id":"external-origin","ref":"ai_server_agent_test","description":"AI Server Agent origin port"}]}}' ;;
+    *) return 2 ;;
+  esac
+}
+if cf_find_rule_by_marker zone1 http_request_origin ai_server_agent_test our-origin-marker >/dev/null; then echo 'concurrent Origin Rule was treated as owned' >&2; exit 1; else test "$?" -eq 2; fi
+cf_api(){
+  case "$2" in
+    '/zones/zone1/rulesets?per_page=100') printf '%s' '{"success":true,"result":[{"id":"ssl-set-race","kind":"zone","phase":"http_config_settings"}]}' ;;
+    '/zones/zone1/rulesets/ssl-set-race') printf '%s' '{"success":true,"result":{"rules":[{"id":"external-ssl","ref":"ai_server_agent_ssl_test","description":"AI Server Agent strict SSL"}]}}' ;;
+    *) return 2 ;;
+  esac
+}
+if cf_find_rule_by_marker zone1 http_config_settings ai_server_agent_ssl_test our-ssl-marker >/dev/null; then echo 'concurrent Configuration Rule was treated as owned' >&2; exit 1; else test "$?" -eq 2; fi
 
 echo 'cloudflare transaction tests passed'
