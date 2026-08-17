@@ -33,7 +33,11 @@ jobs:
           bash -n manage.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh
           ruby -e 'require "yaml"; ARGV.each { |f| YAML.load_file(f) }' scripts/.tmp-ci.yml scripts/.tmp-release.yml scripts/.tmp-security.yml
           go test -race ./...
-          sudo bash -x tests/cloudflare_transaction.sh
+          cp tests/cloudflare_transaction.sh tests/.tmp-debug-cloudflare-transaction.sh
+          sed -i 's/configure_cloudflare >\/dev\/null 2>\&1/configure_cloudflare/' tests/.tmp-debug-cloudflare-transaction.sh
+          sudo bash -x tests/.tmp-debug-cloudflare-transaction.sh
+          rm -f tests/.tmp-debug-cloudflare-transaction.sh
+          sudo bash tests/cloudflare_transaction.sh
           sudo bash tests/cloudflare_crash_recovery.sh
           sudo bash tests/cloudflare_phase_recovery.sh
           grep -qF -- '--verify-tag' scripts/.tmp-release.yml
@@ -50,7 +54,7 @@ jobs:
           set -Eeuo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          rm -f scripts/.tmp-independent-review-fix.py
+          rm -f scripts/.tmp-independent-review-fix.py tests/.tmp-debug-cloudflare-transaction.sh
           git rm scripts/.tmp-irfix-part00 scripts/.tmp-irfix-part01 scripts/.tmp-irfix-part02 scripts/.tmp-irfix-part03 scripts/.tmp-irfix-part04 scripts/.tmp-irfix-part05 scripts/.tmp-irfix-part06 scripts/.tmp-repair-trigger2 scripts/.tmp-independent-review-tail-clean.py
           git add manage.sh tests/cloudflare_transaction.sh tests/cloudflare_phase_recovery.sh README.md docs/ARCHITECTURE.md scripts/.tmp-ci.yml scripts/.tmp-release.yml scripts/.tmp-security.yml
           git diff --cached --check
