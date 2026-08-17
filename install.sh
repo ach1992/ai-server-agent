@@ -33,12 +33,14 @@ SETUP_MODE="${AI_SERVER_AGENT_SETUP_MODE:-}"
 CHECK_ONLY=0
 RESOLVE_REF_ONLY=0
 FRESH_INSTALL=1
+SETUP_INCOMPLETE=0
 RESOLVED_SOURCE_REF=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-/dev/null}")" 2>/dev/null && pwd || true)"
 
 trap 'echo "[ERROR] Installation failed at line $LINENO. Review the output above; existing project files were not intentionally modified." >&2' ERR
 
 log(){ printf '[ai-server-agent] %s\n' "$*"; }
+warn(){ printf '[ai-server-agent] WARNING: %s\n' "$*" >&2; }
 die(){ printf '[ai-server-agent] ERROR: %s\n' "$*" >&2; exit 1; }
 need_root(){ [ "$(id -u)" -eq 0 ] || die "Run this installer as root (for example: sudo bash install.sh)."; }
 version_ge(){ dpkg --compare-versions "$1" ge "$2"; }
@@ -316,10 +318,30 @@ if [ "$NONINTERACTIVE" = "1" ]; then
     *) die "AI_SERVER_AGENT_SETUP_MODE must be local, cloudflare, manual, keep, or empty" ;;
   esac
 elif [ "$FRESH_INSTALL" -eq 1 ] && [ -r /dev/tty ] && [ -z "${AI_SERVER_AGENT_BIND_MODE+x}" ]; then
-  "$MANAGE_BIN" first-run
+  if ! "$MANAGE_BIN" first-run; then
+    SETUP_INCOMPLETE=1
+    warn "Core installation succeeded, but connection setup was not completed. The Agent remains installed and healthy in its last verified mode."
+    warn "Resume setup with: sudo ai-server-agent-manage"
+  fi
 fi
 
-cat <<EOF_SUMMARY
+if [ "$SETUP_INCOMPLETE" -eq 1 ]; then
+  cat <<EOF_SUMMARY
+
+AI Server Agent core installed successfully; connection setup is incomplete.
+
+  Service:       ai-server-agent.service
+  Executor:      ai-server-agent-executor.service
+  Environment:   $STATE_DIR/AI_ENVIRONMENT.json
+  Workspace:     $WORKSPACE_DIR
+  Management:    sudo ai-server-agent-manage
+  Auth:          bearer (protected; not printed)
+
+The Agent is installed and healthy. Resume connection setup with:
+  sudo ai-server-agent-manage
+EOF_SUMMARY
+else
+  cat <<EOF_SUMMARY
 
 AI Server Agent installed successfully.
 
@@ -333,10 +355,15 @@ AI Server Agent installed successfully.
 Use "sudo ai-server-agent-manage" for status, ChatGPT setup, domain/TLS changes,
 updates, repair, Cloudflare cleanup, safe uninstall, or purge.
 EOF_SUMMARY
+fi
 
 if [ "$NONINTERACTIVE" != "1" ] && [ -r /dev/tty ]; then
   echo
   "$MANAGE_BIN" status
   echo
-  echo "Next: run 'sudo ai-server-agent-manage' any time. Choose ChatGPT Setup when you are ready to connect."
+  if [ "$SETUP_INCOMPLETE" -eq 1 ]; then
+    echo "Next: run 'sudo ai-server-agent-manage' and choose Configure or change domain / connection."
+  else
+    echo "Next: run 'sudo ai-server-agent-manage' any time. Choose ChatGPT Setup when you are ready to connect."
+  fi
 fi
