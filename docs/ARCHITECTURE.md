@@ -1,55 +1,211 @@
 # Architecture
 
-AI Server Agent is intentionally host-neutral. The control plane is a single static Go binary used in two systemd services:
+## 1. Supported release target
 
-- `ai-server-agent.service`: unprivileged MCP HTTP process (`aiagent`).
-- `ai-server-agent-executor.service`: root-only local executor with no TCP listener.
+Stable v0.1 releases target **Ubuntu 22.04 LTS amd64/x86_64 on dedicated development/test servers**.
 
-The services communicate through `/run/ai-server-agent/executor.sock` using a random local token. Normal project commands are dropped to `aiworker`; root commands run only when the root tool is selected.
+The source installer also accepts Ubuntu 22.04+ and Debian 11+ on amd64/arm64 for development/source use. That broader path is not a stable-release support promise.
 
-Root-trusted control metadata is isolated under `/etc/ai-server-agent/control` (`root:root`, non-writable by `aiagent`/`aiworker`). Install identity is strict JSON and is never shell-sourced. The top-level `/var/lib/ai-server-agent` hierarchy plus its `jobs` and `runtime` container entries are root-owned so unprivileged identities cannot replace paths later consumed by the privileged executor; writable worker/browser files exist only beneath root-controlled directory entries. Privileged job-file reads reject symlinks/non-regular files, and legacy browser-data symlinks are removed without being followed during upgrade.
+The control plane intentionally coexists with normal server software. It does not require or own nginx, Apache, Caddy, Docker, PHP, databases, Node.js, Python, `cloudflared`, or ports 80/443.
 
-## Non-interference contract
+## 2. Process and trust boundaries
 
-The core does **not** install or require nginx, Apache, PHP, MySQL/MariaDB, Docker, Node.js, Python, Redis, aaPanel, or any hosting panel. It does not bind ports 80 or 443. Projects and AI workflows may install, replace, configure, or remove those components without taking down the MCP service.
+AI Server Agent is split into two long-running services:
 
-The only required host primitives after installation are systemd, `/bin/bash`, and standard Linux process/filesystem facilities. Installation uses `curl`, `tar`, and `xz` only to obtain/build the static binary.
+- `ai-server-agent.service`: MCP/API process running as the unprivileged `aiagent` account.
+- `ai-server-agent-executor.service`: root executor reachable through the Agent-owned Unix socket.
 
-## Self-preservation manifest
+Ordinary shell work runs as `aiworker` in `/srv/ai-workspace`. Root shell work is explicit and uses the same policy/approval evaluation before execution.
 
-At startup the agent writes `/var/lib/ai-server-agent/AI_ENVIRONMENT.json`. The same data is available through the `agent_environment` MCP tool. It records:
+The public MCP surface uses bearer authentication. Direct public mode also requires native TLS. The bearer-authenticated MCP control plane is one authorization domain: root and worker jobs are different execution modes, not different external principals.
 
-- agent services and binary/config/state paths;
-- the active MCP bind address;
-- executor socket;
-- required host primitives;
-- optional runtime components;
-- rules for avoiding accidental disconnection.
+### Root command environment
 
-The manifest is also summarized in MCP server instructions, so an AI client receives the preservation contract during discovery.
+Root commands must not inherit worker-controlled ambient shell state. The executor uses:
 
-## Optional browser runtime
+- `HOME=/root`;
+- working directory `/root`;
+- a minimal explicit environment and fixed command `PATH`;
+- `/bin/bash --noprofile --norc -c`;
+- no inherited `BASH_ENV` or `ENV`.
 
-Browser automation is optional. `browser_setup` creates a root-owned private Node.js + Playwright + Chromium engine under `/opt/ai-server-agent/browser`. The normal `aiworker` cannot modify that engine. Persistent browser profiles and writable session data live separately under `/var/lib/ai-server-agent/runtime/browser`.
+Worker commands retain `/srv/ai-workspace` as HOME/CWD.
 
-The browser capability does not use the system Node installation, does not run a public web service, and does not take ownership of a web port. It may install shared OS libraries required by Chromium only after explicit approval. Removing the browser runtime disables browser automation without affecting the MCP core.
+### Persistent jobs
 
-## Persistent work
+Persistent jobs run as transient systemd units and survive MCP/ChatGPT reconnects. Job metadata lives under the root-controlled state container `/var/lib/ai-server-agent/jobs`.
 
-`start_job` creates a transient systemd unit (`ai-job-*`) and redirects output to the state directory. Jobs are independent of the MCP request and survive ChatGPT disconnections and MCP service restarts.
+Job log/status files are created with exclusive, no-follow semantics. Reads reject symlinks, non-regular files, unexpected owners, and world-writable files. Root-owned versus `aiworker`-owned job files record execution provenance and protect filesystem replacement; they are not a separate bearer-auth authorization partition.
 
-Interactive terminal software such as `tmux` is deliberately optional rather than a core dependency. AI can install it through the root tool if an interactive long-lived TTY is required.
+## 3. Filesystem trust model
 
-## Root safety boundary
+Important paths:
 
-Arbitrary root shell is intentionally supported because real installation and diagnostic workflows may require it. The policy engine flags common destructive operations and changes that reference protected agent resources. This is a guardrail against accidents, not a security sandbox: a deliberately obfuscated root command can bypass string classification. Dedicated test servers, snapshots, backups, and ChatGPT action confirmations remain required operational controls.
+| Path | Purpose / trust |
+| --- | --- |
+| `/usr/local/bin/ai-server-agent` | installed agent binary |
+| `/usr/local/sbin/ai-server-agent-manage` | supported privileged management entrypoint/wrapper |
+| `/usr/local/lib/ai-server-agent` | installed management/update/uninstall implementation |
+| `/etc/ai-server-agent` | root-controlled configuration |
+| `/etc/ai-server-agent/control` | root-only install identity, Cloudflare journal/backup, internal control state |
+| `/var/lib/ai-server-agent` | root-controlled state container |
+| `/var/lib/ai-server-agent/runtime` | root-controlled runtime container |
+| `/var/lib/ai-server-agent/jobs` | root-controlled persistent-job container |
+| `/var/log/ai-server-agent` | Agent logs/audit data |
+| `/srv/ai-workspace` | `aiworker` writable project workspace; preserved by purge |
+| `/run/lock/ai-server-agent` | purge-safe root lifecycle lock namespace |
 
-## Privileged execution and durable transaction invariants
+Root-consumed control state must not be replaceable by `aiworker`/`aiagent`. Install/migration paths reject or repair unsafe legacy container layouts and symlinks where the supported migration semantics allow it.
 
-Root execution is isolated from the worker workspace as an execution environment, not only as a filesystem permission boundary. Root commands use a root-trusted HOME, an explicit minimal environment, and Bash with startup files disabled; background root jobs additionally start through `env -i`. Worker-controlled `.bash_profile`, `.bash_login`, `.profile`, `.bashrc`, `BASH_ENV`, or `ENV` must never influence a later root command.
+## 4. Privileged management lifecycle
 
-Cloudflare changes use a durable root-only transaction state machine. Remote create intent is journaled before POST; a fixed root-only local rollback snapshot is durable before local TLS/config mutation; phases distinguish `prepared`, `applying`, `committing`, `committed`, and `rolled_back`. `committing` records the exact intended managed-resource identity before managed-state replacement, so fresh recovery can distinguish a completed commit from a rollback case. `committed` recovery only finalizes the journal. Malformed journals fail closed and remain untouched. Recovery deletes exact Agent-owned rules, records, and certificates only; it never deletes an entire Ruleset container because concurrent writers cannot be excluded atomically.
+There are two lock layers with different scopes.
 
-### Privileged management serialization and remote drift
+### Global lifecycle serialization
 
-All connection-mutating management paths share one root-only advisory lock under `/etc/ai-server-agent/control`. Cloudflare rollback and cleanup store exact Agent-written resource fingerprints and re-read the current remote representation immediately before destructive mutation; observed drift fails closed instead of overwriting or deleting concurrent state. Existing Agent-owned DNS, Origin Rules, and strict-SSL Configuration Rules are reused only when their recorded representation still matches the requested canonical state; otherwise reconfiguration stops for manual resolution.
+The installed `/usr/local/sbin/ai-server-agent-manage` wrapper acquires:
+
+`/run/lock/ai-server-agent/management.lock`
+
+before entering `manage.sh`. Install, update, uninstall and purge use the same root-only lifecycle lock (or inherit its open descriptor when invoked through management). This namespace is outside Agent config/state so purge cannot remove the lock while a concurrent operation is active.
+
+This is the authoritative cross-operation lifecycle lock for privileged state mutation.
+
+### Cloudflare/internal management lock
+
+`manage.sh` also uses a root-only lock under `/etc/ai-server-agent/control` around connection-management internals. It protects transaction-local management state, but it is not the purge-safe global lifecycle namespace.
+
+New privileged state-mutating entrypoints must participate in the global lifecycle serialization model rather than relying only on the internal control lock.
+
+## 5. Connection modes
+
+### Local/private
+
+The default local endpoint binds to loopback and remains bearer-authenticated. This is appropriate for private connectivity such as a separately managed secure MCP tunnel.
+
+### Manual public TLS
+
+The operator supplies an existing certificate/key pair. The manager validates hostname/key pairing, installs them under `/etc/ai-server-agent/tls`, switches the Agent to public/native TLS, restarts services, and restores the previous local TLS/config state if activation fails.
+
+### Guided Cloudflare
+
+The Cloudflare path manages only the selected MCP hostname. It may create/reconcile:
+
+- a proxied `A` DNS record;
+- a hostname-scoped Origin Rule for the Agent port;
+- a hostname-scoped Configuration Rule setting SSL to `strict`;
+- a Cloudflare Origin CA certificate.
+
+It does **not** change whole-zone SSL mode.
+
+Existing external DNS/rules are not silently adopted or overwritten. The manager reuses a matching external proxied DNS record without taking ownership, and otherwise fails closed on conflicts or ambiguous ownership.
+
+## 6. Cloudflare transaction and recovery model
+
+Cloudflare configuration is a root-only durable transaction. The journal is:
+
+`/etc/ai-server-agent/control/cloudflare-transaction.json`
+
+and the durable pre-local-mutation rollback snapshot is:
+
+`/etc/ai-server-agent/control/cloudflare-transaction-backup/`
+
+The current journal schema is version 3.
+
+### State machine
+
+Normal commit path:
+
+`prepared -> applying -> committing -> committed`
+
+Recovery/rollback path:
+
+`prepared | applying | unproven committing -> rolling_back -> rolled_back`
+
+The journal validator enforces semantic relationships, not only JSON types:
+
+- pending kind is bound to the correct Cloudflare ruleset phase;
+- pending zone/hostname must match the transaction identity;
+- pending creates cannot survive into local `applying`, `committing`, or `committed` state;
+- commit identity must exactly match the transaction/resource identity;
+- `rolled_back` is terminal only when pending evidence, commit intent, rollback-owned resources, and certificate ownership are empty;
+- malformed, contradictory, unsafe-owner/mode, or unknown-schema journals fail closed and remain untouched.
+
+### Durable local rollback snapshot
+
+Before the first remote create, the manager creates the root-only local backup and records `backup_ready=true`. Local config/TLS/managed-state mutation does not begin until remote resources are reconciled and checkpointed.
+
+If the process dies after local mutation but before a proven commit, a fresh process restores the durable local snapshot before entering `rolling_back`.
+
+### Commit identity
+
+Before replacing trusted managed state, the manager durably records the exact intended hostname, port, Cloudflare IDs, ownership flags, and fingerprints and moves to `committing`.
+
+A fresh process may finalize `committing`/`committed` without rollback only when current trusted `managed.json` exactly matches that durable commit identity. Otherwise it restores local state and rolls back transaction-created remote resources.
+
+### Remote ownership and concurrent drift
+
+For confirmed Agent-owned DNS/rules, the manager stores canonical full-resource fingerprints and immediately re-reads the current resource before destructive cleanup. If representation changed, automatic deletion fails closed.
+
+For response-lost POSTs, identity alone is insufficient. Before the POST, the journal stores:
+
+- an unpredictable ownership marker/nonce;
+- the pending create kind and transaction identity;
+- a semantic fingerprint of the exact request-controlled representation.
+
+Recovery discovers only the nonce-marked candidate, re-reads that exact resource by ID, recomputes the semantic fingerprint, and deletes only if the current representation still matches the durable pre-POST representation. Competing lookalikes, multiple matches, missing representation proof, or drift remain unresolved rather than being destructively guessed.
+
+Ruleset recovery deletes only the exact Agent rule, never the shared Ruleset container.
+
+The current design deliberately avoids unconditional in-place mutation of previously recorded Cloudflare DNS/rules when a compare-and-swap guarantee is unavailable; drift is surfaced for explicit resolution instead.
+
+## 7. Stable install/update trust
+
+Stable and source channels are distinct.
+
+### Stable install
+
+A release-hosted `install.sh` is generated with its version/ref pinned to the release tag. Stable installation rejects `AI_SERVER_AGENT_BINARY` overrides and downloads the release archive plus `SHA256SUMS`; archive installation continues only after checksum verification.
+
+Stable v0.1 artifacts are amd64-only.
+
+### Stable update
+
+Trusted install identity is strict root-only JSON under `/etc/ai-server-agent/control/install-state.json`. Missing, malformed, contradictory, or unsafe identity fails closed; the updater does not guess `main`.
+
+For the stable channel the updater:
+
+1. resolves an explicit tag or the latest published immutable release;
+2. requires the release to be non-draft, non-prerelease and immutable;
+3. requires exactly one uploaded `install.sh` asset at the exact tag-scoped release URL;
+4. requires the GitHub release asset `sha256:` digest;
+5. downloads `install.sh` and verifies its bytes against that digest before execution;
+6. lets the release-scoped installer verify the archive with `SHA256SUMS`.
+
+Source updates resolve the selected source ref to a commit SHA and remain a separate development/source mechanism.
+
+## 8. Release provenance
+
+Release publication is manual-dispatch and exact-SHA based. The workflow requires:
+
+- an exact validated `main` SHA;
+- successful `main` push CI and High Assurance Security for that SHA;
+- promotion of the exact CI-produced release artifact rather than rebuilding the release payload;
+- an absent release/tag before create-only tag creation;
+- operator confirmation that repository release immutability is enabled;
+- operator confirmation that the release-tag ruleset protects the release tag pattern from update/delete and has no bypass actor capable of moving/deleting the tag;
+- exact tag creation at the validated SHA before `gh release create --verify-tag`;
+- post-publication verification that the release is immutable, the tag still resolves to the validated SHA, and release/asset attestations verify.
+
+The workflow intentionally does **not** treat a missing `bypass_actors` field from its `GITHUB_TOKEN` ruleset response as proof that no bypass actors exist. That property is an explicit operator gate because the workflow credential cannot authoritatively establish it.
+
+## 9. Preservation and removal
+
+Normal uninstall removes executable services/tooling while preserving configuration, Agent state, users, optional runtime data and workspace for reinstall/repair.
+
+Purge removes Agent-owned config/state/log/runtime and the `aiagent` identity, but intentionally preserves:
+
+- `/srv/ai-workspace`;
+- `aiworker` and its group.
+
+Cloudflare resources are not silently deleted by purge. Recorded Cloudflare resources must be cleaned through the ownership-aware Cloudflare cleanup path when desired.

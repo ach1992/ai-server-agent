@@ -6,6 +6,7 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONTROL_DIR=/etc/ai-server-agent/control
 INSTALL_STATE="$CONTROL_DIR/install-state.json"
 CF_TXN_STATE="$CONTROL_DIR/cloudflare-transaction.json"
+CF_TXN_BACKUP_DIR="$CONTROL_DIR/cloudflare-transaction-backup"
 STATE_DIR=/var/lib/ai-server-agent
 MANAGE_CMD=/usr/local/sbin/ai-server-agent-manage
 MANAGE_IMPL=/usr/local/lib/ai-server-agent/manage.sh
@@ -130,17 +131,27 @@ kill "$holder_pid"; wait "$holder_pid" 2>/dev/null || true; holder_pid=""
 rm -rf "$lifecycle_tmp"
 trap - EXIT
 
-# Create the real Cloudflare transaction journal through production code.
+# Create a valid production-shaped Cloudflare transaction journal through the
+# installed management implementation. The schema-v3 journal is meaningful only
+# after the durable local rollback snapshot exists.
 AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1 bash -c '
+  set -Eeuo pipefail
   source /usr/local/lib/ai-server-agent/manage.sh
-  CF_PENDING_KIND=dns-create
-  CF_PENDING_ZONE=zone-test
-  CF_PENDING_HOST=mcp.example.com
-  CF_PENDING_VALUE=203.0.113.10
-  CF_PENDING_MARKER=0123456789abcdef0123456789abcdef
-  save_cloudflare_transaction_state mcp.example.com zone-test "" "" "" "" "" "" "" "" 3210 "" "" "" ""
+  host=mcp.example.com
+  zone_id=zone-test
+  dns_id=""; dns_action=""; dns_fingerprint=""
+  origin_ruleset_id=""; origin_rule_id=""; origin_action=""; origin_fingerprint=""
+  ssl_ruleset_id=""; ssl_rule_id=""; ssl_action=""; ssl_fingerprint=""; cert_id=""
+  prepare_cloudflare_local_backup
+  CF_TXN_PHASE=prepared
+  marker=0123456789abcdef0123456789abcdef
+  body="$(jq -n --arg name "$host" --arg ip 203.0.113.10 --arg comment "Managed by AI Server Agent txn:$marker" '{type:"A",name:$name,content:$ip,ttl:1,proxied:true,comment:$comment}')"
+  fingerprint="$(cf_dns_intent_fingerprint <<<"$body")"
+  cf_set_pending_write dns-create "$zone_id" "$host" 203.0.113.10 "" "$marker" "$fingerprint"
+  validate_cloudflare_transaction_state "$CF_TXN_STATE"
 '
 assert_owner_mode "$CF_TXN_STATE" root root 600
+assert_owner_mode "$CF_TXN_BACKUP_DIR" root root 700
 journal_hash="$(sha256sum "$CF_TXN_STATE" | awk '{print $1}')"
 for user in aiagent aiworker; do
   expect_denied "$user" rm -f "$CF_TXN_STATE"
@@ -149,7 +160,13 @@ for user in aiagent aiworker; do
   expect_denied "$user" sh -c "printf attacker > '$CF_TXN_STATE'"
 done
 [ "$(sha256sum "$CF_TXN_STATE" | awk '{print $1}')" = "$journal_hash" ]
-rm -f "$CF_TXN_STATE"
+AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1 bash -c '
+  set -Eeuo pipefail
+  source /usr/local/lib/ai-server-agent/manage.sh
+  finalize_cloudflare_transaction_state
+'
+test ! -e "$CF_TXN_STATE"
+test ! -e "$CF_TXN_BACKUP_DIR"
 
 # Old shell-style metadata and malformed custom state are never executed.
 injection_marker=/tmp/ai-server-agent-state-injection-marker

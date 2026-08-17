@@ -1,83 +1,90 @@
 # AI Server Agent
 
-AI Server Agent is a small self-hosted MCP control plane for a **dedicated Ubuntu 22.04 LTS amd64 development/test server**. It gives ChatGPT a controlled way to inspect the host, run normal commands as an unprivileged worker, perform guarded privileged operations, run persistent jobs, access files, and optionally automate a browser.
+AI Server Agent turns a dedicated Linux development/test server into a bearer-authenticated MCP endpoint for ChatGPT. Ordinary commands run as an unprivileged worker; host-level actions go through a separate root executor with policy and approval guardrails.
 
-> **Security scope:** AI Server Agent is root-capable infrastructure. Use it on a dedicated development/test server, keep snapshots/backups, and treat its bearer credential as a privileged secret. The v0.1 line is not a production-support claim.
+## Stable v0.1 support
 
-## Supported stable scope
+Stable v0.1 releases support:
 
-The v0.1 stable release supports:
-
-- Ubuntu 22.04 LTS
-- amd64 / x86-64
+- **Ubuntu 22.04 LTS**
+- **amd64/x86_64**
 - systemd
-- dedicated development/test servers
+- a dedicated development/test server where you are comfortable granting an AI-controlled MCP endpoint the documented capabilities
 
-Ubuntu 24.04, Debian, arm64, hosting panels, and production workloads are outside the current stable support claim until they receive release-grade validation.
+The source installer has a broader development compatibility path for Ubuntu 22.04+ and Debian 11+ on amd64/arm64. That is not a stable-release support promise.
+
+AI Server Agent does not require nginx, Apache, Caddy, Docker, PHP, a database, Node.js, Python, `cloudflared`, or a hosting panel as core dependencies, and it does not need to take over ports 80/443.
 
 ## Install the latest stable release
 
-Run:
+Release-hosted one-line installation is available for stable releases that include the `install.sh` asset (v0.1.2 and later):
 
 ```bash
 curl -fsSL https://github.com/ach1992/ai-server-agent/releases/latest/download/install.sh | sudo bash
 ```
 
-GitHub's `releases/latest` path resolves a published full release rather than a draft or prerelease. Stable releases used by this path are required to be GitHub immutable releases, so their associated tag and published assets cannot be replaced after publication. The `install.sh` asset is generated for one exact release tag and pins both the version and ref to that tag. It never falls back to mutable `main`.
+This is the stable channel. It does **not** fall back to `main`.
 
-The pinned installer then downloads the matching Linux amd64 release archive and `SHA256SUMS` and verifies the archive with `sha256sum` before extracting or installing it. Stable installers reject `AI_SERVER_AGENT_BINARY`, so a stable install cannot bypass the release archive/checksum path with a locally supplied binary.
-
-### Install an exact version
-
-Use the release-specific asset URL:
+For an exact stable version:
 
 ```bash
-curl -fsSL https://github.com/ach1992/ai-server-agent/releases/download/v0.1.2/install.sh | sudo bash
+VERSION=v0.1.2
+curl -fsSL "https://github.com/ach1992/ai-server-agent/releases/download/${VERSION}/install.sh" | sudo bash
 ```
 
-This installs `v0.1.2` specifically. Change the version in the URL only when you intentionally want another published stable release.
+The exact-version command works only after that release has been published with its release-scoped `install.sh` asset.
 
-If you prefer to inspect the installer before executing it, download that same release asset to a local file, review it, and run it with `sudo bash`.
+### What the stable installer verifies
 
-## What the installer changes
+The release-scoped `install.sh` is generated with its version/ref pinned to the release tag. It:
 
-The stable installer:
+1. checks the supported stable OS/architecture;
+2. downloads the matching release archive and `SHA256SUMS`;
+3. verifies the archive checksum before installation;
+4. installs the Agent/services and management helpers;
+5. starts the core Agent locally and verifies health;
+6. optionally launches the first-run connection wizard.
 
-- checks for Ubuntu 22.04 LTS, amd64, and systemd;
-- installs the small setup dependency set `ca-certificates`, `curl`, `jq`, `openssl`, `tar`, and `xz-utils`;
-- creates the service identity `aiagent` when needed;
-- creates the worker identity `aiworker` and `/srv/ai-workspace` when needed;
-- installs the Agent binary, management command, updater, and uninstaller;
-- creates protected config/state/token files under `/etc/ai-server-agent` and `/var/lib/ai-server-agent`;
-- installs and starts `ai-server-agent.service` and `ai-server-agent-executor.service`;
-- verifies both services and local health before starting the optional connection wizard.
+Stable installation rejects a local `AI_SERVER_AGENT_BINARY` override. Stable payload identity is the published release, not a mutable branch.
 
-It does **not** install or reserve nginx, Apache, PHP, MySQL, Docker, Node.js, Python, aaPanel, or ports 80/443 as part of the MCP core.
+## What gets installed
 
-Main installed paths:
+Main paths:
 
-```text
-/usr/local/bin/ai-server-agent
-/usr/local/sbin/ai-server-agent-manage
-/usr/local/lib/ai-server-agent/
-/etc/ai-server-agent/
-/var/lib/ai-server-agent/
-/var/log/ai-server-agent/
-/srv/ai-workspace/
-```
+| Path | Purpose |
+| --- | --- |
+| `/usr/local/bin/ai-server-agent` | Agent binary |
+| `/usr/local/sbin/ai-server-agent-manage` | supported management entrypoint |
+| `/usr/local/lib/ai-server-agent/` | management/update/uninstall implementation |
+| `/etc/ai-server-agent/` | root-controlled configuration, TLS and managed state |
+| `/etc/ai-server-agent/control/` | root-only install identity and recovery control state |
+| `/var/lib/ai-server-agent/` | Agent runtime/state and persistent-job metadata |
+| `/var/log/ai-server-agent/` | logs/audit data |
+| `/srv/ai-workspace/` | `aiworker` project workspace; intentionally preserved by purge |
+| `/run/lock/ai-server-agent/` | root lifecycle serialization lock |
 
-## First-run wizard
+System users:
 
-After the core is installed and local health passes, a new interactive installation offers:
+- `aiagent`: unprivileged MCP/API service account;
+- `aiworker`: ordinary command/workspace account.
 
-```text
-1) Cloudflare domain - guided HTTPS/domain setup
-2) Local/private - loopback-only for Secure MCP Tunnel
-3) Existing certificate - advanced/manual TLS
-0) Configure later - keep the healthy local Agent
-```
+Services:
 
-Choosing `0`, cancelling, or encountering a connection-setup error does not turn a successful core installation into a false installation failure. The Agent remains in its last verified mode and the installer shows how to resume:
+- `ai-server-agent.service`
+- `ai-server-agent-executor.service`
+
+## First-run choices
+
+A successful core install is independent from public connection setup. The wizard offers:
+
+1. **Cloudflare domain** — guided hostname-scoped HTTPS setup;
+2. **Local/private** — keep the Agent loopback-only;
+3. **Existing certificate** — advanced manual native TLS;
+4. **Configure later** — finish the healthy core installation now and run management later.
+
+Choosing **Configure later** is not an installation failure.
+
+After installation, the main entrypoint is:
 
 ```bash
 sudo ai-server-agent-manage
@@ -85,264 +92,202 @@ sudo ai-server-agent-manage
 
 ## Guided Cloudflare setup
 
-Choose **Cloudflare domain** when the MCP hostname is proxied by Cloudflare and you want direct public HTTPS without adding a local web proxy.
+The recommended direct-public path uses Cloudflare for the selected MCP hostname only. It does not change the zone-wide SSL mode.
 
-The wizard asks for:
+Before entering a token, the manager prints the required scope. The token should be restricted to the intended zone and needs the current guided-flow permissions:
 
-- the MCP hostname, for example `mcp.example.com`;
-- a scoped Cloudflare API token;
-- the server public IPv4 only if automatic detection cannot determine it.
+- `Zone > Zone > Read`
+- `Zone > DNS > Edit`
+- `Zone > SSL and Certificates > Edit`
+- `Zone > Origin Rules > Edit`
+- `Zone > Config Rules > Edit`
 
-The Cloudflare token prompt is hidden. The token is used only during that management command and is not written to Agent state.
+The manager creates/reconciles only the selected hostname's resources:
 
-### Create the Cloudflare API token
+- proxied `A` record;
+- hostname-scoped Origin Rule for the Agent port;
+- hostname-scoped Configuration Rule setting SSL to `strict`;
+- Origin CA certificate.
 
-Create a custom API token in Cloudflare and restrict its resource scope to:
+### Token handling
 
-```text
-Include -> Specific zone -> the zone containing the MCP hostname
+The Cloudflare API token is entered in a **hidden terminal prompt**. Do not paste it into ChatGPT, chat, tickets, screenshots, logs or source control.
+
+The interactive manager uses the token only for the current command and does not store it in Agent managed state. Noninteractive automation can supply a protected token file through the documented environment variable instead of putting the token on a command line.
+
+### Ownership and recovery
+
+The manager does not silently adopt or overwrite conflicting external Cloudflare state.
+
+Transaction-created resources are durably journaled. Confirmed Agent-owned resources are fingerprinted and re-read before destructive cleanup. If a POST response is lost, recovery requires both an unpredictable ownership marker and the exact durable pre-POST representation fingerprint before deleting the discovered resource. Concurrent representation drift fails closed.
+
+Cloudflare Ruleset recovery deletes only the exact Agent-owned rule, never a shared Ruleset container.
+
+If old Agent-managed resources remain after a hostname/certificate change, use the explicit Cloudflare cleanup path; do not rely on purge to delete remote resources.
+
+## Local/private mode
+
+Local mode keeps the Agent on loopback. This is suitable when another trusted private connectivity mechanism will carry MCP traffic.
+
+Use the management menu or:
+
+```bash
+sudo ai-server-agent-manage configure-local
 ```
 
-Grant exactly these zone permissions:
+## Manual native TLS
 
-```text
-Zone > Zone > Read
-Zone > DNS > Edit
-Zone > SSL and Certificates > Edit
-Zone > Origin Rules > Edit
-Zone > Config Rules > Edit
+For an existing certificate/key pair:
+
+```bash
+sudo ai-server-agent-manage configure-manual-tls
 ```
 
-These permissions are used for zone lookup, proxied DNS, Cloudflare Origin CA certificate issuance, the origin-port rule, and the hostname-scoped SSL Configuration Rule respectively.
+The manager validates the certificate hostname and key pairing before switching the Agent to public mode. Public mode requires native TLS; plaintext public binding is not the supported direct-public model.
 
-**Enter the token only in the hidden terminal prompt. Do not paste it into ChatGPT, normal chat messages, tickets, logs, screenshots, or source control.**
+## ChatGPT setup
 
-For noninteractive automation, prefer a root-readable token file and `AI_SERVER_AGENT_CLOUDFLARE_API_TOKEN_FILE` instead of placing the token directly in an environment variable.
+After public setup succeeds:
 
-### What the Cloudflare path manages
-
-For the selected MCP hostname only, the manager:
-
-1. finds the matching Cloudflare zone;
-2. generates a fresh private key locally and creates a CSR for the MCP hostname;
-3. requests and validates a Cloudflare Origin CA certificate for that CSR;
-4. creates or safely reconciles a proxied `A` record;
-5. creates or safely reconciles a hostname-scoped Origin Rule that routes Cloudflare to the Agent's high port;
-6. creates or safely reconciles a hostname-scoped Configuration Rule in phase `http_config_settings` with SSL mode `strict`;
-7. enables native TLS/public mode on the Agent;
-8. verifies public HTTPS health, unauthenticated MCP rejection (`401`), and authenticated MCP `initialize`.
-
-The manager **does not change the whole-zone SSL mode**. A zone may remain `Flexible` for unrelated hostnames while the MCP hostname alone is forced to `strict` by its Configuration Rule.
-
-Cloudflare Origin CA private keys are generated locally and are never sent to Cloudflare or printed. Only the CSR is sent for signing.
-
-### Ownership, rollback, and existing Cloudflare resources
-
-The manager is deliberately conservative:
-
-- matching external DNS can be reused without taking ownership;
-- conflicting or ambiguous external DNS is not silently overwritten;
-- Agent rules have deterministic refs and their Cloudflare IDs are recorded in `/etc/ai-server-agent/managed.json` after successful setup;
-- an unrecorded rule that collides with an Agent ref is not silently adopted or overwritten;
-- cleanup deletes only DNS recorded as Agent-owned and rule/certificate IDs recorded by the Agent;
-- unrelated Configuration Rules, Origin Rules, and DNS records are left alone.
-
-Cloudflare setup is transactional across certificate issuance, DNS/rule reconciliation, local TLS/config installation, service restart, public verification, and managed-state commit. If setup fails before commit, the manager restores the previous local config/TLS state and rolls back newly created or updated Agent-owned Cloudflare resources where possible.
-
-If a remote rollback cannot complete, the manager preserves the exact remaining ownership/recovery data in:
-
-```text
-/etc/ai-server-agent/control/cloudflare-transaction.json
+```bash
+sudo ai-server-agent-manage chatgpt-setup
 ```
 
-A pending transaction journal blocks another Cloudflare configuration attempt. Run `sudo ai-server-agent-manage` and choose **Remove recorded Cloudflare resources** to retry the recorded rollback with a fresh scoped token. The token itself is never written to the journal.
+The manager prints the MCP URL and the protected bearer-auth setup guidance. The Authorization value is stored on the server and is revealed only after an explicit terminal confirmation.
 
-When rotating a certificate for the same hostname, the previous Origin CA certificate ID is retained until revocation succeeds. Declining revocation or a Cloudflare revoke failure therefore remains safely recoverable later rather than losing ownership metadata.
+The public endpoint remains bearer-authenticated. Treat the bearer credential as a privileged server-control credential.
 
-## Existing certificate / manual TLS
+## Management commands
 
-If you do not use the guided Cloudflare path, choose **Existing certificate** and provide an already-issued PEM certificate and private key. The manager validates hostname coverage and key/certificate consistency before switching the Agent to public mode.
-
-## Management
-
-Run this at any time:
+Interactive management:
 
 ```bash
 sudo ai-server-agent-manage
 ```
 
-The menu provides:
-
-```text
-1) Status / health
-2) ChatGPT setup
-3) Configure or change domain / connection
-4) Rotate / renew Cloudflare TLS certificate
-5) Update Agent
-6) Repair / restart
-7) Safe uninstall (preserve data)
-8) Purge Agent-owned server data
-9) Remove recorded Cloudflare resources
-0) Exit
-```
-
-### Status
-
-`Status / health` reports the installed version/channel, ref, Agent/executor service state, local health, bind mode, port, current setup provider/domain, and MCP endpoint.
-
-You can also run:
+Useful subcommands:
 
 ```bash
 sudo ai-server-agent-manage status
+sudo ai-server-agent-manage chatgpt-setup
+sudo ai-server-agent-manage configure-cloudflare
+sudo ai-server-agent-manage configure-local
+sudo ai-server-agent-manage configure-manual-tls
+sudo ai-server-agent-manage cloudflare-cleanup
+sudo ai-server-agent-manage update
+sudo ai-server-agent-manage repair
+sudo ai-server-agent-manage uninstall
+sudo ai-server-agent-manage purge
 ```
 
-### Resume an incomplete first run
+Privileged install/update/manage/uninstall/purge operations share a root-only lifecycle lock under `/run/lock/ai-server-agent`. A concurrent management operation fails before state mutation rather than racing another lifecycle operation.
 
-If the installer says the core is healthy but connection setup is incomplete, run:
+## Stable updates
 
-```bash
-sudo ai-server-agent-manage
-```
-
-Then choose **Configure or change domain / connection**. You do not need to reinstall the core first.
-
-### Rotate Cloudflare TLS
-
-Choose **Rotate / renew Cloudflare TLS certificate**. A fresh local private key, CSR, and Origin CA certificate are created and verified. The previous certificate is offered for revocation only after the new public path verifies successfully. If revocation is declined or fails, its certificate ID remains recorded for later cleanup.
-
-### Update
-
-Use **Update Agent** or:
+For a stable installation:
 
 ```bash
 sudo ai-server-agent-manage update
 ```
 
-A stable installation resolves the latest published non-prerelease GitHub Release and requires it to be immutable before updating. It downloads the release-scoped `install.sh`, verifies that the installer pins the exact same stable version/tag, and then uses that installer to fetch and checksum-verify the matching release archive. Stable updates do not execute `install.sh` from the tag Contents API and do not drift to `main`.
+The stable updater does not trust a mutable `main` installer. It:
 
-To request an exact stable update:
+1. reads strict root-only install identity;
+2. resolves the latest published immutable stable release unless an explicit stable tag is requested;
+3. requires the release to be non-draft, non-prerelease and immutable;
+4. requires exactly one uploaded tag-scoped `install.sh` asset;
+5. verifies the downloaded `install.sh` bytes against the SHA-256 digest recorded on that GitHub release asset **before executing it**;
+6. lets the release-scoped installer verify the release archive against `SHA256SUMS`.
+
+Missing/malformed/contradictory stable install identity fails closed. It does not silently become a source/`main` update.
+
+## Repair
 
 ```bash
-sudo env AI_SERVER_AGENT_VERSION='v0.1.2' ai-server-agent-manage update
+sudo ai-server-agent-manage repair
 ```
 
-Source-channel development installs remain source installs and resolve their configured source ref to an immutable commit before installation.
+Repair first restarts and validates the existing services. If local health still fails, it invokes the channel-aware updater rather than guessing a different installation source.
 
-### Repair
-
-`Repair / restart` restarts and validates the current services. If local health is still broken, it invokes the channel-aware reinstall/update path.
-
-## ChatGPT setup
-
-After public verification succeeds, choose **ChatGPT setup**. The manager shows the public MCP URL, for example:
-
-```text
-https://mcp.example.com/mcp
-```
-
-The protected bearer Authorization value is **not displayed by default**. The manager reveals it only after an explicit confirmation.
-
-The protected Authorization header file is:
-
-```text
-/etc/ai-server-agent/mcp.authorization
-```
-
-In ChatGPT Business, create/configure the MCP app with the MCP URL and the workspace's available bearer/authentication option, scan the tools, then test a safe `agent_environment` call followed by a safe `run_command`.
-
-Do not paste the Authorization header into ordinary chat messages, logs, screenshots, tickets, or source control.
-
-## Noninteractive automation inputs
-
-Interactive setup is the normal user path. Automation can use:
-
-- `AI_SERVER_AGENT_NONINTERACTIVE=1`
-- `AI_SERVER_AGENT_SETUP_MODE=local|cloudflare|manual|keep`
-- `AI_SERVER_AGENT_PORT=3210`
-- `AI_SERVER_AGENT_HOSTNAME=mcp.example.com`
-- `AI_SERVER_AGENT_PUBLIC_IPV4=203.0.113.10`
-- `AI_SERVER_AGENT_CLOUDFLARE_API_TOKEN_FILE=/secure/path/token`
-- `AI_SERVER_AGENT_TLS_CERT_FILE=/absolute/path/cert.pem`
-- `AI_SERVER_AGENT_TLS_KEY_FILE=/absolute/path/key.pem`
-
-The token file should be root-readable only. It is read for the Cloudflare operation and is not copied into Agent state.
-
-## Authentication and privilege boundary
-
-Bearer authentication is mandatory in both local and public modes. Loopback is network isolation, not an authentication boundary.
-
-The public MCP process runs as unprivileged `aiagent`. Root-capable execution stays behind the local executor socket. Normal project shell work runs as `aiworker` under `/srv/ai-workspace`.
-
-The MCP safety metadata and approval guardrails remain part of the privileged-operation boundary.
-
-## Public networking
-
-The guided Cloudflare path keeps native TLS on the Agent's dedicated high port. Cloudflare reaches that port through a hostname-scoped Origin Rule, and a separate hostname-scoped Configuration Rule forces only the MCP hostname to Full (strict) behavior.
-
-No whole-zone SSL mutation is required for the normal path, so unrelated proxied hostnames in the same zone keep their existing SSL behavior.
-
-## MCP tools
-
-The Agent exposes a deliberately small tool surface:
-
-- `agent_environment` — environment and preservation information;
-- `run_command` — shell execution as `aiworker`;
-- `run_root_command` — privileged shell execution with approval controls;
-- `start_job`, `job_status`, `job_output`, `job_stop` — persistent jobs;
-- `read_file`, `write_file` — host filesystem operations;
-- `browser_setup` — optional isolated browser runtime installation;
-- `browser_run` — Playwright browser automation.
-
-The exact current tools are discoverable through MCP.
-
-## Workspace and preservation
-
-Normal project work lives at:
-
-```text
-/srv/ai-workspace
-```
-
-The Agent writes its machine-readable self-preservation manifest to:
-
-```text
-/var/lib/ai-server-agent/AI_ENVIRONMENT.json
-```
+## Uninstall and purge
 
 ### Safe uninstall
 
-Safe uninstall removes the services, binary, management command, and installed helper scripts while preserving config/state/logs/users/workspace for straightforward recovery.
+```bash
+sudo ai-server-agent-manage uninstall
+```
+
+Safe uninstall removes services, the binary and management command while preserving configuration/state/users/workspace needed for reinstall or repair.
 
 ### Purge
 
-Purge removes Agent-owned config/state/log/runtime and the `aiagent` service identity.
-
-Even purge intentionally preserves:
-
-```text
-/srv/ai-workspace
-aiworker user/group
+```bash
+sudo ai-server-agent-manage purge
 ```
 
-Removing the control plane must not silently delete user project data.
+Purge removes Agent-owned server config/state/log/runtime and the `aiagent` identity.
 
-Cloudflare resources are separate. If you want the Agent-recorded Cloudflare resources removed, switch away from the active Cloudflare connection first and choose **Remove recorded Cloudflare resources**. The manager asks for a fresh scoped token because provider credentials are not retained. If a failed Cloudflare transaction or a replaced certificate still has deferred recovery state, this cleanup path handles that recorded state first.
+Purge intentionally preserves:
 
-## Security notes
+- `/srv/ai-workspace`
+- the `aiworker` user and group
 
-- Keep the MCP bearer credential private.
-- Root-trusted install/recovery metadata lives under `/etc/ai-server-agent/control` with root-only directory/file permissions; it is not stored in the unprivileged runtime state hierarchy and install identity is parsed as JSON rather than shell-sourced.
-- `/var/lib/ai-server-agent`, `jobs`, and `runtime` are root-controlled container entries; unprivileged writable leaves cannot replace paths later trusted by the privileged executor.
-- Never share the executor token, Cloudflare token, or TLS private key.
-- Keep snapshots/backups before host-wide work.
-- Keep Cloudflare/API credentials temporary and least-privileged.
-- Do not silently adopt, overwrite, or delete external DNS/rules.
-- Public direct mode requires native TLS and bearer authentication.
-- Stable releases rely on GitHub immutable release enforcement plus per-archive `SHA256SUMS` verification; neither stable install nor stable update accepts a local binary override.
-- Stable release publication also requires an active tag ruleset covering `refs/tags/v*` (or all tags) with tag updates and deletions restricted and no bypass actors; the release workflow creates the exact tag only after verifying that protection.
-- Approval guardrails are not a complete sandbox; privileged shell access is an intentional capability.
-- Keep the v0.1 stable line on a dedicated development/test server.
+Purge does **not** silently delete Cloudflare resources. If recorded Cloudflare resources should be removed, run `cloudflare-cleanup` through the supported management path first.
+
+## Security model
+
+Key boundaries:
+
+- public MCP access requires bearer authentication;
+- direct public mode requires native TLS;
+- ordinary commands run as `aiworker`;
+- root commands are intentional capabilities evaluated by the executor policy/approval guardrails;
+- root shell execution uses `/root` HOME/CWD, a minimal explicit environment and shell startup-file suppression;
+- root-consumed control state is stored under root-controlled directories and validated before use;
+- persistent job files use no-follow/exclusive creation and checked reads under root-controlled state containers;
+- worker-writable workspace/state must not implicitly influence root execution;
+- Cloudflare destructive recovery requires ownership plus current representation proof;
+- stable install/update/release identity must remain immutable and must not drift to `main`.
+
+See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for details.
+
+## Release model
+
+Stable release publication is manual and exact-SHA based. The release workflow requires successful `main` CI and High Assurance Security for the exact release SHA and promotes the already-built CI release artifact rather than rebuilding it.
+
+Immediately before publication, the operator must separately verify repository controls that the workflow credential cannot authoritatively prove, including release immutability and release-tag protection/no-bypass conditions. Automation must not treat an omitted Rulesets `bypass_actors` field as proof that no bypass exists.
+
+The release workflow then creates the previously absent tag at the exact validated SHA, publishes with `--verify-tag`, and performs post-publication immutable-release/tag/attestation checks.
+
+## Source/development install
+
+Source installation is intentionally separate from stable installation. It may track a source ref and resolves that ref to a commit SHA before installation/update.
+
+Example development checkout:
+
+```bash
+git clone https://github.com/ach1992/ai-server-agent.git
+cd ai-server-agent
+sudo bash install.sh
+```
+
+Do not present a mutable source/`main` path as an equivalent stable installer.
+
+## Development and testing
+
+See [docs/TESTING.md](docs/TESTING.md) for the current validation model and known coverage limits.
+
+Typical non-destructive development checks:
+
+```bash
+test -z "$(gofmt -l .)"
+go vet ./...
+go test -race ./...
+bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh tests/*.sh
+```
+
+Cloudflare, privileged lifecycle and release-provenance changes also have dedicated High Assurance Security coverage.
 
 ## License
 
-AI Server Agent is released under the [MIT License](LICENSE).
+See [LICENSE](LICENSE).
