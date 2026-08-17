@@ -51,6 +51,15 @@ jobs:
           grep -qF 'origin:{port:$port}' manage.sh
           grep -qF 'Refusing ambiguous replacement' manage.sh
           grep -qF 'Previous Agent state was restored' manage.sh
+          grep -qF 'dns_record_owned' manage.sh
+          grep -qF 'existing-external' manage.sh
+          grep -qF 'Refusing to modify it automatically' manage.sh
+          grep -qF 'if [ "$dns_owned" = "true" ] && [ -n "$dns_id" ]; then' manage.sh
+          grep -qF 'if [ "$old_dns_owned" = "true" ] && [ -n "$old_dns" ]; then' manage.sh
+          if grep -qF 'AI_SERVER_AGENT_REPLACE_EXISTING_DNS' manage.sh; then
+            echo 'external DNS records must not be auto-adopted or overwritten' >&2
+            exit 1
+          fi
           if grep -Eq 'managed\.json.*(TOKEN|token)|CLOUDFLARE_API_TOKEN.*managed' manage.sh; then
             echo 'Cloudflare credentials must not be persisted in managed state' >&2
             exit 1
