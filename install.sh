@@ -37,6 +37,8 @@ FRESH_INSTALL=1
 SETUP_INCOMPLETE=0
 RESOLVED_SOURCE_REF=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-/dev/null}")" 2>/dev/null && pwd || true)"
+LIFECYCLE_LOCK_DIR=/run/lock/ai-server-agent
+LIFECYCLE_LOCK="$LIFECYCLE_LOCK_DIR/management.lock"
 
 trap 'echo "[ERROR] Installation failed at line $LINENO. Review the output above; existing project files were not intentionally modified." >&2' ERR
 
@@ -45,6 +47,25 @@ warn(){ printf '[ai-server-agent] WARNING: %s\n' "$*" >&2; }
 die(){ printf '[ai-server-agent] ERROR: %s\n' "$*" >&2; exit 1; }
 need_root(){ [ "$(id -u)" -eq 0 ] || die "Run this installer as root (for example: sudo bash install.sh)."; }
 version_ge(){ dpkg --compare-versions "$1" ge "$2"; }
+
+acquire_lifecycle_lock(){
+  command -v flock >/dev/null 2>&1 || die "flock is required for privileged lifecycle serialization."
+  [ ! -L "$LIFECYCLE_LOCK_DIR" ] || die "Refusing symlinked lifecycle lock directory: $LIFECYCLE_LOCK_DIR"
+  install -d -o root -g root -m 0700 "$LIFECYCLE_LOCK_DIR"
+  chown root:root "$LIFECYCLE_LOCK_DIR"; chmod 0700 "$LIFECYCLE_LOCK_DIR"
+  [ "$(stat -c '%u:%g:%a' "$LIFECYCLE_LOCK_DIR" 2>/dev/null)" = "0:0:700" ] || die "Lifecycle lock directory ownership/mode is unsafe."
+  [ ! -L "$LIFECYCLE_LOCK" ] || die "Refusing symlinked lifecycle lock: $LIFECYCLE_LOCK"
+  ( umask 077; : >> "$LIFECYCLE_LOCK" ) || die "Could not create lifecycle lock."
+  [ -f "$LIFECYCLE_LOCK" ] && [ ! -L "$LIFECYCLE_LOCK" ] || die "Lifecycle lock is not a regular file."
+  chown root:root "$LIFECYCLE_LOCK"; chmod 0600 "$LIFECYCLE_LOCK"
+  [ "$(stat -c '%u:%g:%a' "$LIFECYCLE_LOCK" 2>/dev/null)" = "0:0:600" ] || die "Lifecycle lock ownership/mode is unsafe."
+  if [ "$(readlink /proc/$$/fd/9 2>/dev/null || true)" = "$LIFECYCLE_LOCK" ]; then
+    flock -n 9 || die "Another AI Server Agent management operation is already active. Retry after it finishes."
+    return 0
+  fi
+  exec 9>>"$LIFECYCLE_LOCK" || die "Could not open lifecycle lock."
+  flock -n 9 || die "Another AI Server Agent management operation is already active. Retry after it finishes."
+}
 
 urlencode_ref(){
   local input="$1" output="" ch hex i
@@ -103,6 +124,7 @@ fi
 if [ "$RESOLVE_REF_ONLY" -eq 1 ]; then resolve_source_ref "$REF"; exit 0; fi
 if [ "$CHECK_ONLY" -eq 1 ]; then log "Compatibility check passed: $PRETTY_NAME, $ARCH, systemd available."; exit 0; fi
 
+acquire_lifecycle_lock
 if [ -s "$CONFIG_FILE" ]; then FRESH_INSTALL=0; fi
 
 export DEBIAN_FRONTEND=noninteractive
@@ -188,9 +210,36 @@ chown root:"$AGENT_USER" "$MCP_AUTH_HEADER_FILE"; chmod 0640 "$MCP_AUTH_HEADER_F
 install_helpers(){
   local root="$1"
   [ -f "$root/manage.sh" ] && [ -f "$root/update.sh" ] && [ -f "$root/uninstall.sh" ] || die "release/source payload is missing management helpers"
-  install -o root -g root -m 0755 "$root/manage.sh" "$MANAGE_BIN"
+  install -o root -g root -m 0700 "$root/manage.sh" "$LIB_DIR/manage.sh"
   install -o root -g root -m 0755 "$root/update.sh" "$LIB_DIR/update.sh"
   install -o root -g root -m 0755 "$root/uninstall.sh" "$LIB_DIR/uninstall.sh"
+  cat > "$MANAGE_BIN" <<'EOF_MANAGE_WRAPPER'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+[ "$(id -u)" -eq 0 ] || { echo "Run as root" >&2; exit 1; }
+LOCK_DIR=/run/lock/ai-server-agent
+LOCK_FILE="$LOCK_DIR/management.lock"
+MANAGE_IMPL=/usr/local/lib/ai-server-agent/manage.sh
+command -v flock >/dev/null 2>&1 || { echo "flock is required for privileged lifecycle serialization" >&2; exit 1; }
+[ ! -L "$LOCK_DIR" ] || { echo "Refusing symlinked lifecycle lock directory: $LOCK_DIR" >&2; exit 1; }
+install -d -o root -g root -m 0700 "$LOCK_DIR"
+chown root:root "$LOCK_DIR"; chmod 0700 "$LOCK_DIR"
+[ "$(stat -c '%u:%g:%a' "$LOCK_DIR" 2>/dev/null)" = "0:0:700" ] || { echo "Lifecycle lock directory ownership/mode is unsafe" >&2; exit 1; }
+[ ! -L "$LOCK_FILE" ] || { echo "Refusing symlinked lifecycle lock: $LOCK_FILE" >&2; exit 1; }
+( umask 077; : >> "$LOCK_FILE" )
+[ -f "$LOCK_FILE" ] && [ ! -L "$LOCK_FILE" ] || { echo "Lifecycle lock is not a regular file" >&2; exit 1; }
+chown root:root "$LOCK_FILE"; chmod 0600 "$LOCK_FILE"
+[ "$(stat -c '%u:%g:%a' "$LOCK_FILE" 2>/dev/null)" = "0:0:600" ] || { echo "Lifecycle lock ownership/mode is unsafe" >&2; exit 1; }
+if [ "$(readlink /proc/$$/fd/9 2>/dev/null || true)" = "$LOCK_FILE" ]; then
+  flock -n 9 || { echo "Another AI Server Agent management operation is already active. Retry after it finishes." >&2; exit 1; }
+else
+  exec 9>>"$LOCK_FILE"
+  flock -n 9 || { echo "Another AI Server Agent management operation is already active. Retry after it finishes." >&2; exit 1; }
+fi
+[ -x "$MANAGE_IMPL" ] || { echo "Management implementation is missing: $MANAGE_IMPL" >&2; exit 1; }
+exec "$MANAGE_IMPL" "$@"
+EOF_MANAGE_WRAPPER
+  chown root:root "$MANAGE_BIN"; chmod 0755 "$MANAGE_BIN"
 }
 
 build_from_source(){ (

@@ -2,11 +2,15 @@
 set -Eeuo pipefail
 
 [ "$(id -u)" -eq 0 ] || { echo "run root_trust_boundary.sh as root" >&2; exit 1; }
+ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONTROL_DIR=/etc/ai-server-agent/control
 INSTALL_STATE="$CONTROL_DIR/install-state.json"
 CF_TXN_STATE="$CONTROL_DIR/cloudflare-transaction.json"
 STATE_DIR=/var/lib/ai-server-agent
-MANAGE=/usr/local/sbin/ai-server-agent-manage
+MANAGE_CMD=/usr/local/sbin/ai-server-agent-manage
+MANAGE_IMPL=/usr/local/lib/ai-server-agent/manage.sh
+LIFECYCLE_LOCK_DIR=/run/lock/ai-server-agent
+LIFECYCLE_LOCK="$LIFECYCLE_LOCK_DIR/management.lock"
 
 assert_owner_mode(){
   local path="$1" owner="$2" group="$3" mode="$4" actual
@@ -27,7 +31,10 @@ assert_owner_mode "$INSTALL_STATE" root root 600
 assert_owner_mode "$STATE_DIR" root root 711
 assert_owner_mode "$STATE_DIR/runtime" root root 711
 assert_owner_mode "$STATE_DIR/jobs" root root 711
+assert_owner_mode "$LIFECYCLE_LOCK_DIR" root root 700
+assert_owner_mode "$LIFECYCLE_LOCK" root root 600
 [ ! -L "$INSTALL_STATE" ]
+[ ! -L "$LIFECYCLE_LOCK" ]
 jq -e 'type=="object" and (keys|sort)==["channel","ref","track_ref","version"]' "$INSTALL_STATE" >/dev/null
 
 # The network-facing service has exactly one writable runtime output file,
@@ -71,14 +78,66 @@ for user in aiagent aiworker; do
   expect_denied "$user" touch "$STATE_DIR/attacker"
 done
 
+# One purge-safe root lifecycle lock serializes every privileged mutating entry
+# point. Hold the actual lock and prove production commands fail before mutation.
+lifecycle_tmp="$(mktemp -d)"
+holder_pid=""
+cleanup_lifecycle_test(){
+  if [ -n "$holder_pid" ]; then kill "$holder_pid" 2>/dev/null || true; wait "$holder_pid" 2>/dev/null || true; fi
+  rm -rf "$lifecycle_tmp"
+}
+trap cleanup_lifecycle_test EXIT
+(
+  exec 9>>"$LIFECYCLE_LOCK"
+  flock -n 9
+  : > "$lifecycle_tmp/ready"
+  sleep 60
+) &
+holder_pid=$!
+for _ in $(seq 1 50); do [ -e "$lifecycle_tmp/ready" ] && break; sleep 0.1; done
+[ -e "$lifecycle_tmp/ready" ] || { echo "could not hold lifecycle lock for overlap test" >&2; exit 1; }
+
+config_hash="$(sha256sum /etc/ai-server-agent/config.json | awk '{print $1}')"
+managed_hash="$(sha256sum /etc/ai-server-agent/managed.json | awk '{print $1}')"
+installed_ref="$(jq -r '.ref' "$INSTALL_STATE")"
+
+if AI_SERVER_AGENT_PORT=3210 "$MANAGE_CMD" configure-local >"$lifecycle_tmp/manage.out" 2>&1; then
+  echo "configure-local bypassed the global lifecycle lock" >&2; exit 1
+fi
+grep -qF 'Another AI Server Agent management operation is already active' "$lifecycle_tmp/manage.out"
+
+if AI_SERVER_AGENT_REF="$installed_ref" /usr/local/lib/ai-server-agent/update.sh >"$lifecycle_tmp/update.out" 2>&1; then
+  echo "update bypassed the global lifecycle lock" >&2; exit 1
+fi
+grep -qF 'Another AI Server Agent management operation is already active' "$lifecycle_tmp/update.out"
+
+if AI_SERVER_AGENT_BINARY=/usr/local/bin/ai-server-agent AI_SERVER_AGENT_REF="$installed_ref" AI_SERVER_AGENT_NONINTERACTIVE=1 AI_SERVER_AGENT_SETUP_MODE=keep bash "$ROOT/install.sh" >"$lifecycle_tmp/install.out" 2>&1; then
+  echo "installer bypassed the global lifecycle lock" >&2; exit 1
+fi
+grep -qF 'Another AI Server Agent management operation is already active' "$lifecycle_tmp/install.out"
+
+if AI_SERVER_AGENT_YES=1 /usr/local/lib/ai-server-agent/uninstall.sh --purge >"$lifecycle_tmp/purge.out" 2>&1; then
+  echo "purge bypassed the global lifecycle lock" >&2; exit 1
+fi
+grep -qF 'Another AI Server Agent management operation is already active' "$lifecycle_tmp/purge.out"
+
+[ "$(sha256sum /etc/ai-server-agent/config.json | awk '{print $1}')" = "$config_hash" ]
+[ "$(sha256sum /etc/ai-server-agent/managed.json | awk '{print $1}')" = "$managed_hash" ]
+[ "$(sha256sum "$INSTALL_STATE" | awk '{print $1}')" = "$state_hash" ]
+systemctl is-active --quiet ai-server-agent-executor.service
+systemctl is-active --quiet ai-server-agent.service
+kill "$holder_pid"; wait "$holder_pid" 2>/dev/null || true; holder_pid=""
+rm -rf "$lifecycle_tmp"
+trap - EXIT
+
 # Create the real Cloudflare transaction journal through production code.
 AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1 bash -c '
-  source /usr/local/sbin/ai-server-agent-manage
+  source /usr/local/lib/ai-server-agent/manage.sh
   CF_PENDING_KIND=dns-create
   CF_PENDING_ZONE=zone-test
   CF_PENDING_HOST=mcp.example.com
   CF_PENDING_VALUE=203.0.113.10
-  CF_PENDING_MARKER=trust-boundary-marker
+  CF_PENDING_MARKER=0123456789abcdef0123456789abcdef
   save_cloudflare_transaction_state mcp.example.com zone-test "" "" "" "" "" "" "" "" 3210 "" "" "" ""
 '
 assert_owner_mode "$CF_TXN_STATE" root root 600
@@ -107,14 +166,14 @@ if AI_SERVER_AGENT_INSTALL_STATE="$malicious_state" /usr/local/lib/ai-server-age
   exit 1
 fi
 test ! -e "$injection_marker"
-MALICIOUS_STATE="$malicious_state" MANAGE="$MANAGE" INJECTION_MARKER="$injection_marker" bash -c '
+MALICIOUS_STATE="$malicious_state" MANAGE_IMPL="$MANAGE_IMPL" INJECTION_MARKER="$injection_marker" bash -c '
   set -Eeuo pipefail
   export AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1
-  source "$MANAGE"
+  source "$MANAGE_IMPL"
   INSTALL_STATE="$MALICIOUS_STATE"
   installed_identity >/tmp/invalid-managed-identity.out
   test ! -e "$INJECTION_MARKER"
 '
 rm -f "$malicious_state" "$injection_marker"
 
-echo "root trust-boundary tests passed"
+echo "root trust-boundary and lifecycle serialization tests passed"

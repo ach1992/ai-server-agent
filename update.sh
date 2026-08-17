@@ -8,6 +8,27 @@ INSTALL_STATE="${AI_SERVER_AGENT_INSTALL_STATE:-$DEFAULT_INSTALL_STATE}"
 PLAN_ONLY=0
 [ "${1:-}" = "--plan" ] && PLAN_ONLY=1
 
+LIFECYCLE_LOCK_DIR=/run/lock/ai-server-agent
+LIFECYCLE_LOCK="$LIFECYCLE_LOCK_DIR/management.lock"
+acquire_lifecycle_lock(){
+  command -v flock >/dev/null 2>&1 || { echo "flock is required for privileged lifecycle serialization" >&2; exit 1; }
+  [ ! -L "$LIFECYCLE_LOCK_DIR" ] || { echo "Refusing symlinked lifecycle lock directory: $LIFECYCLE_LOCK_DIR" >&2; exit 1; }
+  install -d -o root -g root -m 0700 "$LIFECYCLE_LOCK_DIR"
+  chown root:root "$LIFECYCLE_LOCK_DIR"; chmod 0700 "$LIFECYCLE_LOCK_DIR"
+  [ "$(stat -c '%u:%g:%a' "$LIFECYCLE_LOCK_DIR" 2>/dev/null)" = "0:0:700" ] || { echo "Lifecycle lock directory ownership/mode is unsafe" >&2; exit 1; }
+  [ ! -L "$LIFECYCLE_LOCK" ] || { echo "Refusing symlinked lifecycle lock: $LIFECYCLE_LOCK" >&2; exit 1; }
+  ( umask 077; : >> "$LIFECYCLE_LOCK" )
+  [ -f "$LIFECYCLE_LOCK" ] && [ ! -L "$LIFECYCLE_LOCK" ] || { echo "Lifecycle lock is not a regular file" >&2; exit 1; }
+  chown root:root "$LIFECYCLE_LOCK"; chmod 0600 "$LIFECYCLE_LOCK"
+  [ "$(stat -c '%u:%g:%a' "$LIFECYCLE_LOCK" 2>/dev/null)" = "0:0:600" ] || { echo "Lifecycle lock ownership/mode is unsafe" >&2; exit 1; }
+  if [ "$(readlink /proc/$$/fd/9 2>/dev/null || true)" = "$LIFECYCLE_LOCK" ]; then
+    flock -n 9 || { echo "Another AI Server Agent management operation is already active. Retry after it finishes." >&2; exit 1; }
+    return 0
+  fi
+  exec 9>>"$LIFECYCLE_LOCK"
+  flock -n 9 || { echo "Another AI Server Agent management operation is already active. Retry after it finishes." >&2; exit 1; }
+}
+
 CHANNEL="${AI_SERVER_AGENT_UPDATE_CHANNEL:-}"
 VERSION=""
 REF=""
@@ -43,8 +64,8 @@ load_install_state(){
 
 load_install_state "$INSTALL_STATE"
 CHANNEL="${AI_SERVER_AGENT_UPDATE_CHANNEL:-${CHANNEL:-source}}"
-
 case "$CHANNEL" in stable|source) ;; *) echo "Invalid update channel: $CHANNEL" >&2; exit 1 ;; esac
+if [ "$PLAN_ONLY" -eq 0 ]; then acquire_lifecycle_lock; fi
 
 urlencode_ref(){
   local input="$1" output="" ch hex i
