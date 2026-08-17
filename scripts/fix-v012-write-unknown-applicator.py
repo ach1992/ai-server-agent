@@ -8,5 +8,9 @@ if text.count(old) != 1:
     raise SystemExit(f"expected one whole-ruleset assertion marker, got {text.count(old)}")
 text = text.replace(old, new, 1)
 text = text.replace("echo 'cloudflare transaction tests passed' '''", "echo 'cloudflare transaction tests passed'\n'''")
+old_write = "test_path.write_text(test)"
+if text.count(old_write) != 1:
+    raise SystemExit(f"expected one test write marker, got {text.count(old_write)}")
+text = text.replace(old_write, "test_path.write_text(test.rstrip() + '\\n')", 1)
 path.write_text(text)
 print('write-unknown applicator assertions fixed')
