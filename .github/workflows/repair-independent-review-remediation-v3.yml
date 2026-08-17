@@ -22,7 +22,7 @@ jobs:
           go version
           go version | grep -Fq 'go1.26.0' || { echo 'repair validation requires Go 1.26.0' >&2; exit 1; }
           cat scripts/.tmp-irfix-part00 scripts/.tmp-irfix-part01 > scripts/.tmp-independent-review-fix.py
-          sed 's/--argjson port "$CF_COMMIT_PORT"/--arg commit_port "$CF_COMMIT_PORT"/' scripts/.tmp-irfix-part02 >> scripts/.tmp-independent-review-fix.py
+          sed '0,/--argjson port "$CF_COMMIT_PORT"/s//--arg commit_port "$CF_COMMIT_PORT"/' scripts/.tmp-irfix-part02 >> scripts/.tmp-independent-review-fix.py
           sed -n '5,$p' scripts/.tmp-irfix-part03 | sed '1s/^cf_reset_transaction_globals(){//' >> scripts/.tmp-independent-review-fix.py
           cat scripts/.tmp-irfix-part04 >> scripts/.tmp-independent-review-fix.py
           sed -n '1,63p' scripts/.tmp-irfix-part05 >> scripts/.tmp-independent-review-fix.py
@@ -59,44 +59,11 @@ jobs:
           if count != 2:
               raise SystemExit(f'expected two crash-recovery temp-path anchors, found {count}')
           p.write_text(t.replace(anchor, replacement))
-
-          p = Path('tests/cloudflare_phase_recovery.sh')
-          t = p.read_text()
-          anchor = '      cf_recover_pending_write(){ cf_clear_pending_write; return 0; }\n      recover_cloudflare_transaction'
-          replacement = (
-              '      cf_recover_pending_write(){ cf_clear_pending_write; return 0; }\n'
-              '      if [ -s "$CF_TXN_STATE" ]; then\n'
-              '        load_cloudflare_transaction_globals\n'
-              '        if [ "$CF_TXN_PHASE" = committing ] || [ "$CF_TXN_PHASE" = committed ]; then\n'
-              '          printf "phase-debug globals host=<%s> port=<%s> zone_id=<%s> zone_name=<%s> dns_id=<%s> dns_owned=<%s> origin_set=<%s> origin_rule=<%s> ssl_set=<%s> ssl_rule=<%s> cert=<%s>\\n" "$CF_COMMIT_HOST" "$CF_COMMIT_PORT" "$CF_COMMIT_ZONE_ID" "$CF_COMMIT_ZONE_NAME" "$CF_COMMIT_DNS_ID" "$CF_COMMIT_DNS_OWNED" "$CF_COMMIT_ORIGIN_RULESET_ID" "$CF_COMMIT_ORIGIN_RULE_ID" "$CF_COMMIT_SSL_RULESET_ID" "$CF_COMMIT_SSL_RULE_ID" "$CF_COMMIT_CERT_ID" >&2\n'
-              '          printf "phase-debug fingerprints dns=<%s> origin=<%s> ssl=<%s>\\n" "${CF_COMMIT_DNS_FINGERPRINT-UNSET}" "${CF_COMMIT_ORIGIN_FINGERPRINT-UNSET}" "${CF_COMMIT_SSL_FINGERPRINT-UNSET}" >&2\n'
-              '          declare -f managed_state_matches_transaction_commit >&2\n'
-              '          if managed_state_matches_transaction_commit; then\n'
-              '            echo "phase-debug managed-match=true phase=$CF_TXN_PHASE" >&2\n'
-              '          else\n'
-              '            echo "phase-debug managed-match=false phase=$CF_TXN_PHASE" >&2\n'
-              '            jq -c ".commit" "$CF_TXN_STATE" >&2 || true\n'
-              '            jq -c "." "$MANAGED_STATE" >&2 || true\n'
-              '            stat -c "%u:%g:%a %s" "$MANAGED_STATE" >&2 || true\n'
-              '          fi\n'
-              '        fi\n'
-              '      fi\n'
-              '      recover_cloudflare_transaction\n'
-              '      if [ -s "$TEST_DELETE_LOG" ]; then echo "phase-debug deletes:" >&2; cat "$TEST_DELETE_LOG" >&2; fi'
-          )
-          if t.count(anchor) != 1:
-              raise SystemExit(f'expected one phase recovery diagnostic anchor, found {t.count(anchor)}')
-          p.write_text(t.replace(anchor, replacement, 1))
           PY
           chmod +x tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh
           bash -n manage.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh
           ruby -e 'require "yaml"; ARGV.each { |f| YAML.load_file(f) }' scripts/.tmp-ci.yml scripts/.tmp-release.yml scripts/.tmp-security.yml
-          sudo bash -x tests/cloudflare_phase_recovery.sh
           go test -race ./...
-          cp tests/cloudflare_transaction.sh tests/.tmp-debug-cloudflare-transaction.sh
-          sed -i 's/configure_cloudflare >\/dev\/null 2>\&1/configure_cloudflare/' tests/.tmp-debug-cloudflare-transaction.sh
-          sudo bash -x tests/.tmp-debug-cloudflare-transaction.sh
-          rm -f tests/.tmp-debug-cloudflare-transaction.sh
           sudo bash tests/cloudflare_transaction.sh
           sudo bash tests/cloudflare_crash_recovery.sh
           sudo bash tests/cloudflare_phase_recovery.sh
