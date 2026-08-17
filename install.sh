@@ -96,6 +96,9 @@ else
   [ "$ARCH" = "amd64" ] || die "Stable v0.1 supports amd64/x86_64 only."
 fi
 
+if [ "$AGENT_VERSION" != "source" ] && [ -n "${AI_SERVER_AGENT_BINARY:-}" ]; then
+  die "AI_SERVER_AGENT_BINARY is disabled for stable releases. Stable installs must use the release archive verified by SHA256SUMS."
+fi
 if [ "$RESOLVE_REF_ONLY" -eq 1 ]; then resolve_source_ref "$REF"; exit 0; fi
 if [ "$CHECK_ONLY" -eq 1 ]; then log "Compatibility check passed: $PRETTY_NAME, $ARCH, systemd available."; exit 0; fi
 
