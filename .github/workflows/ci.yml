@@ -25,7 +25,7 @@ jobs:
       - name: Build static binary
         run: CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
       - name: Shell syntax
-        run: bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh
+        run: bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh tests/cloudflare_transaction.sh
       - name: Installer compatibility check
         run: sudo bash install.sh --check
       - name: Guided installer and management contract
@@ -69,7 +69,6 @@ jobs:
           grep -qF 'ssl_config_rule_id' manage.sh
           grep -qF 'Refusing to adopt or overwrite it' manage.sh
           grep -qF 'Refusing ambiguous replacement' manage.sh
-          grep -qF 'Previous Agent state was restored' manage.sh
           grep -qF 'dns_record_owned' manage.sh
           grep -qF 'existing-external' manage.sh
           grep -qF 'delete_recorded_cloudflare_resources(){' manage.sh
@@ -79,6 +78,13 @@ jobs:
           grep -qF 'restore_updated_dns_record(){' manage.sh
           grep -qF 'different Cloudflare zone' manage.sh
           grep -qF 'Recorded ownership state was preserved for a safe retry.' manage.sh
+          grep -qF 'CF_TXN_STATE="$STATE_DIR/cloudflare-transaction.json"' manage.sh
+          grep -qF 'save_cloudflare_transaction_state(){' manage.sh
+          grep -qF 'cloudflare_transaction_exit(){' manage.sh
+          grep -qF 'Cloudflare rollback was incomplete. Exact remaining ownership/recovery state was preserved in $CF_TXN_STATE.' manage.sh
+          grep -qF 'cloudflare_previous_certificate' manage.sh
+          grep -qF 'transaction rollback started.' manage.sh
+          grep -qF 'Recovery state remains in $CF_TXN_STATE.' manage.sh
           if grep -qF '/settings/ssl' manage.sh; then
             echo 'guided Cloudflare setup must not modify whole-zone SSL mode' >&2
             exit 1
