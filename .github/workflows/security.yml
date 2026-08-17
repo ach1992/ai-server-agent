@@ -17,6 +17,27 @@ jobs:
       - name: Cloudflare SIGKILL crash recovery
         run: sudo bash tests/cloudflare_crash_recovery.sh
 
+  root-trust-boundary:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - name: Shell syntax
+        run: bash -n tests/root_trust_boundary.sh tests/root_trust_migration.sh
+      - name: Build local test binary
+        run: CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
+      - name: Migrate hostile legacy state and verify root trust boundary
+        run: |
+          set -Eeuo pipefail
+          sudo env AI_SERVER_AGENT_BINARY=/tmp/ai-server-agent bash tests/root_trust_migration.sh
+          sudo bash tests/root_trust_boundary.sh
+      - name: Cleanup test installation
+        if: always()
+        run: sudo env AI_SERVER_AGENT_YES=1 bash uninstall.sh --purge || true
+
   stable-provenance:
     runs-on: ubuntu-22.04
     steps:
@@ -87,10 +108,7 @@ jobs:
         run: |
           state="$(mktemp)"
           cat > "$state" <<'STATE'
-          CHANNEL=stable
-          VERSION=v0.1.1
-          REF=v0.1.1
-          TRACK_REF=v0.1.1
+          {"channel":"stable","version":"v0.1.1","ref":"v0.1.1","track_ref":"v0.1.1"}
           STATE
           fakebin="$(mktemp -d)"
           cat > "$fakebin/curl" <<'CURL'
@@ -111,10 +129,7 @@ jobs:
           set -Eeuo pipefail
           state="$(mktemp)"
           cat > "$state" <<'STATE'
-          CHANNEL=stable
-          VERSION=v0.1.1
-          REF=v0.1.1
-          TRACK_REF=v0.1.1
+          {"channel":"stable","version":"v0.1.1","ref":"v0.1.1","track_ref":"v0.1.1"}
           STATE
           fakebin="$(mktemp -d)"
           marker="$(mktemp)"
