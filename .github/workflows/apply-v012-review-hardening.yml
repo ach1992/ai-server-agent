@@ -1,257 +1,56 @@
-name: Apply v0.1.2 review hardening
+name: Finalize v0.1.2 review contracts
 on:
   push:
     branches: ["feat/v0.1.2-stable-install-cloudflare"]
 permissions:
   contents: write
 jobs:
-  apply:
+  finalize:
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
         with:
           ref: feat/v0.1.2-stable-install-cloudflare
           fetch-depth: 0
-      - name: Apply reviewed manage.sh patch
+      - name: Update CI contracts for reviewed Cloudflare hardening
         shell: bash
         run: |
           set -Eeuo pipefail
-          if grep -qF 'delete_recorded_cloudflare_resources(){' manage.sh; then
-            echo 'Reviewed hardening patch is already present.'
-            exit 0
-          fi
-          cat > /tmp/manage.patch <<'PATCH'
-          --- a/manage.sh
-          +++ b/manage.sh
-          @@ -237,6 +237,27 @@
-             printf '%s' "$out"
-           }
-           
-          +cf_delete_owned(){
-          +  local path="$1" cfg response status body
-          +  cfg="$(mktemp)"; chmod 0600 "$cfg"
-          +  printf 'header = "Authorization: Bearer %s"\n' "$CF_TOKEN" > "$cfg"
-          +  response="$(curl -sS --retry 2 --request DELETE --config "$cfg" -H 'Content-Type: application/json' -w '\n%{http_code}' "$CF_API$path")" || { rm -f "$cfg"; return 1; }
-          +  rm -f "$cfg"
-          +  status="${response##*$'\n'}"; body="${response%$'\n'*}"
-          +  [ "$status" = "404" ] && return 0
-          +  [[ "$status" =~ ^2[0-9][0-9]$ ]] || { jq -r '.errors[]?.message // empty' <<<"$body" >&2 || true; return 1; }
-          +  jq -e '.success == true' >/dev/null 2>&1 <<<"$body" || { jq -r '.errors[]?.message // empty' <<<"$body" >&2 || true; return 1; }
-          +}
-          +
-          +delete_recorded_cloudflare_resources(){
-          +  local zone_id="$1" dns_id="$2" dns_owned="$3" origin_ruleset="$4" origin_rule="$5" ssl_ruleset="$6" ssl_rule="$7" cert_id="$8" failed=0
-          +  if [ "$dns_owned" = "true" ] && [ -n "$dns_id" ] && ! cf_delete_owned "/zones/$zone_id/dns_records/$dns_id"; then warn "Could not delete recorded Agent-owned DNS record $dns_id."; failed=1; fi
-          +  if [ -n "$origin_rule" ] && [ -n "$origin_ruleset" ] && ! cf_delete_owned "/zones/$zone_id/rulesets/$origin_ruleset/rules/$origin_rule"; then warn "Could not delete recorded Agent-owned Origin Rule $origin_rule."; failed=1; fi
-          +  if [ -n "$ssl_rule" ] && [ -n "$ssl_ruleset" ] && ! cf_delete_owned "/zones/$zone_id/rulesets/$ssl_ruleset/rules/$ssl_rule"; then warn "Could not delete recorded Agent-owned Configuration Rule $ssl_rule."; failed=1; fi
-          +  if [ -n "$cert_id" ] && ! cf_delete_owned "/certificates/$cert_id"; then warn "Could not revoke recorded Origin CA certificate $cert_id."; failed=1; fi
-          +  [ "$failed" -eq 0 ]
-          +}
-          +
-           cf_find_zone(){
-             local host="$1" candidate res id
-             candidate="$host"
-          @@ -277,32 +298,32 @@
-           }
-           
-           cf_reconcile_dns(){
-          -  local zone_id="$1" host="$2" ip="$3" res count id type content proxied comment body
-          +  local zone_id="$1" host="$2" ip="$3" owned_dns_id="${4:-}" res count id type content proxied comment ttl body owned=false
-             res="$(cf_api GET "/zones/$zone_id/dns_records?name=$host&per_page=100")" || die "Cloudflare DNS lookup failed."
-             count="$(jq '.result | length' <<<"$res")"
-             if [ "$count" -eq 0 ]; then
-               body="$(jq -n --arg name "$host" --arg ip "$ip" '{type:"A",name:$name,content:$ip,ttl:1,proxied:true,comment:"Managed by AI Server Agent"}')"
-               res="$(cf_api POST "/zones/$zone_id/dns_records" "$body")" || die "Could not create Cloudflare DNS record for $host."
-          -    printf '%s|true|created\n' "$(jq -r '.result.id' <<<"$res")"
-          +    printf '%s|true|created|||\n' "$(jq -r '.result.id' <<<"$res")"
-               return
-             fi
-             [ "$count" -eq 1 ] || die "Multiple DNS records already exist for $host. Refusing ambiguous replacement."
-          -  id="$(jq -r '.result[0].id' <<<"$res")"; type="$(jq -r '.result[0].type' <<<"$res")"; content="$(jq -r '.result[0].content' <<<"$res")"; proxied="$(jq -r '.result[0].proxied' <<<"$res")"; comment="$(jq -r '.result[0].comment // ""' <<<"$res")"
-          +  id="$(jq -r '.result[0].id' <<<"$res")"; type="$(jq -r '.result[0].type' <<<"$res")"; content="$(jq -r '.result[0].content' <<<"$res")"; proxied="$(jq -r '.result[0].proxied' <<<"$res")"; comment="$(jq -r '.result[0].comment // ""' <<<"$res")"; ttl="$(jq -r '.result[0].ttl' <<<"$res")"
-             [ "$type" = "A" ] || die "$host already has a $type record. Use another hostname or resolve the DNS conflict manually."
-          +  if [ -n "$owned_dns_id" ]; then
-          +    [ "$id" = "$owned_dns_id" ] || die "The DNS record ID for $host no longer matches recorded Agent ownership. Refusing to adopt or modify the replacement record."
-          +    owned=true
-          +  fi
-             if [ "$content" = "$ip" ] && [ "$proxied" = "true" ]; then
-          -    if [ "$comment" = "Managed by AI Server Agent" ]; then
-          -      printf '%s|true|existing-managed\n' "$id"
-          -    else
-          -      printf '%s|false|existing-external\n' "$id"
-          -    fi
-          +    if [ "$owned" = "true" ]; then printf '%s|true|existing-managed|||\n' "$id"; else printf '%s|false|existing-external|||\n' "$id"; fi
-               return
-             fi
-          -  if [ "$comment" != "Managed by AI Server Agent" ]; then
-          -    die "Existing A record for $host is not Agent-managed and does not match this server. Refusing to modify it automatically. Use another hostname or update/remove that record manually, then rerun setup."
-          +  if [ "$owned" != "true" ]; then
-          +    die "Existing A record for $host is not recorded as Agent-owned and does not match this server. Refusing to modify or adopt it automatically. Use another hostname or update/remove that record manually, then rerun setup."
-             fi
-             body="$(jq -n --arg name "$host" --arg ip "$ip" '{type:"A",name:$name,content:$ip,ttl:1,proxied:true,comment:"Managed by AI Server Agent"}')"
-             cf_api PATCH "/zones/$zone_id/dns_records/$id" "$body" >/dev/null || die "Could not update Cloudflare DNS record for $host."
-          -  printf '%s|true|updated\n' "$id"
-          +  printf '%s|true|updated|%s|%s|%s\n' "$id" "$content" "$proxied" "$ttl"
-           }
-           
-           cf_reconcile_origin_rule(){
-          @@ -447,10 +468,20 @@
-           
-           rollback_new_cf_resources(){
-             local zone_id="$1" dns_id="$2" dns_action="$3" origin_ruleset="$4" origin_rule="$5" origin_action="$6" ssl_ruleset="$7" ssl_rule="$8" ssl_action="$9" cert_id="${10}"
-          -  if [ "$dns_action" = "created" ] && [ -n "$dns_id" ]; then cf_api DELETE "/zones/$zone_id/dns_records/$dns_id" >/dev/null || true; fi
-          -  case "$origin_action" in created|recreated) [ -n "$origin_rule" ] && [ -n "$origin_ruleset" ] && cf_api DELETE "/zones/$zone_id/rulesets/$origin_ruleset/rules/$origin_rule" >/dev/null || true ;; esac
-          -  case "$ssl_action" in created|recreated) [ -n "$ssl_rule" ] && [ -n "$ssl_ruleset" ] && cf_api DELETE "/zones/$zone_id/rulesets/$ssl_ruleset/rules/$ssl_rule" >/dev/null || true ;; esac
-          -  [ -n "$cert_id" ] && cf_api DELETE "/certificates/$cert_id" >/dev/null || true
-          +  if [ "$dns_action" = "created" ] && [ -n "$dns_id" ]; then cf_delete_owned "/zones/$zone_id/dns_records/$dns_id" || true; fi
-          +  case "$origin_action" in created|recreated) [ -n "$origin_rule" ] && [ -n "$origin_ruleset" ] && cf_delete_owned "/zones/$zone_id/rulesets/$origin_ruleset/rules/$origin_rule" || true ;; esac
-          +  case "$ssl_action" in created|recreated) [ -n "$ssl_rule" ] && [ -n "$ssl_ruleset" ] && cf_delete_owned "/zones/$zone_id/rulesets/$ssl_ruleset/rules/$ssl_rule" || true ;; esac
-          +  [ -n "$cert_id" ] && cf_delete_owned "/certificates/$cert_id" || true
-          +}
-          +
-          +restore_updated_dns_record(){
-          +  local zone_id="$1" host="$2" dns_id="$3" dns_action="$4" old_content="$5" old_proxied="$6" old_ttl="$7" body
-          +  [ "$dns_action" = "updated" ] || return 0
-          +  [ -n "$zone_id" ] && [ -n "$host" ] && [ -n "$dns_id" ] && [ -n "$old_content" ] && [ -n "$old_proxied" ] && [ -n "$old_ttl" ] || return 0
-          +  body="$(jq -n --arg name "$host" --arg content "$old_content" --argjson proxied "$old_proxied" --argjson ttl "$old_ttl" '{type:"A",name:$name,content:$content,ttl:$ttl,proxied:$proxied,comment:"Managed by AI Server Agent"}')"
-          +  if ! cf_api PATCH "/zones/$zone_id/dns_records/$dns_id" "$body" >/dev/null; then
-          +    warn "Could not restore the previous Agent-owned Cloudflare DNS record automatically. Re-run Cloudflare setup or repair the recorded DNS record before relying on the public endpoint."
-          +  fi
-           }
-           
-           restore_updated_origin_rule(){
-          @@ -463,34 +494,38 @@
-           }
-           
-           cleanup_old_cloudflare(){
-          -  local old_host="$1" old_zone="$2" old_dns="$3" old_dns_owned="$4" old_origin_ruleset="$5" old_origin_rule="$6" old_ssl_ruleset="$7" old_ssl_rule="$8" old_cert="$9" new_host="${10}" new_cert="${11}"
-          +  local old_host="$1" old_zone="$2" old_dns="$3" old_dns_owned="$4" old_origin_ruleset="$5" old_origin_rule="$6" old_ssl_ruleset="$7" old_ssl_rule="$8" old_cert="$9" new_host="${10}" new_cert="${11}" new_zone="${12}"
-             [ -n "$old_host" ] || return 0
-             if [ "$old_host" = "$new_host" ]; then
-               if [ -n "$old_cert" ] && [ "$old_cert" != "$new_cert" ] && confirm "Revoke the previous Cloudflare Origin CA certificate now that the new certificate is verified?" yes; then
-          -      cf_api DELETE "/certificates/$old_cert" >/dev/null || warn "Previous Origin CA certificate could not be revoked automatically."
-          +      cf_delete_owned "/certificates/$old_cert" || warn "Previous Origin CA certificate could not be revoked automatically."
-               fi
-               return 0
-             fi
-             save_previous_cloudflare_state "$old_host" "$old_zone" "$old_dns" "$old_dns_owned" "$old_origin_ruleset" "$old_origin_rule" "$old_ssl_ruleset" "$old_ssl_rule" "$old_cert"
-             printf '\nOld managed hostname: %s\n' "$old_host"
-          +  if [ "$old_zone" != "$new_zone" ]; then
-          +    warn "The old hostname belongs to a different Cloudflare zone. Its Agent-owned resources remain recorded for later cleanup with a token scoped to that old zone."
-          +    return 0
-          +  fi
-             if ! confirm "Remove the old Agent-managed DNS, Origin Rule, strict SSL Configuration Rule, and certificate now?" yes; then
-               warn "Old Agent-managed Cloudflare resources were preserved and remain recorded for later cleanup."
-               return 0
-             fi
-          -  if [ "$old_dns_owned" = "true" ] && [ -n "$old_dns" ]; then cf_api DELETE "/zones/$old_zone/dns_records/$old_dns" >/dev/null || true; fi
-          -  [ -n "$old_origin_rule" ] && [ -n "$old_origin_ruleset" ] && cf_api DELETE "/zones/$old_zone/rulesets/$old_origin_ruleset/rules/$old_origin_rule" >/dev/null || true
-          -  [ -n "$old_ssl_rule" ] && [ -n "$old_ssl_ruleset" ] && cf_api DELETE "/zones/$old_zone/rulesets/$old_ssl_ruleset/rules/$old_ssl_rule" >/dev/null || true
-          -  [ -n "$old_cert" ] && cf_api DELETE "/certificates/$old_cert" >/dev/null || true
-          -  clear_previous_cloudflare_state
-          -  log "Old Agent-managed Cloudflare resources cleanup attempted using recorded ownership."
-          +  if delete_recorded_cloudflare_resources "$old_zone" "$old_dns" "$old_dns_owned" "$old_origin_ruleset" "$old_origin_rule" "$old_ssl_ruleset" "$old_ssl_rule" "$old_cert"; then
-          +    clear_previous_cloudflare_state
-          +    log "Old Agent-managed Cloudflare resources were removed or already absent."
-          +  else
-          +    warn "Old Cloudflare cleanup was incomplete. Recorded ownership state was preserved for a safe retry."
-          +  fi
-           }
-           
-           configure_cloudflare(){
-             need_cmd jq; need_cmd openssl; need_cmd curl; need_cmd sha256sum
-             local old_host old_zone old_dns old_dns_owned old_origin_ruleset old_origin_rule old_ssl_ruleset old_ssl_rule old_cert old_port previous_zone
-          -  local host port zone_pair zone_id zone_name ip stage backup cert_id dns_pair dns_id dns_owned dns_action
-          +  local host port zone_pair zone_id zone_name ip stage backup cert_id dns_pair dns_id dns_owned dns_action dns_old_content dns_old_proxied dns_old_ttl
-             local origin_pair origin_ruleset_id origin_rule_id origin_action ssl_pair ssl_ruleset_id ssl_rule_id ssl_action config_backup
-          -  local owned_origin_ruleset="" owned_origin_rule="" owned_ssl_ruleset="" owned_ssl_rule=""
-          +  local owned_dns_id="" owned_origin_ruleset="" owned_origin_rule="" owned_ssl_ruleset="" owned_ssl_rule=""
-             old_host="$(managed_get '.hostname')"; old_zone="$(managed_get '.cloudflare.zone_id')"; old_dns="$(managed_get '.cloudflare.dns_record_id')"; old_dns_owned="$(managed_get '.cloudflare.dns_record_owned')"; old_dns_owned="${old_dns_owned:-false}"
-             old_origin_ruleset="$(managed_get '.cloudflare.origin_ruleset_id')"; old_origin_rule="$(managed_get '.cloudflare.origin_rule_id')"
-             old_ssl_ruleset="$(managed_get '.cloudflare.ssl_config_ruleset_id')"; old_ssl_rule="$(managed_get '.cloudflare.ssl_config_rule_id')"; old_cert="$(managed_get '.cloudflare.origin_certificate_id')"
-          @@ -506,6 +541,7 @@
-             load_cf_token
-             zone_pair="$(cf_find_zone "$host")"; IFS='|' read -r zone_id zone_name <<<"$zone_pair"; log "Cloudflare zone: $zone_name"
-             if [ "$old_host" = "$host" ] && [ "$old_zone" = "$zone_id" ]; then
-          +    [ "$old_dns_owned" = "true" ] && owned_dns_id="$old_dns" || true
-               owned_origin_ruleset="$old_origin_ruleset"; owned_origin_rule="$old_origin_rule"; owned_ssl_ruleset="$old_ssl_ruleset"; owned_ssl_rule="$old_ssl_rule"
-             fi
-             ip="$(cf_public_ipv4)"; log "Origin IPv4: $ip"
-          @@ -514,7 +550,7 @@
-             [ -e "$TLS_DIR/origin.csr" ] && cp -p "$TLS_DIR/origin.csr" "$backup/origin.csr" || true
-             [ -e "$TLS_DIR/origin.crt" ] && cp -p "$TLS_DIR/origin.crt" "$backup/origin.crt" || true
-             cert_id="$(cf_issue_origin_cert "$host" "$stage")"; log "Fresh Origin CA certificate issued and verified."
-          -  dns_pair="$(cf_reconcile_dns "$zone_id" "$host" "$ip")"; IFS='|' read -r dns_id dns_owned dns_action <<<"$dns_pair"
-          +  dns_pair="$(cf_reconcile_dns "$zone_id" "$host" "$ip" "$owned_dns_id")"; IFS='|' read -r dns_id dns_owned dns_action dns_old_content dns_old_proxied dns_old_ttl <<<"$dns_pair"
-             if [ "$dns_owned" = "true" ]; then log "Cloudflare proxied DNS reconciled ($dns_action, Agent-owned)."; else log "Existing matching proxied DNS reused without taking ownership."; fi
-             origin_pair="$(cf_reconcile_origin_rule "$zone_id" "$host" "$port" "$owned_origin_ruleset" "$owned_origin_rule")"; IFS='|' read -r origin_ruleset_id origin_rule_id origin_action <<<"$origin_pair"; log "Cloudflare origin port rule reconciled for port $port."
-             ssl_pair="$(cf_reconcile_ssl_config_rule "$zone_id" "$host" "$owned_ssl_ruleset" "$owned_ssl_rule")"; IFS='|' read -r ssl_ruleset_id ssl_rule_id ssl_action <<<"$ssl_pair"; log "Cloudflare strict SSL Configuration Rule reconciled for $host only."
-          @@ -527,21 +563,27 @@
-             if ! restart_and_verify_local; then
-               install -o root -g "$AGENT_USER" -m 0640 "$config_backup" "$CONFIG_FILE"; restore_tls_backup "$backup"; systemctl restart ai-server-agent-executor.service ai-server-agent.service || true
-               rollback_new_cf_resources "$zone_id" "$dns_id" "$dns_action" "$origin_ruleset_id" "$origin_rule_id" "$origin_action" "$ssl_ruleset_id" "$ssl_rule_id" "$ssl_action" "$cert_id"
-          -    if [ "$old_host" = "$host" ] && [ "$old_zone" = "$zone_id" ]; then restore_updated_origin_rule "$old_zone" "$old_host" "$old_port" "$old_origin_ruleset" "$old_origin_rule" "$origin_action"; fi
-          +    if [ "$old_host" = "$host" ] && [ "$old_zone" = "$zone_id" ]; then
-          +      restore_updated_dns_record "$old_zone" "$old_host" "$old_dns" "$dns_action" "$dns_old_content" "$dns_old_proxied" "$dns_old_ttl"
-          +      restore_updated_origin_rule "$old_zone" "$old_host" "$old_port" "$old_origin_ruleset" "$old_origin_rule" "$origin_action"
-          +    fi
-               rm -rf "$stage" "$backup"; rm -f "$config_backup"; CF_TOKEN=""
-               die "Agent failed after TLS/public reconfiguration; previous local Agent state was restored and newly created Cloudflare resources were rolled back where safe."
-             fi
-             if ! verify_public "$host"; then
-               install -o root -g "$AGENT_USER" -m 0640 "$config_backup" "$CONFIG_FILE"; restore_tls_backup "$backup"; systemctl restart ai-server-agent-executor.service ai-server-agent.service || true
-               rollback_new_cf_resources "$zone_id" "$dns_id" "$dns_action" "$origin_ruleset_id" "$origin_rule_id" "$origin_action" "$ssl_ruleset_id" "$ssl_rule_id" "$ssl_action" "$cert_id"
-          -    if [ "$old_host" = "$host" ] && [ "$old_zone" = "$zone_id" ]; then restore_updated_origin_rule "$old_zone" "$old_host" "$old_port" "$old_origin_ruleset" "$old_origin_rule" "$origin_action"; fi
-          +    if [ "$old_host" = "$host" ] && [ "$old_zone" = "$zone_id" ]; then
-          +      restore_updated_dns_record "$old_zone" "$old_host" "$old_dns" "$dns_action" "$dns_old_content" "$dns_old_proxied" "$dns_old_ttl"
-          +      restore_updated_origin_rule "$old_zone" "$old_host" "$old_port" "$old_origin_ruleset" "$old_origin_rule" "$origin_action"
-          +    fi
-               rm -rf "$stage" "$backup"; rm -f "$config_backup"; CF_TOKEN=""
-               die "Public Cloudflare verification failed. Previous Agent state was restored and newly created Cloudflare resources were rolled back where safe."
-             fi
-             rm -rf "$stage" "$backup"; rm -f "$config_backup"
-             save_cloudflare_state "$host" "$port" "$zone_id" "$zone_name" "$dns_id" "$dns_owned" "$origin_ruleset_id" "$origin_rule_id" "$ssl_ruleset_id" "$ssl_rule_id" "$cert_id"
-             log "Public HTTPS health, unauthenticated rejection, and authenticated MCP initialize all passed."
-          -  cleanup_old_cloudflare "$old_host" "$old_zone" "$old_dns" "$old_dns_owned" "$old_origin_ruleset" "$old_origin_rule" "$old_ssl_ruleset" "$old_ssl_rule" "$old_cert" "$host" "$cert_id"
-          +  cleanup_old_cloudflare "$old_host" "$old_zone" "$old_dns" "$old_dns_owned" "$old_origin_ruleset" "$old_origin_rule" "$old_ssl_ruleset" "$old_ssl_rule" "$old_cert" "$host" "$cert_id" "$zone_id"
-             CF_TOKEN=""
-             printf '\n%sServer setup complete.%s\n' "$GREEN" "$RESET"
-             printf 'MCP URL: %shttps://%s/mcp%s\n' "$BOLD" "$host" "$RESET"
-          @@ -603,17 +645,17 @@
-             confirm "Delete the recorded Agent-owned Cloudflare DNS (if any), Origin Rule, strict SSL Configuration Rule, and Origin CA certificate?" no || { echo "Cancelled."; return 0; }
-             print_cf_token_guidance "$host"
-             load_cf_token
-          -  if [ "$dns_owned" = "true" ] && [ -n "$dns_id" ]; then cf_api DELETE "/zones/$zone_id/dns_records/$dns_id" >/dev/null || true; fi
-          -  [ -n "$origin_rule_id" ] && [ -n "$origin_ruleset_id" ] && cf_api DELETE "/zones/$zone_id/rulesets/$origin_ruleset_id/rules/$origin_rule_id" >/dev/null || true
-          -  [ -n "$ssl_rule_id" ] && [ -n "$ssl_ruleset_id" ] && cf_api DELETE "/zones/$zone_id/rulesets/$ssl_ruleset_id/rules/$ssl_rule_id" >/dev/null || true
-          -  [ -n "$cert_id" ] && cf_api DELETE "/certificates/$cert_id" >/dev/null || true
-          +  if ! delete_recorded_cloudflare_resources "$zone_id" "$dns_id" "$dns_owned" "$origin_ruleset_id" "$origin_rule_id" "$ssl_ruleset_id" "$ssl_rule_id" "$cert_id"; then
-          +    CF_TOKEN=""
-          +    die "Cloudflare cleanup was incomplete. Recorded ownership state was preserved for a safe retry."
-          +  fi
-             CF_TOKEN=""
-             if [ "$source" = previous ]; then
-               clear_previous_cloudflare_state
-             else
-               tmp="$(mktemp)"; old="$(cat "$MANAGED_STATE")"; jq '.cloudflare={}' <<<"$old" > "$tmp"; install -o root -g "$AGENT_USER" -m 0640 "$tmp" "$MANAGED_STATE"; rm -f "$tmp"
-             fi
-          -  log "Recorded Agent-owned Cloudflare resources cleanup attempted; external DNS and unrecorded rules were preserved."
-          +  log "Recorded Agent-owned Cloudflare resources were removed or already absent; external DNS and unrecorded rules were preserved."
-           }
-           
-           update_agent(){ [ -x "$UPDATE_HELPER" ] || die "Update helper is missing: $UPDATE_HELPER"; "$UPDATE_HELPER"; }
-          PATCH
-          sed -i 's/^          //' /tmp/manage.patch
-          git apply --check /tmp/manage.patch
-          git apply /tmp/manage.patch
-          bash -n manage.sh
-          git diff --check
-          grep -qF 'delete_recorded_cloudflare_resources(){' manage.sh
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path('.github/workflows/ci.yml')
+          text = path.read_text()
+          old = '''          grep -qF 'Refusing to modify it automatically' manage.sh
+          grep -qF 'if [ "$dns_owned" = "true" ] && [ -n "$dns_id" ]; then' manage.sh
+          grep -qF 'if [ "$old_dns_owned" = "true" ] && [ -n "$old_dns" ]; then' manage.sh
+          '''
+          new = '''          grep -qF 'delete_recorded_cloudflare_resources(){' manage.sh
+          grep -qF 'cf_delete_owned(){' manage.sh
           grep -qF 'Refusing to adopt or modify the replacement record.' manage.sh
+          grep -qF 'Refusing to modify or adopt it automatically.' manage.sh
+          grep -qF 'restore_updated_dns_record(){' manage.sh
+          grep -qF 'different Cloudflare zone' manage.sh
           grep -qF 'Recorded ownership state was preserved for a safe retry.' manage.sh
+          '''
+          if old not in text:
+              if new in text:
+                  raise SystemExit(0)
+              raise SystemExit('expected CI contract block was not found')
+          path.write_text(text.replace(old, new, 1))
+          PY
+          bash -n manage.sh install.sh update.sh uninstall.sh scripts/build-release.sh
+          git diff --check
+          grep -qF "grep -qF 'delete_recorded_cloudflare_resources(){' manage.sh" .github/workflows/ci.yml
+          grep -qF "grep -qF 'restore_updated_dns_record(){' manage.sh" .github/workflows/ci.yml
+          grep -qF "grep -qF 'Recorded ownership state was preserved for a safe retry.' manage.sh" .github/workflows/ci.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add manage.sh
+          git add .github/workflows/ci.yml
+          if git diff --cached --quiet; then
+            echo 'CI review contracts are already current.'
+            exit 0
+          fi
           git diff --cached --check
-          git commit -m 'Harden Cloudflare ownership and rollback'
+          git commit -m 'Test Cloudflare ownership rollback contracts'
           git push origin HEAD:feat/v0.1.2-stable-install-cloudflare
