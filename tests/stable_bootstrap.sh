@@ -2,12 +2,12 @@
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BOOTSTRAP="$ROOT/scripts/install-stable.sh"
-BOOTSTRAP_COMMIT=15b0c6a351f404f946d865fc3b8fdb791cef6f7e
+BOOTSTRAP_REF=v0.1.2
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 bash -n "$BOOTSTRAP"
-grep -qF "https://raw.githubusercontent.com/ach1992/ai-server-agent/$BOOTSTRAP_COMMIT/scripts/install-stable.sh | bash" "$ROOT/README.md"
+grep -qF "https://raw.githubusercontent.com/ach1992/ai-server-agent/$BOOTSTRAP_REF/scripts/install-stable.sh | bash" "$ROOT/README.md"
 if grep -qF 'curl -fsSL https://github.com/ach1992/ai-server-agent/releases/latest/download/install.sh | sudo bash' "$ROOT/README.md"; then
   echo 'README restored an unauthenticated release-installer-to-root path' >&2
   exit 1
