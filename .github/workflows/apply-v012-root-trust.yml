@@ -20,13 +20,14 @@ jobs:
       - name: Apply and validate root trust-boundary hardening
         run: |
           set -Eeuo pipefail
-          python3 -m py_compile scripts/fix-v012-root-applicator.py scripts/extend-v012-root-applicator.py
+          python3 -m py_compile scripts/fix-v012-root-applicator.py scripts/extend-v012-root-applicator.py scripts/extend-v012-root-applicator-v3.py
           python3 scripts/fix-v012-root-applicator.py
           python3 scripts/extend-v012-root-applicator.py
+          python3 scripts/extend-v012-root-applicator-v3.py
           python3 -m py_compile scripts/apply-v012-root-trust-boundary.py
           python3 scripts/apply-v012-root-trust-boundary.py
           chmod +x tests/root_trust_boundary.sh tests/root_trust_migration.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh
-          gofmt -w internal/executor/executor.go internal/executor/executor_test.go
+          gofmt -w internal/browser/browser.go internal/executor/executor.go internal/executor/executor_test.go
           bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/root_trust_boundary.sh tests/root_trust_migration.sh
           go test -race ./...
           CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
@@ -44,7 +45,7 @@ jobs:
           set -Eeuo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add install.sh update.sh manage.sh README.md docs/ARCHITECTURE.md internal/executor/executor.go internal/executor/executor_test.go tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/root_trust_boundary.sh tests/root_trust_migration.sh .github/workflows/ci.yml .github/workflows/security.yml
+          git add install.sh update.sh manage.sh README.md docs/ARCHITECTURE.md internal/browser/browser.go internal/executor/executor.go internal/executor/executor_test.go tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/root_trust_boundary.sh tests/root_trust_migration.sh
           git diff --cached --check
           test -n "$(git diff --cached --name-only)"
           git commit -m 'Harden root-trusted state boundary'
