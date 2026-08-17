@@ -72,8 +72,10 @@ actual_digest="sha256:$(sha256sum "$tmp/install.sh" | awk '{print $1}')"
 chmod 0500 "$tmp/install.sh"
 
 log "Verified immutable stable installer $VERSION before privileged staging."
-sudo bash -s -- "$tmp/install.sh" "$installer_digest" <<'ROOT_INSTALL'
+sudo /bin/bash --noprofile --norc -s -- "$tmp/install.sh" "$installer_digest" <<'ROOT_INSTALL'
 set -Eeuo pipefail
+PATH=/usr/sbin:/usr/bin:/sbin:/bin
+export PATH
 source_installer="${1:?missing verified installer path}"
 expected_digest="${2:?missing verified installer digest}"
 
@@ -99,5 +101,5 @@ actual_digest="sha256:$(sha256sum "$root_stage/install.sh" | awk '{print $1}')"
   exit 1
 }
 printf '[ai-server-agent] Privileged staging re-verified the authenticated installer bytes.\n'
-bash "$root_stage/install.sh"
+/bin/bash --noprofile --norc "$root_stage/install.sh"
 ROOT_INSTALL
