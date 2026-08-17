@@ -23,6 +23,7 @@ CF_PENDING_HOST=""
 CF_PENDING_VALUE=""
 CF_PENDING_PHASE=""
 CF_PENDING_MARKER=""
+CF_PENDING_FINGERPRINT=""
 CF_TXN_PHASE="prepared"
 CF_TXN_BACKUP_DIR="$CONTROL_DIR/cloudflare-transaction-backup"
 CF_TXN_BACKUP_READY=false
@@ -309,14 +310,10 @@ cf_api(){
 cf_delete_owned(){
   local path="$1" cfg response status body
   cfg="$(mktemp)"; chmod 0600 "$cfg"
-  printf 'header = "Authorization: Bearer %s"
-' "$CF_TOKEN" > "$cfg"
-  response="$(curl -sS --retry 2 --request DELETE --config "$cfg" -H 'Content-Type: application/json' -w '
-%{http_code}' "$CF_API$path")" || { rm -f "$cfg"; return 1; }
+  printf 'header = "Authorization: Bearer %s"\n' "$CF_TOKEN" > "$cfg"
+  response="$(curl -sS --retry 2 --request DELETE --config "$cfg" -H 'Content-Type: application/json' -w '\n%{http_code}' "$CF_API$path")" || { rm -f "$cfg"; return 1; }
   rm -f "$cfg"
-  status="${response##*$'
-'}"; body="${response%$'
-'*}"
+  status="${response##*$'\n'}"; body="${response%$'\n'*}"
   [ "$status" = "404" ] && return 0
   [[ "$status" =~ ^2[0-9][0-9]$ ]] || { jq -r '.errors[]?.message // empty' <<<"$body" >&2 || true; return 1; }
   jq -e '.success == true' >/dev/null 2>&1 <<<"$body" || { jq -r '.errors[]?.message // empty' <<<"$body" >&2 || true; return 1; }
@@ -325,14 +322,10 @@ cf_delete_owned(){
 cf_get_optional(){
   local path="$1" cfg response status body
   cfg="$(mktemp)"; chmod 0600 "$cfg"
-  printf 'header = "Authorization: Bearer %s"
-' "$CF_TOKEN" > "$cfg"
-  response="$(curl -sS --retry 2 --request GET --config "$cfg" -H 'Content-Type: application/json' -w '
-%{http_code}' "$CF_API$path")" || { rm -f "$cfg"; return 2; }
+  printf 'header = "Authorization: Bearer %s"\n' "$CF_TOKEN" > "$cfg"
+  response="$(curl -sS --retry 2 --request GET --config "$cfg" -H 'Content-Type: application/json' -w '\n%{http_code}' "$CF_API$path")" || { rm -f "$cfg"; return 2; }
   rm -f "$cfg"
-  status="${response##*$'
-'}"; body="${response%$'
-'*}"
+  status="${response##*$'\n'}"; body="${response%$'\n'*}"
   [ "$status" = "404" ] && return 3
   [[ "$status" =~ ^2[0-9][0-9]$ ]] || return 2
   jq -e '.success == true' >/dev/null 2>&1 <<<"$body" || return 2
@@ -345,6 +338,14 @@ cf_dns_fingerprint(){
 
 cf_rule_fingerprint(){
   jq -cS '{id:(.id // ""),ref:(.ref // ""),description:(.description // ""),expression:(.expression // ""),action:(.action // ""),action_parameters:(.action_parameters // {}),enabled:(.enabled // false)}' | sha256sum | awk '{print $1}'
+}
+
+cf_dns_intent_fingerprint(){
+  jq -cS '{type:(.type // ""),name:(.name // ""),content:(.content // ""),ttl:(.ttl // 0),proxied:(.proxied // false),comment:(.comment // "")}' | sha256sum | awk '{print $1}'
+}
+
+cf_rule_intent_fingerprint(){
+  jq -cS '{ref:(.ref // ""),description:(.description // ""),expression:(.expression // ""),action:(.action // ""),action_parameters:(.action_parameters // {}),enabled:(.enabled // false)}' | sha256sum | awk '{print $1}'
 }
 
 cf_get_dns_record(){
@@ -363,8 +364,7 @@ cf_get_rule(){
   fi
   rule="$(jq -c --arg id "$rule_id" '.result.rules[]? | select(.id==$id)' <<<"$res" | head -n1)"
   [ -n "$rule" ] || return 3
-  printf '%s
-' "$rule"
+  printf '%s\n' "$rule"
 }
 
 cf_delete_dns_if_expected(){
@@ -391,8 +391,38 @@ cf_delete_rule_if_expected(){
   cf_delete_owned "/zones/$zone_id/rulesets/$ruleset_id/rules/$rule_id"
 }
 
+cf_delete_pending_dns_if_expected(){
+  local zone_id="$1" dns_id="$2" expected="$3" current rc actual
+  [ -n "$zone_id" ] && [ -n "$dns_id" ] && [ -n "$expected" ] || return 1
+  if current="$(cf_get_dns_record "$zone_id" "$dns_id")"; then
+    actual="$(cf_dns_intent_fingerprint <<<"$current")"
+  else
+    rc=$?; [ "$rc" -eq 3 ] && return 0; return 1
+  fi
+  [ "$actual" = "$expected" ] || { warn "Response-lost DNS $dns_id no longer matches the durable create representation; refusing automatic deletion."; return 1; }
+  cf_delete_owned "/zones/$zone_id/dns_records/$dns_id"
+}
+
+cf_delete_pending_rule_if_expected(){
+  local zone_id="$1" ruleset_id="$2" rule_id="$3" expected="$4" current rc actual
+  [ -n "$zone_id" ] && [ -n "$ruleset_id" ] && [ -n "$rule_id" ] && [ -n "$expected" ] || return 1
+  if current="$(cf_get_rule "$zone_id" "$ruleset_id" "$rule_id")"; then
+    actual="$(cf_rule_intent_fingerprint <<<"$current")"
+  else
+    rc=$?; [ "$rc" -eq 3 ] && return 0; return 1
+  fi
+  [ "$actual" = "$expected" ] || { warn "Response-lost Cloudflare rule $rule_id no longer matches the durable create representation; refusing automatic deletion."; return 1; }
+  cf_delete_owned "/zones/$zone_id/rulesets/$ruleset_id/rules/$rule_id"
+}
+
 cf_clear_pending_write(){
-  CF_PENDING_KIND=""; CF_PENDING_ZONE=""; CF_PENDING_HOST=""; CF_PENDING_VALUE=""; CF_PENDING_PHASE=""; CF_PENDING_MARKER=""
+  CF_PENDING_KIND=""; CF_PENDING_ZONE=""; CF_PENDING_HOST=""; CF_PENDING_VALUE=""; CF_PENDING_PHASE=""; CF_PENDING_MARKER=""; CF_PENDING_FINGERPRINT=""
+}
+
+cf_clear_commit_intent(){
+  CF_COMMIT_HOST=""; CF_COMMIT_PORT=""; CF_COMMIT_ZONE_ID=""; CF_COMMIT_ZONE_NAME=""; CF_COMMIT_DNS_ID=""; CF_COMMIT_DNS_OWNED=false
+  CF_COMMIT_ORIGIN_RULESET_ID=""; CF_COMMIT_ORIGIN_RULE_ID=""; CF_COMMIT_SSL_RULESET_ID=""; CF_COMMIT_SSL_RULE_ID=""; CF_COMMIT_CERT_ID=""
+  CF_COMMIT_DNS_FINGERPRINT=""; CF_COMMIT_ORIGIN_FINGERPRINT=""; CF_COMMIT_SSL_FINGERPRINT=""
 }
 
 cf_new_ownership_marker(){ openssl rand -hex 16; }
@@ -401,8 +431,7 @@ save_current_cloudflare_transaction_state(){
   save_cloudflare_transaction_state \
     "${host:-${CF_PENDING_HOST:-}}" "${zone_id:-${CF_PENDING_ZONE:-}}" \
     "${dns_id:-${CF_RESULT_DNS_ID:-}}" "${dns_action:-${CF_RESULT_DNS_ACTION:-}}" \
-    "${dns_old_content:-${CF_RESULT_DNS_OLD_CONTENT:-}}" "${dns_old_proxied:-${CF_RESULT_DNS_OLD_PROXIED:-}}" "${dns_old_ttl:-${CF_RESULT_DNS_OLD_TTL:-}}" \
-    "${origin_ruleset_id:-${CF_RESULT_ORIGIN_RULESET_ID:-}}" "${origin_rule_id:-${CF_RESULT_ORIGIN_RULE_ID:-}}" "${origin_action:-${CF_RESULT_ORIGIN_ACTION:-}}" "${old_port:-}" \
+    "${origin_ruleset_id:-${CF_RESULT_ORIGIN_RULESET_ID:-}}" "${origin_rule_id:-${CF_RESULT_ORIGIN_RULE_ID:-}}" "${origin_action:-${CF_RESULT_ORIGIN_ACTION:-}}" \
     "${ssl_ruleset_id:-${CF_RESULT_SSL_RULESET_ID:-}}" "${ssl_rule_id:-${CF_RESULT_SSL_RULE_ID:-}}" "${ssl_action:-${CF_RESULT_SSL_ACTION:-}}" \
     "${cert_id:-${CF_RESULT_CERT_ID:-}}" \
     "${dns_fingerprint:-${CF_RESULT_DNS_FINGERPRINT:-}}" "${origin_fingerprint:-${CF_RESULT_ORIGIN_FINGERPRINT:-}}" "${ssl_fingerprint:-${CF_RESULT_SSL_FINGERPRINT:-}}"
@@ -413,15 +442,15 @@ cf_checkpoint_transaction(){
 }
 
 cf_set_pending_write(){
-  CF_PENDING_KIND="$1"; CF_PENDING_ZONE="$2"; CF_PENDING_HOST="$3"; CF_PENDING_VALUE="$4"; CF_PENDING_PHASE="${5:-}"; CF_PENDING_MARKER="${6:-}"
+  CF_PENDING_KIND="$1"; CF_PENDING_ZONE="$2"; CF_PENDING_HOST="$3"; CF_PENDING_VALUE="$4"; CF_PENDING_PHASE="${5:-}"; CF_PENDING_MARKER="${6:-}"; CF_PENDING_FINGERPRINT="${7:-}"
   save_current_cloudflare_transaction_state || die "Could not durably journal the Cloudflare create intent before remote mutation. No create request was sent."
 }
 
 cf_commit_pending_write(){
-  local old_kind="$CF_PENDING_KIND" old_zone="$CF_PENDING_ZONE" old_host="$CF_PENDING_HOST" old_value="$CF_PENDING_VALUE" old_phase="$CF_PENDING_PHASE" old_marker="$CF_PENDING_MARKER"
+  local old_kind="$CF_PENDING_KIND" old_zone="$CF_PENDING_ZONE" old_host="$CF_PENDING_HOST" old_value="$CF_PENDING_VALUE" old_phase="$CF_PENDING_PHASE" old_marker="$CF_PENDING_MARKER" old_fingerprint="$CF_PENDING_FINGERPRINT"
   cf_clear_pending_write
   if save_current_cloudflare_transaction_state; then return 0; fi
-  CF_PENDING_KIND="$old_kind"; CF_PENDING_ZONE="$old_zone"; CF_PENDING_HOST="$old_host"; CF_PENDING_VALUE="$old_value"; CF_PENDING_PHASE="$old_phase"; CF_PENDING_MARKER="$old_marker"
+  CF_PENDING_KIND="$old_kind"; CF_PENDING_ZONE="$old_zone"; CF_PENDING_HOST="$old_host"; CF_PENDING_VALUE="$old_value"; CF_PENDING_PHASE="$old_phase"; CF_PENDING_MARKER="$old_marker"; CF_PENDING_FINGERPRINT="$old_fingerprint"
   die "Cloudflare create succeeded but the confirmed result could not be durably checkpointed. Recovery intent remains active."
 }
 
@@ -455,7 +484,7 @@ cf_find_origin_cert_by_csr(){
 }
 
 cf_find_dns_by_marker(){
-  local zone_id="$1" host="$2" ip="$3" marker="$4" res ids exact_count total found
+  local zone_id="$1" host="$2" ip="$3" marker="$4" res ids exact_count total
   res="$(cf_api GET "/zones/$zone_id/dns_records?name=$host&per_page=100")" || return 2
   ids="$(jq -r --arg ip "$ip" --arg marker "$marker" '.result[]? | select(.type=="A" and .content==$ip and .proxied==true and (.comment // "")==("Managed by AI Server Agent txn:"+$marker)) | .id // empty' <<<"$res")"
   exact_count="$(grep -cve '^$' <<<"$ids" || true)"
@@ -483,24 +512,8 @@ cf_find_rule_by_marker(){
   return 2
 }
 
-cf_find_ruleset_by_marker(){
-  local zone_id="$1" phase="$2" marker="$3" list ruleset_id ruleset phase_count=0 exact_count=0 found="" desc
-  list="$(cf_api GET "/zones/$zone_id/rulesets?per_page=100")" || return 2
-  while IFS= read -r ruleset_id; do
-    [ -n "$ruleset_id" ] || continue
-    phase_count=$((phase_count + 1))
-    ruleset="$(cf_api GET "/zones/$zone_id/rulesets/$ruleset_id")" || return 2
-    desc="$(jq -r '.result.description // ""' <<<"$ruleset")"
-    if [[ "$desc" == *" txn:$marker" ]]; then found="$ruleset_id"; exact_count=$((exact_count + 1)); fi
-  done < <(jq -r --arg phase "$phase" '.result[]? | select(.kind=="zone" and .phase==$phase) | .id // empty' <<<"$list")
-  [ "$exact_count" -eq 1 ] && { printf '%s\n' "$found"; return 0; }
-  [ "$exact_count" -eq 0 ] || return 2
-  [ "$phase_count" -eq 0 ] && return 1
-  return 2
-}
-
 cf_recover_pending_write(){
-  local found rc ruleset_id rule_id ruleset marked_ids marked_count
+  local found rc ruleset_id rule_id
   [ -n "$CF_PENDING_KIND" ] || return 0
   case "$CF_PENDING_KIND" in
     origin-cert-create)
@@ -512,7 +525,7 @@ cf_recover_pending_write(){
       ;;
     dns-create)
       if found="$(cf_find_dns_by_marker "$CF_PENDING_ZONE" "$CF_PENDING_HOST" "$CF_PENDING_VALUE" "$CF_PENDING_MARKER")"; then
-        cf_delete_owned "/zones/$CF_PENDING_ZONE/dns_records/$found" || return 1
+        cf_delete_pending_dns_if_expected "$CF_PENDING_ZONE" "$found" "$CF_PENDING_FINGERPRINT" || return 1
       else
         rc=$?; [ "$rc" -eq 1 ] || return 1
       fi
@@ -520,24 +533,7 @@ cf_recover_pending_write(){
     origin-rule-create|ssl-rule-create)
       if found="$(cf_find_rule_by_marker "$CF_PENDING_ZONE" "$CF_PENDING_PHASE" "$CF_PENDING_VALUE" "$CF_PENDING_MARKER")"; then
         IFS='|' read -r ruleset_id rule_id <<<"$found"
-        cf_delete_owned "/zones/$CF_PENDING_ZONE/rulesets/$ruleset_id/rules/$rule_id" || return 1
-      else
-        rc=$?; [ "$rc" -eq 1 ] || return 1
-      fi
-      ;;
-    origin-ruleset-create|ssl-ruleset-create)
-      if found="$(cf_find_ruleset_by_marker "$CF_PENDING_ZONE" "$CF_PENDING_PHASE" "$CF_PENDING_MARKER")"; then
-        ruleset="$(cf_api GET "/zones/$CF_PENDING_ZONE/rulesets/$found")" || return 1
-        marked_ids="$(jq -r --arg ref "$CF_PENDING_VALUE" --arg marker "$CF_PENDING_MARKER" '.result.rules[]? | select((.ref // "")==$ref and ((.description // "") | endswith(" txn:"+$marker))) | .id // empty' <<<"$ruleset")"
-        marked_count="$(grep -cve '^$' <<<"$marked_ids" || true)"
-        [ "$marked_count" -le 1 ] || return 1
-        if [ "$marked_count" -eq 1 ]; then
-          rule_id="$(grep -v '^$' <<<"$marked_ids" | head -n1)"
-          cf_delete_owned "/zones/$CF_PENDING_ZONE/rulesets/$found/rules/$rule_id" || return 1
-        fi
-        # Never delete a ruleset container during recovery. Another writer may
-        # add an unrelated rule after our GET and before a container DELETE.
-        # An empty Agent-created ruleset is safer than deleting external state.
+        cf_delete_pending_rule_if_expected "$CF_PENDING_ZONE" "$ruleset_id" "$rule_id" "$CF_PENDING_FINGERPRINT" || return 1
       else
         rc=$?; [ "$rc" -eq 1 ] || return 1
       fi
@@ -585,7 +581,7 @@ cf_issue_origin_cert(){
   openssl req -new -sha256 -key "$key" -out "$csr" -subj "/CN=$host" -addext "subjectAltName=DNS:$host"
   csr_value="$(cat "$csr")"
   body="$(jq -n --arg csr "$csr_value" --arg host "$host" '{hostnames:[$host],request_type:"origin-rsa",requested_validity:1095,csr:$csr}')"
-  cf_set_pending_write origin-cert-create "$zone_id" "$host" "$csr_value" "" ""
+  cf_set_pending_write origin-cert-create "$zone_id" "$host" "$csr_value" "" "" ""
   res="$(cf_api POST '/certificates' "$body")" || die "Cloudflare Origin CA certificate issuance response was not confirmed. Durable transaction recovery will reconcile the exact CSR before continuing."
   jq -r '.result.certificate // empty' <<<"$res" > "$crt"
   CF_RESULT_CERT_ID="$(jq -r '.result.id // empty' <<<"$res")"
@@ -598,15 +594,16 @@ cf_issue_origin_cert(){
 }
 
 cf_reconcile_dns(){
-  local zone_id="$1" host="$2" ip="$3" owned_dns_id="${4:-}" owned_fingerprint="${5:-}" res count id type content proxied record current_fingerprint comment body marker
-  CF_RESULT_DNS_ID=""; CF_RESULT_DNS_OWNED=false; CF_RESULT_DNS_ACTION=""; CF_RESULT_DNS_OLD_CONTENT=""; CF_RESULT_DNS_OLD_PROXIED=""; CF_RESULT_DNS_OLD_TTL=""; CF_RESULT_DNS_FINGERPRINT=""
+  local zone_id="$1" host="$2" ip="$3" owned_dns_id="${4:-}" owned_fingerprint="${5:-}" res count id type content proxied record current_fingerprint comment body marker pending_fingerprint
+  CF_RESULT_DNS_ID=""; CF_RESULT_DNS_OWNED=false; CF_RESULT_DNS_ACTION=""; CF_RESULT_DNS_FINGERPRINT=""
   res="$(cf_api GET "/zones/$zone_id/dns_records?name=$host&per_page=100")" || die "Cloudflare DNS lookup failed."
   count="$(jq '.result | length' <<<"$res")"
   if [ "$count" -eq 0 ]; then
     marker="$(cf_new_ownership_marker)"; comment="Managed by AI Server Agent txn:$marker"
     body="$(jq -n --arg name "$host" --arg ip "$ip" --arg comment "$comment" '{type:"A",name:$name,content:$ip,ttl:1,proxied:true,comment:$comment}')"
-    cf_set_pending_write dns-create "$zone_id" "$host" "$ip" "" "$marker"
-    res="$(cf_api POST "/zones/$zone_id/dns_records" "$body")" || die "Cloudflare DNS create response was not confirmed. Durable transaction recovery will require the exact ownership marker."
+    pending_fingerprint="$(cf_dns_intent_fingerprint <<<"$body")"
+    cf_set_pending_write dns-create "$zone_id" "$host" "$ip" "" "$marker" "$pending_fingerprint"
+    res="$(cf_api POST "/zones/$zone_id/dns_records" "$body")" || die "Cloudflare DNS create response was not confirmed. Durable transaction recovery will verify the exact create representation before any cleanup."
     id="$(jq -r '.result.id // empty' <<<"$res")"; [ -n "$id" ] || die "Cloudflare did not return the created DNS record ID."
     record="$(jq -ce '.result | select(type=="object")' <<<"$res")" || die "Cloudflare returned an invalid created DNS record."
     CF_RESULT_DNS_ID="$id"; CF_RESULT_DNS_OWNED=true; CF_RESULT_DNS_ACTION=created; CF_RESULT_DNS_FINGERPRINT="$(cf_dns_fingerprint <<<"$record")"
@@ -631,19 +628,20 @@ cf_reconcile_dns(){
 
 cf_reconcile_origin_rule(){
   local zone_id="$1" host="$2" port="$3" owned_ruleset="${4:-}" owned_rule="${5:-}" owned_fingerprint="${6:-}"
-  local list ruleset_id rule_ref rule_id ref_match rule_body create_body res ruleset marker pending_rule_body ruleset_desc verify_id rule current_fingerprint
+  local list ruleset_id rule_ref ref_match rule_body create_body res ruleset marker pending_rule_body ruleset_desc verify_id rule current_fingerprint pending_fingerprint
   CF_RESULT_ORIGIN_RULESET_ID=""; CF_RESULT_ORIGIN_RULE_ID=""; CF_RESULT_ORIGIN_ACTION=""; CF_RESULT_ORIGIN_FINGERPRINT=""
   rule_ref="ai_server_agent_$(printf '%s' "$host" | sha256sum | cut -c1-16)"
   rule_body="$(jq -n --arg ref "$rule_ref" --arg host "$host" --argjson port "$port" '{ref:$ref,description:"AI Server Agent origin port",expression:("http.host eq \""+$host+"\""),action:"route",action_parameters:{origin:{port:$port}},enabled:true}')"
   list="$(cf_api GET "/zones/$zone_id/rulesets?per_page=100")" || die "Cloudflare ruleset lookup failed."
   ruleset_id="$(jq -r '.result[]? | select(.kind=="zone" and .phase=="http_request_origin") | .id' <<<"$list" | head -n1)"
   if [ -z "$ruleset_id" ]; then
-    marker="$(cf_new_ownership_marker)"; ruleset_desc="Hostname-scoped origin routing managed by AI Server Agent txn:$marker"
+    marker="$(cf_new_ownership_marker)"; ruleset_desc="Hostname-scoped origin routing managed by AI Server Agent"
     pending_rule_body="$(jq -n --arg ref "$rule_ref" --arg host "$host" --argjson port "$port" --arg desc "AI Server Agent origin port txn:$marker" '{ref:$ref,description:$desc,expression:("http.host eq \""+$host+"\""),action:"route",action_parameters:{origin:{port:$port}},enabled:true}')"
+    pending_fingerprint="$(cf_rule_intent_fingerprint <<<"$pending_rule_body")"
     create_body="$(jq -n --argjson rule "$pending_rule_body" --arg desc "$ruleset_desc" '{name:"AI Server Agent Origin Rules",description:$desc,kind:"zone",phase:"http_request_origin",rules:[$rule]}')"
-    cf_set_pending_write origin-ruleset-create "$zone_id" "$host" "$rule_ref" http_request_origin "$marker"
-    res="$(cf_api POST "/zones/$zone_id/rulesets" "$create_body")" || die "Cloudflare Origin Rules create response was not confirmed. Durable recovery will require the exact ownership marker."
-    CF_RESULT_ORIGIN_RULESET_ID="$(jq -r '.result.id // empty' <<<"$res")"; CF_RESULT_ORIGIN_RULE_ID="$(jq -r '.result.rules[0].id // empty' <<<"$res")"; CF_RESULT_ORIGIN_ACTION=ruleset-created
+    cf_set_pending_write origin-rule-create "$zone_id" "$host" "$rule_ref" http_request_origin "$marker" "$pending_fingerprint"
+    res="$(cf_api POST "/zones/$zone_id/rulesets" "$create_body")" || die "Cloudflare Origin Rules create response was not confirmed. Durable recovery will verify the exact marked rule representation before any cleanup."
+    CF_RESULT_ORIGIN_RULESET_ID="$(jq -r '.result.id // empty' <<<"$res")"; CF_RESULT_ORIGIN_RULE_ID="$(jq -r '.result.rules[0].id // empty' <<<"$res")"; CF_RESULT_ORIGIN_ACTION=created
     [ -n "$CF_RESULT_ORIGIN_RULESET_ID" ] && [ -n "$CF_RESULT_ORIGIN_RULE_ID" ] || die "Cloudflare did not return the created Origin Rules IDs."
     rule="$(jq -ce '.result.rules[0] | select(type=="object")' <<<"$res")" || die "Cloudflare returned an invalid created Origin Rule."
     CF_RESULT_ORIGIN_FINGERPRINT="$(cf_rule_fingerprint <<<"$rule")"
@@ -663,9 +661,10 @@ cf_reconcile_origin_rule(){
       else
         marker="$(cf_new_ownership_marker)"
         pending_rule_body="$(jq -n --arg ref "$rule_ref" --arg host "$host" --argjson port "$port" --arg desc "AI Server Agent origin port txn:$marker" '{ref:$ref,description:$desc,expression:("http.host eq \""+$host+"\""),action:"route",action_parameters:{origin:{port:$port}},enabled:true}')"
-        cf_set_pending_write origin-rule-create "$zone_id" "$host" "$rule_ref" http_request_origin "$marker"
-        res="$(cf_api POST "/zones/$zone_id/rulesets/$ruleset_id/rules" "$pending_rule_body")" || die "Cloudflare Origin Rule recreate response was not confirmed. Durable recovery will require the exact ownership marker."
-        CF_RESULT_ORIGIN_RULESET_ID="$ruleset_id"; CF_RESULT_ORIGIN_RULE_ID="$(jq -r '.result.id // empty' <<<"$res")"; CF_RESULT_ORIGIN_ACTION=recreated
+        pending_fingerprint="$(cf_rule_intent_fingerprint <<<"$pending_rule_body")"
+        cf_set_pending_write origin-rule-create "$zone_id" "$host" "$rule_ref" http_request_origin "$marker" "$pending_fingerprint"
+        res="$(cf_api POST "/zones/$zone_id/rulesets/$ruleset_id/rules" "$pending_rule_body")" || die "Cloudflare Origin Rule recreate response was not confirmed. Durable recovery will verify the exact marked rule representation before any cleanup."
+        CF_RESULT_ORIGIN_RULESET_ID="$ruleset_id"; CF_RESULT_ORIGIN_RULE_ID="$(jq -r '.result.id // empty' <<<"$res")"; CF_RESULT_ORIGIN_ACTION=created
         rule="$(jq -ce '.result | select(type=="object")' <<<"$res")" || die "Cloudflare returned an invalid recreated Origin Rule."
         CF_RESULT_ORIGIN_FINGERPRINT="$(cf_rule_fingerprint <<<"$rule")"
       fi
@@ -673,8 +672,9 @@ cf_reconcile_origin_rule(){
       [ -z "$ref_match" ] || die "An unowned Origin Rule already uses the Agent ref. Refusing to adopt or overwrite it."
       marker="$(cf_new_ownership_marker)"
       pending_rule_body="$(jq -n --arg ref "$rule_ref" --arg host "$host" --argjson port "$port" --arg desc "AI Server Agent origin port txn:$marker" '{ref:$ref,description:$desc,expression:("http.host eq \""+$host+"\""),action:"route",action_parameters:{origin:{port:$port}},enabled:true}')"
-      cf_set_pending_write origin-rule-create "$zone_id" "$host" "$rule_ref" http_request_origin "$marker"
-      res="$(cf_api POST "/zones/$zone_id/rulesets/$ruleset_id/rules" "$pending_rule_body")" || die "Cloudflare Origin Rule create response was not confirmed. Durable recovery will require the exact ownership marker."
+      pending_fingerprint="$(cf_rule_intent_fingerprint <<<"$pending_rule_body")"
+      cf_set_pending_write origin-rule-create "$zone_id" "$host" "$rule_ref" http_request_origin "$marker" "$pending_fingerprint"
+      res="$(cf_api POST "/zones/$zone_id/rulesets/$ruleset_id/rules" "$pending_rule_body")" || die "Cloudflare Origin Rule create response was not confirmed. Durable recovery will verify the exact marked rule representation before any cleanup."
       CF_RESULT_ORIGIN_RULESET_ID="$ruleset_id"; CF_RESULT_ORIGIN_RULE_ID="$(jq -r '.result.id // empty' <<<"$res")"; CF_RESULT_ORIGIN_ACTION=created
       rule="$(jq -ce '.result | select(type=="object")' <<<"$res")" || die "Cloudflare returned an invalid created Origin Rule."
       CF_RESULT_ORIGIN_FINGERPRINT="$(cf_rule_fingerprint <<<"$rule")"
@@ -696,19 +696,20 @@ cf_reconcile_origin_rule(){
 
 cf_reconcile_ssl_config_rule(){
   local zone_id="$1" host="$2" owned_ruleset="${3:-}" owned_rule="${4:-}" owned_fingerprint="${5:-}"
-  local list ruleset_id rule_ref ref_match rule_body create_body res ruleset marker pending_rule_body ruleset_desc verify_id rule current_fingerprint
+  local list ruleset_id rule_ref ref_match rule_body create_body res ruleset marker pending_rule_body ruleset_desc verify_id rule current_fingerprint pending_fingerprint
   CF_RESULT_SSL_RULESET_ID=""; CF_RESULT_SSL_RULE_ID=""; CF_RESULT_SSL_ACTION=""; CF_RESULT_SSL_FINGERPRINT=""
   rule_ref="ai_server_agent_ssl_$(printf '%s' "$host" | sha256sum | cut -c1-16)"
   rule_body="$(jq -n --arg ref "$rule_ref" --arg host "$host" '{ref:$ref,description:"AI Server Agent strict SSL",expression:("http.host eq \""+$host+"\""),action:"set_config",action_parameters:{ssl:"strict"},enabled:true}')"
   list="$(cf_api GET "/zones/$zone_id/rulesets?per_page=100")" || die "Cloudflare ruleset lookup failed."
   ruleset_id="$(jq -r '.result[]? | select(.kind=="zone" and .phase=="http_config_settings") | .id' <<<"$list" | head -n1)"
   if [ -z "$ruleset_id" ]; then
-    marker="$(cf_new_ownership_marker)"; ruleset_desc="Hostname-scoped configuration managed by AI Server Agent txn:$marker"
+    marker="$(cf_new_ownership_marker)"; ruleset_desc="Hostname-scoped configuration managed by AI Server Agent"
     pending_rule_body="$(jq -n --arg ref "$rule_ref" --arg host "$host" --arg desc "AI Server Agent strict SSL txn:$marker" '{ref:$ref,description:$desc,expression:("http.host eq \""+$host+"\""),action:"set_config",action_parameters:{ssl:"strict"},enabled:true}')"
+    pending_fingerprint="$(cf_rule_intent_fingerprint <<<"$pending_rule_body")"
     create_body="$(jq -n --argjson rule "$pending_rule_body" --arg desc "$ruleset_desc" '{name:"AI Server Agent Configuration Rules",description:$desc,kind:"zone",phase:"http_config_settings",rules:[$rule]}')"
-    cf_set_pending_write ssl-ruleset-create "$zone_id" "$host" "$rule_ref" http_config_settings "$marker"
-    res="$(cf_api POST "/zones/$zone_id/rulesets" "$create_body")" || die "Cloudflare Configuration Rules create response was not confirmed. Durable recovery will require the exact ownership marker."
-    CF_RESULT_SSL_RULESET_ID="$(jq -r '.result.id // empty' <<<"$res")"; CF_RESULT_SSL_RULE_ID="$(jq -r '.result.rules[0].id // empty' <<<"$res")"; CF_RESULT_SSL_ACTION=ruleset-created
+    cf_set_pending_write ssl-rule-create "$zone_id" "$host" "$rule_ref" http_config_settings "$marker" "$pending_fingerprint"
+    res="$(cf_api POST "/zones/$zone_id/rulesets" "$create_body")" || die "Cloudflare Configuration Rules create response was not confirmed. Durable recovery will verify the exact marked rule representation before any cleanup."
+    CF_RESULT_SSL_RULESET_ID="$(jq -r '.result.id // empty' <<<"$res")"; CF_RESULT_SSL_RULE_ID="$(jq -r '.result.rules[0].id // empty' <<<"$res")"; CF_RESULT_SSL_ACTION=created
     [ -n "$CF_RESULT_SSL_RULESET_ID" ] && [ -n "$CF_RESULT_SSL_RULE_ID" ] || die "Cloudflare did not return the created Configuration Rules IDs."
     rule="$(jq -ce '.result.rules[0] | select(type=="object")' <<<"$res")" || die "Cloudflare returned an invalid created Configuration Rule."
     CF_RESULT_SSL_FINGERPRINT="$(cf_rule_fingerprint <<<"$rule")"
@@ -728,9 +729,10 @@ cf_reconcile_ssl_config_rule(){
       else
         marker="$(cf_new_ownership_marker)"
         pending_rule_body="$(jq -n --arg ref "$rule_ref" --arg host "$host" --arg desc "AI Server Agent strict SSL txn:$marker" '{ref:$ref,description:$desc,expression:("http.host eq \""+$host+"\""),action:"set_config",action_parameters:{ssl:"strict"},enabled:true}')"
-        cf_set_pending_write ssl-rule-create "$zone_id" "$host" "$rule_ref" http_config_settings "$marker"
-        res="$(cf_api POST "/zones/$zone_id/rulesets/$ruleset_id/rules" "$pending_rule_body")" || die "Cloudflare Configuration Rule recreate response was not confirmed. Durable recovery will require the exact ownership marker."
-        CF_RESULT_SSL_RULESET_ID="$ruleset_id"; CF_RESULT_SSL_RULE_ID="$(jq -r '.result.id // empty' <<<"$res")"; CF_RESULT_SSL_ACTION=recreated
+        pending_fingerprint="$(cf_rule_intent_fingerprint <<<"$pending_rule_body")"
+        cf_set_pending_write ssl-rule-create "$zone_id" "$host" "$rule_ref" http_config_settings "$marker" "$pending_fingerprint"
+        res="$(cf_api POST "/zones/$zone_id/rulesets/$ruleset_id/rules" "$pending_rule_body")" || die "Cloudflare Configuration Rule recreate response was not confirmed. Durable recovery will verify the exact marked rule representation before any cleanup."
+        CF_RESULT_SSL_RULESET_ID="$ruleset_id"; CF_RESULT_SSL_RULE_ID="$(jq -r '.result.id // empty' <<<"$res")"; CF_RESULT_SSL_ACTION=created
         rule="$(jq -ce '.result | select(type=="object")' <<<"$res")" || die "Cloudflare returned an invalid recreated Configuration Rule."
         CF_RESULT_SSL_FINGERPRINT="$(cf_rule_fingerprint <<<"$rule")"
       fi
@@ -738,8 +740,9 @@ cf_reconcile_ssl_config_rule(){
       [ -z "$ref_match" ] || die "An unowned Configuration Rule already uses the Agent SSL ref. Refusing to adopt or overwrite it."
       marker="$(cf_new_ownership_marker)"
       pending_rule_body="$(jq -n --arg ref "$rule_ref" --arg host "$host" --arg desc "AI Server Agent strict SSL txn:$marker" '{ref:$ref,description:$desc,expression:("http.host eq \""+$host+"\""),action:"set_config",action_parameters:{ssl:"strict"},enabled:true}')"
-      cf_set_pending_write ssl-rule-create "$zone_id" "$host" "$rule_ref" http_config_settings "$marker"
-      res="$(cf_api POST "/zones/$zone_id/rulesets/$ruleset_id/rules" "$pending_rule_body")" || die "Cloudflare Configuration Rule create response was not confirmed. Durable recovery will require the exact ownership marker."
+      pending_fingerprint="$(cf_rule_intent_fingerprint <<<"$pending_rule_body")"
+      cf_set_pending_write ssl-rule-create "$zone_id" "$host" "$rule_ref" http_config_settings "$marker" "$pending_fingerprint"
+      res="$(cf_api POST "/zones/$zone_id/rulesets/$ruleset_id/rules" "$pending_rule_body")" || die "Cloudflare Configuration Rule create response was not confirmed. Durable recovery will verify the exact marked rule representation before any cleanup."
       CF_RESULT_SSL_RULESET_ID="$ruleset_id"; CF_RESULT_SSL_RULE_ID="$(jq -r '.result.id // empty' <<<"$res")"; CF_RESULT_SSL_ACTION=created
       rule="$(jq -ce '.result | select(type=="object")' <<<"$res")" || die "Cloudflare returned an invalid created Configuration Rule."
       CF_RESULT_SSL_FINGERPRINT="$(cf_rule_fingerprint <<<"$rule")"
@@ -875,20 +878,20 @@ restore_cloudflare_local_backup(){
 }
 
 save_cloudflare_transaction_state(){
-  local host="$1" zone_id="$2" dns_id="$3" dns_action="$4" dns_old_content="$5" dns_old_proxied="$6" dns_old_ttl="$7" origin_ruleset="$8" origin_rule="$9" origin_action="${10}" old_port="${11}" ssl_ruleset="${12}" ssl_rule="${13}" ssl_action="${14}" cert_id="${15}" dns_fingerprint="${16:-}" origin_fingerprint="${17:-}" ssl_fingerprint="${18:-}" tmp
+  local host="$1" zone_id="$2" dns_id="$3" dns_action="$4" origin_ruleset="$5" origin_rule="$6" origin_action="$7" ssl_ruleset="$8" ssl_rule="$9" ssl_action="${10}" cert_id="${11}" dns_fingerprint="${12:-}" origin_fingerprint="${13:-}" ssl_fingerprint="${14:-}" tmp
   install -d -o root -g root -m 0700 "$CONTROL_DIR" || return 1
   tmp="$(mktemp "$CONTROL_DIR/.cloudflare-transaction.XXXXXX")" || return 1
   chmod 0600 "$tmp"
   jq -n \
     --arg phase "$CF_TXN_PHASE" --argjson backup_ready "$CF_TXN_BACKUP_READY" \
-    --arg host "$host" --arg zone_id "$zone_id" --arg dns_id "$dns_id" --arg dns_action "$dns_action" --arg dns_fingerprint "$dns_fingerprint" --arg dns_old_content "$dns_old_content" --arg dns_old_proxied "$dns_old_proxied" --arg dns_old_ttl "$dns_old_ttl" \
-    --arg origin_ruleset "$origin_ruleset" --arg origin_rule "$origin_rule" --arg origin_action "$origin_action" --arg origin_fingerprint "$origin_fingerprint" --arg old_port "$old_port" \
+    --arg host "$host" --arg zone_id "$zone_id" --arg dns_id "$dns_id" --arg dns_action "$dns_action" --arg dns_fingerprint "$dns_fingerprint" \
+    --arg origin_ruleset "$origin_ruleset" --arg origin_rule "$origin_rule" --arg origin_action "$origin_action" --arg origin_fingerprint "$origin_fingerprint" \
     --arg ssl_ruleset "$ssl_ruleset" --arg ssl_rule "$ssl_rule" --arg ssl_action "$ssl_action" --arg ssl_fingerprint "$ssl_fingerprint" --arg cert_id "$cert_id" \
-    --arg pending_kind "$CF_PENDING_KIND" --arg pending_zone "$CF_PENDING_ZONE" --arg pending_host "$CF_PENDING_HOST" --arg pending_value "$CF_PENDING_VALUE" --arg pending_phase "$CF_PENDING_PHASE" --arg pending_marker "$CF_PENDING_MARKER" \
+    --arg pending_kind "$CF_PENDING_KIND" --arg pending_zone "$CF_PENDING_ZONE" --arg pending_host "$CF_PENDING_HOST" --arg pending_value "$CF_PENDING_VALUE" --arg pending_phase "$CF_PENDING_PHASE" --arg pending_marker "$CF_PENDING_MARKER" --arg pending_fingerprint "$CF_PENDING_FINGERPRINT" \
     --arg commit_host "$CF_COMMIT_HOST" --arg commit_port "$CF_COMMIT_PORT" --arg commit_zone_id "$CF_COMMIT_ZONE_ID" --arg commit_zone_name "$CF_COMMIT_ZONE_NAME" --arg commit_dns_id "$CF_COMMIT_DNS_ID" --argjson commit_dns_owned "$CF_COMMIT_DNS_OWNED" \
     --arg commit_origin_ruleset "$CF_COMMIT_ORIGIN_RULESET_ID" --arg commit_origin_rule "$CF_COMMIT_ORIGIN_RULE_ID" --arg commit_ssl_ruleset "$CF_COMMIT_SSL_RULESET_ID" --arg commit_ssl_rule "$CF_COMMIT_SSL_RULE_ID" --arg commit_cert "$CF_COMMIT_CERT_ID" \
     --arg commit_dns_fingerprint "$CF_COMMIT_DNS_FINGERPRINT" --arg commit_origin_fingerprint "$CF_COMMIT_ORIGIN_FINGERPRINT" --arg commit_ssl_fingerprint "$CF_COMMIT_SSL_FINGERPRINT" \
-    '{version:2,phase:$phase,backup_ready:$backup_ready,hostname:$host,zone_id:$zone_id,dns:{id:$dns_id,action:$dns_action,fingerprint:$dns_fingerprint,old_content:$dns_old_content,old_proxied:$dns_old_proxied,old_ttl:$dns_old_ttl},origin:{ruleset_id:$origin_ruleset,rule_id:$origin_rule,action:$origin_action,fingerprint:$origin_fingerprint,old_port:$old_port},ssl:{ruleset_id:$ssl_ruleset,rule_id:$ssl_rule,action:$ssl_action,fingerprint:$ssl_fingerprint},certificate_id:$cert_id,pending:{kind:$pending_kind,zone_id:$pending_zone,hostname:$pending_host,value:$pending_value,phase:$pending_phase,marker:$pending_marker},commit:{hostname:$commit_host,port:$commit_port,zone_id:$commit_zone_id,zone_name:$commit_zone_name,dns_id:$commit_dns_id,dns_owned:$commit_dns_owned,dns_fingerprint:$commit_dns_fingerprint,origin_ruleset_id:$commit_origin_ruleset,origin_rule_id:$commit_origin_rule,origin_rule_fingerprint:$commit_origin_fingerprint,ssl_ruleset_id:$commit_ssl_ruleset,ssl_rule_id:$commit_ssl_rule,ssl_rule_fingerprint:$commit_ssl_fingerprint,certificate_id:$commit_cert}}' > "$tmp" || { rm -f "$tmp"; return 1; }
+    '{version:3,phase:$phase,backup_ready:$backup_ready,hostname:$host,zone_id:$zone_id,dns:{id:$dns_id,action:$dns_action,fingerprint:$dns_fingerprint},origin:{ruleset_id:$origin_ruleset,rule_id:$origin_rule,action:$origin_action,fingerprint:$origin_fingerprint},ssl:{ruleset_id:$ssl_ruleset,rule_id:$ssl_rule,action:$ssl_action,fingerprint:$ssl_fingerprint},certificate_id:$cert_id,pending:{kind:$pending_kind,zone_id:$pending_zone,hostname:$pending_host,value:$pending_value,phase:$pending_phase,marker:$pending_marker,fingerprint:$pending_fingerprint},commit:{hostname:$commit_host,port:$commit_port,zone_id:$commit_zone_id,zone_name:$commit_zone_name,dns_id:$commit_dns_id,dns_owned:$commit_dns_owned,dns_fingerprint:$commit_dns_fingerprint,origin_ruleset_id:$commit_origin_ruleset,origin_rule_id:$commit_origin_rule,origin_rule_fingerprint:$commit_origin_fingerprint,ssl_ruleset_id:$commit_ssl_ruleset,ssl_rule_id:$commit_ssl_rule,ssl_rule_fingerprint:$commit_ssl_fingerprint,certificate_id:$commit_cert}}' > "$tmp" || { rm -f "$tmp"; return 1; }
   chown root:root "$tmp" || { rm -f "$tmp"; return 1; }
   chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
   sync -f "$tmp" || { rm -f "$tmp"; return 1; }
@@ -902,38 +905,69 @@ validate_cloudflare_transaction_state(){
   [ "$(stat -c '%u:%g:%a' "$f" 2>/dev/null)" = "0:0:600" ] || return 1
   size="$(stat -c '%s' "$f" 2>/dev/null || printf 999999)"; [ "$size" -gt 0 ] && [ "$size" -le 131072 ] || return 1
   jq -e '
-    type=="object" and .version==2 and
+    def hex64: type=="string" and test("^[0-9a-f]{64}$");
+    def marker: type=="string" and test("^[0-9a-fA-F]{16,128}$");
+    def empty_commit:
+      .dns_owned==false and .hostname=="" and .port=="" and .zone_id=="" and .zone_name=="" and
+      .dns_id=="" and .dns_fingerprint=="" and .origin_ruleset_id=="" and .origin_rule_id=="" and
+      .origin_rule_fingerprint=="" and .ssl_ruleset_id=="" and .ssl_rule_id=="" and
+      .ssl_rule_fingerprint=="" and .certificate_id=="";
+    type=="object" and .version==3 and
     (keys|sort)==(["backup_ready","certificate_id","commit","dns","hostname","origin","pending","phase","ssl","version","zone_id"]|sort) and
-    (.phase=="prepared" or .phase=="applying" or .phase=="committing" or .phase=="committed" or .phase=="rolled_back") and
-    (.backup_ready|type)=="boolean" and (.hostname|type)=="string" and (.zone_id|type)=="string" and (.certificate_id|type)=="string" and
-    (.dns|type)=="object" and (.dns|keys|sort)==(["action","fingerprint","id","old_content","old_proxied","old_ttl"]|sort) and
-    (.dns.id|type)=="string" and (.dns.action|type)=="string" and (.dns.fingerprint|type)=="string" and (.dns.old_content|type)=="string" and (.dns.old_proxied|type)=="string" and (.dns.old_ttl|type)=="string" and
-    (.dns.action=="" or .dns.action=="created") and
-    (.origin|type)=="object" and (.origin|keys|sort)==(["action","fingerprint","old_port","rule_id","ruleset_id"]|sort) and
-    (.origin.ruleset_id|type)=="string" and (.origin.rule_id|type)=="string" and (.origin.action|type)=="string" and (.origin.fingerprint|type)=="string" and (.origin.old_port|type)=="string" and
-    (.origin.action=="" or .origin.action=="ruleset-created" or .origin.action=="created" or .origin.action=="recreated") and
+    (.phase=="prepared" or .phase=="applying" or .phase=="committing" or .phase=="committed" or .phase=="rolling_back" or .phase=="rolled_back") and
+    .backup_ready==true and (.hostname|type)=="string" and (.hostname|length)>0 and (.zone_id|type)=="string" and (.zone_id|length)>0 and (.certificate_id|type)=="string" and
+    (.dns|type)=="object" and (.dns|keys|sort)==(["action","fingerprint","id"]|sort) and
+    (.dns.id|type)=="string" and (.dns.action|type)=="string" and (.dns.fingerprint|type)=="string" and (.dns.action=="" or .dns.action=="created") and
+    (if .dns.id=="" then .dns.fingerprint=="" else (.dns.fingerprint|hex64) end) and
+    (if .dns.action=="created" then (.dns.id|length)>0 else true end) and
+    (.origin|type)=="object" and (.origin|keys|sort)==(["action","fingerprint","rule_id","ruleset_id"]|sort) and
+    (.origin.ruleset_id|type)=="string" and (.origin.rule_id|type)=="string" and (.origin.action|type)=="string" and (.origin.fingerprint|type)=="string" and (.origin.action=="" or .origin.action=="created") and
+    (if .origin.rule_id=="" then .origin.fingerprint=="" else ((.origin.ruleset_id|length)>0 and (.origin.fingerprint|hex64)) end) and
+    (if .origin.action=="created" then ((.origin.ruleset_id|length)>0 and (.origin.rule_id|length)>0) else true end) and
     (.ssl|type)=="object" and (.ssl|keys|sort)==(["action","fingerprint","rule_id","ruleset_id"]|sort) and
-    (.ssl.ruleset_id|type)=="string" and (.ssl.rule_id|type)=="string" and (.ssl.action|type)=="string" and (.ssl.fingerprint|type)=="string" and
-    (.ssl.action=="" or .ssl.action=="ruleset-created" or .ssl.action=="created" or .ssl.action=="recreated") and
-    (.pending|type)=="object" and (.pending|keys|sort)==(["hostname","kind","marker","phase","value","zone_id"]|sort) and
-    (.pending.kind|type)=="string" and (.pending.zone_id|type)=="string" and (.pending.hostname|type)=="string" and (.pending.value|type)=="string" and (.pending.phase|type)=="string" and (.pending.marker|type)=="string" and
-    (.pending.kind=="" or .pending.kind=="origin-cert-create" or .pending.kind=="dns-create" or .pending.kind=="origin-rule-create" or .pending.kind=="ssl-rule-create" or .pending.kind=="origin-ruleset-create" or .pending.kind=="ssl-ruleset-create") and
+    (.ssl.ruleset_id|type)=="string" and (.ssl.rule_id|type)=="string" and (.ssl.action|type)=="string" and (.ssl.fingerprint|type)=="string" and (.ssl.action=="" or .ssl.action=="created") and
+    (if .ssl.rule_id=="" then .ssl.fingerprint=="" else ((.ssl.ruleset_id|length)>0 and (.ssl.fingerprint|hex64)) end) and
+    (if .ssl.action=="created" then ((.ssl.ruleset_id|length)>0 and (.ssl.rule_id|length)>0) else true end) and
+    (.pending|type)=="object" and (.pending|keys|sort)==(["fingerprint","hostname","kind","marker","phase","value","zone_id"]|sort) and
+    (.pending.kind|type)=="string" and (.pending.zone_id|type)=="string" and (.pending.hostname|type)=="string" and (.pending.value|type)=="string" and (.pending.phase|type)=="string" and (.pending.marker|type)=="string" and (.pending.fingerprint|type)=="string" and
+    (.pending.kind=="" or .pending.kind=="origin-cert-create" or .pending.kind=="dns-create" or .pending.kind=="origin-rule-create" or .pending.kind=="ssl-rule-create") and
+    (if .pending.kind=="" then
+       (.pending.zone_id=="" and .pending.hostname=="" and .pending.value=="" and .pending.phase=="" and .pending.marker=="" and .pending.fingerprint=="")
+     else
+       ((.phase=="prepared" or .phase=="rolling_back") and .pending.zone_id==.zone_id and .pending.hostname==.hostname and (.pending.value|length)>0 and
+        (if .pending.kind=="origin-cert-create" then
+           (.pending.phase=="" and .pending.marker=="" and .pending.fingerprint=="")
+         elif .pending.kind=="dns-create" then
+           (.pending.phase=="" and (.pending.marker|marker) and (.pending.fingerprint|hex64))
+         elif .pending.kind=="origin-rule-create" then
+           (.pending.phase=="http_request_origin" and (.pending.marker|marker) and (.pending.fingerprint|hex64))
+         else
+           (.pending.phase=="http_config_settings" and (.pending.marker|marker) and (.pending.fingerprint|hex64))
+         end))
+     end) and
     (.commit|type)=="object" and (.commit|keys|sort)==(["certificate_id","dns_fingerprint","dns_id","dns_owned","hostname","origin_rule_fingerprint","origin_rule_id","origin_ruleset_id","port","ssl_rule_fingerprint","ssl_rule_id","ssl_ruleset_id","zone_id","zone_name"]|sort) and
     (.commit.hostname|type)=="string" and (.commit.port|type)=="string" and (.commit.zone_id|type)=="string" and (.commit.zone_name|type)=="string" and (.commit.dns_id|type)=="string" and (.commit.dns_owned|type)=="boolean" and (.commit.dns_fingerprint|type)=="string" and (.commit.origin_ruleset_id|type)=="string" and (.commit.origin_rule_id|type)=="string" and (.commit.origin_rule_fingerprint|type)=="string" and (.commit.ssl_ruleset_id|type)=="string" and (.commit.ssl_rule_id|type)=="string" and (.commit.ssl_rule_fingerprint|type)=="string" and (.commit.certificate_id|type)=="string" and
-    (if .dns.action=="" then true else ((.dns.id|length)>0 and (.dns.fingerprint|test("^[0-9a-f]{64}$"))) end) and
-    (if .origin.action=="" then true else ((.origin.ruleset_id|length)>0 and (.origin.rule_id|length)>0 and (.origin.fingerprint|test("^[0-9a-f]{64}$"))) end) and
-    (if .ssl.action=="" then true else ((.ssl.ruleset_id|length)>0 and (.ssl.rule_id|length)>0 and (.ssl.fingerprint|test("^[0-9a-f]{64}$"))) end) and
-    (if .pending.kind=="" then true elif .pending.kind=="origin-cert-create" then ((.pending.zone_id|length)>0 and (.pending.hostname|length)>0 and (.pending.value|length)>0) else ((.pending.zone_id|length)>0 and (.pending.hostname|length)>0 and (.pending.value|length)>0 and (.pending.marker|test("^[0-9a-fA-F]{16,128}$"))) end) and
-    (if (.phase=="applying" or .phase=="committing" or .phase=="committed") then .backup_ready==true else true end) and
-    (if (.phase=="committing" or .phase=="committed" or .phase=="rolled_back") then .pending.kind=="" else true end) and
-    (if .phase=="rolled_back" then (.dns.action=="" and .origin.action=="" and .ssl.action=="" and .certificate_id=="") else true end) and
-    (if (.phase=="committing" or .phase=="committed") then ((.commit.hostname|length)>0 and (.commit.port|test("^[0-9]+$")) and (.commit.zone_id|length)>0 and (.commit.zone_name|length)>0 and (.commit.dns_id|length)>0 and (.commit.dns_fingerprint|test("^[0-9a-f]{64}$")) and (.commit.origin_ruleset_id|length)>0 and (.commit.origin_rule_id|length)>0 and (.commit.origin_rule_fingerprint|test("^[0-9a-f]{64}$")) and (.commit.ssl_ruleset_id|length)>0 and (.commit.ssl_rule_id|length)>0 and (.commit.ssl_rule_fingerprint|test("^[0-9a-f]{64}$")) and (.commit.certificate_id|length)>0) else true end)
+    (if (.phase=="committing" or .phase=="committed") then
+       (.pending.kind=="" and .commit.hostname==.hostname and .commit.zone_id==.zone_id and (.commit.port|test("^[0-9]+$")) and (.commit.zone_name|length)>0 and
+        .commit.dns_id==.dns.id and .commit.dns_fingerprint==.dns.fingerprint and (.commit.dns_fingerprint|hex64) and
+        .commit.origin_ruleset_id==.origin.ruleset_id and .commit.origin_rule_id==.origin.rule_id and .commit.origin_rule_fingerprint==.origin.fingerprint and (.commit.origin_rule_fingerprint|hex64) and
+        .commit.ssl_ruleset_id==.ssl.ruleset_id and .commit.ssl_rule_id==.ssl.rule_id and .commit.ssl_rule_fingerprint==.ssl.fingerprint and (.commit.ssl_rule_fingerprint|hex64) and
+        .commit.certificate_id==.certificate_id and (.commit.certificate_id|length)>0)
+     else
+       (.commit|empty_commit)
+     end) and
+    (if .phase=="applying" then .pending.kind=="" else true end) and
+    (if .phase=="rolled_back" then
+       (.pending.kind=="" and .dns.id=="" and .dns.action=="" and .dns.fingerprint=="" and
+        .origin.ruleset_id=="" and .origin.rule_id=="" and .origin.action=="" and .origin.fingerprint=="" and
+        .ssl.ruleset_id=="" and .ssl.rule_id=="" and .ssl.action=="" and .ssl.fingerprint=="" and .certificate_id=="")
+     else true end)
   ' "$f" >/dev/null 2>&1
 }
 
 load_cloudflare_transaction_globals(){
   CF_TXN_PHASE="$(jq -r '.phase' "$CF_TXN_STATE")"; CF_TXN_BACKUP_READY="$(jq -r '.backup_ready' "$CF_TXN_STATE")"
-  CF_PENDING_KIND="$(jq -r '.pending.kind' "$CF_TXN_STATE")"; CF_PENDING_ZONE="$(jq -r '.pending.zone_id' "$CF_TXN_STATE")"; CF_PENDING_HOST="$(jq -r '.pending.hostname' "$CF_TXN_STATE")"; CF_PENDING_VALUE="$(jq -r '.pending.value' "$CF_TXN_STATE")"; CF_PENDING_PHASE="$(jq -r '.pending.phase' "$CF_TXN_STATE")"; CF_PENDING_MARKER="$(jq -r '.pending.marker' "$CF_TXN_STATE")"
+  CF_PENDING_KIND="$(jq -r '.pending.kind' "$CF_TXN_STATE")"; CF_PENDING_ZONE="$(jq -r '.pending.zone_id' "$CF_TXN_STATE")"; CF_PENDING_HOST="$(jq -r '.pending.hostname' "$CF_TXN_STATE")"; CF_PENDING_VALUE="$(jq -r '.pending.value' "$CF_TXN_STATE")"; CF_PENDING_PHASE="$(jq -r '.pending.phase' "$CF_TXN_STATE")"; CF_PENDING_MARKER="$(jq -r '.pending.marker' "$CF_TXN_STATE")"; CF_PENDING_FINGERPRINT="$(jq -r '.pending.fingerprint' "$CF_TXN_STATE")"
   CF_COMMIT_HOST="$(jq -r '.commit.hostname' "$CF_TXN_STATE")"; CF_COMMIT_PORT="$(jq -r '.commit.port' "$CF_TXN_STATE")"; CF_COMMIT_ZONE_ID="$(jq -r '.commit.zone_id' "$CF_TXN_STATE")"; CF_COMMIT_ZONE_NAME="$(jq -r '.commit.zone_name' "$CF_TXN_STATE")"; CF_COMMIT_DNS_ID="$(jq -r '.commit.dns_id' "$CF_TXN_STATE")"; CF_COMMIT_DNS_OWNED="$(jq -r '.commit.dns_owned' "$CF_TXN_STATE")"
   CF_COMMIT_ORIGIN_RULESET_ID="$(jq -r '.commit.origin_ruleset_id' "$CF_TXN_STATE")"; CF_COMMIT_ORIGIN_RULE_ID="$(jq -r '.commit.origin_rule_id' "$CF_TXN_STATE")"; CF_COMMIT_SSL_RULESET_ID="$(jq -r '.commit.ssl_ruleset_id' "$CF_TXN_STATE")"; CF_COMMIT_SSL_RULE_ID="$(jq -r '.commit.ssl_rule_id' "$CF_TXN_STATE")"; CF_COMMIT_CERT_ID="$(jq -r '.commit.certificate_id' "$CF_TXN_STATE")"
   CF_COMMIT_DNS_FINGERPRINT="$(jq -r '.commit.dns_fingerprint' "$CF_TXN_STATE")"; CF_COMMIT_ORIGIN_FINGERPRINT="$(jq -r '.commit.origin_rule_fingerprint' "$CF_TXN_STATE")"; CF_COMMIT_SSL_FINGERPRINT="$(jq -r '.commit.ssl_rule_fingerprint' "$CF_TXN_STATE")"
@@ -954,9 +988,7 @@ cf_reset_transaction_globals(){
   CF_TXN_PHASE=prepared
   CF_TXN_BACKUP_READY=false
   cf_clear_pending_write
-  CF_COMMIT_HOST=""; CF_COMMIT_PORT=""; CF_COMMIT_ZONE_ID=""; CF_COMMIT_ZONE_NAME=""; CF_COMMIT_DNS_ID=""; CF_COMMIT_DNS_OWNED=false
-  CF_COMMIT_ORIGIN_RULESET_ID=""; CF_COMMIT_ORIGIN_RULE_ID=""; CF_COMMIT_SSL_RULESET_ID=""; CF_COMMIT_SSL_RULE_ID=""; CF_COMMIT_CERT_ID=""
-  CF_COMMIT_DNS_FINGERPRINT=""; CF_COMMIT_ORIGIN_FINGERPRINT=""; CF_COMMIT_SSL_FINGERPRINT=""
+  cf_clear_commit_intent
 }
 
 finalize_cloudflare_transaction_state(){
@@ -1009,21 +1041,21 @@ restore_tls_backup(){
 }
 
 rollback_new_cf_resources(){
-  local host="$1" zone_id="$2" dns_id="$3" dns_action="$4" dns_old_content="$5" dns_old_proxied="$6" dns_old_ttl="$7" origin_ruleset="$8" origin_rule="$9" origin_action="${10}" old_port="${11}" ssl_ruleset="${12}" ssl_rule="${13}" ssl_action="${14}" cert_id="${15}" dns_fingerprint="${16:-}" origin_fingerprint="${17:-}" ssl_fingerprint="${18:-}"
+  local host="$1" zone_id="$2" dns_id="$3" dns_action="$4" origin_ruleset="$5" origin_rule="$6" origin_action="$7" ssl_ruleset="$8" ssl_rule="$9" ssl_action="${10}" cert_id="${11}" dns_fingerprint="${12:-}" origin_fingerprint="${13:-}" ssl_fingerprint="${14:-}"
   local keep_dns_id="" keep_dns_action="" keep_dns_fingerprint="" keep_origin_ruleset="" keep_origin_rule="" keep_origin_action="" keep_origin_fingerprint="" keep_ssl_ruleset="" keep_ssl_rule="" keep_ssl_action="" keep_ssl_fingerprint="" keep_cert_id="" failed=0
   if ! cf_recover_pending_write; then failed=1; fi
   case "$dns_action" in
     created) if [ -n "$dns_id" ] && ! cf_delete_dns_if_expected "$zone_id" "$dns_id" "$dns_fingerprint"; then keep_dns_id="$dns_id"; keep_dns_action=created; keep_dns_fingerprint="$dns_fingerprint"; failed=1; fi ;;
   esac
   case "$origin_action" in
-    ruleset-created|created|recreated) if [ -n "$origin_rule" ] && [ -n "$origin_ruleset" ] && ! cf_delete_rule_if_expected "$zone_id" "$origin_ruleset" "$origin_rule" "$origin_fingerprint"; then keep_origin_ruleset="$origin_ruleset"; keep_origin_rule="$origin_rule"; keep_origin_action="$origin_action"; keep_origin_fingerprint="$origin_fingerprint"; failed=1; fi ;;
+    created) if [ -n "$origin_rule" ] && [ -n "$origin_ruleset" ] && ! cf_delete_rule_if_expected "$zone_id" "$origin_ruleset" "$origin_rule" "$origin_fingerprint"; then keep_origin_ruleset="$origin_ruleset"; keep_origin_rule="$origin_rule"; keep_origin_action=created; keep_origin_fingerprint="$origin_fingerprint"; failed=1; fi ;;
   esac
   case "$ssl_action" in
-    ruleset-created|created|recreated) if [ -n "$ssl_rule" ] && [ -n "$ssl_ruleset" ] && ! cf_delete_rule_if_expected "$zone_id" "$ssl_ruleset" "$ssl_rule" "$ssl_fingerprint"; then keep_ssl_ruleset="$ssl_ruleset"; keep_ssl_rule="$ssl_rule"; keep_ssl_action="$ssl_action"; keep_ssl_fingerprint="$ssl_fingerprint"; failed=1; fi ;;
+    created) if [ -n "$ssl_rule" ] && [ -n "$ssl_ruleset" ] && ! cf_delete_rule_if_expected "$zone_id" "$ssl_ruleset" "$ssl_rule" "$ssl_fingerprint"; then keep_ssl_ruleset="$ssl_ruleset"; keep_ssl_rule="$ssl_rule"; keep_ssl_action=created; keep_ssl_fingerprint="$ssl_fingerprint"; failed=1; fi ;;
   esac
   if [ -n "$cert_id" ] && ! cf_delete_owned "/certificates/$cert_id"; then keep_cert_id="$cert_id"; failed=1; fi
   if [ "$failed" -eq 0 ]; then return 0; fi
-  if save_cloudflare_transaction_state "$host" "$zone_id" "$keep_dns_id" "$keep_dns_action" "" "" "" "$keep_origin_ruleset" "$keep_origin_rule" "$keep_origin_action" "$old_port" "$keep_ssl_ruleset" "$keep_ssl_rule" "$keep_ssl_action" "$keep_cert_id" "$keep_dns_fingerprint" "$keep_origin_fingerprint" "$keep_ssl_fingerprint"; then
+  if save_cloudflare_transaction_state "$host" "$zone_id" "$keep_dns_id" "$keep_dns_action" "$keep_origin_ruleset" "$keep_origin_rule" "$keep_origin_action" "$keep_ssl_ruleset" "$keep_ssl_rule" "$keep_ssl_action" "$keep_cert_id" "$keep_dns_fingerprint" "$keep_origin_fingerprint" "$keep_ssl_fingerprint"; then
     warn "Cloudflare rollback was incomplete. Exact remaining ownership/recovery state was preserved in $CF_TXN_STATE."
   else
     warn "CRITICAL: Cloudflare rollback was incomplete and the recovery journal could not be written to $CF_TXN_STATE. Do not continue Cloudflare setup until the host filesystem issue is repaired."
@@ -1035,11 +1067,11 @@ recover_cloudflare_transaction(){
   acquire_management_lock
   { [ -e "$CF_TXN_STATE" ] || [ -L "$CF_TXN_STATE" ]; } || return 0
   validate_cloudflare_transaction_state "$CF_TXN_STATE" || { warn "Cloudflare recovery journal is malformed or has unsafe ownership/mode. It was left untouched."; return 1; }
-  local host zone_id dns_id dns_action dns_old_content dns_old_proxied dns_old_ttl dns_fingerprint origin_ruleset origin_rule origin_action origin_fingerprint old_port ssl_ruleset ssl_rule ssl_action ssl_fingerprint cert_id
+  local host zone_id dns_id dns_action dns_fingerprint origin_ruleset origin_rule origin_action origin_fingerprint ssl_ruleset ssl_rule ssl_action ssl_fingerprint cert_id
   load_cloudflare_transaction_globals
   host="$(jq -r '.hostname' "$CF_TXN_STATE")"; zone_id="$(jq -r '.zone_id' "$CF_TXN_STATE")"
-  dns_id="$(jq -r '.dns.id' "$CF_TXN_STATE")"; dns_action="$(jq -r '.dns.action' "$CF_TXN_STATE")"; dns_old_content="$(jq -r '.dns.old_content' "$CF_TXN_STATE")"; dns_old_proxied="$(jq -r '.dns.old_proxied' "$CF_TXN_STATE")"; dns_old_ttl="$(jq -r '.dns.old_ttl' "$CF_TXN_STATE")"; dns_fingerprint="$(jq -r '.dns.fingerprint' "$CF_TXN_STATE")"
-  origin_ruleset="$(jq -r '.origin.ruleset_id' "$CF_TXN_STATE")"; origin_rule="$(jq -r '.origin.rule_id' "$CF_TXN_STATE")"; origin_action="$(jq -r '.origin.action' "$CF_TXN_STATE")"; origin_fingerprint="$(jq -r '.origin.fingerprint' "$CF_TXN_STATE")"; old_port="$(jq -r '.origin.old_port' "$CF_TXN_STATE")"
+  dns_id="$(jq -r '.dns.id' "$CF_TXN_STATE")"; dns_action="$(jq -r '.dns.action' "$CF_TXN_STATE")"; dns_fingerprint="$(jq -r '.dns.fingerprint' "$CF_TXN_STATE")"
+  origin_ruleset="$(jq -r '.origin.ruleset_id' "$CF_TXN_STATE")"; origin_rule="$(jq -r '.origin.rule_id' "$CF_TXN_STATE")"; origin_action="$(jq -r '.origin.action' "$CF_TXN_STATE")"; origin_fingerprint="$(jq -r '.origin.fingerprint' "$CF_TXN_STATE")"
   ssl_ruleset="$(jq -r '.ssl.ruleset_id' "$CF_TXN_STATE")"; ssl_rule="$(jq -r '.ssl.rule_id' "$CF_TXN_STATE")"; ssl_action="$(jq -r '.ssl.action' "$CF_TXN_STATE")"; ssl_fingerprint="$(jq -r '.ssl.fingerprint' "$CF_TXN_STATE")"; cert_id="$(jq -r '.certificate_id' "$CF_TXN_STATE")"
 
   case "$CF_TXN_PHASE" in
@@ -1055,7 +1087,7 @@ recover_cloudflare_transaction(){
     committing)
       if managed_state_matches_transaction_commit; then
         CF_TXN_PHASE=committed
-        save_cloudflare_transaction_state "$host" "$zone_id" "$dns_id" "$dns_action" "$dns_old_content" "$dns_old_proxied" "$dns_old_ttl" "$origin_ruleset" "$origin_rule" "$origin_action" "$old_port" "$ssl_ruleset" "$ssl_rule" "$ssl_action" "$cert_id" "$dns_fingerprint" "$origin_fingerprint" "$ssl_fingerprint" || return 1
+        save_cloudflare_transaction_state "$host" "$zone_id" "$dns_id" "$dns_action" "$origin_ruleset" "$origin_rule" "$origin_action" "$ssl_ruleset" "$ssl_rule" "$ssl_action" "$cert_id" "$dns_fingerprint" "$origin_fingerprint" "$ssl_fingerprint" || return 1
         finalize_cloudflare_transaction_state
         return
       fi
@@ -1064,13 +1096,21 @@ recover_cloudflare_transaction(){
     applying)
       restore_cloudflare_local_backup || { warn "Could not restore the durable pre-transaction local state. Cloudflare resources were not mutated."; return 1; }
       ;;
-    prepared) ;;
+    prepared|rolling_back) ;;
     *) return 1 ;;
   esac
 
-  rollback_new_cf_resources "$host" "$zone_id" "$dns_id" "$dns_action" "$dns_old_content" "$dns_old_proxied" "$dns_old_ttl" "$origin_ruleset" "$origin_rule" "$origin_action" "$old_port" "$ssl_ruleset" "$ssl_rule" "$ssl_action" "$cert_id" "$dns_fingerprint" "$origin_fingerprint" "$ssl_fingerprint" || return 1
+  if [ "$CF_TXN_PHASE" != "rolling_back" ]; then
+    cf_clear_commit_intent
+    CF_TXN_PHASE=rolling_back
+    save_cloudflare_transaction_state "$host" "$zone_id" "$dns_id" "$dns_action" "$origin_ruleset" "$origin_rule" "$origin_action" "$ssl_ruleset" "$ssl_rule" "$ssl_action" "$cert_id" "$dns_fingerprint" "$origin_fingerprint" "$ssl_fingerprint" || return 1
+  fi
+
+  rollback_new_cf_resources "$host" "$zone_id" "$dns_id" "$dns_action" "$origin_ruleset" "$origin_rule" "$origin_action" "$ssl_ruleset" "$ssl_rule" "$ssl_action" "$cert_id" "$dns_fingerprint" "$origin_fingerprint" "$ssl_fingerprint" || return 1
+  cf_clear_pending_write
+  cf_clear_commit_intent
   CF_TXN_PHASE=rolled_back
-  save_cloudflare_transaction_state "$host" "$zone_id" "" "" "" "" "" "" "" "" "$old_port" "" "" "" "" "" "" "" || return 1
+  save_cloudflare_transaction_state "$host" "$zone_id" "" "" "" "" "" "" "" "" "" "" "" "" || return 1
   finalize_cloudflare_transaction_state
 }
 
@@ -1109,9 +1149,9 @@ configure_cloudflare(){ (
   acquire_management_lock
   need_cmd jq; need_cmd openssl; need_cmd curl; need_cmd sha256sum
   old_host=""; old_zone=""; old_dns=""; old_dns_owned=""; old_dns_fingerprint=""; old_origin_ruleset=""; old_origin_rule=""; old_origin_fingerprint=""; old_ssl_ruleset=""; old_ssl_rule=""; old_ssl_fingerprint=""; old_cert=""; old_port=""; previous_zone=""; previous_cert=""
-  host=""; port=""; zone_pair=""; zone_id=""; zone_name=""; ip=""; stage=""; backup=""; cert_id=""; dns_id=""; dns_owned=false; dns_action=""; dns_old_content=""; dns_old_proxied=""; dns_old_ttl=""; dns_fingerprint=""
-  origin_ruleset_id=""; origin_rule_id=""; origin_action=""; origin_fingerprint=""; ssl_ruleset_id=""; ssl_rule_id=""; ssl_action=""; ssl_fingerprint=""; config_backup=""; managed_backup=""; managed_existed=0
-  owned_dns_id=""; owned_origin_ruleset=""; owned_origin_rule=""; owned_ssl_ruleset=""; owned_ssl_rule=""; local_mutation_started=0; managed_mutation_started=0; transaction_committed=0
+  host=""; port=""; zone_pair=""; zone_id=""; zone_name=""; ip=""; stage=""; cert_id=""; dns_id=""; dns_owned=false; dns_action=""; dns_fingerprint=""
+  origin_ruleset_id=""; origin_rule_id=""; origin_action=""; origin_fingerprint=""; ssl_ruleset_id=""; ssl_rule_id=""; ssl_action=""; ssl_fingerprint=""
+  owned_dns_id=""; owned_origin_ruleset=""; owned_origin_rule=""; owned_ssl_ruleset=""; owned_ssl_rule=""
   old_host="$(managed_get '.hostname')"; old_zone="$(managed_get '.cloudflare.zone_id')"; old_dns="$(managed_get '.cloudflare.dns_record_id')"; old_dns_owned="$(managed_get '.cloudflare.dns_record_owned')"; old_dns_owned="${old_dns_owned:-false}"; old_dns_fingerprint="$(managed_get '.cloudflare.dns_record_fingerprint')"
   old_origin_ruleset="$(managed_get '.cloudflare.origin_ruleset_id')"; old_origin_rule="$(managed_get '.cloudflare.origin_rule_id')"; old_origin_fingerprint="$(managed_get '.cloudflare.origin_rule_fingerprint')"
   old_ssl_ruleset="$(managed_get '.cloudflare.ssl_config_ruleset_id')"; old_ssl_rule="$(managed_get '.cloudflare.ssl_config_rule_id')"; old_ssl_fingerprint="$(managed_get '.cloudflare.ssl_config_rule_fingerprint')"; old_cert="$(managed_get '.cloudflare.origin_certificate_id')"
@@ -1131,13 +1171,7 @@ configure_cloudflare(){ (
     owned_origin_ruleset="$old_origin_ruleset"; owned_origin_rule="$old_origin_rule"; owned_ssl_ruleset="$old_ssl_ruleset"; owned_ssl_rule="$old_ssl_rule"
   fi
   ip="$(cf_public_ipv4)"; log "Origin IPv4: $ip"
-  stage="$(mktemp -d)"; backup="$stage/backup"; mkdir -m 0700 "$backup"; chmod 0700 "$stage"
-  config_backup="$stage/config.backup"; managed_backup="$stage/managed.backup"
-  cp -a "$CONFIG_FILE" "$config_backup"
-  if [ -s "$MANAGED_STATE" ]; then cp -a "$MANAGED_STATE" "$managed_backup"; managed_existed=1; fi
-  [ -e "$TLS_DIR/origin.key" ] && cp -p "$TLS_DIR/origin.key" "$backup/origin.key" || true
-  [ -e "$TLS_DIR/origin.csr" ] && cp -p "$TLS_DIR/origin.csr" "$backup/origin.csr" || true
-  [ -e "$TLS_DIR/origin.crt" ] && cp -p "$TLS_DIR/origin.crt" "$backup/origin.crt" || true
+  stage="$(mktemp -d)"; chmod 0700 "$stage"
 
   cloudflare_transaction_exit(){
     local rc=$?
@@ -1152,19 +1186,18 @@ configure_cloudflare(){ (
   }
   trap cloudflare_transaction_exit EXIT
 
-  cert_id=""; dns_id=""; dns_owned=false; dns_action=""; dns_old_content=""; dns_old_proxied=""; dns_old_ttl=""; dns_fingerprint=""; origin_ruleset_id=""; origin_rule_id=""; origin_action=""; origin_fingerprint=""; ssl_ruleset_id=""; ssl_rule_id=""; ssl_action=""; ssl_fingerprint=""
+  cert_id=""; dns_id=""; dns_owned=false; dns_action=""; dns_fingerprint=""; origin_ruleset_id=""; origin_rule_id=""; origin_action=""; origin_fingerprint=""; ssl_ruleset_id=""; ssl_rule_id=""; ssl_action=""; ssl_fingerprint=""
   CF_TXN_PHASE=prepared
   prepare_cloudflare_local_backup || die "Could not create the durable root-only local rollback snapshot. No Cloudflare mutation was started."
   cf_checkpoint_transaction
   cf_issue_origin_cert "$zone_id" "$host" "$stage"; cert_id="$CF_RESULT_CERT_ID"; cf_finish_transaction_step; log "Fresh Origin CA certificate issued and verified."
-  cf_reconcile_dns "$zone_id" "$host" "$ip" "$owned_dns_id" "$old_dns_fingerprint"; dns_id="$CF_RESULT_DNS_ID"; dns_owned="$CF_RESULT_DNS_OWNED"; dns_action="$CF_RESULT_DNS_ACTION"; dns_old_content="$CF_RESULT_DNS_OLD_CONTENT"; dns_old_proxied="$CF_RESULT_DNS_OLD_PROXIED"; dns_old_ttl="$CF_RESULT_DNS_OLD_TTL"; dns_fingerprint="$CF_RESULT_DNS_FINGERPRINT"; cf_finish_transaction_step
+  cf_reconcile_dns "$zone_id" "$host" "$ip" "$owned_dns_id" "$old_dns_fingerprint"; dns_id="$CF_RESULT_DNS_ID"; dns_owned="$CF_RESULT_DNS_OWNED"; dns_action="$CF_RESULT_DNS_ACTION"; dns_fingerprint="$CF_RESULT_DNS_FINGERPRINT"; cf_finish_transaction_step
   if [ "$dns_owned" = "true" ]; then [ -n "$dns_action" ] && log "Cloudflare proxied DNS reconciled ($dns_action, Agent-owned)." || log "Cloudflare proxied DNS already matches the recorded Agent-owned state."; else log "Existing matching proxied DNS reused without taking ownership."; fi
   cf_reconcile_origin_rule "$zone_id" "$host" "$port" "$owned_origin_ruleset" "$owned_origin_rule" "$old_origin_fingerprint"; origin_ruleset_id="$CF_RESULT_ORIGIN_RULESET_ID"; origin_rule_id="$CF_RESULT_ORIGIN_RULE_ID"; origin_action="$CF_RESULT_ORIGIN_ACTION"; origin_fingerprint="$CF_RESULT_ORIGIN_FINGERPRINT"; cf_finish_transaction_step; log "Cloudflare origin port rule reconciled for port $port."
   cf_reconcile_ssl_config_rule "$zone_id" "$host" "$owned_ssl_ruleset" "$owned_ssl_rule" "$old_ssl_fingerprint"; ssl_ruleset_id="$CF_RESULT_SSL_RULESET_ID"; ssl_rule_id="$CF_RESULT_SSL_RULE_ID"; ssl_action="$CF_RESULT_SSL_ACTION"; ssl_fingerprint="$CF_RESULT_SSL_FINGERPRINT"; cf_finish_transaction_step; log "Cloudflare strict SSL Configuration Rule reconciled for $host only."
 
   CF_TXN_PHASE=applying
   cf_checkpoint_transaction
-  local_mutation_started=1
   install -d -o root -g "$AGENT_USER" -m 0750 "$TLS_DIR"
   install -o root -g "$AGENT_USER" -m 0640 "$stage/new.key" "$TLS_DIR/origin.key"
   install -o root -g root -m 0644 "$stage/new.csr" "$TLS_DIR/origin.csr"
@@ -1174,7 +1207,6 @@ configure_cloudflare(){ (
   verify_public "$host" || die "Public Cloudflare verification failed; transaction rollback started."
 
   cf_set_commit_intent "$host" "$port" "$zone_id" "$zone_name" "$dns_id" "$dns_owned" "$origin_ruleset_id" "$origin_rule_id" "$ssl_ruleset_id" "$ssl_rule_id" "$cert_id" "$dns_fingerprint" "$origin_fingerprint" "$ssl_fingerprint"
-  managed_mutation_started=1
   if [ -n "$old_host" ] && [ "$old_host" != "$host" ]; then
     save_previous_cloudflare_state "$old_host" "$old_zone" "$old_dns" "$old_dns_owned" "$old_origin_ruleset" "$old_origin_rule" "$old_ssl_ruleset" "$old_ssl_rule" "$old_cert" "$old_dns_fingerprint" "$old_origin_fingerprint" "$old_ssl_fingerprint"
   elif [ "$old_host" = "$host" ] && [ -n "$old_cert" ] && [ "$old_cert" != "$cert_id" ]; then
@@ -1183,7 +1215,6 @@ configure_cloudflare(){ (
   save_cloudflare_state "$host" "$port" "$zone_id" "$zone_name" "$dns_id" "$dns_owned" "$origin_ruleset_id" "$origin_rule_id" "$ssl_ruleset_id" "$ssl_rule_id" "$cert_id" "$dns_fingerprint" "$origin_fingerprint" "$ssl_fingerprint"
   CF_TXN_PHASE=committed
   cf_checkpoint_transaction
-  transaction_committed=1
   clear_cloudflare_transaction_state
   log "Public HTTPS health, unauthenticated rejection, and authenticated MCP initialize all passed."
   cleanup_old_cloudflare "$old_host" "$old_zone" "$old_dns" "$old_dns_owned" "$old_origin_ruleset" "$old_origin_rule" "$old_ssl_ruleset" "$old_ssl_rule" "$old_cert" "$host" "$cert_id" "$zone_id" "$old_dns_fingerprint" "$old_origin_fingerprint" "$old_ssl_fingerprint"

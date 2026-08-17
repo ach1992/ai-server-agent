@@ -33,8 +33,9 @@ kill_after_boundary(){
       source "$ROOT/manage.sh"
       AGENT_USER=root
       STATE_DIR="$TEST_STATE_DIR"; CONFIG_DIR="$TEST_CONFIG_DIR"; CONTROL_DIR="$TEST_CONTROL_DIR"; TLS_DIR="$TEST_TLS_DIR"; CONFIG_FILE="$TEST_CONFIG_FILE"; MANAGED_STATE="$TEST_MANAGED_STATE"; CF_TXN_STATE="$TEST_CF_TXN_STATE"; CF_TXN_BACKUP_DIR="$TEST_CF_TXN_BACKUP_DIR"; MANAGEMENT_LOCK="$TEST_MANAGEMENT_LOCK"; MANAGEMENT_LOCK_FD=""
-      host=mcp.example.com; zone_id=zone1; old_port=3210
-      dns_id=dns-new; dns_action=created; dns_old_content=""; dns_old_proxied=""; dns_old_ttl=""; dns_fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      systemctl(){ return 0; }
+      host=mcp.example.com; zone_id=zone1
+      dns_id=dns-new; dns_action=created; dns_fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
       origin_ruleset_id=origin-set; origin_rule_id=origin-rule; origin_action=created; origin_fingerprint=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
       ssl_ruleset_id=ssl-set; ssl_rule_id=ssl-rule; ssl_action=created; ssl_fingerprint=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; cert_id=cert-new
       prepare_cloudflare_local_backup
@@ -44,6 +45,12 @@ kill_after_boundary(){
       printf "new-key\n" > "$TLS_DIR/origin.key"; printf "new-crt\n" > "$TLS_DIR/origin.crt"
       case "$TEST_SCENARIO" in
         applying) ;;
+        rolling_back)
+          restore_cloudflare_local_backup
+          cf_clear_commit_intent
+          CF_TXN_PHASE=rolling_back
+          cf_checkpoint_transaction
+          ;;
         committing|committed)
           cf_set_commit_intent mcp.example.com 3210 zone1 example.com dns-new true origin-set origin-rule ssl-set ssl-rule cert-new aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
           printf "%s\n" "$TEST_NEW_MANAGED" > "$MANAGED_STATE"
@@ -81,6 +88,37 @@ recover_fresh(){
     '
 }
 
+write_prepared_pending(){
+  local kind="$1"
+  env \
+    ROOT="$ROOT" TEST_KIND="$kind" \
+    TEST_STATE_DIR="$STATE_DIR" TEST_CONFIG_DIR="$CONFIG_DIR" TEST_CONTROL_DIR="$CONTROL_DIR" TEST_TLS_DIR="$TLS_DIR" \
+    TEST_CONFIG_FILE="$CONFIG_FILE" TEST_MANAGED_STATE="$MANAGED_STATE" TEST_CF_TXN_STATE="$CF_TXN_STATE" TEST_CF_TXN_BACKUP_DIR="$CF_TXN_BACKUP_DIR" TEST_MANAGEMENT_LOCK="$MANAGEMENT_LOCK" \
+    bash -c '
+      set -Eeuo pipefail
+      export AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1
+      source "$ROOT/manage.sh"
+      AGENT_USER=root
+      STATE_DIR="$TEST_STATE_DIR"; CONFIG_DIR="$TEST_CONFIG_DIR"; CONTROL_DIR="$TEST_CONTROL_DIR"; TLS_DIR="$TEST_TLS_DIR"; CONFIG_FILE="$TEST_CONFIG_FILE"; MANAGED_STATE="$TEST_MANAGED_STATE"; CF_TXN_STATE="$TEST_CF_TXN_STATE"; CF_TXN_BACKUP_DIR="$TEST_CF_TXN_BACKUP_DIR"; MANAGEMENT_LOCK="$TEST_MANAGEMENT_LOCK"; MANAGEMENT_LOCK_FD=""
+      host=mcp.example.com; zone_id=zone1; dns_id=""; dns_action=""; dns_fingerprint=""; origin_ruleset_id=""; origin_rule_id=""; origin_action=""; origin_fingerprint=""; ssl_ruleset_id=""; ssl_rule_id=""; ssl_action=""; ssl_fingerprint=""; cert_id=""
+      prepare_cloudflare_local_backup
+      CF_TXN_PHASE=prepared
+      case "$TEST_KIND" in
+        dns) cf_set_pending_write dns-create zone1 mcp.example.com 203.0.113.10 "" 0123456789abcdef0123456789abcdef aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
+        origin) cf_set_pending_write origin-rule-create zone1 mcp.example.com ai_server_agent_test http_request_origin 0123456789abcdef0123456789abcdef bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ;;
+        *) exit 2 ;;
+      esac
+    '
+}
+
+expect_journal_rejected(){
+  local label="$1" before
+  before="$(sha256sum "$CF_TXN_STATE" | awk '{print $1}')"; : > "$DELETE_LOG"
+  if recover_fresh; then echo "$label was accepted" >&2; exit 1; fi
+  test "$(sha256sum "$CF_TXN_STATE" | awk '{print $1}')" = "$before"
+  test ! -s "$DELETE_LOG"
+}
+
 # Real SIGKILL immediately after local TLS/config mutation. A fresh process must
 # restore the durable local snapshot and roll back only recorded remote state.
 reset_old_local
@@ -94,9 +132,22 @@ grep -qF '/zones/zone1/rulesets/ssl-set/rules/ssl-rule' "$DELETE_LOG"
 grep -qF '/certificates/cert-new' "$DELETE_LOG"
 test ! -e "$CF_TXN_STATE"; test ! -e "$CF_TXN_BACKUP_DIR"
 
+# A persisted rolling_back phase means local restoration already completed; a
+# fresh process resumes only remote rollback and finalization.
+reset_old_local
+kill_after_boundary rolling_back
+: > "$DELETE_LOG"
+recover_fresh
+cmp -s <(printf '%s\n' "$old_config") "$CONFIG_FILE"
+cmp -s <(printf '%s\n' "$old_managed") "$MANAGED_STATE"
+grep -qF '/zones/zone1/dns_records/dns-new' "$DELETE_LOG"
+grep -qF '/zones/zone1/rulesets/origin-set/rules/origin-rule' "$DELETE_LOG"
+grep -qF '/zones/zone1/rulesets/ssl-set/rules/ssl-rule' "$DELETE_LOG"
+grep -qF '/certificates/cert-new' "$DELETE_LOG"
+test ! -e "$CF_TXN_STATE"; test ! -e "$CF_TXN_BACKUP_DIR"
+
 # Real SIGKILL immediately after managed-state replacement while durable phase
-# is committing. A fresh process must detect the exact committed identity and
-# finalize without deleting active Cloudflare resources or restoring old local state.
+# is committing. Exact committed identity finalizes without rollback.
 reset_old_local
 kill_after_boundary committing
 : > "$DELETE_LOG"
@@ -106,8 +157,8 @@ cmp -s <(printf '%s\n' "$new_config") "$CONFIG_FILE"
 cmp -s <(printf '%s\n' "$new_managed") "$MANAGED_STATE"
 test ! -e "$CF_TXN_STATE"; test ! -e "$CF_TXN_BACKUP_DIR"
 
-# Real SIGKILL after durable phase=committed but before journal deletion. A
-# fresh process must finalize only; no rollback is allowed.
+# Real SIGKILL after durable phase=committed but before journal deletion also
+# finalizes only when managed state proves the exact commit.
 reset_old_local
 kill_after_boundary committed
 : > "$DELETE_LOG"
@@ -117,51 +168,78 @@ cmp -s <(printf '%s\n' "$new_config") "$CONFIG_FILE"
 cmp -s <(printf '%s\n' "$new_managed") "$MANAGED_STATE"
 test ! -e "$CF_TXN_STATE"; test ! -e "$CF_TXN_BACKUP_DIR"
 
-
-# Committed recovery is terminal only when managed state proves the exact commit.
 reset_old_local
 kill_after_boundary committed
 printf '%s\n' "$old_managed" > "$MANAGED_STATE"
 chown root:root "$MANAGED_STATE"; chmod 0640 "$MANAGED_STATE"
-before="$(sha256sum "$CF_TXN_STATE" | awk '{print $1}')"; : > "$DELETE_LOG"
-if recover_fresh; then echo 'committed journal finalized with mismatched managed state' >&2; exit 1; fi
-test "$(sha256sum "$CF_TXN_STATE" | awk '{print $1}')" = "$before"
-test -d "$CF_TXN_BACKUP_DIR"; test ! -s "$DELETE_LOG"
+expect_journal_rejected 'committed journal with mismatched managed state'
+test -d "$CF_TXN_BACKUP_DIR"
 
 reset_old_local
 kill_after_boundary committed
 rm -f "$MANAGED_STATE"
-before="$(sha256sum "$CF_TXN_STATE" | awk '{print $1}')"; : > "$DELETE_LOG"
-if recover_fresh; then echo 'committed journal finalized with missing managed state' >&2; exit 1; fi
-test "$(sha256sum "$CF_TXN_STATE" | awk '{print $1}')" = "$before"
-test -d "$CF_TXN_BACKUP_DIR"; test ! -s "$DELETE_LOG"
+expect_journal_rejected 'committed journal with missing managed state'
+test -d "$CF_TXN_BACKUP_DIR"
 
-# Truncated journal fails closed and remains byte-for-byte untouched.
+# Truncated/unknown-schema state fails closed and remains untouched.
 reset_old_local
 printf '{"version":1,"phase":"applying"' > "$CF_TXN_STATE"
 chown root:root "$CF_TXN_STATE"; chmod 0600 "$CF_TXN_STATE"
-before="$(sha256sum "$CF_TXN_STATE" | awk '{print $1}')"; : > "$DELETE_LOG"
-if recover_fresh; then echo 'truncated journal was accepted' >&2; exit 1; fi
-test "$(sha256sum "$CF_TXN_STATE" | awk '{print $1}')" = "$before"; test ! -s "$DELETE_LOG"
+expect_journal_rejected 'truncated journal'
 
-# A syntactically valid but contradictory committed journal with live pending
-# create intent must also fail closed instead of finalizing away ownership evidence.
+# Pending identity is bound to the top-level transaction zone/hostname.
 reset_old_local
-kill_after_boundary committed
+write_prepared_pending dns
 jtmp="$TMP/journal.tmp"
-jq '.pending={kind:"dns-create",zone_id:"zone1",hostname:"mcp.example.com",value:"203.0.113.10",phase:"",marker:"0123456789abcdef"}' "$CF_TXN_STATE" > "$jtmp"
+jq '.pending.zone_id="zone2"' "$CF_TXN_STATE" > "$jtmp"
 install -o root -g root -m 0600 "$jtmp" "$CF_TXN_STATE"
-before="$(sha256sum "$CF_TXN_STATE" | awk '{print $1}')"; : > "$DELETE_LOG"
-if recover_fresh; then echo 'committed journal with pending create was accepted' >&2; exit 1; fi
-test "$(sha256sum "$CF_TXN_STATE" | awk '{print $1}')" = "$before"; test ! -s "$DELETE_LOG"
+expect_journal_rejected 'pending journal with mismatched zone identity'
 
-# rolled_back is terminal only when no rollback-owned resources remain.
+reset_old_local
+write_prepared_pending dns
+jq '.pending.hostname="other.example.com"' "$CF_TXN_STATE" > "$jtmp"
+install -o root -g root -m 0600 "$jtmp" "$CF_TXN_STATE"
+expect_journal_rejected 'pending journal with mismatched hostname identity'
+
+# Pending kind is semantically bound to the correct Cloudflare ruleset phase.
+reset_old_local
+write_prepared_pending origin
+jq '.pending.phase="http_config_settings"' "$CF_TXN_STATE" > "$jtmp"
+install -o root -g root -m 0600 "$jtmp" "$CF_TXN_STATE"
+expect_journal_rejected 'origin pending journal with Configuration Rules phase'
+
+# Pending create evidence cannot survive into local application/commit phases.
+reset_old_local
+write_prepared_pending dns
+jq '.phase="applying"' "$CF_TXN_STATE" > "$jtmp"
+install -o root -g root -m 0600 "$jtmp" "$CF_TXN_STATE"
+expect_journal_rejected 'applying journal with pending create'
+
 reset_old_local
 kill_after_boundary committed
-jq '.phase="rolled_back" | .pending={kind:"",zone_id:"",hostname:"",value:"",phase:"",marker:""} | .dns.action="created" | .dns.id="dns-new"' "$CF_TXN_STATE" > "$jtmp"
+jq '.pending={kind:"dns-create",zone_id:"zone1",hostname:"mcp.example.com",value:"203.0.113.10",phase:"",marker:"0123456789abcdef",fingerprint:"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}' "$CF_TXN_STATE" > "$jtmp"
 install -o root -g root -m 0600 "$jtmp" "$CF_TXN_STATE"
-before="$(sha256sum "$CF_TXN_STATE" | awk '{print $1}')"; : > "$DELETE_LOG"
-if recover_fresh; then echo 'rolled_back journal with live rollback resources was accepted' >&2; exit 1; fi
-test "$(sha256sum "$CF_TXN_STATE" | awk '{print $1}')" = "$before"; test ! -s "$DELETE_LOG"
+expect_journal_rejected 'committed journal with pending create'
+
+# Commit identity is bound to the transaction and recorded remote resources.
+reset_old_local
+kill_after_boundary committed
+jq '.commit.zone_id="zone2"' "$CF_TXN_STATE" > "$jtmp"
+install -o root -g root -m 0600 "$jtmp" "$CF_TXN_STATE"
+expect_journal_rejected 'committed journal with contradictory commit identity'
+
+# rolled_back is terminal only with no pending/rollback-owned resources and no
+# abandoned commit intent.
+reset_old_local
+kill_after_boundary committed
+jq '.phase="rolled_back" | .pending={kind:"",zone_id:"",hostname:"",value:"",phase:"",marker:"",fingerprint:""} | .commit={hostname:"",port:"",zone_id:"",zone_name:"",dns_id:"",dns_owned:false,dns_fingerprint:"",origin_ruleset_id:"",origin_rule_id:"",origin_rule_fingerprint:"",ssl_ruleset_id:"",ssl_rule_id:"",ssl_rule_fingerprint:"",certificate_id:""} | .dns.action="created" | .dns.id="dns-new"' "$CF_TXN_STATE" > "$jtmp"
+install -o root -g root -m 0600 "$jtmp" "$CF_TXN_STATE"
+expect_journal_rejected 'rolled_back journal with live rollback resource'
+
+reset_old_local
+kill_after_boundary committed
+jq '.phase="rolled_back" | .pending={kind:"",zone_id:"",hostname:"",value:"",phase:"",marker:"",fingerprint:""} | .dns={id:"",action:"",fingerprint:""} | .origin={ruleset_id:"",rule_id:"",action:"",fingerprint:""} | .ssl={ruleset_id:"",rule_id:"",action:"",fingerprint:""} | .certificate_id=""' "$CF_TXN_STATE" > "$jtmp"
+install -o root -g root -m 0600 "$jtmp" "$CF_TXN_STATE"
+expect_journal_rejected 'rolled_back journal with stale commit intent'
 
 echo 'cloudflare durable phase-recovery SIGKILL tests passed'
