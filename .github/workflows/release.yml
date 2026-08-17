@@ -42,7 +42,7 @@ jobs:
           grep -qF "export AI_SERVER_AGENT_VERSION=$GITHUB_REF_NAME" dist/install.sh
           grep -qF "export AI_SERVER_AGENT_REF=$GITHUB_REF_NAME" dist/install.sh
           (cd dist && sha256sum -c SHA256SUMS)
-      - name: Publish immutable release payload
+      - name: Publish release payload
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -58,4 +58,33 @@ jobs:
             --repo "$GITHUB_REPOSITORY" \
             --verify-tag \
             --generate-notes \
-            --latest
+            --latest \
+            --fail-on-no-commits
+      - name: Verify immutable release and attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          release_json="$(gh api -H 'X-GitHub-Api-Version: 2026-03-10' "/repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME")"
+          jq -e --arg tag "$GITHUB_REF_NAME" '.tag_name == $tag and .draft == false and .prerelease == false and .immutable == true' >/dev/null <<<"$release_json" || {
+            echo "Published release is not immutable. The repository immutable-release setting must be enabled before release publication." >&2
+            exit 1
+          }
+          test "$(git rev-parse "$GITHUB_REF_NAME^{}")" = "$GITHUB_SHA"
+          verified=0
+          for attempt in 1 2 3 4 5 6; do
+            if gh release verify "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/tmp/release-attestation.json 2>/tmp/release-attestation.err; then
+              verified=1
+              break
+            fi
+            sleep 5
+          done
+          if [ "$verified" -ne 1 ]; then
+            cat /tmp/release-attestation.err >&2 || true
+            echo "GitHub release attestation verification did not succeed." >&2
+            exit 1
+          fi
+          version="${GITHUB_REF_NAME#v}"
+          gh release verify-asset "$GITHUB_REF_NAME" "dist/ai-server-agent_${version}_linux_amd64.tar.gz" --repo "$GITHUB_REPOSITORY"
+          gh release verify-asset "$GITHUB_REF_NAME" dist/SHA256SUMS --repo "$GITHUB_REPOSITORY"
+          gh release verify-asset "$GITHUB_REF_NAME" dist/install.sh --repo "$GITHUB_REPOSITORY"
