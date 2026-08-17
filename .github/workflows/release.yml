@@ -22,8 +22,10 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          run_id="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&status=success&head_sha=$GITHUB_SHA&per_page=20" --jq '.workflow_runs[] | select(.event == "push" and .head_branch == "main" and .head_sha == env.GITHUB_SHA) | .id' | head -n1)"
+          run_id="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&status=success&head_sha=$GITHUB_SHA&per_page=20" --jq '.workflow_runs[] | select(.event == "push" and .head_branch == "main") | .id' | head -n1)"
           test -n "$run_id" || { echo "No successful main CI run found for $GITHUB_SHA" >&2; exit 1; }
+          actual_sha="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$run_id" --jq '.head_sha')"
+          test "$actual_sha" = "$GITHUB_SHA" || { echo "Selected CI run is for $actual_sha, expected $GITHUB_SHA" >&2; exit 1; }
           artifact="ai-server-agent-$GITHUB_REF_NAME-$GITHUB_SHA"
           mkdir -p dist
           gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name "$artifact" --dir dist
