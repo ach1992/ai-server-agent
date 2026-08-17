@@ -135,10 +135,12 @@ func newShellCommand(command, home, dir string) *exec.Cmd {
 func (s *Server) command(req Request) (*exec.Cmd, policy.Decision) {
 	dec := s.guard.Evaluate(req.Command, req.Root)
 	home := s.cfg.WorkspaceDir
+	dir := s.cfg.WorkspaceDir
 	if req.Root {
 		home = "/root"
+		dir = "/root"
 	}
-	cmd := newShellCommand(req.Command, home, s.cfg.WorkspaceDir)
+	cmd := newShellCommand(req.Command, home, dir)
 	if req.Root {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 0, Gid: 0, Groups: []uint32{0}}}
 	} else {
@@ -259,10 +261,13 @@ func (s *Server) startJob(req Request) Response {
 	unit := "ai-job-" + id
 	shell := fmt.Sprintf("( %s ) >>%s 2>&1; rc=$?; printf '%%s\n' \"$rc\" >%s; exit \"$rc\"", req.Command, shellQuote(logPath), shellQuote(statusPath))
 	home := s.cfg.WorkspaceDir
-	args := []string{"--unit", unit, "--collect", "--property=WorkingDirectory=" + s.cfg.WorkspaceDir}
+	workDir := s.cfg.WorkspaceDir
 	if req.Root {
 		home = "/root"
-	} else {
+		workDir = "/root"
+	}
+	args := []string{"--unit", unit, "--collect", "--property=WorkingDirectory=" + workDir}
+	if !req.Root {
 		args = append(args, "--uid="+s.cfg.WorkerUser)
 	}
 	args = append(args,

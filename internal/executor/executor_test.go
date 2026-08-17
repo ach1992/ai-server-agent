@@ -121,6 +121,13 @@ func TestCommandUsesSanitizedRootEnvironment(t *testing.T) {
 	if strings.Contains(env, "HOME="+workspace) {
 		t.Fatalf("root command inherited worker HOME: %q", env)
 	}
+	if rootCmd.Dir != "/root" {
+		t.Fatalf("root command working directory = %q, want /root", rootCmd.Dir)
+	}
+	workerCmd, _ := s.command(Request{Command: "printf safe", Root: false})
+	if workerCmd.Dir != workspace {
+		t.Fatalf("worker command working directory = %q, want workspace", workerCmd.Dir)
+	}
 }
 
 func TestShellCommandIgnoresWorkerStartupFiles(t *testing.T) {
@@ -175,6 +182,11 @@ func TestRootCommandAndJobIgnoreWorkerStartupFiles(t *testing.T) {
 	}
 	t.Setenv("BASH_ENV", bashEnv)
 	t.Setenv("ENV", bashEnv)
+	ambientName := ".ai-worker-ambient-" + filepath.Base(workspace)
+	if err := os.WriteFile(filepath.Join(workspace, ambientName), []byte("worker-controlled"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	benignRootCommand := "test ! -e " + shellQuote(ambientName) + " && printf safe"
 
 	s := &Server{
 		cfg: config.Config{
@@ -187,7 +199,7 @@ func TestRootCommandAndJobIgnoreWorkerStartupFiles(t *testing.T) {
 		workerUID: 0,
 		workerGID: 0,
 	}
-	resp := s.run(Request{Command: "printf safe", Root: true, Approval: true})
+	resp := s.run(Request{Command: benignRootCommand, Root: true, Approval: true})
 	if !resp.OK || resp.Output != "safe" {
 		t.Fatalf("root command failed: %+v", resp)
 	}
@@ -199,11 +211,13 @@ func TestRootCommandAndJobIgnoreWorkerStartupFiles(t *testing.T) {
 	fakeSystemdRun := filepath.Join(fakeBin, "systemd-run")
 	fakeScript := `#!/bin/sh
 set -e
+workdir=
 while [ "$#" -gt 0 ]; do
   case "$1" in
     --unit) shift 2 ;;
-    --collect|--property=*|--uid=*) shift ;;
-    /usr/bin/env) exec "$@" ;;
+    --property=WorkingDirectory=*) workdir="${1#--property=WorkingDirectory=}"; shift ;;
+    --collect|--uid=*) shift ;;
+    /usr/bin/env) [ -n "$workdir" ] && cd "$workdir"; exec "$@" ;;
     *) echo "unexpected systemd-run test arg: $1" >&2; exit 64 ;;
   esac
 done
@@ -213,7 +227,7 @@ exit 65
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
-	job := s.startJob(Request{Command: "printf safe", Root: true, Approval: true})
+	job := s.startJob(Request{Command: benignRootCommand, Root: true, Approval: true})
 	if !job.OK || job.JobID == "" {
 		t.Fatalf("root job failed: %+v", job)
 	}
@@ -235,7 +249,7 @@ func TestRootJobInvocationSanitizesEnvironment(t *testing.T) {
 		t.Fatal(err)
 	}
 	text := string(source)
-	for _, want := range []string{"/usr/bin/env", `"-i"`, `"HOME="+home`, `"/bin/bash", "--noprofile", "--norc", "-c"`} {
+	for _, want := range []string{"/usr/bin/env", `"-i"`, `"HOME="+home`, `workDir = "/root"`, `"--property=WorkingDirectory=" + workDir`, `"/bin/bash", "--noprofile", "--norc", "-c"`} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("startJob is missing sanitized invocation contract %q", want)
 		}
