@@ -72,9 +72,13 @@ jobs:
           grep -qF 'Previous Agent state was restored' manage.sh
           grep -qF 'dns_record_owned' manage.sh
           grep -qF 'existing-external' manage.sh
-          grep -qF 'Refusing to modify it automatically' manage.sh
-          grep -qF 'if [ "$dns_owned" = "true" ] && [ -n "$dns_id" ]; then' manage.sh
-          grep -qF 'if [ "$old_dns_owned" = "true" ] && [ -n "$old_dns" ]; then' manage.sh
+          grep -qF 'delete_recorded_cloudflare_resources(){' manage.sh
+          grep -qF 'cf_delete_owned(){' manage.sh
+          grep -qF 'Refusing to adopt or modify the replacement record.' manage.sh
+          grep -qF 'Refusing to modify or adopt it automatically.' manage.sh
+          grep -qF 'restore_updated_dns_record(){' manage.sh
+          grep -qF 'different Cloudflare zone' manage.sh
+          grep -qF 'Recorded ownership state was preserved for a safe retry.' manage.sh
           if grep -qF '/settings/ssl' manage.sh; then
             echo 'guided Cloudflare setup must not modify whole-zone SSL mode' >&2
             exit 1
