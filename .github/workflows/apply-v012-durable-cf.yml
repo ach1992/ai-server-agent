@@ -1,0 +1,35 @@
+name: Apply v0.1.2 durable Cloudflare journal hardening
+on:
+  push:
+    branches: [feat/v0.1.2-stable-install-cloudflare]
+permissions:
+  contents: write
+jobs:
+  apply:
+    if: github.event.head_commit.message == 'Run durable Cloudflare journal hardening'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/v0.1.2-stable-install-cloudflare
+          fetch-depth: 0
+      - name: Apply and validate hardening
+        run: |
+          set -Eeuo pipefail
+          python3 -m py_compile scripts/apply-v012-durable-cf-journal.py
+          python3 scripts/apply-v012-durable-cf-journal.py
+          chmod +x tests/cloudflare_crash_recovery.sh
+          bash -n manage.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh
+          sudo bash tests/cloudflare_transaction.sh
+          sudo bash tests/cloudflare_crash_recovery.sh
+          git diff --check
+      - name: Commit product changes
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add manage.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh
+          git diff --cached --check
+          test -n "$(git diff --cached --name-only)"
+          git commit -m 'Persist Cloudflare create ownership before POST'
+          git push origin HEAD:feat/v0.1.2-stable-install-cloudflare
