@@ -23,15 +23,64 @@ jobs:
       - name: Build static binary
         run: CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
       - name: Shell syntax
-        run: bash -n install.sh update.sh uninstall.sh scripts/build-release.sh
+        run: bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh
       - name: Installer compatibility check
         run: sudo bash install.sh --check
+      - name: Guided installer and management contract
+        run: |
+          grep -qF 'MANAGE_BIN="/usr/local/sbin/ai-server-agent-manage"' install.sh
+          grep -qF 'AI_SERVER_AGENT_SETUP_MODE' install.sh
+          grep -qF '"$MANAGE_BIN" first-run' install.sh
+          grep -qF 'ca-certificates curl jq openssl tar xz-utils' install.sh
+          grep -qF 'CHANNEL=$STATE_CHANNEL' install.sh
+          grep -qF 'TRACK_REF=$TRACK_REF' install.sh
+          grep -qF '1) Status / health' manage.sh
+          grep -qF '2) ChatGPT setup' manage.sh
+          grep -qF 'Configure or change domain / connection' manage.sh
+          grep -qF 'Rotate / renew Cloudflare TLS certificate' manage.sh
+          grep -qF 'Safe uninstall (preserve data)' manage.sh
+          grep -qF 'Purge Agent-owned server data' manage.sh
+          grep -qF 'Remove recorded Cloudflare resources' manage.sh
+      - name: Cloudflare guided setup safety contract
+        run: |
+          grep -qF 'read -r -s CF_TOKEN' manage.sh
+          grep -qF 'Cloudflare API token (input hidden; not stored)' manage.sh
+          grep -qF "cf_api POST '/certificates'" manage.sh
+          grep -qF '/dns_records' manage.sh
+          grep -qF 'http_request_origin' manage.sh
+          grep -qF 'origin:{port:$port}' manage.sh
+          grep -qF 'Refusing ambiguous replacement' manage.sh
+          grep -qF 'Previous Agent state was restored' manage.sh
+          if grep -Eq 'managed\.json.*(TOKEN|token)|CLOUDFLARE_API_TOKEN.*managed' manage.sh; then
+            echo 'Cloudflare credentials must not be persisted in managed state' >&2
+            exit 1
+          fi
+      - name: Stable update channel contract
+        run: |
+          state="$(mktemp)"
+          cat > "$state" <<'STATE'
+          CHANNEL=stable
+          VERSION=v0.1.0
+          REF=v0.1.0
+          TRACK_REF=v0.1.0
+          STATE
+          sudo env \
+            AI_SERVER_AGENT_INSTALL_STATE="$state" \
+            AI_SERVER_AGENT_VERSION='v0.1.1' \
+            bash update.sh --plan > /tmp/stable-plan.out
+          grep -qF 'Update channel: stable' /tmp/stable-plan.out
+          grep -qF 'Target version: v0.1.1' /tmp/stable-plan.out
+          grep -qF 'Target ref: v0.1.1' /tmp/stable-plan.out
+          if grep -qF 'Target ref: main' /tmp/stable-plan.out; then
+            echo 'stable update must never default to main' >&2
+            exit 1
+          fi
       - name: Installer restart contract
         run: |
-          daemon_line="$(grep -nF 'systemctl daemon-reload' install.sh | cut -d: -f1)"
-          enable_line="$(grep -nF 'systemctl enable ai-server-agent-executor.service ai-server-agent.service' install.sh | cut -d: -f1)"
-          restart_line="$(grep -nF 'systemctl restart ai-server-agent-executor.service ai-server-agent.service' install.sh | cut -d: -f1)"
-          active_line="$(grep -nF 'systemctl is-active --quiet ai-server-agent-executor.service' install.sh | cut -d: -f1)"
+          daemon_line="$(grep -nF 'systemctl daemon-reload' install.sh | cut -d: -f1 | head -n1)"
+          enable_line="$(grep -nF 'systemctl enable ai-server-agent-executor.service ai-server-agent.service' install.sh | cut -d: -f1 | head -n1)"
+          restart_line="$(grep -nF 'systemctl restart ai-server-agent-executor.service ai-server-agent.service' install.sh | cut -d: -f1 | head -n1)"
+          active_line="$(grep -nF 'systemctl is-active --quiet ai-server-agent-executor.service' install.sh | cut -d: -f1 | head -n1)"
           test -n "$daemon_line" && test -n "$enable_line" && test -n "$restart_line" && test -n "$active_line"
           test "$enable_line" -gt "$daemon_line"
           test "$restart_line" -gt "$enable_line"
@@ -58,18 +107,17 @@ jobs:
           test "$(tail -c 1 "$token_file" | od -An -tu1 | tr -d '[:space:]')" = "10"
       - name: Native TLS public-mode contract
         run: |
-          grep -qF 'Public mode requires native TLS.' install.sh
+          grep -qF 'Public mode requires native TLS.' install.sh || grep -qF 'Public mode requires native TLS' install.sh
           grep -qF '"tls_cert_file": "$TLS_CERT_FILE"' install.sh
           grep -qF '"tls_key_file": "$TLS_KEY_FILE"' install.sh
-          grep -qF 'AI_SERVER_AGENT_TLS_CERT_FILE="$TLS_CERT_FILE"' update.sh
-          grep -qF 'AI_SERVER_AGENT_TLS_KEY_FILE="$TLS_KEY_FILE"' update.sh
+          grep -qF 'write_config public' manage.sh
           grep -qF 'ServeTLS(cfg)' cmd/ai-server-agent/main.go
           if sudo env AI_SERVER_AGENT_BIND_MODE=public AI_SERVER_AGENT_NONINTERACTIVE=1 bash install.sh >/tmp/public-no-tls.out 2>&1; then
             echo 'public mode unexpectedly accepted plaintext configuration' >&2
             cat /tmp/public-no-tls.out >&2
             exit 1
           fi
-          grep -qF 'Public mode requires native TLS.' /tmp/public-no-tls.out
+          grep -qF 'Public mode requires native TLS' /tmp/public-no-tls.out
           if grep -Eq 'apt-get install.*(nginx|apache2|caddy|cloudflared)' install.sh; then
             echo 'Agent installer must not add a web proxy or tunnel daemon' >&2
             exit 1
@@ -80,30 +128,33 @@ jobs:
           [[ "$branch_sha" =~ ^[0-9a-f]{40}$ ]]
           immutable='97aa670f1e72279349aea557bf25abaf6c2fd7ab'
           test "$(sudo AI_SERVER_AGENT_REF="$immutable" bash install.sh --resolve-ref)" = "$immutable"
-          grep -qF 'https://api.github.com/repos/$REPO/tarball/$resolved_ref' install.sh
-          grep -qF 'https://api.github.com/repos/$REPO/contents/install.sh?ref=$RESOLVED_REF' update.sh
-          if grep -qF 'raw.githubusercontent.com' update.sh; then
-            echo 'update.sh must not bootstrap from a mutable raw ref' >&2
+          grep -qF 'https://api.github.com/repos/$REPO/tarball/$RESOLVED_SOURCE_REF' install.sh
+          grep -qF -- '--data-urlencode "ref=$TARGET_REF"' update.sh
+          if grep -qF 'TARGET_REF=main' update.sh; then
+            echo 'update.sh must not hard-code main as a stable target' >&2
             exit 1
           fi
       - name: Release artifact contract
         run: |
           rm -rf dist
-          bash scripts/build-release.sh v0.1.0
-          archive='dist/ai-server-agent_0.1.0_linux_amd64.tar.gz'
+          bash scripts/build-release.sh v0.1.1
+          archive='dist/ai-server-agent_0.1.1_linux_amd64.tar.gz'
           test -f "$archive"
           test -f dist/SHA256SUMS
           test "$(find dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
           test "$(wc -l < dist/SHA256SUMS)" -eq 1
-          grep -qF '  ai-server-agent_0.1.0_linux_amd64.tar.gz' dist/SHA256SUMS
+          grep -qF '  ai-server-agent_0.1.1_linux_amd64.tar.gz' dist/SHA256SUMS
           if find dist -maxdepth 1 -name '*arm64*' -print -quit | grep -q .; then
             echo 'v0.1 must not produce unvalidated arm64 artifacts' >&2
             exit 1
           fi
           (cd dist && sha256sum -c SHA256SUMS)
-          tar -tzf "$archive" | grep -qF 'ai-server-agent_0.1.0_linux_amd64/ai-server-agent'
-          tar -tzf "$archive" | grep -qF 'ai-server-agent_0.1.0_linux_amd64/README.md'
-          tar -tzf "$archive" | grep -qF 'ai-server-agent_0.1.0_linux_amd64/LICENSE'
+          tar -tzf "$archive" | grep -qF 'ai-server-agent_0.1.1_linux_amd64/ai-server-agent'
+          tar -tzf "$archive" | grep -qF 'ai-server-agent_0.1.1_linux_amd64/manage.sh'
+          tar -tzf "$archive" | grep -qF 'ai-server-agent_0.1.1_linux_amd64/update.sh'
+          tar -tzf "$archive" | grep -qF 'ai-server-agent_0.1.1_linux_amd64/uninstall.sh'
+          tar -tzf "$archive" | grep -qF 'ai-server-agent_0.1.1_linux_amd64/README.md'
+          tar -tzf "$archive" | grep -qF 'ai-server-agent_0.1.1_linux_amd64/LICENSE'
           git diff --exit-code -- internal/mcp/server.go
       - name: Ubuntu 22.04 amd64 lifecycle validation
         run: |
@@ -112,6 +163,9 @@ jobs:
           sudo env AI_SERVER_AGENT_BINARY=/tmp/ai-server-agent AI_SERVER_AGENT_NONINTERACTIVE=1 bash install.sh
           sudo systemctl is-active --quiet ai-server-agent.service
           sudo systemctl is-active --quiet ai-server-agent-executor.service
+          sudo test -x /usr/local/sbin/ai-server-agent-manage
+          sudo test -x /usr/local/lib/ai-server-agent/update.sh
+          sudo grep -qF 'CHANNEL=source' /var/lib/ai-server-agent/install-state.env
           sudo touch /etc/ai-server-agent/lifecycle-config-sentinel
           sudo touch /var/lib/ai-server-agent/lifecycle-state-sentinel
           sudo touch /var/log/ai-server-agent/lifecycle-log-sentinel
@@ -121,6 +175,8 @@ jobs:
 
           sudo env AI_SERVER_AGENT_YES=1 bash uninstall.sh
           test ! -e /usr/local/bin/ai-server-agent
+          test ! -e /usr/local/sbin/ai-server-agent-manage
+          test ! -e /usr/local/lib/ai-server-agent
           test ! -e /etc/systemd/system/ai-server-agent.service
           test ! -e /etc/systemd/system/ai-server-agent-executor.service
           sudo test -e /etc/ai-server-agent/lifecycle-config-sentinel
@@ -141,6 +197,8 @@ jobs:
 
           sudo env AI_SERVER_AGENT_YES=1 bash uninstall.sh --purge
           test ! -e /usr/local/bin/ai-server-agent
+          test ! -e /usr/local/sbin/ai-server-agent-manage
+          test ! -e /usr/local/lib/ai-server-agent
           sudo test ! -e /etc/ai-server-agent
           sudo test ! -e /var/lib/ai-server-agent
           sudo test ! -e /var/log/ai-server-agent
@@ -160,9 +218,9 @@ jobs:
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v4
         with:
-          name: ai-server-agent-v0.1.0-${{ github.sha }}
+          name: ai-server-agent-v0.1.1-${{ github.sha }}
           path: |
-            dist/ai-server-agent_0.1.0_linux_amd64.tar.gz
+            dist/ai-server-agent_0.1.1_linux_amd64.tar.gz
             dist/SHA256SUMS
           if-no-files-found: error
           retention-days: 7
