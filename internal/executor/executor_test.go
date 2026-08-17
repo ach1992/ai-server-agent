@@ -170,7 +170,7 @@ func TestRootCommandAndJobIgnoreWorkerStartupFiles(t *testing.T) {
 		t.Fatal(err)
 	}
 	marker := filepath.Join(t.TempDir(), "worker-startup-ran")
-	payload := []byte("printf pwned > " + marker + "\\n")
+	payload := []byte("printf pwned > " + marker + "\n")
 	for _, name := range []string{".bash_profile", ".bash_login", ".profile", ".bashrc"} {
 		if err := os.WriteFile(filepath.Join(workspace, name), payload, 0644); err != nil {
 			t.Fatal(err)
