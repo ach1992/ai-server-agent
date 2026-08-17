@@ -63,7 +63,8 @@ A separate first-run test proves that choosing "Configure later" is a successful
 - preserved recovery state after incomplete rollback;
 - current-representation fingerprints before destructive cleanup;
 - response-lost DNS/rule create recovery with durable nonce + semantic fingerprint;
-- fail-closed handling of representation drift and competing lookalikes;
+- response-lost Origin CA discovery by generated CSR plus complete create-semantic fingerprint and exact-certificate-ID re-read before revoke;
+- fail-closed handling of DNS/rule/certificate representation drift, exact-ID read failure, and competing lookalikes;
 - exact-rule cleanup rather than deleting a shared Ruleset container;
 - management-lock exclusion behavior.
 
@@ -71,7 +72,12 @@ The Cloudflare provider is mocked. This is behavioral testing of production tran
 
 ### Crash recovery
 
-`tests/cloudflare_crash_recovery.sh` performs a real process `SIGKILL` after a mocked remote create has committed but before the POST response returns. The durable pre-POST journal and local rollback snapshot must survive, and a fresh process must recover through the exact representation-check/delete path.
+`tests/cloudflare_crash_recovery.sh` performs real process `SIGKILL` after mocked remote creates have committed but before the POST response returns. The durable pre-POST journal and local rollback snapshot must survive, and a fresh process must recover through the production discovery + exact-representation re-read/delete path.
+
+The crash suite covers both:
+
+- DNS response-lost create using the Agent nonce/marker and exact semantic fingerprint;
+- Origin CA response-lost create using the generated CSR for discovery, a complete `csr`/hostname-set/`request_type`/`requested_validity` fingerprint, exact certificate-ID GET, and representation-checked revoke.
 
 `tests/cloudflare_phase_recovery.sh` performs real `SIGKILL` + fresh-process recovery at durable local/commit boundaries, including:
 
@@ -81,6 +87,7 @@ The Cloudflare provider is mocked. This is behavioral testing of production tran
 - `committed` finalization;
 - malformed/contradictory journal rejection;
 - pending kind/phase/identity relationships;
+- required Origin CA pending semantic fingerprint evidence;
 - terminal-state consistency.
 
 ### Root trust boundary
@@ -89,7 +96,7 @@ The Cloudflare provider is mocked. This is behavioral testing of production tran
 
 The lifecycle overlap tests use the installed management wrapper and the real `/run/lock/ai-server-agent/management.lock` namespace to verify that configure/update/install/purge cannot overlap before mutation.
 
-`tests/root_trust_boundary.sh` also invokes `tests/stable_bootstrap.sh`, so the initial stable-install pre-execution trust boundary is exercised by the existing High Assurance root-trust job rather than by a separate duplicate workflow.
+`tests/root_trust_boundary.sh` also invokes `tests/stable_bootstrap.sh`, so the initial stable-install privilege handoff is exercised by the existing High Assurance root-trust job rather than by a separate duplicate workflow.
 
 ### Privileged shell isolation
 
@@ -109,10 +116,12 @@ Initial stable installation deliberately separates the bootstrap trust root from
 - requires exactly the expected tag-scoped `install.sh` asset representation;
 - rejects a mutable release before downloading or executing the release installer;
 - rejects an unexpected asset URL before installer download/execution;
-- rejects an installer digest mismatch after download but before `sudo` or installer execution;
-- calls privileged installer execution only after the downloaded bytes match the release asset `sha256:` digest.
+- rejects an installer digest mismatch after download but before the privileged handoff;
+- copies the candidate through the privileged boundary into a root-controlled staging directory and re-verifies the same expected release-asset digest there before execution;
+- fails closed when the invoking-user-writable installer pathname is adversarially replaced after the first verification but before privileged staging;
+- proves that neither the original nor substituted installer executes when privileged re-verification fails.
 
-This test is behavioral for bootstrap control flow and privilege ordering. GitHub Release HTTP is mocked; it does not prove future GitHub repository settings or external network behavior.
+This test is behavioral for bootstrap control flow, privilege ordering, and the local verified-path replacement threat. GitHub Release HTTP and the `sudo` command are mocked; the root-trust High Assurance job executes the same production bootstrap/test under the privileged supported-runner context. The test does not prove future GitHub repository settings or external network behavior.
 
 ### Release-scoped installer
 
