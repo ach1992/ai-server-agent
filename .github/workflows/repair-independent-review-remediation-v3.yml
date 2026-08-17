@@ -59,6 +59,13 @@ jobs:
           if count != 2:
               raise SystemExit(f'expected two crash-recovery temp-path anchors, found {count}')
           p.write_text(t.replace(anchor, replacement))
+
+          p = Path('tests/cloudflare_phase_recovery.sh')
+          lines = p.read_text().splitlines()
+          if len(lines) < 11 or not lines[10].startswith("new_managed=") or not lines[10].endswith(' '):
+              raise SystemExit('expected one generated trailing-space phase fixture on line 11')
+          lines[10] = lines[10].rstrip()
+          p.write_text('\n'.join(lines) + '\n')
           PY
           chmod +x tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh
           bash -n manage.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh
