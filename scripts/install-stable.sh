@@ -71,5 +71,33 @@ actual_digest="sha256:$(sha256sum "$tmp/install.sh" | awk '{print $1}')"
   die "Stable release install.sh digest mismatch: expected $installer_digest, got $actual_digest"
 chmod 0500 "$tmp/install.sh"
 
-log "Verified immutable stable installer $VERSION before privileged execution."
-sudo bash "$tmp/install.sh"
+log "Verified immutable stable installer $VERSION before privileged staging."
+sudo bash -s -- "$tmp/install.sh" "$installer_digest" <<'ROOT_INSTALL'
+set -Eeuo pipefail
+source_installer="${1:?missing verified installer path}"
+expected_digest="${2:?missing verified installer digest}"
+
+[[ "$expected_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
+  printf '[ai-server-agent] ERROR: Invalid privileged staging digest.\n' >&2
+  exit 1
+}
+for cmd in install mktemp sha256sum; do
+  command -v "$cmd" >/dev/null 2>&1 || {
+    printf '[ai-server-agent] ERROR: %s is required for privileged installer staging.\n' "$cmd" >&2
+    exit 1
+  }
+done
+
+root_stage="$(mktemp -d /var/tmp/ai-server-agent-bootstrap.XXXXXX)"
+trap 'rm -rf -- "$root_stage"' EXIT
+chown root:root "$root_stage"
+chmod 0700 "$root_stage"
+install -o root -g root -m 0500 -- "$source_installer" "$root_stage/install.sh"
+actual_digest="sha256:$(sha256sum "$root_stage/install.sh" | awk '{print $1}')"
+[ "$actual_digest" = "$expected_digest" ] || {
+  printf '[ai-server-agent] ERROR: Privileged staging digest mismatch: expected %s, got %s\n' "$expected_digest" "$actual_digest" >&2
+  exit 1
+}
+printf '[ai-server-agent] Privileged staging re-verified the authenticated installer bytes.\n'
+bash "$root_stage/install.sh"
+ROOT_INSTALL
