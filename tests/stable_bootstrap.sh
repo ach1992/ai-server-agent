@@ -16,11 +16,12 @@ fi
 make_fixture(){
   local immutable="${1:-true}" wrong_digest="${2:-false}" bad_url="${3:-false}"
   FIXTURE="$TMP/fixture-$RANDOM-$RANDOM"
-  mkdir -p "$FIXTURE/bin"
+  mkdir -p "$FIXTURE/bin" "$FIXTURE/poison-bin"
   EXEC_MARKER="$FIXTURE/executed"
   DOWNLOAD_MARKER="$FIXTURE/downloaded"
   SUDO_MARKER="$FIXTURE/sudo-called"
   ATTACK_MARKER="$FIXTURE/attacker-executed"
+  PATH_ATTACK_MARKER="$FIXTURE/privileged-path-command-executed"
   MALICIOUS_INSTALLER="$FIXTURE/malicious-install.sh"
   cat > "$FIXTURE/install.sh" <<'INSTALLER'
 #!/usr/bin/env bash
@@ -32,6 +33,13 @@ INSTALLER
 set -Eeuo pipefail
 printf 'attacker-executed\n' > "$ATTACK_MARKER"
 MALICIOUS
+  cat > "$FIXTURE/poison-bin/install" <<'POISON_INSTALL'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+printf 'poison-install\n' > "$PATH_ATTACK_MARKER"
+exec /usr/bin/install "$@"
+POISON_INSTALL
+  chmod +x "$FIXTURE/poison-bin/install"
   INSTALLER_DIGEST="sha256:$(sha256sum "$FIXTURE/install.sh" | awk '{print $1}')"
   if [ "$wrong_digest" = true ]; then
     INSTALLER_DIGEST="sha256:$(printf 'different bytes\n' | sha256sum | awk '{print $1}')"
@@ -73,17 +81,19 @@ CURL
 #!/usr/bin/env bash
 set -Eeuo pipefail
 printf 'sudo-called\n' > "$SUDO_MARKER"
+[ "$1" = /bin/bash ] && [ "$2" = --noprofile ] && [ "$3" = --norc ] && [ "$4" = -s ] && [ "$5" = -- ] || exit 93
+source_installer="$6"
 if [ "${RACE_SOURCE_REPLACEMENT:-false}" = true ]; then
-  [ "$1" = bash ] && [ "$2" = -s ] && [ "$3" = -- ] || exit 93
-  source_installer="$4"
   rm -f -- "$source_installer"
   cp -- "$MALICIOUS_INSTALLER" "$source_installer"
   chmod 0500 "$source_installer"
 fi
+export PATH="$POISON_BIN:$PATH"
 exec "$@"
 SUDO
   chmod +x "$FIXTURE/bin/curl" "$FIXTURE/bin/sudo"
-  export FIXTURE_INSTALLER="$FIXTURE/install.sh" EXEC_MARKER DOWNLOAD_MARKER SUDO_MARKER ATTACK_MARKER MALICIOUS_INSTALLER INSTALLER_DIGEST INSTALLER_URL IMMUTABLE
+  export FIXTURE_INSTALLER="$FIXTURE/install.sh" EXEC_MARKER DOWNLOAD_MARKER SUDO_MARKER ATTACK_MARKER PATH_ATTACK_MARKER MALICIOUS_INSTALLER INSTALLER_DIGEST INSTALLER_URL IMMUTABLE
+  export POISON_BIN="$FIXTURE/poison-bin"
   export RACE_SOURCE_REPLACEMENT=false
   export PATH="$FIXTURE/bin:/usr/bin:/bin"
 }
@@ -95,11 +105,13 @@ grep -qF 'Privileged staging re-verified the authenticated installer bytes.' "$F
 test -s "$DOWNLOAD_MARKER"
 test -s "$SUDO_MARKER"
 test -s "$EXEC_MARKER"
+test ! -e "$PATH_ATTACK_MARKER"
 
 make_fixture true false false
 bash "$BOOTSTRAP" v0.1.2 > "$FIXTURE/out"
 test -s "$SUDO_MARKER"
 test -s "$EXEC_MARKER"
+test ! -e "$PATH_ATTACK_MARKER"
 
 make_fixture true false false
 export RACE_SOURCE_REPLACEMENT=true
@@ -112,6 +124,7 @@ test -s "$DOWNLOAD_MARKER"
 test -s "$SUDO_MARKER"
 test ! -e "$EXEC_MARKER"
 test ! -e "$ATTACK_MARKER"
+test ! -e "$PATH_ATTACK_MARKER"
 
 make_fixture false false false
 if bash "$BOOTSTRAP" > "$FIXTURE/out" 2>&1; then
