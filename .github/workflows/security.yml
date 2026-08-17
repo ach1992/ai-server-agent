@@ -11,9 +11,11 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Shell syntax
-        run: bash -n manage.sh tests/cloudflare_transaction.sh
+        run: bash -n manage.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh
       - name: Cloudflare mutation rollback and ownership recovery
         run: sudo bash tests/cloudflare_transaction.sh
+      - name: Cloudflare SIGKILL crash recovery
+        run: sudo bash tests/cloudflare_crash_recovery.sh
 
   stable-provenance:
     runs-on: ubuntu-22.04
@@ -153,8 +155,27 @@ jobs:
           fi
           grep -qF 'Stable update requires a published immutable release for v0.1.2' /tmp/mutable-release.out
           test ! -e "$marker"
-      - name: Release workflow immutability contract
+      - name: Release publication is manually gated before publish
         run: |
+          set -Eeuo pipefail
+          grep -qF 'workflow_dispatch:' .github/workflows/release.yml
+          if grep -qF "tags: ['v*']" .github/workflows/release.yml; then
+            echo 'release must not publish automatically from a tag push' >&2
+            exit 1
+          fi
+          grep -qF 'immutability_confirmation:' .github/workflows/release.yml
+          grep -qF 'IMMUTABLE_RELEASES_ENABLED' .github/workflows/release.yml
+          grep -qF 'release_sha:' .github/workflows/release.yml
+          grep -qF -- '--target "$RELEASE_SHA"' .github/workflows/release.yml
+          grep -qF 'Tag $RELEASE_TAG already exists' .github/workflows/release.yml
+          gate_line="$(grep -nF 'Pre-publication immutable release gate' .github/workflows/release.yml | cut -d: -f1)"
+          recheck_line="$(grep -nF 'Recheck manual immutability gate before publication' .github/workflows/release.yml | cut -d: -f1)"
+          publish_line="$(grep -nF 'Publish release payload' .github/workflows/release.yml | cut -d: -f1)"
+          verify_line="$(grep -nF 'Verify immutable release and attestations' .github/workflows/release.yml | cut -d: -f1)"
+          test -n "$gate_line" && test -n "$recheck_line" && test -n "$publish_line" && test -n "$verify_line"
+          test "$gate_line" -lt "$recheck_line"
+          test "$recheck_line" -lt "$publish_line"
+          test "$publish_line" -lt "$verify_line"
           grep -qF '.immutable == true' .github/workflows/release.yml
-          grep -qF 'gh release verify "$GITHUB_REF_NAME"' .github/workflows/release.yml
+          grep -qF 'gh release verify "$RELEASE_TAG"' .github/workflows/release.yml
           grep -qF 'gh release verify-asset' .github/workflows/release.yml
