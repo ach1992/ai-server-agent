@@ -145,7 +145,7 @@ AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1 bash -c '
   prepare_cloudflare_local_backup
   CF_TXN_PHASE=prepared
   marker=0123456789abcdef0123456789abcdef
-  body="$(jq -n --arg name "$host" --arg ip 203.0.113.10 --arg comment "Managed by AI Server Agent txn:$marker" '{type:"A",name:$name,content:$ip,ttl:1,proxied:true,comment:$comment}')"
+  body="$(jq -n --arg name "$host" --arg ip 203.0.113.10 --arg comment "Managed by AI Server Agent txn:$marker" "{type:\"A\",name:\$name,content:\$ip,ttl:1,proxied:true,comment:\$comment}")"
   fingerprint="$(cf_dns_intent_fingerprint <<<"$body")"
   cf_set_pending_write dns-create "$zone_id" "$host" 203.0.113.10 "" "$marker" "$fingerprint"
   validate_cloudflare_transaction_state "$CF_TXN_STATE"
