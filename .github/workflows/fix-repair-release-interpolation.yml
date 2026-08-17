@@ -1,0 +1,43 @@
+name: Fix repair release interpolation
+on:
+  push:
+    branches: [feat/v0.1.2-stable-install-cloudflare]
+permissions:
+  contents: write
+jobs:
+  fix:
+    if: github.event.head_commit.message == 'Fix repair release interpolation'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/v0.1.2-stable-install-cloudflare
+      - name: Make release rewrite expression-safe and structural
+        run: |
+          set -Eeuo pipefail
+          python3 - <<'PY'
+          from pathlib import Path
+          p = Path('.github/workflows/repair-independent-review-remediation.yml')
+          s = p.read_text()
+          token_expr = '$' + '{{ github.token }}'
+          s = s.replace('GH_TOKEN: ' + token_expr, 'GH_TOKEN: @@GITHUB_TOKEN@@')
+          old = """          if old_tag not in release:\n              raise SystemExit('release old tag gate missing')\n          release = release.replace(old_tag, new_tag, 1)\n"""
+          new = """          release, n = re.subn(r'      - name: Require a new release tag\\n.*?(?=      - name: Verify exact main validation and download artifact\\n)', new_tag, release, count=1, flags=re.S)\n          if n != 1:\n              raise SystemExit('release old tag gate missing or ambiguous')\n"""
+          if old not in s:
+              raise SystemExit('old tag rewrite logic missing')
+          s = s.replace(old, new, 1)
+          old = """          if old_publish not in release:\n              raise SystemExit('release publish block missing')\n          release = release.replace(old_publish, new_publish, 1)\n          if '--target \"$RELEASE_SHA\"' in release or '--verify-tag' not in release:\n              raise SystemExit('release tag provenance remediation incomplete')\n          Path('scripts/.tmp-release.yml').write_text(release)\n"""
+          new = """          release, n = re.subn(r'      - name: Recheck manual immutability gate before publication\\n.*?(?=      - name: Verify immutable release and attestations\\n)', new_publish, release, count=1, flags=re.S)\n          if n != 1:\n              raise SystemExit('release publish block missing or ambiguous')\n          if '--target \"$RELEASE_SHA\"' in release or '--verify-tag' not in release:\n              raise SystemExit('release tag provenance remediation incomplete')\n          release = release.replace('@@GITHUB_TOKEN@@', '$' + '{{ github.token }}')\n          Path('scripts/.tmp-release.yml').write_text(release)\n"""
+          if old not in s:
+              raise SystemExit('old publish rewrite logic missing')
+          s = s.replace(old, new, 1)
+          if token_expr in s:
+              raise SystemExit('literal Actions token expression remains inside repair run script')
+          p.write_text(s)
+          PY
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add .github/workflows/repair-independent-review-remediation.yml
+          git commit -m 'Harden repair workflow interpolation'
+          git push origin HEAD:feat/v0.1.2-stable-install-cloudflare
