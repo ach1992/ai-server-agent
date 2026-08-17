@@ -17,26 +17,34 @@ AI Server Agent does not require nginx, Apache, Caddy, Docker, PHP, a database, 
 
 ## Install the latest stable release
 
-Release-hosted one-line installation is available for stable releases that include the `install.sh` asset (v0.1.2 and later):
+Stable installation starts with a small bootstrap pinned to an exact Git commit. The bootstrap runs before privilege escalation, verifies the immutable GitHub Release and the exact `install.sh` release-asset SHA-256 digest, and only then runs the verified installer with `sudo`.
+
+For v0.1.2, the stable bootstrap trust anchor is commit `15b0c6a351f404f946d865fc3b8fdb791cef6f7e`:
 
 ```bash
-curl -fsSL https://github.com/ach1992/ai-server-agent/releases/latest/download/install.sh | sudo bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/15b0c6a351f404f946d865fc3b8fdb791cef6f7e/scripts/install-stable.sh | bash
 ```
-
-This is the stable channel. It does **not** fall back to `main`.
 
 For an exact stable version:
 
 ```bash
-VERSION=v0.1.2
-curl -fsSL "https://github.com/ach1992/ai-server-agent/releases/download/${VERSION}/install.sh" | sudo bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/15b0c6a351f404f946d865fc3b8fdb791cef6f7e/scripts/install-stable.sh | bash -s -- v0.1.2
 ```
 
-The exact-version command works only after that release has been published with its release-scoped `install.sh` asset.
+Do **not** use `releases/latest/download/install.sh | sudo bash` as the stable trust path: that executes release-supplied code as root before the same asset can be authenticated.
 
-### What the stable installer verifies
+The stable bootstrap does **not** fall back to `main`. It:
 
-The release-scoped `install.sh` is generated with its version/ref pinned to the release tag. It:
+1. resolves the requested release or GitHub's latest release metadata;
+2. requires a published, non-draft, non-prerelease, immutable release;
+3. requires exactly one uploaded `install.sh` asset at the exact tag-scoped release URL;
+4. requires the GitHub release asset `sha256:` digest;
+5. downloads `install.sh` without root execution and verifies its bytes against that digest;
+6. invokes `sudo bash` only after the installer bytes are authenticated.
+
+### What the verified release installer does
+
+The release-scoped `install.sh` is generated with its version/ref pinned to the release tag. After the bootstrap authenticates it, the installer:
 
 1. checks the supported stable OS/architecture;
 2. downloads the matching release archive and `SHA256SUMS`;
@@ -45,7 +53,7 @@ The release-scoped `install.sh` is generated with its version/ref pinned to the 
 5. starts the core Agent locally and verifies health;
 6. optionally launches the first-run connection wizard.
 
-Stable installation rejects a local `AI_SERVER_AGENT_BINARY` override. Stable payload identity is the published release, not a mutable branch.
+Stable installation rejects a local `AI_SERVER_AGENT_BINARY` override. Stable payload identity is the published immutable release, not a mutable branch.
 
 ## What gets installed
 
@@ -247,7 +255,8 @@ Key boundaries:
 - persistent job files use no-follow/exclusive creation and checked reads under root-controlled state containers;
 - worker-writable workspace/state must not implicitly influence root execution;
 - Cloudflare destructive recovery requires ownership plus current representation proof;
-- stable install/update/release identity must remain immutable and must not drift to `main`.
+- stable install/update/release identity must remain immutable and must not drift to `main`;
+- release installer bytes must be authenticated before privileged execution through the commit-pinned stable bootstrap.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for details.
 
@@ -283,7 +292,7 @@ Typical non-destructive development checks:
 test -z "$(gofmt -l .)"
 go vet ./...
 go test -race ./...
-bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh tests/*.sh
+bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh scripts/install-stable.sh tests/*.sh
 ```
 
 Cloudflare, privileged lifecycle and release-provenance changes also have dedicated High Assurance Security coverage.
