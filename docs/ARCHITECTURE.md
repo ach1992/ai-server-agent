@@ -165,9 +165,11 @@ Stable and source channels are distinct.
 
 ### Stable bootstrap and first install
 
-The release `install.sh` cannot authenticate itself before it executes, so it is deliberately **not** the stable trust root. Initial stable installation begins with `scripts/install-stable.sh` fetched from an exact immutable Git commit URL.
+The release `install.sh` cannot authenticate itself before it executes, so it is deliberately **not** the stable trust root. Initial stable installation begins with `scripts/install-stable.sh` loaded from a Git tag already bound to a published immutable GitHub Release. For the v0.1.2 generation, that durable bootstrap source identity is `v0.1.2` itself once the release has been published immutable.
 
-The commit-pinned bootstrap runs before release-supplied code receives root execution. It:
+GitHub immutable releases lock their associated tag against movement/deletion while the release exists, and a deleted immutable release does not permit reuse of the same tag name. The bootstrap source therefore does not depend on preservation of a feature branch or a particular merge strategy.
+
+The immutable-tag bootstrap runs before release `install.sh` bytes receive root execution. It:
 
 1. resolves an explicit stable tag or GitHub's latest release metadata;
 2. requires the release to be non-draft, non-prerelease and immutable;
@@ -178,7 +180,7 @@ The commit-pinned bootstrap runs before release-supplied code receives root exec
 
 The release-scoped `install.sh` is generated with its version/ref pinned to the release tag. Once authenticated by the bootstrap, it rejects `AI_SERVER_AGENT_BINARY` overrides, downloads the release archive plus `SHA256SUMS`, and continues only after archive checksum verification.
 
-A direct `releases/.../install.sh | sudo bash` command is intentionally not a supported stable trust path because it would execute the asset before authenticating that same asset.
+A direct `releases/.../install.sh | sudo bash` command is intentionally not a supported stable trust path because it would execute the asset before authenticating that same asset. A mutable branch is likewise not an acceptable stable bootstrap source.
 
 Stable v0.1 artifacts are amd64-only.
 
