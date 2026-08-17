@@ -17,18 +17,18 @@ AI Server Agent does not require nginx, Apache, Caddy, Docker, PHP, a database, 
 
 ## Install the latest stable release
 
-Stable installation starts with a small bootstrap pinned to an exact Git commit. The bootstrap runs before privilege escalation, verifies the immutable GitHub Release and the exact `install.sh` release-asset SHA-256 digest, and only then runs the verified installer with `sudo`.
+Stable installation starts with a small bootstrap loaded from an **immutable published release tag**, separate from the release `install.sh` asset it authenticates. For the v0.1.2 generation, the bootstrap trust anchor is the immutable `v0.1.2` release tag. GitHub locks the associated tag when an immutable release is published, so this path does not depend on a feature branch or merge strategy.
 
-For v0.1.2, the stable bootstrap trust anchor is commit `15b0c6a351f404f946d865fc3b8fdb791cef6f7e`:
+After v0.1.2 is published as an immutable release, install the latest stable release with:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/15b0c6a351f404f946d865fc3b8fdb791cef6f7e/scripts/install-stable.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.2/scripts/install-stable.sh | bash
 ```
 
-For an exact stable version:
+For an exact stable version through the same immutable bootstrap:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/15b0c6a351f404f946d865fc3b8fdb791cef6f7e/scripts/install-stable.sh | bash -s -- v0.1.2
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.2/scripts/install-stable.sh | bash -s -- v0.1.2
 ```
 
 Do **not** use `releases/latest/download/install.sh | sudo bash` as the stable trust path: that executes release-supplied code as root before the same asset can be authenticated.
@@ -256,7 +256,7 @@ Key boundaries:
 - worker-writable workspace/state must not implicitly influence root execution;
 - Cloudflare destructive recovery requires ownership plus current representation proof;
 - stable install/update/release identity must remain immutable and must not drift to `main`;
-- release installer bytes must be authenticated before privileged execution through the commit-pinned stable bootstrap.
+- release installer bytes must be authenticated before privileged execution through a bootstrap source anchored to an immutable release tag.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for details.
 
@@ -266,7 +266,7 @@ Stable release publication is manual and exact-SHA based. The release workflow r
 
 Immediately before publication, the operator must separately verify repository controls that the workflow credential cannot authoritatively prove, including release immutability and release-tag protection/no-bypass conditions. Automation must not treat an omitted Rulesets `bypass_actors` field as proof that no bypass exists.
 
-The release workflow then creates the previously absent tag at the exact validated SHA, publishes with `--verify-tag`, and performs post-publication immutable-release/tag/attestation checks.
+The release workflow then creates the previously absent tag at the exact validated SHA, publishes with `--verify-tag`, and performs post-publication immutable-release/tag/attestation checks. Once that release is immutable, its associated tag is the durable source identity for the stable bootstrap path.
 
 ## Source/development install
 
