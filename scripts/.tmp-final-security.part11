@@ -1,0 +1,25 @@
+replace_once(
+    "manage.sh",
+    '''finalize_cloudflare_transaction_state(){
+  [ ! -L "$CF_TXN_BACKUP_DIR" ] || return 1
+  rm -rf -- "$CF_TXN_BACKUP_DIR" || return 1
+  rm -f -- "$CF_TXN_STATE" || return 1
+  sync -f "$CONTROL_DIR" || return 1
+}
+''',
+    '''cf_reset_transaction_globals(){
+  CF_TXN_PHASE=prepared
+  CF_TXN_BACKUP_READY=false
+  cf_clear_pending_write
+  CF_COMMIT_HOST=""; CF_COMMIT_PORT=""; CF_COMMIT_ZONE_ID=""; CF_COMMIT_ZONE_NAME=""; CF_COMMIT_DNS_ID=""; CF_COMMIT_DNS_OWNED=false
+  CF_COMMIT_ORIGIN_RULESET_ID=""; CF_COMMIT_ORIGIN_RULE_ID=""; CF_COMMIT_SSL_RULESET_ID=""; CF_COMMIT_SSL_RULE_ID=""; CF_COMMIT_CERT_ID=""
+}
+
+finalize_cloudflare_transaction_state(){
+  [ ! -L "$CF_TXN_BACKUP_DIR" ] || return 1
+  rm -rf -- "$CF_TXN_BACKUP_DIR" || return 1
+  rm -f -- "$CF_TXN_STATE" || return 1
+  sync -f "$CONTROL_DIR" || return 1
+  cf_reset_transaction_globals
+}
+''')
