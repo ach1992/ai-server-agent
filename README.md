@@ -74,7 +74,7 @@ The guided Cloudflare path then:
 - verifies local health, public HTTPS health, unauthenticated MCP rejection, and authenticated MCP initialize;
 - rolls the Agent configuration back if the public path cannot be verified.
 
-The Cloudflare token should be scoped to the target zone and be able to list/read the zone, manage the hostname's DNS record, manage Origin Rules, read the zone SSL mode, and create/revoke Origin CA certificates. If the zone is not already **Full (strict)**, the wizard explains the impact and asks before attempting a zone-wide SSL mode change. It never silently changes that setting.
+Create a custom Cloudflare API token restricted to the target zone with **Zone Read**, **DNS Edit**, **Origin Rules Edit** (or the equivalent **Origin Write** permission), **SSL and Certificates Edit**, and **Zone Settings Read**. Add **Zone Settings Edit** only if you want the wizard to change the zone to **Full (strict)** for you. If the zone is not already Full (strict), the wizard explains the zone-wide impact and asks before attempting that change; it never silently changes the setting.
 
 If you do not use Cloudflare, choose **Existing certificate** and provide an already-issued certificate/key. The Agent still validates them before switching to public mode.
 
