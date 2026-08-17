@@ -23,9 +23,9 @@ Run:
 curl -fsSL https://github.com/ach1992/ai-server-agent/releases/latest/download/install.sh | sudo bash
 ```
 
-GitHub's `releases/latest` path resolves a published full release rather than a draft or prerelease. The `install.sh` asset is generated for one exact release tag and pins both the version and ref to that tag. It never falls back to mutable `main`.
+GitHub's `releases/latest` path resolves a published full release rather than a draft or prerelease. Stable releases used by this path are required to be GitHub immutable releases, so their associated tag and published assets cannot be replaced after publication. The `install.sh` asset is generated for one exact release tag and pins both the version and ref to that tag. It never falls back to mutable `main`.
 
-The pinned installer then downloads the matching Linux amd64 release archive and `SHA256SUMS` and verifies the archive with `sha256sum` before extracting or installing it.
+The pinned installer then downloads the matching Linux amd64 release archive and `SHA256SUMS` and verifies the archive with `sha256sum` before extracting or installing it. Stable installers reject `AI_SERVER_AGENT_BINARY`, so a stable install cannot bypass the release archive/checksum path with a locally supplied binary.
 
 ### Install an exact version
 
@@ -136,7 +136,7 @@ The manager **does not change the whole-zone SSL mode**. A zone may remain `Flex
 
 Cloudflare Origin CA private keys are generated locally and are never sent to Cloudflare or printed. Only the CSR is sent for signing.
 
-### Ownership and existing Cloudflare resources
+### Ownership, rollback, and existing Cloudflare resources
 
 The manager is deliberately conservative:
 
@@ -147,7 +147,17 @@ The manager is deliberately conservative:
 - cleanup deletes only DNS recorded as Agent-owned and rule/certificate IDs recorded by the Agent;
 - unrelated Configuration Rules, Origin Rules, and DNS records are left alone.
 
-If public verification fails, the previous local Agent configuration is restored and newly created Cloudflare resources are rolled back where it is safe to do so.
+Cloudflare setup is transactional across certificate issuance, DNS/rule reconciliation, local TLS/config installation, service restart, public verification, and managed-state commit. If setup fails before commit, the manager restores the previous local config/TLS state and rolls back newly created or updated Agent-owned Cloudflare resources where possible.
+
+If a remote rollback cannot complete, the manager preserves the exact remaining ownership/recovery data in:
+
+```text
+/var/lib/ai-server-agent/cloudflare-transaction.json
+```
+
+A pending transaction journal blocks another Cloudflare configuration attempt. Run `sudo ai-server-agent-manage` and choose **Remove recorded Cloudflare resources** to retry the recorded rollback with a fresh scoped token. The token itself is never written to the journal.
+
+When rotating a certificate for the same hostname, the previous Origin CA certificate ID is retained until revocation succeeds. Declining revocation or a Cloudflare revoke failure therefore remains safely recoverable later rather than losing ownership metadata.
 
 ## Existing certificate / manual TLS
 
@@ -198,7 +208,7 @@ Then choose **Configure or change domain / connection**. You do not need to rein
 
 ### Rotate Cloudflare TLS
 
-Choose **Rotate / renew Cloudflare TLS certificate**. A fresh local private key, CSR, and Origin CA certificate are created and verified. The previous certificate is offered for revocation only after the new public path verifies successfully.
+Choose **Rotate / renew Cloudflare TLS certificate**. A fresh local private key, CSR, and Origin CA certificate are created and verified. The previous certificate is offered for revocation only after the new public path verifies successfully. If revocation is declined or fails, its certificate ID remains recorded for later cleanup.
 
 ### Update
 
@@ -208,7 +218,7 @@ Use **Update Agent** or:
 sudo ai-server-agent-manage update
 ```
 
-A stable installation resolves the latest published stable GitHub Release and invokes the installer with the matching stable version/tag. It does not drift to `main`.
+A stable installation resolves the latest published non-prerelease GitHub Release and requires it to be immutable before updating. It downloads the release-scoped `install.sh`, verifies that the installer pins the exact same stable version/tag, and then uses that installer to fetch and checksum-verify the matching release archive. Stable updates do not execute `install.sh` from the tag Contents API and do not drift to `main`.
 
 To request an exact stable update:
 
@@ -316,7 +326,7 @@ aiworker user/group
 
 Removing the control plane must not silently delete user project data.
 
-Cloudflare resources are separate. If you want the Agent-recorded Cloudflare resources removed, switch away from the active Cloudflare connection first and choose **Remove recorded Cloudflare resources**. The manager asks for a fresh scoped token because provider credentials are not retained.
+Cloudflare resources are separate. If you want the Agent-recorded Cloudflare resources removed, switch away from the active Cloudflare connection first and choose **Remove recorded Cloudflare resources**. The manager asks for a fresh scoped token because provider credentials are not retained. If a failed Cloudflare transaction or a replaced certificate still has deferred recovery state, this cleanup path handles that recorded state first.
 
 ## Security notes
 
@@ -326,6 +336,7 @@ Cloudflare resources are separate. If you want the Agent-recorded Cloudflare res
 - Keep Cloudflare/API credentials temporary and least-privileged.
 - Do not silently adopt, overwrite, or delete external DNS/rules.
 - Public direct mode requires native TLS and bearer authentication.
+- Stable releases rely on GitHub immutable release enforcement plus per-archive `SHA256SUMS` verification; neither stable install nor stable update accepts a local binary override.
 - Approval guardrails are not a complete sandbox; privileged shell access is an intentional capability.
 - Keep the v0.1 stable line on a dedicated development/test server.
 
