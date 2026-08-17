@@ -1,0 +1,20 @@
+# Final applicator corrections for exact existing fixtures and privileged test imports.
+replace_once(
+    "internal/executor/executor_test.go",
+    '''\t"testing"\n\n\t"github.com/ach1992/ai-server-agent/internal/config"\n''',
+    '''\t"testing"\n\n\t"github.com/ach1992/ai-server-agent/internal/audit"\n\t"github.com/ach1992/ai-server-agent/internal/config"\n''')
+
+p = Path("tests/cloudflare_transaction.sh")
+text = p.read_text().replace("CF_PENDING_MARKER=marker-later", "CF_PENDING_MARKER=abcdefabcdefabcdefabcdefabcdefab")
+p.write_text(text)
+
+p = Path("tests/cloudflare_crash_recovery.sh")
+text = p.read_text().replace("crashnonce0123456789abcdef01234567", "0123456789abcdef0123456789abcdef")
+p.write_text(text)
+
+p = Path("manage.sh")
+text = p.read_text().replace(
+    'if [ "$rc" -ne 0 ] && [ -e "$CF_TXN_STATE" ]; then\n      recover_cloudflare_transaction',
+    'if [ "$rc" -ne 0 ] && { [ -e "$CF_TXN_STATE" ] || [ -L "$CF_TXN_STATE" ]; }; then\n      recover_cloudflare_transaction',
+)
+p.write_text(text)
