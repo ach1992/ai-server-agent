@@ -806,7 +806,9 @@ validate_cloudflare_transaction_state(){
     (if .origin.action=="" then true else ((.origin.ruleset_id|length)>0 and (.origin.rule_id|length)>0) end) and
     (if .ssl.action=="" then true else ((.ssl.ruleset_id|length)>0 and (.ssl.rule_id|length)>0) end) and
     (if .pending.kind=="" then true elif .pending.kind=="origin-cert-create" then ((.pending.zone_id|length)>0 and (.pending.hostname|length)>0 and (.pending.value|length)>0) else ((.pending.zone_id|length)>0 and (.pending.hostname|length)>0 and (.pending.value|length)>0 and (.pending.marker|test("^[0-9a-fA-F]{16,128}$"))) end) and
-    (if (.phase=="applying" or .phase=="committing") then .backup_ready==true else true end) and
+    (if (.phase=="applying" or .phase=="committing" or .phase=="committed") then .backup_ready==true else true end) and
+    (if (.phase=="committing" or .phase=="committed" or .phase=="rolled_back") then .pending.kind=="" else true end) and
+    (if .phase=="rolled_back" then (.dns.action=="" and .origin.action=="" and .ssl.action=="" and .certificate_id=="") else true end) and
     (if (.phase=="committing" or .phase=="committed") then ((.commit.hostname|length)>0 and (.commit.port|test("^[0-9]+$")) and (.commit.zone_id|length)>0 and (.commit.zone_name|length)>0 and (.commit.dns_id|length)>0 and (.commit.origin_ruleset_id|length)>0 and (.commit.origin_rule_id|length)>0 and (.commit.ssl_ruleset_id|length)>0 and (.commit.ssl_rule_id|length)>0 and (.commit.certificate_id|length)>0) else true end)
   ' "$f" >/dev/null 2>&1
 }
