@@ -20,11 +20,18 @@ make_fixture(){
   EXEC_MARKER="$FIXTURE/executed"
   DOWNLOAD_MARKER="$FIXTURE/downloaded"
   SUDO_MARKER="$FIXTURE/sudo-called"
+  ATTACK_MARKER="$FIXTURE/attacker-executed"
+  MALICIOUS_INSTALLER="$FIXTURE/malicious-install.sh"
   cat > "$FIXTURE/install.sh" <<'INSTALLER'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 printf 'executed\n' > "$EXEC_MARKER"
 INSTALLER
+  cat > "$MALICIOUS_INSTALLER" <<'MALICIOUS'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+printf 'attacker-executed\n' > "$ATTACK_MARKER"
+MALICIOUS
   INSTALLER_DIGEST="sha256:$(sha256sum "$FIXTURE/install.sh" | awk '{print $1}')"
   if [ "$wrong_digest" = true ]; then
     INSTALLER_DIGEST="sha256:$(printf 'different bytes\n' | sha256sum | awk '{print $1}')"
@@ -66,16 +73,25 @@ CURL
 #!/usr/bin/env bash
 set -Eeuo pipefail
 printf 'sudo-called\n' > "$SUDO_MARKER"
+if [ "${RACE_SOURCE_REPLACEMENT:-false}" = true ]; then
+  [ "$1" = bash ] && [ "$2" = -s ] && [ "$3" = -- ] || exit 93
+  source_installer="$4"
+  rm -f -- "$source_installer"
+  cp -- "$MALICIOUS_INSTALLER" "$source_installer"
+  chmod 0500 "$source_installer"
+fi
 exec "$@"
 SUDO
   chmod +x "$FIXTURE/bin/curl" "$FIXTURE/bin/sudo"
-  export FIXTURE_INSTALLER="$FIXTURE/install.sh" EXEC_MARKER DOWNLOAD_MARKER SUDO_MARKER INSTALLER_DIGEST INSTALLER_URL IMMUTABLE
+  export FIXTURE_INSTALLER="$FIXTURE/install.sh" EXEC_MARKER DOWNLOAD_MARKER SUDO_MARKER ATTACK_MARKER MALICIOUS_INSTALLER INSTALLER_DIGEST INSTALLER_URL IMMUTABLE
+  export RACE_SOURCE_REPLACEMENT=false
   export PATH="$FIXTURE/bin:/usr/bin:/bin"
 }
 
 make_fixture true false false
 bash "$BOOTSTRAP" > "$FIXTURE/out"
-grep -qF 'Verified immutable stable installer v0.1.2 before privileged execution.' "$FIXTURE/out"
+grep -qF 'Verified immutable stable installer v0.1.2 before privileged staging.' "$FIXTURE/out"
+grep -qF 'Privileged staging re-verified the authenticated installer bytes.' "$FIXTURE/out"
 test -s "$DOWNLOAD_MARKER"
 test -s "$SUDO_MARKER"
 test -s "$EXEC_MARKER"
@@ -84,6 +100,18 @@ make_fixture true false false
 bash "$BOOTSTRAP" v0.1.2 > "$FIXTURE/out"
 test -s "$SUDO_MARKER"
 test -s "$EXEC_MARKER"
+
+make_fixture true false false
+export RACE_SOURCE_REPLACEMENT=true
+if bash "$BOOTSTRAP" > "$FIXTURE/out" 2>&1; then
+  echo 'unprivileged installer pathname replacement reached privileged execution' >&2
+  exit 1
+fi
+grep -qF 'Privileged staging digest mismatch' "$FIXTURE/out"
+test -s "$DOWNLOAD_MARKER"
+test -s "$SUDO_MARKER"
+test ! -e "$EXEC_MARKER"
+test ! -e "$ATTACK_MARKER"
 
 make_fixture false false false
 if bash "$BOOTSTRAP" > "$FIXTURE/out" 2>&1; then
