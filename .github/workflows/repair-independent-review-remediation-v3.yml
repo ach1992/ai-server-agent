@@ -68,6 +68,8 @@ jobs:
               '      if [ -s "$CF_TXN_STATE" ]; then\n'
               '        load_cloudflare_transaction_globals\n'
               '        if [ "$CF_TXN_PHASE" = committing ] || [ "$CF_TXN_PHASE" = committed ]; then\n'
+              '          printf "phase-debug globals host=<%s> port=<%s> zone_id=<%s> zone_name=<%s> dns_id=<%s> dns_owned=<%s> origin_set=<%s> origin_rule=<%s> ssl_set=<%s> ssl_rule=<%s> cert=<%s>\\n" "$CF_COMMIT_HOST" "$CF_COMMIT_PORT" "$CF_COMMIT_ZONE_ID" "$CF_COMMIT_ZONE_NAME" "$CF_COMMIT_DNS_ID" "$CF_COMMIT_DNS_OWNED" "$CF_COMMIT_ORIGIN_RULESET_ID" "$CF_COMMIT_ORIGIN_RULE_ID" "$CF_COMMIT_SSL_RULESET_ID" "$CF_COMMIT_SSL_RULE_ID" "$CF_COMMIT_CERT_ID" >&2\n'
+              '          printf "phase-debug fingerprints dns=<%s> origin=<%s> ssl=<%s>\\n" "${CF_COMMIT_DNS_FINGERPRINT-UNSET}" "${CF_COMMIT_ORIGIN_FINGERPRINT-UNSET}" "${CF_COMMIT_SSL_FINGERPRINT-UNSET}" >&2\n'
               '          if managed_state_matches_transaction_commit; then\n'
               '            echo "phase-debug managed-match=true phase=$CF_TXN_PHASE" >&2\n'
               '          else\n'
@@ -88,6 +90,7 @@ jobs:
           chmod +x tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh
           bash -n manage.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh
           ruby -e 'require "yaml"; ARGV.each { |f| YAML.load_file(f) }' scripts/.tmp-ci.yml scripts/.tmp-release.yml scripts/.tmp-security.yml
+          sudo bash -x tests/cloudflare_phase_recovery.sh
           go test -race ./...
           cp tests/cloudflare_transaction.sh tests/.tmp-debug-cloudflare-transaction.sh
           sed -i 's/configure_cloudflare >\/dev\/null 2>\&1/configure_cloudflare/' tests/.tmp-debug-cloudflare-transaction.sh
@@ -95,7 +98,7 @@ jobs:
           rm -f tests/.tmp-debug-cloudflare-transaction.sh
           sudo bash tests/cloudflare_transaction.sh
           sudo bash tests/cloudflare_crash_recovery.sh
-          sudo bash -x tests/cloudflare_phase_recovery.sh
+          sudo bash tests/cloudflare_phase_recovery.sh
           grep -qF -- '--verify-tag' scripts/.tmp-release.yml
           if grep -qF -- '--target "$RELEASE_SHA"' scripts/.tmp-release.yml; then
             echo 'release workflow still uses unsafe --target' >&2
@@ -110,7 +113,10 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: repair-debug-${{ github.run_id }}
-          path: /tmp/repair.log
+          path: |
+            /tmp/repair.log
+            manage.sh
+            tests/cloudflare_phase_recovery.sh
           if-no-files-found: error
       - name: Commit validated non-workflow changes
         run: |
