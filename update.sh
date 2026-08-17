@@ -63,7 +63,6 @@ if [ "$CHANNEL" = "stable" ]; then
   [ "$TARGET_REF" = "$TARGET_VERSION" ] || { echo "Stable update ref must match the stable version tag exactly ($TARGET_VERSION)." >&2; exit 1; }
   TARGET_TRACK_REF="$TARGET_VERSION"
   [ -z "${AI_SERVER_AGENT_BINARY:-}" ] || { echo "AI_SERVER_AGENT_BINARY is disabled for stable updates" >&2; exit 1; }
-  verify_stable_release "$TARGET_VERSION"
 else
   TARGET_TRACK_REF="${AI_SERVER_AGENT_REF:-${TRACK_REF:-${REF:-main}}}"
   [[ "$TARGET_TRACK_REF" =~ ^[A-Za-z0-9._/-]+$|^[0-9a-fA-F]{40}$ ]] || { echo "Invalid source update ref: $TARGET_TRACK_REF" >&2; exit 1; }
@@ -78,6 +77,7 @@ if [ "$PLAN_ONLY" -eq 1 ]; then exit 0; fi
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 if [ "$CHANNEL" = "stable" ]; then
+  verify_stable_release "$TARGET_VERSION"
   curl -fsSL "https://github.com/$REPO/releases/download/$TARGET_VERSION/install.sh" -o "$TMP/install.sh"
   grep -qF "export AI_SERVER_AGENT_VERSION=$TARGET_VERSION" "$TMP/install.sh" || { echo "Release installer does not pin $TARGET_VERSION" >&2; exit 1; }
   grep -qF "export AI_SERVER_AGENT_REF=$TARGET_VERSION" "$TMP/install.sh" || { echo "Release installer ref does not pin $TARGET_VERSION" >&2; exit 1; }
