@@ -31,7 +31,8 @@ jobs:
               scripts/.tmp-final-security.part7 \
               scripts/.tmp-final-security.part8 \
               scripts/.tmp-final-security.part9 \
-              scripts/.tmp-final-security.part10
+              scripts/.tmp-final-security.part10 \
+              scripts/.tmp-final-security.part11
           } > /tmp/apply-final-security.py
           python3 -m py_compile /tmp/apply-final-security.py
           python3 /tmp/apply-final-security.py
@@ -40,7 +41,7 @@ jobs:
           bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh tests/root_trust_boundary.sh tests/root_trust_migration.sh
           go test -race ./...
           sudo env PATH="$PATH" go test ./internal/executor -run TestRootCommandAndJobIgnoreWorkerStartupFiles -count=1
-          sudo bash -x tests/cloudflare_transaction.sh
+          sudo bash tests/cloudflare_transaction.sh
           sudo bash tests/cloudflare_crash_recovery.sh
           sudo bash tests/cloudflare_phase_recovery.sh
           git diff --check
@@ -60,17 +61,9 @@ jobs:
             scripts/.tmp-final-security.part7 \
             scripts/.tmp-final-security.part8 \
             scripts/.tmp-final-security.part9 \
-            scripts/.tmp-final-security.part10
-          git add \
-            manage.sh \
-            internal/executor/executor.go \
-            internal/executor/executor_test.go \
-            tests/cloudflare_transaction.sh \
-            tests/cloudflare_crash_recovery.sh \
-            tests/cloudflare_phase_recovery.sh \
-            .github/workflows/ci.yml \
-            .github/workflows/security.yml \
-            docs/ARCHITECTURE.md
+            scripts/.tmp-final-security.part10 \
+            scripts/.tmp-final-security.part11
+          git add manage.sh internal/executor/executor.go internal/executor/executor_test.go tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh .github/workflows/ci.yml .github/workflows/security.yml docs/ARCHITECTURE.md
           git diff --cached --check
           test -n "$(git diff --cached --name-only)"
           git commit -m 'Harden privileged execution and Cloudflare recovery'
