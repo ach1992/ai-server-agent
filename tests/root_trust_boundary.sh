@@ -91,7 +91,7 @@ trap cleanup_lifecycle_test EXIT
   exec 9>>"$LIFECYCLE_LOCK"
   flock -n 9
   : > "$lifecycle_tmp/ready"
-  sleep 60
+  sleep 60 9>&-
 ) &
 holder_pid=$!
 for _ in $(seq 1 50); do [ -e "$lifecycle_tmp/ready" ] && break; sleep 0.1; done
