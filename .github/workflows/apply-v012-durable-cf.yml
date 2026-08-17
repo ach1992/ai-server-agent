@@ -16,7 +16,8 @@ jobs:
       - name: Apply and validate hardening
         run: |
           set -Eeuo pipefail
-          python3 -m py_compile scripts/apply-v012-durable-cf-journal.py
+          python3 -m py_compile scripts/fix-v012-durable-cf-applicator.py scripts/apply-v012-durable-cf-journal.py
+          python3 scripts/fix-v012-durable-cf-applicator.py
           python3 scripts/apply-v012-durable-cf-journal.py
           chmod +x tests/cloudflare_crash_recovery.sh
           bash -n manage.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh
