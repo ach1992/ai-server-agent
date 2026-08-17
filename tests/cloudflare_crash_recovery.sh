@@ -10,9 +10,9 @@ cat > "$child" <<'CHILD'
 set -Eeuo pipefail
 export AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1
 source "$ROOT/manage.sh"
-STATE_DIR="$TEST_STATE_DIR"; CONFIG_DIR="$TEST_CONFIG_DIR"; CONTROL_DIR="$TEST_CONTROL_DIR"; TLS_DIR="$TEST_TLS_DIR"; CF_TXN_STATE="$TEST_CF_TXN_STATE"
+STATE_DIR="$TEST_STATE_DIR"; CONFIG_DIR="$TEST_CONFIG_DIR"; CONTROL_DIR="$TEST_CONTROL_DIR"; TLS_DIR="$TEST_TLS_DIR"; CF_TXN_STATE="$TEST_CF_TXN_STATE"; CF_TXN_BACKUP_DIR="$TEST_CONTROL_DIR/cloudflare-transaction-backup"
 AGENT_USER=root; CF_TOKEN=test
-cf_new_ownership_marker(){ printf 'crashnonce0123456789abcdef01234567\n'; }
+cf_new_ownership_marker(){ printf '0123456789abcdef0123456789abcdef\n'; }
 cf_api(){
   local method="$1" path="$2" body="${3:-}"
   if [ "$method" = GET ] && [[ "$path" == /zones/zone1/dns_records* ]]; then printf '%s' '{"success":true,"result":[]}'; return 0; fi
@@ -47,7 +47,7 @@ ROOT="$ROOT" TEST_STATE_DIR="$STATE_DIR" TEST_CONFIG_DIR="$CONFIG_DIR" TEST_CONT
   set -Eeuo pipefail
   export AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1
   source "$ROOT/manage.sh"
-  STATE_DIR="$TEST_STATE_DIR"; CONFIG_DIR="$TEST_CONFIG_DIR"; CONTROL_DIR="$TEST_CONTROL_DIR"; TLS_DIR="$TEST_TLS_DIR"; CF_TXN_STATE="$TEST_CF_TXN_STATE"
+  STATE_DIR="$TEST_STATE_DIR"; CONFIG_DIR="$TEST_CONFIG_DIR"; CONTROL_DIR="$TEST_CONTROL_DIR"; TLS_DIR="$TEST_TLS_DIR"; CF_TXN_STATE="$TEST_CF_TXN_STATE"; CF_TXN_BACKUP_DIR="$TEST_CONTROL_DIR/cloudflare-transaction-backup"
   AGENT_USER=root; CF_TOKEN=test
   cf_api(){
     method="$1"; path="$2"

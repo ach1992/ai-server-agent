@@ -5,7 +5,7 @@ export AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1
 source "$ROOT/manage.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 AGENT_USER=root
-STATE_DIR="$TMP/state"; CONFIG_DIR="$TMP/config"; CONTROL_DIR="$CONFIG_DIR/control"; TLS_DIR="$CONFIG_DIR/tls"; CONFIG_FILE="$CONFIG_DIR/config.json"; MANAGED_STATE="$CONFIG_DIR/managed.json"; CF_TXN_STATE="$CONTROL_DIR/cloudflare-transaction.json"; AUTH_HEADER_FILE="$CONFIG_DIR/mcp.authorization"
+STATE_DIR="$TMP/state"; CONFIG_DIR="$TMP/config"; CONTROL_DIR="$CONFIG_DIR/control"; TLS_DIR="$CONFIG_DIR/tls"; CONFIG_FILE="$CONFIG_DIR/config.json"; MANAGED_STATE="$CONFIG_DIR/managed.json"; CF_TXN_STATE="$CONTROL_DIR/cloudflare-transaction.json"; CF_TXN_BACKUP_DIR="$CONTROL_DIR/cloudflare-transaction-backup"; AUTH_HEADER_FILE="$CONFIG_DIR/mcp.authorization"
 mkdir -p "$STATE_DIR" "$CONFIG_DIR" "$CONTROL_DIR" "$TLS_DIR"
 printf '{"listen_address":"127.0.0.1:3210","tls_cert_file":"","tls_key_file":""}\n' > "$CONFIG_FILE"
 printf 'Bearer test\n' > "$AUTH_HEADER_FILE"
@@ -39,6 +39,8 @@ cf_issue_origin_cert(){
   local stage="$3"
   printf 'key\n' > "$stage/new.key"; printf 'csr\n' > "$stage/new.csr"; printf 'crt\n' > "$stage/new.crt"
   CF_RESULT_CERT_ID=cert-midfail
+  cert_id=cert-midfail
+  cf_checkpoint_transaction
   return 1
 }
 expect_configure_failure 'certificate helper failure'
@@ -99,7 +101,7 @@ test -z "$CF_PENDING_KIND"
 test ! -e "$CF_TXN_STATE"
 
 # If semantic recovery itself cannot read Cloudflare, pending intent is preserved for a later cleanup retry.
-CF_PENDING_KIND=dns-create; CF_PENDING_ZONE=zone1; CF_PENDING_HOST=mcp.example.com; CF_PENDING_VALUE=203.0.113.10; CF_PENDING_PHASE=""; CF_PENDING_MARKER=marker-later
+CF_PENDING_KIND=dns-create; CF_PENDING_ZONE=zone1; CF_PENDING_HOST=mcp.example.com; CF_PENDING_VALUE=203.0.113.10; CF_PENDING_PHASE=""; CF_PENDING_MARKER=abcdefabcdefabcdefabcdefabcdefab
 cf_find_dns_by_marker(){ return 2; }
 if rollback_new_cf_resources mcp.example.com zone1 '' '' '' '' '' '' '' '' 3210 '' '' '' ''; then echo 'expected pending recovery journal' >&2; exit 1; fi
 test -s "$CF_TXN_STATE"
@@ -155,3 +157,24 @@ cf_api(){
 if cf_find_rule_by_marker zone1 http_config_settings ai_server_agent_ssl_test our-ssl-marker >/dev/null; then echo 'concurrent Configuration Rule was treated as owned' >&2; exit 1; else test "$?" -eq 2; fi
 
 echo 'cloudflare transaction tests passed'
+
+# A response-lost ruleset create may recover its exact nonce-marked rule, but
+# must never delete the ruleset container: another writer can add a rule after
+# our inspection and before a whole-ruleset DELETE.
+: > "$DELETE_LOG"
+CF_PENDING_KIND=origin-ruleset-create; CF_PENDING_ZONE=zone1; CF_PENDING_HOST=mcp.example.com; CF_PENDING_VALUE=ai_server_agent_ruleset_test; CF_PENDING_PHASE=http_request_origin; CF_PENDING_MARKER=abcdef0123456789abcdef0123456789
+cf_find_ruleset_by_marker(){ printf 'marked-set\n'; }
+cf_api(){
+  case "$1:$2" in
+    GET:/zones/zone1/rulesets/marked-set)
+      printf '%s' '{"success":true,"result":{"rules":[{"id":"agent-rule","ref":"ai_server_agent_ruleset_test","description":"AI Server Agent origin port txn:abcdef0123456789abcdef0123456789"}]}}'
+      ;;
+    *) return 2 ;;
+  esac
+}
+cf_delete_owned(){ printf '%s\n' "$1" >> "$DELETE_LOG"; return 0; }
+cf_recover_pending_write
+grep -Fxq '/zones/zone1/rulesets/marked-set/rules/agent-rule' "$DELETE_LOG"
+if grep -Fxq '/zones/zone1/rulesets/marked-set' "$DELETE_LOG"; then echo 'pending recovery deleted a whole ruleset' >&2; exit 1; fi
+
+echo 'pending ruleset recovery never deletes the ruleset container'

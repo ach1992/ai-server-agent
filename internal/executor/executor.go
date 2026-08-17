@@ -113,16 +113,37 @@ func (s *Server) dispatch(req Request) Response {
 	}
 }
 
+const safeCommandPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+func sanitizedCommandEnv(home string) []string {
+	return []string{
+		"HOME=" + home,
+		"PATH=" + safeCommandPath,
+		"LANG=C.UTF-8",
+		"LC_ALL=C.UTF-8",
+		"AI_SERVER_AGENT=1",
+	}
+}
+
+func newShellCommand(command, home, dir string) *exec.Cmd {
+	cmd := exec.Command("/bin/bash", "--noprofile", "--norc", "-c", command)
+	cmd.Dir = dir
+	cmd.Env = sanitizedCommandEnv(home)
+	return cmd
+}
+
 func (s *Server) command(req Request) (*exec.Cmd, policy.Decision) {
 	dec := s.guard.Evaluate(req.Command, req.Root)
-	cmd := exec.Command("/bin/bash", "-lc", req.Command)
+	home := s.cfg.WorkspaceDir
+	if req.Root {
+		home = "/root"
+	}
+	cmd := newShellCommand(req.Command, home, s.cfg.WorkspaceDir)
 	if req.Root {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 0, Gid: 0, Groups: []uint32{0}}}
 	} else {
 		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: s.workerUID, Gid: s.workerGID, Groups: []uint32{s.workerGID}}}
 	}
-	cmd.Dir = s.cfg.WorkspaceDir
-	cmd.Env = append(os.Environ(), "HOME="+s.cfg.WorkspaceDir, "AI_SERVER_AGENT=1")
 	return cmd, dec
 }
 
@@ -225,10 +246,8 @@ func (s *Server) startJob(req Request) Response {
 	logPath := filepath.Join(jobsDir, id+".log")
 	statusPath := filepath.Join(jobsDir, id+".status")
 	fileUID, fileGID := uint32(0), uint32(0)
-	mode := ""
 	if !req.Root {
 		fileUID, fileGID = s.workerUID, s.workerGID
-		mode = "--uid=" + s.cfg.WorkerUser
 	}
 	if err := createJobFile(logPath, fileUID, fileGID); err != nil {
 		return Response{Error: "prepare job log: " + err.Error()}
@@ -238,12 +257,23 @@ func (s *Server) startJob(req Request) Response {
 		return Response{Error: "prepare job status: " + err.Error()}
 	}
 	unit := "ai-job-" + id
-	shell := fmt.Sprintf("/bin/bash -lc %s >>%s 2>&1; rc=$?; printf '%%s\n' \"$rc\" >%s; exit \"$rc\"", shellQuote(req.Command), shellQuote(logPath), shellQuote(statusPath))
-	args := []string{"--unit", unit, "--collect", "--property=WorkingDirectory=" + s.cfg.WorkspaceDir, "--setenv=HOME=" + s.cfg.WorkspaceDir, "--setenv=AI_SERVER_AGENT=1"}
-	if mode != "" {
-		args = append(args, mode)
+	shell := fmt.Sprintf("( %s ) >>%s 2>&1; rc=$?; printf '%%s\n' \"$rc\" >%s; exit \"$rc\"", req.Command, shellQuote(logPath), shellQuote(statusPath))
+	home := s.cfg.WorkspaceDir
+	args := []string{"--unit", unit, "--collect", "--property=WorkingDirectory=" + s.cfg.WorkspaceDir}
+	if req.Root {
+		home = "/root"
+	} else {
+		args = append(args, "--uid="+s.cfg.WorkerUser)
 	}
-	args = append(args, "/bin/bash", "-lc", shell)
+	args = append(args,
+		"/usr/bin/env", "-i",
+		"HOME="+home,
+		"PATH="+safeCommandPath,
+		"LANG=C.UTF-8",
+		"LC_ALL=C.UTF-8",
+		"AI_SERVER_AGENT=1",
+		"/bin/bash", "--noprofile", "--norc", "-c", shell,
+	)
 	out, err := exec.Command("systemd-run", args...).CombinedOutput()
 	_ = s.audit.Write(audit.Entry{Action: "start_job", Mode: map[bool]string{true: "root", false: "worker"}[req.Root], Command: req.Command, Success: err == nil, Detail: string(out)})
 	if err != nil {
