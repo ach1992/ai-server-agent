@@ -1,0 +1,42 @@
+name: Apply final review hardening
+on:
+  push:
+    branches: [feat/v0.1.2-stable-install-cloudflare]
+permissions:
+  contents: write
+jobs:
+  apply:
+    if: github.event.head_commit.message == 'Apply final review hardening'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/v0.1.2-stable-install-cloudflare
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - name: Apply hardening
+        run: |
+          set -Eeuo pipefail
+          python3 scripts/.tmp-final-review-hardening.py
+          chmod +x tests/cloudflare_phase_recovery.sh
+          bash -n manage.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh
+          gofmt -w internal/executor/executor.go internal/executor/executor_test.go
+          go test -race ./...
+          sudo env PATH="$PATH" go test ./internal/executor -run TestRootCommandAndJobIgnoreWorkerStartupFiles -count=1
+          sudo bash tests/cloudflare_transaction.sh
+          sudo bash tests/cloudflare_crash_recovery.sh
+          sudo bash tests/cloudflare_phase_recovery.sh
+          git diff --check
+      - name: Commit validated product changes
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git rm scripts/.tmp-final-review-hardening.py
+          git add manage.sh tests/cloudflare_phase_recovery.sh
+          git diff --cached --check
+          git commit -m 'Strengthen Cloudflare crash-recovery invariants'
+          git push origin HEAD:feat/v0.1.2-stable-install-cloudflare
