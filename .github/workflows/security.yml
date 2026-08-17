@@ -11,11 +11,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Shell syntax
-        run: bash -n manage.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh
+        run: bash -n manage.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh
       - name: Cloudflare mutation rollback and ownership recovery
         run: sudo bash tests/cloudflare_transaction.sh
       - name: Cloudflare SIGKILL crash recovery
         run: sudo bash tests/cloudflare_crash_recovery.sh
+      - name: Cloudflare durable commit and malformed-journal recovery
+        run: sudo bash tests/cloudflare_phase_recovery.sh
+      - name: Privileged shell startup-file isolation
+        run: sudo env PATH="$PATH" go test ./internal/executor -run TestRootCommandAndJobIgnoreWorkerStartupFiles -count=1
 
   root-trust-boundary:
     runs-on: ubuntu-22.04
