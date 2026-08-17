@@ -20,6 +20,8 @@ jobs:
       - name: Apply and validate root trust-boundary hardening
         run: |
           set -Eeuo pipefail
+          python3 -m py_compile scripts/fix-v012-root-applicator.py
+          python3 scripts/fix-v012-root-applicator.py
           python3 -m py_compile scripts/apply-v012-root-trust-boundary.py
           python3 scripts/apply-v012-root-trust-boundary.py
           chmod +x tests/root_trust_boundary.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh
