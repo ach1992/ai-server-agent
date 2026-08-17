@@ -15,7 +15,7 @@ TRACK_REF=""
 
 load_install_state(){
   local file="$1" json keys
-  [ -e "$file" ] || return 0
+  [ -e "$file" ] || { echo "Trusted install state is missing: $file. Refusing to guess an update channel or ref." >&2; exit 1; }
   [ -f "$file" ] && [ ! -L "$file" ] || { echo "Install state must be a regular non-symlink file: $file" >&2; exit 1; }
   [ "$(stat -c '%s' "$file")" -le 4096 ] || { echo "Install state is unexpectedly large: $file" >&2; exit 1; }
   json="$(cat -- "$file")" || { echo "Could not read install state: $file" >&2; exit 1; }

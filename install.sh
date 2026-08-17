@@ -273,6 +273,12 @@ case "$STATE_CHANNEL" in stable|source) ;; *) die "invalid install channel" ;; e
 [[ "$STATE_VERSION" =~ ^(source|v[0-9]+\.[0-9]+\.[0-9]+)$ ]] || die "invalid install version metadata"
 [[ "$STATE_REF" =~ ^([0-9a-f]{40}|v[0-9]+\.[0-9]+\.[0-9]+|binary)$ ]] || die "invalid install ref metadata: $STATE_REF"
 [[ "$TRACK_REF" =~ ^[A-Za-z0-9._/-]+$|^[0-9a-fA-F]{40}$ ]] || die "invalid install tracking ref metadata: $TRACK_REF"
+if [ "$STATE_CHANNEL" = stable ]; then
+  [ "$STATE_REF" = "$STATE_VERSION" ] && [ "$TRACK_REF" = "$STATE_VERSION" ] || die "Stable install metadata must pin version/ref/track_ref to the same tag."
+else
+  [ "$STATE_VERSION" = source ] || die "Source install metadata must use version=source."
+  [[ "$STATE_REF" =~ ^([0-9a-f]{40}|binary)$ ]] || die "Source install metadata must use an immutable commit SHA or binary marker."
+fi
 state_tmp="$(mktemp "$CONTROL_DIR/.install-state.XXXXXX")"
 jq -n \
   --arg channel "$STATE_CHANNEL" \

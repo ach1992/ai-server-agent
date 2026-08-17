@@ -52,6 +52,18 @@ for user in aiagent aiworker; do
 done
 [ "$(sha256sum "$INSTALL_STATE" | awk '{print $1}')" = "$state_hash" ]
 
+# Missing trusted identity must fail closed rather than drifting to source/main.
+state_backup="$(mktemp)"
+cp -- "$INSTALL_STATE" "$state_backup"
+rm -f -- "$INSTALL_STATE"
+if /usr/local/lib/ai-server-agent/update.sh --plan >/tmp/missing-install-state.out 2>&1; then
+  echo "updater guessed a channel/ref without trusted install state" >&2
+  exit 1
+fi
+grep -qF 'Trusted install state is missing' /tmp/missing-install-state.out
+install -o root -g root -m 0600 "$state_backup" "$INSTALL_STATE"
+rm -f "$state_backup"
+
 # Neither unprivileged principal may replace root-consumed state containers.
 for user in aiagent aiworker; do
   expect_denied "$user" mv "$STATE_DIR/jobs" "$STATE_DIR/jobs.replaced"
