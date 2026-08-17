@@ -39,7 +39,18 @@ jobs:
           count = t.count(old)
           if count != 3:
               raise SystemExit(f'expected exactly three doubled-escape SSL fixtures, found {count}')
-          p.write_text(t.replace(old, new))
+          t = t.replace(old, new)
+          capture = 'ORIG_CF_GET_OPTIONAL="$(declare -f cf_get_optional)"\n'
+          capture_new = capture + 'ORIG_CF_RECONCILE_SSL_CONFIG_RULE="$(declare -f cf_reconcile_ssl_config_rule)"\n'
+          if t.count(capture) != 1:
+              raise SystemExit('expected exactly one real-helper capture anchor')
+          t = t.replace(capture, capture_new, 1)
+          restore = 'eval "$ORIG_CF_GET_OPTIONAL"\n\n# Same-host canonical owned SSL rule is a no-op'
+          restore_new = 'eval "$ORIG_CF_GET_OPTIONAL"\neval "$ORIG_CF_RECONCILE_SSL_CONFIG_RULE"\n\n# Same-host canonical owned SSL rule is a no-op'
+          if t.count(restore) != 1:
+              raise SystemExit('expected exactly one SSL reconcile restore anchor')
+          t = t.replace(restore, restore_new, 1)
+          p.write_text(t)
           PY
           chmod +x tests/cloudflare_transaction.sh tests/cloudflare_phase_recovery.sh
           bash -n manage.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh
