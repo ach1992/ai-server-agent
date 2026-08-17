@@ -1,44 +1,85 @@
 name: Release
 on:
-  push:
-    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Stable release tag to create (for example v0.1.2)'
+        required: true
+        type: string
+      release_sha:
+        description: 'Exact validated main commit SHA to release'
+        required: true
+        type: string
+      immutability_confirmation:
+        description: 'After verifying Settings -> Releases -> Enable release immutability is enabled, type IMMUTABLE_RELEASES_ENABLED'
+        required: true
+        type: string
 permissions:
   contents: write
   actions: read
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_SHA: ${{ inputs.release_sha }}
+      IMMUTABILITY_CONFIRMATION: ${{ inputs.immutability_confirmation }}
     steps:
+      - name: Pre-publication immutable release gate
+        run: |
+          set -Eeuo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Release tag must be semantic, for example v0.1.2." >&2; exit 1; }
+          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "release_sha must be an exact 40-character commit SHA." >&2; exit 1; }
+          test "$IMMUTABILITY_CONFIRMATION" = 'IMMUTABLE_RELEASES_ENABLED' || {
+            echo "Publication is blocked. Verify Repository Settings -> Releases -> Enable release immutability is enabled immediately before this workflow, then enter IMMUTABLE_RELEASES_ENABLED." >&2
+            exit 1
+          }
+          echo "Manual pre-publication immutability verification recorded for $RELEASE_TAG at $RELEASE_SHA."
       - uses: actions/checkout@v4
         with:
+          ref: ${{ inputs.release_sha }}
           fetch-depth: 0
-      - name: Verify stable tag and main ancestry
+      - name: Verify release commit and main ancestry
         run: |
-          [[ "$GITHUB_REF_NAME" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          git fetch origin main
-          git merge-base --is-ancestor "$GITHUB_SHA" origin/main
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          git fetch origin main --tags
+          git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+      - name: Require a new release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; refusing to mutate an existing release." >&2
+            exit 1
+          fi
+          if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Tag $RELEASE_TAG already exists. This workflow requires an absent tag so GitHub creates it atomically for the exact release SHA." >&2
+            exit 1
+          fi
       - name: Verify exact main validation and download artifact
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -Eeuo pipefail
-          run_id="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&status=success&head_sha=$GITHUB_SHA&per_page=20" --jq '.workflow_runs[] | select(.event == "push" and .head_branch == "main") | .id' | head -n1)"
-          test -n "$run_id" || { echo "No successful main CI run found for $GITHUB_SHA" >&2; exit 1; }
+          run_id="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&status=success&head_sha=$RELEASE_SHA&per_page=20" --jq '.workflow_runs[] | select(.event == "push" and .head_branch == "main") | .id' | head -n1)"
+          test -n "$run_id" || { echo "No successful main CI run found for $RELEASE_SHA" >&2; exit 1; }
           actual_sha="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$run_id" --jq '.head_sha')"
-          test "$actual_sha" = "$GITHUB_SHA" || { echo "Selected CI run is for $actual_sha, expected $GITHUB_SHA" >&2; exit 1; }
+          test "$actual_sha" = "$RELEASE_SHA" || { echo "Selected CI run is for $actual_sha, expected $RELEASE_SHA" >&2; exit 1; }
 
-          security_run_id="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/security.yml/runs?branch=main&status=success&head_sha=$GITHUB_SHA&per_page=20" --jq '.workflow_runs[] | select(.event == "push" and .head_branch == "main") | .id' | head -n1)"
-          test -n "$security_run_id" || { echo "No successful High Assurance Security run found for main SHA $GITHUB_SHA" >&2; exit 1; }
+          security_run_id="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/security.yml/runs?branch=main&status=success&head_sha=$RELEASE_SHA&per_page=20" --jq '.workflow_runs[] | select(.event == "push" and .head_branch == "main") | .id' | head -n1)"
+          test -n "$security_run_id" || { echo "No successful High Assurance Security run found for main SHA $RELEASE_SHA" >&2; exit 1; }
           security_sha="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$security_run_id" --jq '.head_sha')"
-          test "$security_sha" = "$GITHUB_SHA" || { echo "Selected security run is for $security_sha, expected $GITHUB_SHA" >&2; exit 1; }
+          test "$security_sha" = "$RELEASE_SHA" || { echo "Selected security run is for $security_sha, expected $RELEASE_SHA" >&2; exit 1; }
 
-          artifact="ai-server-agent-$GITHUB_REF_NAME-$GITHUB_SHA"
+          artifact="ai-server-agent-$RELEASE_TAG-$RELEASE_SHA"
           mkdir -p dist
           gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name "$artifact" --dir dist
       - name: Verify promoted release payload
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          set -Eeuo pipefail
+          version="${RELEASE_TAG#v}"
           archive="dist/ai-server-agent_${version}_linux_amd64.tar.gz"
           test -f "$archive"
           test -f dist/SHA256SUMS
@@ -46,24 +87,26 @@ jobs:
           test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 3
           test "$(wc -l < dist/SHA256SUMS)" -eq 1
           grep -qF "  ai-server-agent_${version}_linux_amd64.tar.gz" dist/SHA256SUMS
-          grep -qF "export AI_SERVER_AGENT_VERSION=$GITHUB_REF_NAME" dist/install.sh
-          grep -qF "export AI_SERVER_AGENT_REF=$GITHUB_REF_NAME" dist/install.sh
+          grep -qF "export AI_SERVER_AGENT_VERSION=$RELEASE_TAG" dist/install.sh
+          grep -qF "export AI_SERVER_AGENT_REF=$RELEASE_TAG" dist/install.sh
           (cd dist && sha256sum -c SHA256SUMS)
+      - name: Recheck manual immutability gate before publication
+        run: |
+          set -Eeuo pipefail
+          test "$IMMUTABILITY_CONFIRMATION" = 'IMMUTABLE_RELEASES_ENABLED'
+          echo "Proceeding only on the operator's immediately preceding repository-setting verification."
       - name: Publish release payload
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          if gh release view "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            echo "Release $GITHUB_REF_NAME already exists; refusing to mutate an existing release." >&2
-            exit 1
-          fi
-          version="${GITHUB_REF_NAME#v}"
-          gh release create "$GITHUB_REF_NAME" \
+          set -Eeuo pipefail
+          version="${RELEASE_TAG#v}"
+          gh release create "$RELEASE_TAG" \
             "dist/ai-server-agent_${version}_linux_amd64.tar.gz" \
             dist/SHA256SUMS \
             dist/install.sh \
             --repo "$GITHUB_REPOSITORY" \
-            --verify-tag \
+            --target "$RELEASE_SHA" \
             --generate-notes \
             --latest \
             --fail-on-no-commits
@@ -72,15 +115,16 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -Eeuo pipefail
-          release_json="$(gh api -H 'X-GitHub-Api-Version: 2026-03-10' "/repos/$GITHUB_REPOSITORY/releases/tags/$GITHUB_REF_NAME")"
-          jq -e --arg tag "$GITHUB_REF_NAME" '.tag_name == $tag and .draft == false and .prerelease == false and .immutable == true' >/dev/null <<<"$release_json" || {
-            echo "Published release is not immutable. The repository immutable-release setting must be enabled before release publication." >&2
+          release_json="$(gh api -H 'X-GitHub-Api-Version: 2026-03-10' "/repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG")"
+          jq -e --arg tag "$RELEASE_TAG" '.tag_name == $tag and .draft == false and .prerelease == false and .immutable == true' >/dev/null <<<"$release_json" || {
+            echo "Published release is not immutable. Treat this release as failed and do not use the latest-stable path." >&2
             exit 1
           }
-          test "$(git rev-parse "$GITHUB_REF_NAME^{}")" = "$GITHUB_SHA"
+          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse "$RELEASE_TAG^{}")" = "$RELEASE_SHA"
           verified=0
           for attempt in 1 2 3 4 5 6; do
-            if gh release verify "$GITHUB_REF_NAME" --repo "$GITHUB_REPOSITORY" >/tmp/release-attestation.json 2>/tmp/release-attestation.err; then
+            if gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/tmp/release-attestation.json 2>/tmp/release-attestation.err; then
               verified=1
               break
             fi
@@ -91,7 +135,7 @@ jobs:
             echo "GitHub release attestation verification did not succeed." >&2
             exit 1
           fi
-          version="${GITHUB_REF_NAME#v}"
-          gh release verify-asset "$GITHUB_REF_NAME" "dist/ai-server-agent_${version}_linux_amd64.tar.gz" --repo "$GITHUB_REPOSITORY"
-          gh release verify-asset "$GITHUB_REF_NAME" dist/SHA256SUMS --repo "$GITHUB_REPOSITORY"
-          gh release verify-asset "$GITHUB_REF_NAME" dist/install.sh --repo "$GITHUB_REPOSITORY"
+          version="${RELEASE_TAG#v}"
+          gh release verify-asset "$RELEASE_TAG" "dist/ai-server-agent_${version}_linux_amd64.tar.gz" --repo "$GITHUB_REPOSITORY"
+          gh release verify-asset "$RELEASE_TAG" dist/SHA256SUMS --repo "$GITHUB_REPOSITORY"
+          gh release verify-asset "$RELEASE_TAG" dist/install.sh --repo "$GITHUB_REPOSITORY"
