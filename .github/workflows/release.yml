@@ -14,6 +14,10 @@ on:
         description: 'After verifying Settings -> Releases -> Enable release immutability is enabled, type IMMUTABLE_RELEASES_ENABLED'
         required: true
         type: string
+      tag_protection_confirmation:
+        description: 'After verifying an active tag ruleset protects refs/tags/v* from update/delete with no bypass actors, type RELEASE_TAG_PROTECTION_VERIFIED'
+        required: true
+        type: string
 concurrency:
   group: stable-release
   cancel-in-progress: false
@@ -27,17 +31,25 @@ jobs:
       RELEASE_TAG: ${{ inputs.tag }}
       RELEASE_SHA: ${{ inputs.release_sha }}
       IMMUTABILITY_CONFIRMATION: ${{ inputs.immutability_confirmation }}
+      TAG_PROTECTION_CONFIRMATION: ${{ inputs.tag_protection_confirmation }}
     steps:
-      - name: Pre-publication immutable release gate
+      - name: Pre-publication operator release-control gate
         run: |
           set -Eeuo pipefail
           [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Release tag must be semantic, for example v0.1.2." >&2; exit 1; }
           [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "release_sha must be an exact 40-character commit SHA." >&2; exit 1; }
           test "$IMMUTABILITY_CONFIRMATION" = 'IMMUTABLE_RELEASES_ENABLED' || {
-            echo "Publication is blocked. Verify Repository Settings -> Releases -> Enable release immutability is enabled immediately before this workflow, then enter IMMUTABLE_RELEASES_ENABLED." >&2
+            echo "Publication is blocked. Verify Repository Settings -> Releases -> Enable release immutability is enabled immediately before dispatch, then enter IMMUTABLE_RELEASES_ENABLED." >&2
             exit 1
           }
-          echo "Manual pre-publication immutability verification recorded for $RELEASE_TAG at $RELEASE_SHA."
+          test "$TAG_PROTECTION_CONFIRMATION" = 'RELEASE_TAG_PROTECTION_VERIFIED' || {
+            echo "Publication is blocked. Immediately before dispatch, verify an active repository tag ruleset covers refs/tags/v* (or all release tags), restricts update and deletion, and has no bypass actors that can move/delete the release tag. Then enter RELEASE_TAG_PROTECTION_VERIFIED." >&2
+            exit 1
+          }
+          # GitHub intentionally omits ruleset bypass_actors unless the API
+          # caller has write access to that ruleset. GITHUB_TOKEN is therefore
+          # not used to pretend it can prove the no-bypass property.
+          echo "Operator release-control verification recorded for $RELEASE_TAG at $RELEASE_SHA."
       - uses: actions/checkout@v4
         with:
           ref: ${{ inputs.release_sha }}
@@ -90,38 +102,15 @@ jobs:
           test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 3
           test "$(wc -l < dist/SHA256SUMS)" -eq 1
           grep -qF "  ai-server-agent_${version}_linux_amd64.tar.gz" dist/SHA256SUMS
-          grep -qF "export AI_SERVER_AGENT_VERSION=$RELEASE_TAG" dist/install.sh
-          grep -qF "export AI_SERVER_AGENT_REF=$RELEASE_TAG" dist/install.sh
+          test "$(sed -n '1p' dist/install.sh)" = '#!/usr/bin/env bash'
+          test "$(sed -n '2p' dist/install.sh)" = "export AI_SERVER_AGENT_VERSION=$RELEASE_TAG"
+          test "$(sed -n '3p' dist/install.sh)" = "export AI_SERVER_AGENT_REF=$RELEASE_TAG"
           (cd dist && sha256sum -c SHA256SUMS)
-      - name: Verify active immutable release-tag ruleset
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          set -Eeuo pipefail
-          protected=0
-          while IFS= read -r ruleset_id; do
-            [ -n "$ruleset_id" ] || continue
-            ruleset="$(gh api "/repos/$GITHUB_REPOSITORY/rulesets/$ruleset_id")"
-            if jq -e --arg pattern 'refs/tags/v*' '
-              .target=="tag" and .enforcement=="active" and
-              ((.bypass_actors // []) | length)==0 and
-              ((((.conditions.ref_name.include // []) | index($pattern)) != null) or (((.conditions.ref_name.include // []) | index("~ALL")) != null)) and
-              (((.conditions.ref_name.exclude // []) | length)==0) and
-              (([.rules[]?.type] | index("update")) != null) and
-              (([.rules[]?.type] | index("deletion")) != null)
-            ' >/dev/null <<<"$ruleset"; then
-              protected=1
-              break
-            fi
-          done < <(gh api "/repos/$GITHUB_REPOSITORY/rulesets?targets=tag&includes_parents=true&per_page=100" --jq '.[] | select(.target == "tag" and .enforcement == "active") | .id')
-          test "$protected" -eq 1 || {
-            echo "Publication is blocked. Create an active tag ruleset covering refs/tags/v* (or all tags) with Restrict updates + Restrict deletions and no bypass actors." >&2
-            exit 1
-          }
-      - name: Recheck manual immutability gate before publication
+      - name: Recheck operator release-control gate before publication
         run: |
           set -Eeuo pipefail
           test "$IMMUTABILITY_CONFIRMATION" = 'IMMUTABLE_RELEASES_ENABLED'
+          test "$TAG_PROTECTION_CONFIRMATION" = 'RELEASE_TAG_PROTECTION_VERIFIED'
           echo "Proceeding only on the operator's immediately preceding repository-setting verification."
       - name: Create and verify exact protected release tag
         env:

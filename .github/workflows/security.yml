@@ -51,7 +51,12 @@ jobs:
           go-version: '1.26.x'
           cache: false
       - name: Build release-scoped installer
-        run: bash scripts/build-release.sh v0.1.2
+        run: |
+          set -Eeuo pipefail
+          bash scripts/build-release.sh v0.1.2
+          test "$(sed -n '1p' dist/install.sh)" = '#!/usr/bin/env bash'
+          test "$(sed -n '2p' dist/install.sh)" = 'export AI_SERVER_AGENT_VERSION=v0.1.2'
+          test "$(sed -n '3p' dist/install.sh)" = 'export AI_SERVER_AGENT_REF=v0.1.2'
       - name: Reject stable binary override
         run: |
           if sudo env AI_SERVER_AGENT_BINARY=/bin/true bash dist/install.sh --check >/tmp/binary-override.out 2>&1; then
@@ -152,7 +157,7 @@ jobs:
           done
           case "$url" in
             */releases/tags/v0.1.2)
-              printf '%s\n' '{"tag_name":"v0.1.2","draft":false,"prerelease":false,"immutable":false}'
+              printf '%s\n' '{"tag_name":"v0.1.2","draft":false,"prerelease":false,"immutable":false,"assets":[]}'
               ;;
             */releases/download/*)
               printf '%s\n' installer-download > "$INSTALLER_MARKER"
@@ -174,7 +179,120 @@ jobs:
           fi
           grep -qF 'Stable update requires a published immutable release for v0.1.2' /tmp/mutable-release.out
           test ! -e "$marker"
-      - name: Release publication is manually gated and exact-tag protected before publish
+      - name: Verify immutable release installer asset digest before execution
+        run: |
+          set -Eeuo pipefail
+          state="$(mktemp)"
+          cat > "$state" <<'STATE'
+          {"channel":"stable","version":"v0.1.1","ref":"v0.1.1","track_ref":"v0.1.1"}
+          STATE
+          fixture="$(mktemp -d)"
+          fakebin="$fixture/bin"
+          mkdir -p "$fakebin"
+          marker="$fixture/executed"
+          cat > "$fixture/install.sh" <<'INSTALLER'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          printf 'executed\n' > "$EXEC_MARKER"
+          INSTALLER
+          digest="sha256:$(sha256sum "$fixture/install.sh" | awk '{print $1}')"
+          cat > "$fakebin/curl" <<'CURL'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          out=''
+          url=''
+          while [ "$#" -gt 0 ]; do
+            case "$1" in
+              -H) shift 2 ;;
+              -o) out="$2"; shift 2 ;;
+              -*) shift ;;
+              *) url="$1"; shift ;;
+            esac
+          done
+          case "$url" in
+            */releases/tags/v0.1.2)
+              printf '{"tag_name":"v0.1.2","draft":false,"prerelease":false,"immutable":true,"assets":[{"name":"install.sh","state":"uploaded","digest":"%s","browser_download_url":"https://github.com/ach1992/ai-server-agent/releases/download/v0.1.2/install.sh"}]}\n' "$INSTALLER_DIGEST"
+              ;;
+            https://github.com/ach1992/ai-server-agent/releases/download/v0.1.2/install.sh)
+              [ -n "$out" ] || exit 92
+              cp "$FIXTURE_INSTALLER" "$out"
+              ;;
+            *) exit 91 ;;
+          esac
+          CURL
+          cat > "$fakebin/systemctl" <<'SYSTEMCTL'
+          #!/usr/bin/env bash
+          exit 0
+          SYSTEMCTL
+          chmod +x "$fakebin/curl" "$fakebin/systemctl"
+          sudo env \
+            PATH="$fakebin:$PATH" \
+            INSTALLER_DIGEST="$digest" \
+            FIXTURE_INSTALLER="$fixture/install.sh" \
+            EXEC_MARKER="$marker" \
+            AI_SERVER_AGENT_INSTALL_STATE="$state" \
+            AI_SERVER_AGENT_VERSION=v0.1.2 \
+            AI_SERVER_AGENT_REF=v0.1.2 \
+            bash update.sh >/tmp/digest-update.out
+          test -s "$marker"
+          grep -qF "AI Server Agent update completed on the 'stable' channel." /tmp/digest-update.out
+      - name: Reject stable installer asset digest mismatch before execution
+        run: |
+          set -Eeuo pipefail
+          state="$(mktemp)"
+          cat > "$state" <<'STATE'
+          {"channel":"stable","version":"v0.1.1","ref":"v0.1.1","track_ref":"v0.1.1"}
+          STATE
+          fixture="$(mktemp -d)"
+          fakebin="$fixture/bin"
+          mkdir -p "$fakebin"
+          marker="$fixture/executed"
+          cat > "$fixture/install.sh" <<'INSTALLER'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          printf 'executed\n' > "$EXEC_MARKER"
+          INSTALLER
+          wrong_digest="sha256:$(printf 'different trusted bytes\n' | sha256sum | awk '{print $1}')"
+          cat > "$fakebin/curl" <<'CURL'
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+          out=''
+          url=''
+          while [ "$#" -gt 0 ]; do
+            case "$1" in
+              -H) shift 2 ;;
+              -o) out="$2"; shift 2 ;;
+              -*) shift ;;
+              *) url="$1"; shift ;;
+            esac
+          done
+          case "$url" in
+            */releases/tags/v0.1.2)
+              printf '{"tag_name":"v0.1.2","draft":false,"prerelease":false,"immutable":true,"assets":[{"name":"install.sh","state":"uploaded","digest":"%s","browser_download_url":"https://github.com/ach1992/ai-server-agent/releases/download/v0.1.2/install.sh"}]}\n' "$INSTALLER_DIGEST"
+              ;;
+            https://github.com/ach1992/ai-server-agent/releases/download/v0.1.2/install.sh)
+              [ -n "$out" ] || exit 92
+              cp "$FIXTURE_INSTALLER" "$out"
+              ;;
+            *) exit 91 ;;
+          esac
+          CURL
+          chmod +x "$fakebin/curl"
+          if sudo env \
+            PATH="$fakebin:$PATH" \
+            INSTALLER_DIGEST="$wrong_digest" \
+            FIXTURE_INSTALLER="$fixture/install.sh" \
+            EXEC_MARKER="$marker" \
+            AI_SERVER_AGENT_INSTALL_STATE="$state" \
+            AI_SERVER_AGENT_VERSION=v0.1.2 \
+            AI_SERVER_AGENT_REF=v0.1.2 \
+            bash update.sh >/tmp/digest-mismatch.out 2>&1; then
+            echo 'installer with mismatched release-asset digest was executed' >&2
+            exit 1
+          fi
+          grep -qF 'Stable release install.sh digest mismatch' /tmp/digest-mismatch.out
+          test ! -e "$marker"
+      - name: Release publication uses explicit operator controls and exact-SHA automation
         run: |
           set -Eeuo pipefail
           grep -qF 'workflow_dispatch:' .github/workflows/release.yml
@@ -184,29 +302,32 @@ jobs:
           fi
           grep -qF 'immutability_confirmation:' .github/workflows/release.yml
           grep -qF 'IMMUTABLE_RELEASES_ENABLED' .github/workflows/release.yml
+          grep -qF 'tag_protection_confirmation:' .github/workflows/release.yml
+          grep -qF 'RELEASE_TAG_PROTECTION_VERIFIED' .github/workflows/release.yml
           grep -qF 'release_sha:' .github/workflows/release.yml
           grep -qF 'group: stable-release' .github/workflows/release.yml
+          if grep -qF 'rulesets?targets=tag' .github/workflows/release.yml; then
+            echo 'release workflow must not pretend GITHUB_TOKEN can prove complete tag-ruleset bypass state' >&2
+            exit 1
+          fi
+          if grep -qF '(.bypass_actors // [])' .github/workflows/release.yml; then
+            echo 'release workflow must not normalize omitted bypass_actors to an empty authoritative set' >&2
+            exit 1
+          fi
           if grep -qF -- '--target "$RELEASE_SHA"' .github/workflows/release.yml; then
             echo 'release must not rely on --target for an existing tag' >&2
             exit 1
           fi
           grep -qF -- '--verify-tag' .github/workflows/release.yml
-          grep -qF 'rulesets?targets=tag&includes_parents=true' .github/workflows/release.yml
-          grep -qF -- "--arg pattern 'refs/tags/v*'" .github/workflows/release.yml
-          grep -qF 'index("update")' .github/workflows/release.yml
-          grep -qF 'index("deletion")' .github/workflows/release.yml
-          grep -qF '((.bypass_actors // []) | length)==0' .github/workflows/release.yml
           grep -qF 'gh api --method POST "/repos/$GITHUB_REPOSITORY/git/refs"' .github/workflows/release.yml
           grep -qF -- '-f sha="$RELEASE_SHA"' .github/workflows/release.yml
-          gate_line="$(grep -nF 'Pre-publication immutable release gate' .github/workflows/release.yml | cut -d: -f1)"
-          ruleset_line="$(grep -nF 'Verify active immutable release-tag ruleset' .github/workflows/release.yml | cut -d: -f1)"
-          recheck_line="$(grep -nF 'Recheck manual immutability gate before publication' .github/workflows/release.yml | cut -d: -f1)"
+          gate_line="$(grep -nF 'Pre-publication operator release-control gate' .github/workflows/release.yml | cut -d: -f1)"
+          recheck_line="$(grep -nF 'Recheck operator release-control gate before publication' .github/workflows/release.yml | cut -d: -f1)"
           tag_line="$(grep -nF 'Create and verify exact protected release tag' .github/workflows/release.yml | cut -d: -f1)"
           publish_line="$(grep -nF 'Publish release payload' .github/workflows/release.yml | cut -d: -f1)"
           verify_line="$(grep -nF 'Verify immutable release and attestations' .github/workflows/release.yml | cut -d: -f1)"
-          test -n "$gate_line" && test -n "$ruleset_line" && test -n "$recheck_line" && test -n "$tag_line" && test -n "$publish_line" && test -n "$verify_line"
-          test "$gate_line" -lt "$ruleset_line"
-          test "$ruleset_line" -lt "$recheck_line"
+          test -n "$gate_line" && test -n "$recheck_line" && test -n "$tag_line" && test -n "$publish_line" && test -n "$verify_line"
+          test "$gate_line" -lt "$recheck_line"
           test "$recheck_line" -lt "$tag_line"
           test "$tag_line" -lt "$publish_line"
           test "$publish_line" -lt "$verify_line"

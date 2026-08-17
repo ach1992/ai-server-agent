@@ -35,7 +35,7 @@ REF=""
 TRACK_REF=""
 
 load_install_state(){
-  local file="$1" json keys
+  local file="$1" json
   [ -e "$file" ] || { echo "Trusted install state is missing: $file. Refusing to guess an update channel or ref." >&2; exit 1; }
   [ -f "$file" ] && [ ! -L "$file" ] || { echo "Install state must be a regular non-symlink file: $file" >&2; exit 1; }
   [ "$(stat -c '%s' "$file")" -le 4096 ] || { echo "Install state is unexpectedly large: $file" >&2; exit 1; }
@@ -96,10 +96,11 @@ latest_stable(){
   printf '%s\n' "$tag"
 }
 
-verify_stable_release(){
+verified_stable_release_json(){
   local version="$1" json
   json="$(curl -fsSL -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2026-03-10' "https://api.github.com/repos/$REPO/releases/tags/$version")" || { echo "Could not read GitHub release $version" >&2; exit 1; }
   jq -e --arg version "$version" '.tag_name == $version and .draft == false and .prerelease == false and .immutable == true' >/dev/null <<<"$json" || { echo "Stable update requires a published immutable release for $version" >&2; exit 1; }
+  printf '%s' "$json"
 }
 
 if [ "$CHANNEL" = "stable" ]; then
@@ -124,10 +125,22 @@ if [ "$PLAN_ONLY" -eq 1 ]; then exit 0; fi
 
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 if [ "$CHANNEL" = "stable" ]; then
-  verify_stable_release "$TARGET_VERSION"
-  curl -fsSL "https://github.com/$REPO/releases/download/$TARGET_VERSION/install.sh" -o "$TMP/install.sh"
-  grep -qF "export AI_SERVER_AGENT_VERSION=$TARGET_VERSION" "$TMP/install.sh" || { echo "Release installer does not pin $TARGET_VERSION" >&2; exit 1; }
-  grep -qF "export AI_SERVER_AGENT_REF=$TARGET_VERSION" "$TMP/install.sh" || { echo "Release installer ref does not pin $TARGET_VERSION" >&2; exit 1; }
+  release_json="$(verified_stable_release_json "$TARGET_VERSION")"
+  asset_json="$(jq -ce '[.assets[]? | select(.name=="install.sh" and .state=="uploaded")] | select(length==1) | .[0]' <<<"$release_json")" || {
+    echo "Stable release $TARGET_VERSION must contain exactly one uploaded install.sh asset" >&2
+    exit 1
+  }
+  installer_url="$(jq -r '.browser_download_url // empty' <<<"$asset_json")"
+  installer_digest="$(jq -r '.digest // empty' <<<"$asset_json")"
+  expected_url="https://github.com/$REPO/releases/download/$TARGET_VERSION/install.sh"
+  [ "$installer_url" = "$expected_url" ] || { echo "Stable release install.sh asset URL does not match the exact release tag" >&2; exit 1; }
+  [[ "$installer_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { echo "Stable release install.sh asset is missing a valid SHA-256 digest" >&2; exit 1; }
+  curl -fsSL "$installer_url" -o "$TMP/install.sh"
+  actual_digest="sha256:$(sha256sum "$TMP/install.sh" | awk '{print $1}')"
+  [ "$actual_digest" = "$installer_digest" ] || {
+    echo "Stable release install.sh digest mismatch: expected $installer_digest, got $actual_digest" >&2
+    exit 1
+  }
   chmod +x "$TMP/install.sh"
   AI_SERVER_AGENT_NONINTERACTIVE=1 \
   AI_SERVER_AGENT_SETUP_MODE=keep \
