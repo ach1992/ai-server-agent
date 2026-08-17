@@ -104,7 +104,7 @@ jobs:
           grep -qF 'Refusing to adopt or overwrite it' manage.sh
           grep -qF 'Refusing ambiguous replacement' manage.sh
           grep -qF 'dns_record_owned' manage.sh
-          grep -qF 'existing-external' manage.sh
+          grep -qF '[ "$content" = "$ip" ] && [ "$proxied" = "true" ] || die "Existing A record for $host is not recorded as Agent-owned and does not match this server. Refusing to modify or adopt it automatically.' manage.sh
           grep -qF 'delete_recorded_cloudflare_resources(){' manage.sh
           grep -qF 'cf_delete_owned(){' manage.sh
           grep -qF 'Refusing to adopt or modify the replacement record.' manage.sh
