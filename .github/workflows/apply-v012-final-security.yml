@@ -20,16 +20,17 @@ jobs:
       - name: Apply and validate final security remediation
         run: |
           set -Eeuo pipefail
-          cat \
-            scripts/.tmp-final-security.part1 \
-            scripts/.tmp-final-security.part2 \
-            scripts/.tmp-final-security.part3 \
-            scripts/.tmp-final-security.part4 \
-            scripts/.tmp-final-security.part5 \
-            scripts/.tmp-final-security.part6 \
-            scripts/.tmp-final-security.part7 \
-            scripts/.tmp-final-security.part8 \
-            > /tmp/apply-final-security.py
+          {
+            head -n -1 scripts/.tmp-final-security.part1
+            cat \
+              scripts/.tmp-final-security.part2 \
+              scripts/.tmp-final-security.part3 \
+              scripts/.tmp-final-security.part4 \
+              scripts/.tmp-final-security.part5 \
+              scripts/.tmp-final-security.part6 \
+              scripts/.tmp-final-security.part7 \
+              scripts/.tmp-final-security.part8
+          } > /tmp/apply-final-security.py
           python3 -m py_compile /tmp/apply-final-security.py
           python3 /tmp/apply-final-security.py
           chmod +x tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh tests/root_trust_boundary.sh tests/root_trust_migration.sh
