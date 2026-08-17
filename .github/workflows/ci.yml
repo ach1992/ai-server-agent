@@ -5,6 +5,8 @@ on:
   pull_request:
 permissions:
   contents: read
+env:
+  RELEASE_VERSION: v0.1.2
 jobs:
   test:
     runs-on: ubuntu-22.04
@@ -30,7 +32,11 @@ jobs:
         run: |
           grep -qF 'MANAGE_BIN="/usr/local/sbin/ai-server-agent-manage"' install.sh
           grep -qF 'AI_SERVER_AGENT_SETUP_MODE' install.sh
-          grep -qF '"$MANAGE_BIN" first-run' install.sh
+          grep -qF 'if ! "$MANAGE_BIN" first-run; then' install.sh
+          grep -qF 'SETUP_INCOMPLETE=1' install.sh
+          grep -qF 'Core installation succeeded, but connection setup was not completed.' install.sh
+          grep -qF 'Resume setup with: sudo ai-server-agent-manage' install.sh
+          grep -qF 'Configure later - keep the healthy local Agent' manage.sh
           grep -qF 'ca-certificates curl jq openssl tar xz-utils' install.sh
           grep -qF 'CHANNEL=$STATE_CHANNEL' install.sh
           grep -qF 'TRACK_REF=$TRACK_REF' install.sh
@@ -45,10 +51,23 @@ jobs:
         run: |
           grep -qF 'read -r -s CF_TOKEN' manage.sh
           grep -qF 'Cloudflare API token (input hidden; not stored)' manage.sh
+          grep -qF 'Resource scope: Include -> Specific zone' manage.sh
+          grep -qF 'Zone > Zone > Read' manage.sh
+          grep -qF 'Zone > DNS > Edit' manage.sh
+          grep -qF 'Zone > SSL and Certificates > Edit' manage.sh
+          grep -qF 'Zone > Origin Rules > Edit' manage.sh
+          grep -qF 'Zone > Config Rules > Edit' manage.sh
+          grep -qF 'Do not paste the token into ChatGPT' manage.sh
           grep -qF "cf_api POST '/certificates'" manage.sh
           grep -qF '/dns_records' manage.sh
           grep -qF 'http_request_origin' manage.sh
           grep -qF 'origin:{port:$port}' manage.sh
+          grep -qF 'http_config_settings' manage.sh
+          grep -qF 'action:"set_config"' manage.sh
+          grep -qF 'action_parameters:{ssl:"strict"}' manage.sh
+          grep -qF 'ssl_config_ruleset_id' manage.sh
+          grep -qF 'ssl_config_rule_id' manage.sh
+          grep -qF 'Refusing to adopt or overwrite it' manage.sh
           grep -qF 'Refusing ambiguous replacement' manage.sh
           grep -qF 'Previous Agent state was restored' manage.sh
           grep -qF 'dns_record_owned' manage.sh
@@ -56,6 +75,14 @@ jobs:
           grep -qF 'Refusing to modify it automatically' manage.sh
           grep -qF 'if [ "$dns_owned" = "true" ] && [ -n "$dns_id" ]; then' manage.sh
           grep -qF 'if [ "$old_dns_owned" = "true" ] && [ -n "$old_dns" ]; then' manage.sh
+          if grep -qF '/settings/ssl' manage.sh; then
+            echo 'guided Cloudflare setup must not modify whole-zone SSL mode' >&2
+            exit 1
+          fi
+          if grep -qF 'AI_SERVER_AGENT_ALLOW_ZONE_SSL_CHANGE' manage.sh; then
+            echo 'whole-zone SSL mutation fallback must not be present in normal setup' >&2
+            exit 1
+          fi
           if grep -qF 'AI_SERVER_AGENT_REPLACE_EXISTING_DNS' manage.sh; then
             echo 'external DNS records must not be auto-adopted or overwritten' >&2
             exit 1
@@ -69,17 +96,17 @@ jobs:
           state="$(mktemp)"
           cat > "$state" <<'STATE'
           CHANNEL=stable
-          VERSION=v0.1.0
-          REF=v0.1.0
-          TRACK_REF=v0.1.0
+          VERSION=v0.1.1
+          REF=v0.1.1
+          TRACK_REF=v0.1.1
           STATE
           sudo env \
             AI_SERVER_AGENT_INSTALL_STATE="$state" \
-            AI_SERVER_AGENT_VERSION='v0.1.1' \
+            AI_SERVER_AGENT_VERSION="$RELEASE_VERSION" \
             bash update.sh --plan > /tmp/stable-plan.out
           grep -qF 'Update channel: stable' /tmp/stable-plan.out
-          grep -qF 'Target version: v0.1.1' /tmp/stable-plan.out
-          grep -qF 'Target ref: v0.1.1' /tmp/stable-plan.out
+          grep -qF "Target version: $RELEASE_VERSION" /tmp/stable-plan.out
+          grep -qF "Target ref: $RELEASE_VERSION" /tmp/stable-plan.out
           if grep -qF 'Target ref: main' /tmp/stable-plan.out; then
             echo 'stable update must never default to main' >&2
             exit 1
@@ -143,27 +170,35 @@ jobs:
             echo 'update.sh must not hard-code main as a stable target' >&2
             exit 1
           fi
-      - name: Release artifact contract
+      - name: Release artifact and one-line installer contract
         run: |
           rm -rf dist
-          bash scripts/build-release.sh v0.1.1
-          archive='dist/ai-server-agent_0.1.1_linux_amd64.tar.gz'
+          bash scripts/build-release.sh "$RELEASE_VERSION"
+          version="${RELEASE_VERSION#v}"
+          archive="dist/ai-server-agent_${version}_linux_amd64.tar.gz"
           test -f "$archive"
           test -f dist/SHA256SUMS
+          test -x dist/install.sh
           test "$(find dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
           test "$(wc -l < dist/SHA256SUMS)" -eq 1
-          grep -qF '  ai-server-agent_0.1.1_linux_amd64.tar.gz' dist/SHA256SUMS
+          grep -qF "  ai-server-agent_${version}_linux_amd64.tar.gz" dist/SHA256SUMS
+          grep -qF "export AI_SERVER_AGENT_VERSION=$RELEASE_VERSION" dist/install.sh
+          grep -qF "export AI_SERVER_AGENT_REF=$RELEASE_VERSION" dist/install.sh
+          grep -qF 'curl -fsSL "$url/$asset"' dist/install.sh
+          grep -qF 'curl -fsSL "$url/SHA256SUMS"' dist/install.sh
+          grep -qF 'sha256sum -c -' dist/install.sh
           if find dist -maxdepth 1 -name '*arm64*' -print -quit | grep -q .; then
             echo 'v0.1 must not produce unvalidated arm64 artifacts' >&2
             exit 1
           fi
           (cd dist && sha256sum -c SHA256SUMS)
-          tar -tzf "$archive" | grep -qF 'ai-server-agent_0.1.1_linux_amd64/ai-server-agent'
-          tar -tzf "$archive" | grep -qF 'ai-server-agent_0.1.1_linux_amd64/manage.sh'
-          tar -tzf "$archive" | grep -qF 'ai-server-agent_0.1.1_linux_amd64/update.sh'
-          tar -tzf "$archive" | grep -qF 'ai-server-agent_0.1.1_linux_amd64/uninstall.sh'
-          tar -tzf "$archive" | grep -qF 'ai-server-agent_0.1.1_linux_amd64/README.md'
-          tar -tzf "$archive" | grep -qF 'ai-server-agent_0.1.1_linux_amd64/LICENSE'
+          sudo bash dist/install.sh --check
+          tar -tzf "$archive" | grep -qF "ai-server-agent_${version}_linux_amd64/ai-server-agent"
+          tar -tzf "$archive" | grep -qF "ai-server-agent_${version}_linux_amd64/manage.sh"
+          tar -tzf "$archive" | grep -qF "ai-server-agent_${version}_linux_amd64/update.sh"
+          tar -tzf "$archive" | grep -qF "ai-server-agent_${version}_linux_amd64/uninstall.sh"
+          tar -tzf "$archive" | grep -qF "ai-server-agent_${version}_linux_amd64/README.md"
+          tar -tzf "$archive" | grep -qF "ai-server-agent_${version}_linux_amd64/LICENSE"
           git diff --exit-code -- internal/mcp/server.go
       - name: Ubuntu 22.04 amd64 lifecycle validation
         run: |
@@ -223,13 +258,28 @@ jobs:
           id aiworker >/dev/null
           getent group aiworker >/dev/null
           sudo test -e /srv/ai-workspace/lifecycle-workspace-sentinel
+      - name: First-run deferral is not an installation failure
+        run: |
+          command -v script >/dev/null
+          printf '0\n' | script -qefc "sudo env AI_SERVER_AGENT_BINARY=/tmp/ai-server-agent bash install.sh" /tmp/first-run.out
+          grep -qF 'Setup deferred. The Agent remains installed and healthy in local mode.' /tmp/first-run.out
+          grep -qF 'AI Server Agent core installed successfully; connection setup is incomplete.' /tmp/first-run.out
+          grep -qF 'sudo ai-server-agent-manage' /tmp/first-run.out
+          if grep -qF '[ERROR] Installation failed' /tmp/first-run.out; then
+            echo 'safe first-run deferral must not be reported as installation failure' >&2
+            exit 1
+          fi
+          sudo systemctl is-active --quiet ai-server-agent.service
+          sudo systemctl is-active --quiet ai-server-agent-executor.service
+          sudo env AI_SERVER_AGENT_YES=1 bash uninstall.sh --purge
+          id aiworker >/dev/null
+          getent group aiworker >/dev/null
+          sudo test -e /srv/ai-workspace/lifecycle-workspace-sentinel
       - name: Upload release candidate artifacts
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@v4
         with:
-          name: ai-server-agent-v0.1.1-${{ github.sha }}
-          path: |
-            dist/ai-server-agent_0.1.1_linux_amd64.tar.gz
-            dist/SHA256SUMS
+          name: ai-server-agent-${{ env.RELEASE_VERSION }}-${{ github.sha }}
+          path: dist/
           if-no-files-found: error
           retention-days: 7
