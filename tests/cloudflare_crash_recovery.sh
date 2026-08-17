@@ -2,15 +2,15 @@
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
-STATE_DIR="$TMP/state"; CONFIG_DIR="$TMP/config"; TLS_DIR="$CONFIG_DIR/tls"; CF_TXN_STATE="$STATE_DIR/cloudflare-transaction.json"; REMOTE="$TMP/remote.json"
-mkdir -p "$STATE_DIR" "$CONFIG_DIR" "$TLS_DIR"
+STATE_DIR="$TMP/state"; CONFIG_DIR="$TMP/config"; CONTROL_DIR="$CONFIG_DIR/control"; TLS_DIR="$CONFIG_DIR/tls"; CF_TXN_STATE="$CONTROL_DIR/cloudflare-transaction.json"; REMOTE="$TMP/remote.json"
+mkdir -p "$STATE_DIR" "$CONFIG_DIR" "$CONTROL_DIR" "$TLS_DIR"
 child="$TMP/crash-child.sh"
 cat > "$child" <<'CHILD'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 export AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1
 source "$ROOT/manage.sh"
-STATE_DIR="$TEST_STATE_DIR"; CONFIG_DIR="$TEST_CONFIG_DIR"; TLS_DIR="$TEST_TLS_DIR"; CF_TXN_STATE="$TEST_CF_TXN_STATE"
+STATE_DIR="$TEST_STATE_DIR"; CONFIG_DIR="$TEST_CONFIG_DIR"; CONTROL_DIR="$TEST_CONTROL_DIR"; TLS_DIR="$TEST_TLS_DIR"; CF_TXN_STATE="$TEST_CF_TXN_STATE"
 AGENT_USER=root; CF_TOKEN=test
 cf_new_ownership_marker(){ printf 'crashnonce0123456789abcdef01234567\n'; }
 cf_api(){
@@ -27,7 +27,7 @@ CHILD
 chmod +x "$child"
 
 set +e
-ROOT="$ROOT" TEST_STATE_DIR="$STATE_DIR" TEST_CONFIG_DIR="$CONFIG_DIR" TEST_TLS_DIR="$TLS_DIR" TEST_CF_TXN_STATE="$CF_TXN_STATE" REMOTE="$REMOTE" timeout --signal=KILL 1s bash "$child" >/tmp/cloudflare-crash-child.out 2>&1
+ROOT="$ROOT" TEST_STATE_DIR="$STATE_DIR" TEST_CONFIG_DIR="$CONFIG_DIR" TEST_CONTROL_DIR="$CONTROL_DIR" TEST_TLS_DIR="$TLS_DIR" TEST_CF_TXN_STATE="$CF_TXN_STATE" REMOTE="$REMOTE" timeout --signal=KILL 1s bash "$child" >/tmp/cloudflare-crash-child.out 2>&1
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || { echo 'expected SIGKILL crash injection' >&2; exit 1; }
@@ -43,11 +43,11 @@ test "$(jq -r '.comment' "$REMOTE")" = "Managed by AI Server Agent txn:$marker" 
 echo 'remote ownership marker matches durable journal'
 
 # New process: reload only the durable journal and remote state, then recover.
-ROOT="$ROOT" TEST_STATE_DIR="$STATE_DIR" TEST_CONFIG_DIR="$CONFIG_DIR" TEST_TLS_DIR="$TLS_DIR" TEST_CF_TXN_STATE="$CF_TXN_STATE" REMOTE="$REMOTE" bash -c '
+ROOT="$ROOT" TEST_STATE_DIR="$STATE_DIR" TEST_CONFIG_DIR="$CONFIG_DIR" TEST_CONTROL_DIR="$CONTROL_DIR" TEST_TLS_DIR="$TLS_DIR" TEST_CF_TXN_STATE="$CF_TXN_STATE" REMOTE="$REMOTE" bash -c '
   set -Eeuo pipefail
   export AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1
   source "$ROOT/manage.sh"
-  STATE_DIR="$TEST_STATE_DIR"; CONFIG_DIR="$TEST_CONFIG_DIR"; TLS_DIR="$TEST_TLS_DIR"; CF_TXN_STATE="$TEST_CF_TXN_STATE"
+  STATE_DIR="$TEST_STATE_DIR"; CONFIG_DIR="$TEST_CONFIG_DIR"; CONTROL_DIR="$TEST_CONTROL_DIR"; TLS_DIR="$TEST_TLS_DIR"; CF_TXN_STATE="$TEST_CF_TXN_STATE"
   AGENT_USER=root; CF_TOKEN=test
   cf_api(){
     method="$1"; path="$2"

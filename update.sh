@@ -3,7 +3,8 @@ set -Eeuo pipefail
 
 [ "$(id -u)" -eq 0 ] || { echo "Run as root" >&2; exit 1; }
 REPO="ach1992/ai-server-agent"
-INSTALL_STATE="${AI_SERVER_AGENT_INSTALL_STATE:-/var/lib/ai-server-agent/install-state.env}"
+DEFAULT_INSTALL_STATE="/etc/ai-server-agent/control/install-state.json"
+INSTALL_STATE="${AI_SERVER_AGENT_INSTALL_STATE:-$DEFAULT_INSTALL_STATE}"
 PLAN_ONLY=0
 [ "${1:-}" = "--plan" ] && PLAN_ONLY=1
 
@@ -11,11 +12,36 @@ CHANNEL="${AI_SERVER_AGENT_UPDATE_CHANNEL:-}"
 VERSION=""
 REF=""
 TRACK_REF=""
-if [ -r "$INSTALL_STATE" ]; then
-  # Root-owned, installer-generated metadata with validated values only.
-  # shellcheck disable=SC1090
-  . "$INSTALL_STATE"
-fi
+
+load_install_state(){
+  local file="$1" json keys
+  [ -e "$file" ] || return 0
+  [ -f "$file" ] && [ ! -L "$file" ] || { echo "Install state must be a regular non-symlink file: $file" >&2; exit 1; }
+  [ "$(stat -c '%s' "$file")" -le 4096 ] || { echo "Install state is unexpectedly large: $file" >&2; exit 1; }
+  json="$(cat -- "$file")" || { echo "Could not read install state: $file" >&2; exit 1; }
+  jq -e 'type=="object" and (keys|sort)==["channel","ref","track_ref","version"] and (.channel|type)=="string" and (.version|type)=="string" and (.ref|type)=="string" and (.track_ref|type)=="string"' >/dev/null <<<"$json" || {
+    echo "Install state has an invalid schema: $file" >&2
+    exit 1
+  }
+  CHANNEL="$(jq -r '.channel' <<<"$json")"
+  VERSION="$(jq -r '.version' <<<"$json")"
+  REF="$(jq -r '.ref' <<<"$json")"
+  TRACK_REF="$(jq -r '.track_ref' <<<"$json")"
+  case "$CHANNEL" in
+    stable)
+      [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Invalid stable install version metadata" >&2; exit 1; }
+      [ "$REF" = "$VERSION" ] && [ "$TRACK_REF" = "$VERSION" ] || { echo "Stable install metadata must pin version/ref/track_ref to the same tag" >&2; exit 1; }
+      ;;
+    source)
+      [ "$VERSION" = source ] || { echo "Source install metadata must use version=source" >&2; exit 1; }
+      [[ "$REF" =~ ^([0-9a-f]{40}|binary)$ ]] || { echo "Invalid source install ref metadata" >&2; exit 1; }
+      [[ "$TRACK_REF" =~ ^[A-Za-z0-9._/-]+$|^[0-9a-fA-F]{40}$ ]] || { echo "Invalid source install tracking ref metadata" >&2; exit 1; }
+      ;;
+    *) echo "Invalid install channel metadata: $CHANNEL" >&2; exit 1 ;;
+  esac
+}
+
+load_install_state "$INSTALL_STATE"
 CHANNEL="${AI_SERVER_AGENT_UPDATE_CHANNEL:-${CHANNEL:-source}}"
 
 case "$CHANNEL" in stable|source) ;; *) echo "Invalid update channel: $CHANNEL" >&2; exit 1 ;; esac

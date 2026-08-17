@@ -150,6 +150,62 @@ func (s *Server) run(req Request) Response {
 	return Response{OK: err == nil, Error: errString(err), Output: limit(out.String(), 4<<20), ExitCode: code}
 }
 
+func trustedDir(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 || !fi.IsDir() {
+		return fmt.Errorf("trusted path is not a real directory: %s", path)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || st.Uid != uint32(os.Geteuid()) {
+		return fmt.Errorf("trusted directory is not owned by executor uid: %s", path)
+	}
+	if fi.Mode().Perm()&0022 != 0 {
+		return fmt.Errorf("trusted directory is group/other writable: %s", path)
+	}
+	return nil
+}
+
+func createJobFile(path string, uid, gid uint32) error {
+	f, err := os.OpenFile(path, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0640)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	if err := f.Chown(int(uid), int(gid)); err != nil {
+		return err
+	}
+	return f.Chmod(0640)
+}
+
+func (s *Server) openJobFile(path string) (*os.File, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return nil, err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		f.Close()
+		return nil, err
+	}
+	if !fi.Mode().IsRegular() {
+		f.Close()
+		return nil, fmt.Errorf("job path is not a regular file: %s", path)
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok || (st.Uid != 0 && st.Uid != s.workerUID) {
+		f.Close()
+		return nil, fmt.Errorf("job file has an unexpected owner: %s", path)
+	}
+	if fi.Mode().Perm()&0002 != 0 {
+		f.Close()
+		return nil, fmt.Errorf("job file is world-writable: %s", path)
+	}
+	return f, nil
+}
+
 func (s *Server) startJob(req Request) Response {
 	_, dec := s.command(req)
 	if !dec.Allowed {
@@ -159,16 +215,29 @@ func (s *Server) startJob(req Request) Response {
 		return Response{Error: "approval_required", Approval: dec}
 	}
 	id := fmt.Sprintf("%d", time.Now().UnixNano())
-	logPath := filepath.Join(s.cfg.StateDir, "jobs", id+".log")
-	statusPath := filepath.Join(s.cfg.StateDir, "jobs", id+".status")
-	if err := os.MkdirAll(filepath.Dir(logPath), 0750); err != nil {
+	jobsDir := filepath.Join(s.cfg.StateDir, "jobs")
+	if err := trustedDir(s.cfg.StateDir); err != nil {
 		return Response{Error: err.Error()}
 	}
-	unit := "ai-job-" + id
+	if err := trustedDir(jobsDir); err != nil {
+		return Response{Error: err.Error()}
+	}
+	logPath := filepath.Join(jobsDir, id+".log")
+	statusPath := filepath.Join(jobsDir, id+".status")
+	fileUID, fileGID := uint32(0), uint32(0)
 	mode := ""
 	if !req.Root {
+		fileUID, fileGID = s.workerUID, s.workerGID
 		mode = "--uid=" + s.cfg.WorkerUser
 	}
+	if err := createJobFile(logPath, fileUID, fileGID); err != nil {
+		return Response{Error: "prepare job log: " + err.Error()}
+	}
+	if err := createJobFile(statusPath, fileUID, fileGID); err != nil {
+		_ = os.Remove(logPath)
+		return Response{Error: "prepare job status: " + err.Error()}
+	}
+	unit := "ai-job-" + id
 	shell := fmt.Sprintf("/bin/bash -lc %s >>%s 2>&1; rc=$?; printf '%%s\n' \"$rc\" >%s; exit \"$rc\"", shellQuote(req.Command), shellQuote(logPath), shellQuote(statusPath))
 	args := []string{"--unit", unit, "--collect", "--property=WorkingDirectory=" + s.cfg.WorkspaceDir, "--setenv=HOME=" + s.cfg.WorkspaceDir, "--setenv=AI_SERVER_AGENT=1"}
 	if mode != "" {
@@ -189,8 +258,21 @@ func (s *Server) jobStatus(req Request) Response {
 		return Response{Error: err.Error()}
 	}
 	statusPath := filepath.Join(s.cfg.StateDir, "jobs", id+".status")
-	if b, er := os.ReadFile(statusPath); er == nil {
-		return Response{OK: true, Status: "completed", Output: strings.TrimSpace(string(b))}
+	if f, er := s.openJobFile(statusPath); er == nil {
+		b, readErr := io.ReadAll(io.LimitReader(f, 64))
+		_ = f.Close()
+		if readErr != nil {
+			return Response{Error: readErr.Error()}
+		}
+		status := strings.TrimSpace(string(b))
+		if status != "" {
+			if _, parseErr := strconv.Atoi(status); parseErr == nil {
+				return Response{OK: true, Status: "completed", Output: status}
+			}
+			return Response{Error: "invalid job status file"}
+		}
+	} else if !os.IsNotExist(er) {
+		return Response{Error: er.Error()}
 	}
 	unit := "ai-job-" + id
 	out, er := exec.Command("systemctl", "show", unit, "--property=ActiveState,SubState,ExecMainStatus,MainPID", "--no-pager").CombinedOutput()
@@ -217,7 +299,7 @@ func (s *Server) jobOutput(req Request) Response {
 		return Response{Error: err.Error()}
 	}
 	path := filepath.Join(s.cfg.StateDir, "jobs", id+".log")
-	f, er := os.Open(path)
+	f, er := s.openJobFile(path)
 	if er != nil {
 		return Response{Error: er.Error()}
 	}

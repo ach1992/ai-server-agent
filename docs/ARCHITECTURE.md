@@ -7,6 +7,8 @@ AI Server Agent is intentionally host-neutral. The control plane is a single sta
 
 The services communicate through `/run/ai-server-agent/executor.sock` using a random local token. Normal project commands are dropped to `aiworker`; root commands run only when the root tool is selected.
 
+Root-trusted control metadata is isolated under `/etc/ai-server-agent/control` (`root:root`, non-writable by `aiagent`/`aiworker`). Install identity is strict JSON and is never shell-sourced. The top-level `/var/lib/ai-server-agent` hierarchy plus its `jobs` and `runtime` container entries are root-owned so unprivileged identities cannot replace paths later consumed by the privileged executor; writable worker/browser files exist only beneath root-controlled directory entries. Privileged job-file reads reject symlinks/non-regular files, and legacy browser-data symlinks are removed without being followed during upgrade.
+
 ## Non-interference contract
 
 The core does **not** install or require nginx, Apache, PHP, MySQL/MariaDB, Docker, Node.js, Python, Redis, aaPanel, or any hosting panel. It does not bind ports 80 or 443. Projects and AI workflows may install, replace, configure, or remove those components without taking down the MCP service.

@@ -17,7 +17,8 @@ STATE_DIR="/var/lib/ai-server-agent"
 LOG_DIR="/var/log/ai-server-agent"
 WORKSPACE_DIR="/srv/ai-workspace"
 CONFIG_FILE="$CONFIG_DIR/config.json"
-INSTALL_STATE="$STATE_DIR/install-state.env"
+CONTROL_DIR="$CONFIG_DIR/control"
+INSTALL_STATE="$CONTROL_DIR/install-state.json"
 MANAGED_STATE="$CONFIG_DIR/managed.json"
 MCP_AUTH_HEADER_FILE="$CONFIG_DIR/mcp.authorization"
 AGENT_USER="aiagent"
@@ -141,11 +142,39 @@ if ! id "$AGENT_USER" >/dev/null 2>&1; then useradd --system --gid "$AGENT_USER"
 if ! id "$WORKER_USER" >/dev/null 2>&1; then useradd --system --gid "$WORKER_USER" --create-home --home-dir "$WORKSPACE_DIR" --shell /bin/bash "$WORKER_USER"; fi
 
 install -d -m 0750 -o root -g "$AGENT_USER" "$CONFIG_DIR"
-install -d -m 0711 -o "$AGENT_USER" -g "$AGENT_USER" "$STATE_DIR"
+install -d -m 0700 -o root -g root "$CONTROL_DIR"
+[ ! -L "$STATE_DIR" ] || die "Refusing a symlinked state directory: $STATE_DIR"
+install -d -m 0711 -o root -g root "$STATE_DIR"
 install -d -m 2750 -o root -g "$AGENT_USER" "$LOG_DIR"
 install -d -m 0750 -o "$WORKER_USER" -g "$WORKER_USER" "$WORKSPACE_DIR"
-install -d -m 0750 -o "$WORKER_USER" -g "$WORKER_USER" "$STATE_DIR/runtime"
-install -d -m 0750 -o "$WORKER_USER" -g "$WORKER_USER" "$STATE_DIR/jobs"
+secure_state_container(){
+  local path="$1"
+  if [ -L "$path" ]; then
+    warn "Removing unsafe legacy state-container symlink without following it: $path"
+    rm -f -- "$path"
+  fi
+  if [ -e "$path" ] && [ ! -d "$path" ]; then
+    die "State container is not a real directory: $path"
+  fi
+  install -d -m 0711 -o root -g root "$path"
+}
+secure_state_container "$STATE_DIR/runtime"
+secure_state_container "$STATE_DIR/jobs"
+if [ -L "$STATE_DIR/runtime/browser" ]; then
+  warn "Removing unsafe legacy browser-data symlink without following it: $STATE_DIR/runtime/browser"
+  rm -f -- "$STATE_DIR/runtime/browser"
+fi
+if [ -e "$STATE_DIR/runtime/browser" ] && [ ! -d "$STATE_DIR/runtime/browser" ]; then
+  die "Browser runtime-data path is not a real directory: $STATE_DIR/runtime/browser"
+fi
+# Existing job outputs from the older worker-owned container are never trusted
+# as symlinks after migration.
+find "$STATE_DIR/jobs" -mindepth 1 -maxdepth 1 -type l -delete
+# AI_ENVIRONMENT.json is informational output written by aiagent. Its parent is
+# root-controlled, so the service can update the file but cannot replace the
+# directory entry with a symlink or another inode.
+rm -f -- "$STATE_DIR/AI_ENVIRONMENT.json"
+install -o "$AGENT_USER" -g "$AGENT_USER" -m 0640 /dev/null "$STATE_DIR/AI_ENVIRONMENT.json"
 install -d -m 0755 -o root -g root "$LIB_DIR"
 
 random_hex(){ od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; printf '\n'; }
@@ -244,13 +273,19 @@ case "$STATE_CHANNEL" in stable|source) ;; *) die "invalid install channel" ;; e
 [[ "$STATE_VERSION" =~ ^(source|v[0-9]+\.[0-9]+\.[0-9]+)$ ]] || die "invalid install version metadata"
 [[ "$STATE_REF" =~ ^([0-9a-f]{40}|v[0-9]+\.[0-9]+\.[0-9]+|binary)$ ]] || die "invalid install ref metadata: $STATE_REF"
 [[ "$TRACK_REF" =~ ^[A-Za-z0-9._/-]+$|^[0-9a-fA-F]{40}$ ]] || die "invalid install tracking ref metadata: $TRACK_REF"
-cat > "$INSTALL_STATE" <<EOF_STATE
-CHANNEL=$STATE_CHANNEL
-VERSION=$STATE_VERSION
-REF=$STATE_REF
-TRACK_REF=$TRACK_REF
-EOF_STATE
-chown root:"$AGENT_USER" "$INSTALL_STATE"; chmod 0640 "$INSTALL_STATE"
+state_tmp="$(mktemp "$CONTROL_DIR/.install-state.XXXXXX")"
+jq -n \
+  --arg channel "$STATE_CHANNEL" \
+  --arg version "$STATE_VERSION" \
+  --arg ref "$STATE_REF" \
+  --arg track_ref "$TRACK_REF" \
+  '{channel:$channel,version:$version,ref:$ref,track_ref:$track_ref}' > "$state_tmp"
+chown root:root "$state_tmp"; chmod 0600 "$state_tmp"
+mv -f "$state_tmp" "$INSTALL_STATE"
+# v0.1.1 and earlier stored executable shell metadata in the runtime state
+# directory. Never read it during migration; remove only the legacy directory
+# entry after the new root-only JSON state has been committed.
+rm -f "$STATE_DIR/install-state.env"
 
 if [ ! -s "$MANAGED_STATE" ]; then
   jq -n --arg provider "$([ "$MODE" = "public" ] && printf manual || printf local)" --arg hostname "$HOSTNAME_VALUE" --argjson port "$PORT" '{active_provider:$provider,hostname:$hostname,port:$port,cloudflare:{}}' > "$MANAGED_STATE"
@@ -294,7 +329,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
-ReadWritePaths=$STATE_DIR
+ReadWritePaths=$STATE_DIR/AI_ENVIRONMENT.json
 UMask=0027
 
 [Install]

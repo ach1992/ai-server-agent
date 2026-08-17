@@ -5,8 +5,8 @@ export AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1
 source "$ROOT/manage.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 AGENT_USER=root
-STATE_DIR="$TMP/state"; CONFIG_DIR="$TMP/config"; TLS_DIR="$CONFIG_DIR/tls"; CONFIG_FILE="$CONFIG_DIR/config.json"; MANAGED_STATE="$CONFIG_DIR/managed.json"; CF_TXN_STATE="$STATE_DIR/cloudflare-transaction.json"; AUTH_HEADER_FILE="$CONFIG_DIR/mcp.authorization"
-mkdir -p "$STATE_DIR" "$CONFIG_DIR" "$TLS_DIR"
+STATE_DIR="$TMP/state"; CONFIG_DIR="$TMP/config"; CONTROL_DIR="$CONFIG_DIR/control"; TLS_DIR="$CONFIG_DIR/tls"; CONFIG_FILE="$CONFIG_DIR/config.json"; MANAGED_STATE="$CONFIG_DIR/managed.json"; CF_TXN_STATE="$CONTROL_DIR/cloudflare-transaction.json"; AUTH_HEADER_FILE="$CONFIG_DIR/mcp.authorization"
+mkdir -p "$STATE_DIR" "$CONFIG_DIR" "$CONTROL_DIR" "$TLS_DIR"
 printf '{"listen_address":"127.0.0.1:3210","tls_cert_file":"","tls_key_file":""}\n' > "$CONFIG_FILE"
 printf 'Bearer test\n' > "$AUTH_HEADER_FILE"
 printf '{}\n' > "$MANAGED_STATE"

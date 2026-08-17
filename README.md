@@ -331,6 +331,8 @@ Cloudflare resources are separate. If you want the Agent-recorded Cloudflare res
 ## Security notes
 
 - Keep the MCP bearer credential private.
+- Root-trusted install/recovery metadata lives under `/etc/ai-server-agent/control` with root-only directory/file permissions; it is not stored in the unprivileged runtime state hierarchy and install identity is parsed as JSON rather than shell-sourced.
+- `/var/lib/ai-server-agent`, `jobs`, and `runtime` are root-controlled container entries; unprivileged writable leaves cannot replace paths later trusted by the privileged executor.
 - Never share the executor token, Cloudflare token, or TLS private key.
 - Keep snapshots/backups before host-wide work.
 - Keep Cloudflare/API credentials temporary and least-privileged.

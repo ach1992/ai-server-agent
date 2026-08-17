@@ -41,6 +41,8 @@ engine=%[1]q
 data=%[2]q
 worker=%[3]q
 install -d -m 0755 -o root -g root "$engine"
+[ ! -L "$data" ] || { echo "Refusing symlinked browser data directory: $data" >&2; exit 2; }
+[ ! -e "$data" ] || [ -d "$data" ] || { echo "Browser data path is not a directory: $data" >&2; exit 2; }
 install -d -m 0750 -o "$worker" -g "$worker" "$data"
 cd "$engine"
 arch=$(uname -m)

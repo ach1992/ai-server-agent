@@ -4,7 +4,8 @@ set -Eeuo pipefail
 CONFIG_DIR="/etc/ai-server-agent"
 CONFIG_FILE="$CONFIG_DIR/config.json"
 STATE_DIR="/var/lib/ai-server-agent"
-INSTALL_STATE="$STATE_DIR/install-state.env"
+CONTROL_DIR="$CONFIG_DIR/control"
+INSTALL_STATE="$CONTROL_DIR/install-state.json"
 MANAGED_STATE="$CONFIG_DIR/managed.json"
 TLS_DIR="$CONFIG_DIR/tls"
 AUTH_HEADER_FILE="$CONFIG_DIR/mcp.authorization"
@@ -15,7 +16,7 @@ AGENT_USER="aiagent"
 DEFAULT_PORT=3210
 CF_API="https://api.cloudflare.com/client/v4"
 CF_TOKEN=""
-CF_TXN_STATE="$STATE_DIR/cloudflare-transaction.json"
+CF_TXN_STATE="$CONTROL_DIR/cloudflare-transaction.json"
 CF_PENDING_KIND=""
 CF_PENDING_ZONE=""
 CF_PENDING_HOST=""
@@ -93,13 +94,36 @@ current_mode(){
 }
 
 installed_identity(){
-  local CHANNEL="unknown" VERSION="unknown" REF=""
-  if [ -r "$INSTALL_STATE" ]; then
-    # Root-owned, installer-generated metadata containing only validated channel/version/ref values.
-    # shellcheck disable=SC1090
-    . "$INSTALL_STATE"
+  local json channel version ref track_ref
+  if [ ! -e "$INSTALL_STATE" ]; then printf 'unknown|unknown|\n'; return 0; fi
+  if [ ! -f "$INSTALL_STATE" ] || [ -L "$INSTALL_STATE" ] || [ "$(stat -c '%s' "$INSTALL_STATE" 2>/dev/null || printf 999999)" -gt 4096 ]; then
+    warn "Install identity metadata is invalid; refusing to execute or trust it."
+    printf 'unknown|unknown|\n'
+    return 0
   fi
-  printf '%s|%s|%s\n' "${CHANNEL:-unknown}" "${VERSION:-unknown}" "${REF:-}"
+  json="$(cat -- "$INSTALL_STATE" 2>/dev/null || true)"
+  if ! jq -e 'type=="object" and (keys|sort)==["channel","ref","track_ref","version"] and (.channel|type)=="string" and (.version|type)=="string" and (.ref|type)=="string" and (.track_ref|type)=="string"' >/dev/null 2>&1 <<<"$json"; then
+    warn "Install identity metadata has an invalid schema; refusing to trust it."
+    printf 'unknown|unknown|\n'
+    return 0
+  fi
+  channel="$(jq -r '.channel' <<<"$json")"; version="$(jq -r '.version' <<<"$json")"; ref="$(jq -r '.ref' <<<"$json")"; track_ref="$(jq -r '.track_ref' <<<"$json")"
+  case "$channel" in
+    stable)
+      if ! [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || [ "$ref" != "$version" ] || [ "$track_ref" != "$version" ]; then
+        warn "Stable install identity metadata is inconsistent; refusing to trust it."
+        printf 'unknown|unknown|\n'; return 0
+      fi
+      ;;
+    source)
+      if [ "$version" != source ] || ! [[ "$ref" =~ ^([0-9a-f]{40}|binary)$ ]] || ! [[ "$track_ref" =~ ^[A-Za-z0-9._/-]+$|^[0-9a-fA-F]{40}$ ]]; then
+        warn "Source install identity metadata is invalid; refusing to trust it."
+        printf 'unknown|unknown|\n'; return 0
+      fi
+      ;;
+    *) warn "Install identity channel is invalid; refusing to trust it."; printf 'unknown|unknown|\n'; return 0 ;;
+  esac
+  printf '%s|%s|%s\n' "$channel" "$version" "$ref"
 }
 
 write_config(){
@@ -640,13 +664,13 @@ clear_previous_cloudflare_certificate(){
 
 save_cloudflare_transaction_state(){
   local host="$1" zone_id="$2" dns_id="$3" dns_action="$4" dns_old_content="$5" dns_old_proxied="$6" dns_old_ttl="$7" origin_ruleset="$8" origin_rule="$9" origin_action="${10}" old_port="${11}" ssl_ruleset="${12}" ssl_rule="${13}" ssl_action="${14}" cert_id="${15}" tmp
-  install -d -o root -g "$AGENT_USER" -m 0750 "$STATE_DIR" || return 1
-  tmp="$(mktemp "$STATE_DIR/.cloudflare-transaction.XXXXXX")" || return 1
+  install -d -o root -g root -m 0700 "$CONTROL_DIR" || return 1
+  tmp="$(mktemp "$CONTROL_DIR/.cloudflare-transaction.XXXXXX")" || return 1
   chmod 0600 "$tmp"
   jq -n --arg host "$host" --arg zone_id "$zone_id" --arg dns_id "$dns_id" --arg dns_action "$dns_action" --arg dns_old_content "$dns_old_content" --arg dns_old_proxied "$dns_old_proxied" --arg dns_old_ttl "$dns_old_ttl" --arg origin_ruleset "$origin_ruleset" --arg origin_rule "$origin_rule" --arg origin_action "$origin_action" --arg old_port "$old_port" --arg ssl_ruleset "$ssl_ruleset" --arg ssl_rule "$ssl_rule" --arg ssl_action "$ssl_action" --arg cert_id "$cert_id" --arg pending_kind "$CF_PENDING_KIND" --arg pending_zone "$CF_PENDING_ZONE" --arg pending_host "$CF_PENDING_HOST" --arg pending_value "$CF_PENDING_VALUE" --arg pending_phase "$CF_PENDING_PHASE" --arg pending_marker "$CF_PENDING_MARKER" \
     '{hostname:$host,zone_id:$zone_id,dns:{id:$dns_id,action:$dns_action,old_content:$dns_old_content,old_proxied:$dns_old_proxied,old_ttl:$dns_old_ttl},origin:{ruleset_id:$origin_ruleset,rule_id:$origin_rule,action:$origin_action,old_port:$old_port},ssl:{ruleset_id:$ssl_ruleset,rule_id:$ssl_rule,action:$ssl_action},certificate_id:$cert_id,pending:{kind:$pending_kind,zone_id:$pending_zone,hostname:$pending_host,value:$pending_value,phase:$pending_phase,marker:$pending_marker}}' > "$tmp" || { rm -f "$tmp"; return 1; }
-  chown root:"$AGENT_USER" "$tmp" || { rm -f "$tmp"; return 1; }
-  chmod 0640 "$tmp" || { rm -f "$tmp"; return 1; }
+  chown root:root "$tmp" || { rm -f "$tmp"; return 1; }
+  chmod 0600 "$tmp" || { rm -f "$tmp"; return 1; }
   mv -f "$tmp" "$CF_TXN_STATE" || { rm -f "$tmp"; return 1; }
 }
 
