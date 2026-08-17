@@ -16,10 +16,11 @@ jobs:
       - name: Apply reviewed fixes
         run: |
           set -Eeuo pipefail
-          python3 -m py_compile scripts/fix-v012-applicator-marker.py scripts/apply-v012-independent-review-fixes.py scripts/apply-v012-trap-fallback.py
+          python3 -m py_compile scripts/fix-v012-applicator-marker.py scripts/apply-v012-independent-review-fixes.py scripts/apply-v012-trap-fallback.py scripts/fix-v012-transaction-test-errexit.py
           python3 scripts/fix-v012-applicator-marker.py
           python3 scripts/apply-v012-independent-review-fixes.py
           python3 scripts/apply-v012-trap-fallback.py
+          python3 scripts/fix-v012-transaction-test-errexit.py
           bash -n install.sh update.sh manage.sh tests/cloudflare_transaction.sh scripts/build-release.sh
           sudo bash tests/cloudflare_transaction.sh
           git diff --check
