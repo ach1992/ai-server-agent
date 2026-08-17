@@ -70,6 +70,11 @@ jobs:
           grep -qF 'ReadWritePaths=$STATE_DIR/AI_ENVIRONMENT.json' install.sh
           grep -qF 'DEFAULT_INSTALL_STATE="/etc/ai-server-agent/control/install-state.json"' update.sh
           grep -qF 'CF_TXN_STATE="$CONTROL_DIR/cloudflare-transaction.json"' manage.sh
+          grep -qF 'MANAGEMENT_LOCK="$CONTROL_DIR/management.lock"' manage.sh
+          grep -qF 'flock -n "$MANAGEMENT_LOCK_FD"' manage.sh
+          grep -qF 'dns_record_fingerprint' manage.sh
+          grep -qF 'origin_rule_fingerprint' manage.sh
+          grep -qF 'ssl_config_rule_fingerprint' manage.sh
           grep -qF 'install -d -o root -g root -m 0700 "$CONTROL_DIR"' manage.sh
           grep -qF 'chmod 0600 "$tmp"' manage.sh
           grep -qF 'syscall.O_NOFOLLOW' internal/executor/executor.go
@@ -104,9 +109,10 @@ jobs:
           grep -qF 'cf_delete_owned(){' manage.sh
           grep -qF 'Refusing to adopt or modify the replacement record.' manage.sh
           grep -qF 'Refusing to modify or adopt it automatically.' manage.sh
-          grep -qF 'restore_updated_dns_record(){' manage.sh
+          grep -qF 'cf_delete_dns_if_expected(){' manage.sh
+          grep -qF 'cf_delete_rule_if_expected(){' manage.sh
           grep -qF 'different Cloudflare zone' manage.sh
-          grep -qF 'Recorded ownership state was preserved for a safe retry.' manage.sh
+          grep -qF 'resource drift was detected' manage.sh
           grep -qF 'CF_TXN_STATE="$CONTROL_DIR/cloudflare-transaction.json"' manage.sh
           grep -qF 'save_cloudflare_transaction_state(){' manage.sh
           grep -qF 'cloudflare_transaction_exit(){' manage.sh

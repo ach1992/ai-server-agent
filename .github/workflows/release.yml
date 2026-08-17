@@ -14,6 +14,9 @@ on:
         description: 'After verifying Settings -> Releases -> Enable release immutability is enabled, type IMMUTABLE_RELEASES_ENABLED'
         required: true
         type: string
+concurrency:
+  group: stable-release
+  cancel-in-progress: false
 permissions:
   contents: write
   actions: read
@@ -45,7 +48,7 @@ jobs:
           test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
           git fetch origin main --tags
           git merge-base --is-ancestor "$RELEASE_SHA" origin/main
-      - name: Require a new release tag
+      - name: Require an unpublished absent release tag
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -54,8 +57,8 @@ jobs:
             echo "Release $RELEASE_TAG already exists; refusing to mutate an existing release." >&2
             exit 1
           fi
-          if git ls-remote --exit-code --tags origin "refs/tags/$RELEASE_TAG" >/dev/null 2>&1; then
-            echo "Tag $RELEASE_TAG already exists. This workflow requires an absent tag so GitHub creates it atomically for the exact release SHA." >&2
+          if gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Tag $RELEASE_TAG already exists. Publication requires an absent tag so create-only tag creation can bind the exact validated SHA." >&2
             exit 1
           fi
       - name: Verify exact main validation and download artifact
@@ -90,23 +93,64 @@ jobs:
           grep -qF "export AI_SERVER_AGENT_VERSION=$RELEASE_TAG" dist/install.sh
           grep -qF "export AI_SERVER_AGENT_REF=$RELEASE_TAG" dist/install.sh
           (cd dist && sha256sum -c SHA256SUMS)
+      - name: Verify active immutable release-tag ruleset
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          protected=0
+          while IFS= read -r ruleset_id; do
+            [ -n "$ruleset_id" ] || continue
+            ruleset="$(gh api "/repos/$GITHUB_REPOSITORY/rulesets/$ruleset_id")"
+            if jq -e --arg pattern 'refs/tags/v*' '
+              .target=="tag" and .enforcement=="active" and
+              ((.bypass_actors // []) | length)==0 and
+              ((((.conditions.ref_name.include // []) | index($pattern)) != null) or (((.conditions.ref_name.include // []) | index("~ALL")) != null)) and
+              (((.conditions.ref_name.exclude // []) | length)==0) and
+              (([.rules[]?.type] | index("update")) != null) and
+              (([.rules[]?.type] | index("deletion")) != null)
+            ' >/dev/null <<<"$ruleset"; then
+              protected=1
+              break
+            fi
+          done < <(gh api "/repos/$GITHUB_REPOSITORY/rulesets?targets=tag&includes_parents=true&per_page=100" --jq '.[] | select(.target == "tag" and .enforcement == "active") | .id')
+          test "$protected" -eq 1 || {
+            echo "Publication is blocked. Create an active tag ruleset covering refs/tags/v* (or all tags) with Restrict updates + Restrict deletions and no bypass actors." >&2
+            exit 1
+          }
       - name: Recheck manual immutability gate before publication
         run: |
           set -Eeuo pipefail
           test "$IMMUTABILITY_CONFIRMATION" = 'IMMUTABLE_RELEASES_ENABLED'
           echo "Proceeding only on the operator's immediately preceding repository-setting verification."
+      - name: Create and verify exact protected release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          gh api --method POST "/repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/$RELEASE_TAG" \
+            -f sha="$RELEASE_SHA" >/tmp/release-tag-create.json
+          test "$(jq -r '.object.type' /tmp/release-tag-create.json)" = commit
+          test "$(jq -r '.object.sha' /tmp/release-tag-create.json)" = "$RELEASE_SHA"
+          remote_tag_json="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG")"
+          test "$(jq -r '.object.type' <<<"$remote_tag_json")" = commit
+          test "$(jq -r '.object.sha' <<<"$remote_tag_json")" = "$RELEASE_SHA"
       - name: Publish release payload
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -Eeuo pipefail
+          remote_tag_json="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG")"
+          test "$(jq -r '.object.type' <<<"$remote_tag_json")" = commit
+          test "$(jq -r '.object.sha' <<<"$remote_tag_json")" = "$RELEASE_SHA"
           version="${RELEASE_TAG#v}"
           gh release create "$RELEASE_TAG" \
             "dist/ai-server-agent_${version}_linux_amd64.tar.gz" \
             dist/SHA256SUMS \
             dist/install.sh \
             --repo "$GITHUB_REPOSITORY" \
-            --target "$RELEASE_SHA" \
+            --verify-tag \
             --generate-notes \
             --latest \
             --fail-on-no-commits

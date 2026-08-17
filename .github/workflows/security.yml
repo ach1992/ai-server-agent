@@ -174,7 +174,7 @@ jobs:
           fi
           grep -qF 'Stable update requires a published immutable release for v0.1.2' /tmp/mutable-release.out
           test ! -e "$marker"
-      - name: Release publication is manually gated before publish
+      - name: Release publication is manually gated and exact-tag protected before publish
         run: |
           set -Eeuo pipefail
           grep -qF 'workflow_dispatch:' .github/workflows/release.yml
@@ -185,15 +185,30 @@ jobs:
           grep -qF 'immutability_confirmation:' .github/workflows/release.yml
           grep -qF 'IMMUTABLE_RELEASES_ENABLED' .github/workflows/release.yml
           grep -qF 'release_sha:' .github/workflows/release.yml
-          grep -qF -- '--target "$RELEASE_SHA"' .github/workflows/release.yml
-          grep -qF 'Tag $RELEASE_TAG already exists' .github/workflows/release.yml
+          grep -qF 'group: stable-release' .github/workflows/release.yml
+          if grep -qF -- '--target "$RELEASE_SHA"' .github/workflows/release.yml; then
+            echo 'release must not rely on --target for an existing tag' >&2
+            exit 1
+          fi
+          grep -qF -- '--verify-tag' .github/workflows/release.yml
+          grep -qF 'rulesets?targets=tag&includes_parents=true' .github/workflows/release.yml
+          grep -qF "--arg pattern 'refs/tags/v*'" .github/workflows/release.yml
+          grep -qF 'index("update")' .github/workflows/release.yml
+          grep -qF 'index("deletion")' .github/workflows/release.yml
+          grep -qF '((.bypass_actors // []) | length)==0' .github/workflows/release.yml
+          grep -qF 'gh api --method POST "/repos/$GITHUB_REPOSITORY/git/refs"' .github/workflows/release.yml
+          grep -qF -- '-f sha="$RELEASE_SHA"' .github/workflows/release.yml
           gate_line="$(grep -nF 'Pre-publication immutable release gate' .github/workflows/release.yml | cut -d: -f1)"
+          ruleset_line="$(grep -nF 'Verify active immutable release-tag ruleset' .github/workflows/release.yml | cut -d: -f1)"
           recheck_line="$(grep -nF 'Recheck manual immutability gate before publication' .github/workflows/release.yml | cut -d: -f1)"
+          tag_line="$(grep -nF 'Create and verify exact protected release tag' .github/workflows/release.yml | cut -d: -f1)"
           publish_line="$(grep -nF 'Publish release payload' .github/workflows/release.yml | cut -d: -f1)"
           verify_line="$(grep -nF 'Verify immutable release and attestations' .github/workflows/release.yml | cut -d: -f1)"
-          test -n "$gate_line" && test -n "$recheck_line" && test -n "$publish_line" && test -n "$verify_line"
-          test "$gate_line" -lt "$recheck_line"
-          test "$recheck_line" -lt "$publish_line"
+          test -n "$gate_line" && test -n "$ruleset_line" && test -n "$recheck_line" && test -n "$tag_line" && test -n "$publish_line" && test -n "$verify_line"
+          test "$gate_line" -lt "$ruleset_line"
+          test "$ruleset_line" -lt "$recheck_line"
+          test "$recheck_line" -lt "$tag_line"
+          test "$tag_line" -lt "$publish_line"
           test "$publish_line" -lt "$verify_line"
           grep -qF '.immutable == true' .github/workflows/release.yml
           grep -qF 'gh release verify "$RELEASE_TAG"' .github/workflows/release.yml
