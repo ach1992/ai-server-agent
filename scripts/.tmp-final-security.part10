@@ -1,0 +1,15 @@
+# Align the synthetic certificate-helper failure fixture with the durable
+# transaction contract: a remote resource that exists at failure time must
+# already be represented in the durable journal, never only in shell memory.
+replace_once(
+    "tests/cloudflare_transaction.sh",
+    '''  CF_RESULT_CERT_ID=cert-midfail
+  return 1
+}
+''',
+    '''  CF_RESULT_CERT_ID=cert-midfail
+  cert_id=cert-midfail
+  cf_checkpoint_transaction
+  return 1
+}
+''')
