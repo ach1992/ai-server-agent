@@ -16,6 +16,7 @@ Stable v0.1 releases support **Ubuntu 22.04 LTS on amd64/x86_64 only**. `install
 - Cloudflare automation is hostname-scoped and must not mutate whole-zone SSL mode.
 - Never persist Cloudflare API tokens or other user secrets in repository files, logs, managed state, or test fixtures.
 - Stable install/update paths must resolve to immutable published releases and must never silently fall back to `main`.
+- Initial stable installation must authenticate release `install.sh` bytes before privileged execution. The supported one-line path uses the commit-pinned `scripts/install-stable.sh` bootstrap; do not restore a direct `releases/.../install.sh | sudo bash` path.
 
 ## Privileged lifecycle
 
@@ -39,7 +40,7 @@ Typical local checks on a compatible development host:
 test -z "$(gofmt -l .)"
 go vet ./...
 go test -race ./...
-bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh tests/*.sh
+bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh scripts/install-stable.sh tests/*.sh
 ```
 
 High-risk changes to privileged execution, Cloudflare recovery, installer/updater trust, or release provenance require the corresponding High Assurance Security coverage. Static/grep contracts are secondary guardrails; do not treat them as substitutes for behavioral tests of the production path.
@@ -53,3 +54,4 @@ See `docs/ARCHITECTURE.md` for trust boundaries and `docs/TESTING.md` for the cu
 - Keep docs aligned with current behavior, not historical remediation.
 - Do not edit published release identities.
 - Do not use production VPS or live Cloudflare mutation as an ordinary diagnosis/test environment.
+- Do not use independent HIGH_ASSURANCE review as iterative lint while a candidate is still moving. Complete the accepted implementation and behavioral validation, freeze an exact candidate, then use independent review as an integration/release gate when required. A review finding that changes the candidate invalidates that review identity; fix the root cause, revalidate, and refreeze before another independent gate review.
