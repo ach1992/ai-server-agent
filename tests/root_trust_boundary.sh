@@ -193,4 +193,10 @@ MALICIOUS_STATE="$malicious_state" MANAGE_IMPL="$MANAGE_IMPL" INJECTION_MARKER="
 '
 rm -f "$malicious_state" "$injection_marker"
 
-echo "root trust-boundary and lifecycle serialization tests passed"
+# Initial stable installation must authenticate the release installer before
+# any privileged installer execution. This dedicated behavioral test is also
+# part of the High Assurance root-trust job through this production-boundary suite.
+bash -n "$ROOT/scripts/install-stable.sh" "$ROOT/tests/stable_bootstrap.sh"
+bash "$ROOT/tests/stable_bootstrap.sh"
+
+echo "root trust-boundary, lifecycle serialization, and stable bootstrap tests passed"
