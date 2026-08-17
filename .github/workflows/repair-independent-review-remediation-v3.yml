@@ -21,7 +21,9 @@ jobs:
       - name: Apply and validate
         run: |
           set -Eeuo pipefail
-          cat scripts/.tmp-irfix-part00 scripts/.tmp-irfix-part01 scripts/.tmp-irfix-part02 scripts/.tmp-irfix-part03 scripts/.tmp-irfix-part04 > scripts/.tmp-independent-review-fix.py
+          cat scripts/.tmp-irfix-part00 scripts/.tmp-irfix-part01 scripts/.tmp-irfix-part02 > scripts/.tmp-independent-review-fix.py
+          sed -n '5,$p' scripts/.tmp-irfix-part03 | sed '1s/^cf_reset_transaction_globals(){//' >> scripts/.tmp-independent-review-fix.py
+          cat scripts/.tmp-irfix-part04 >> scripts/.tmp-independent-review-fix.py
           sed -n '1,63p' scripts/.tmp-irfix-part05 >> scripts/.tmp-independent-review-fix.py
           cat scripts/.tmp-independent-review-tail-clean.py >> scripts/.tmp-independent-review-fix.py
           python3 -m py_compile scripts/.tmp-independent-review-fix.py
