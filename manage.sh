@@ -348,6 +348,10 @@ cf_rule_intent_fingerprint(){
   jq -cS '{ref:(.ref // ""),description:(.description // ""),expression:(.expression // ""),action:(.action // ""),action_parameters:(.action_parameters // {}),enabled:(.enabled // false)}' | sha256sum | awk '{print $1}'
 }
 
+cf_origin_cert_intent_fingerprint(){
+  jq -cS '{csr:(.csr // ""),hostnames:((.hostnames // []) | sort),request_type:(.request_type // ""),requested_validity:(.requested_validity // 0)}' | sha256sum | awk '{print $1}'
+}
+
 cf_get_dns_record(){
   local zone_id="$1" dns_id="$2" res rc
   if res="$(cf_get_optional "/zones/$zone_id/dns_records/$dns_id")"; then
@@ -365,6 +369,15 @@ cf_get_rule(){
   rule="$(jq -c --arg id "$rule_id" '.result.rules[]? | select(.id==$id)' <<<"$res" | head -n1)"
   [ -n "$rule" ] || return 3
   printf '%s\n' "$rule"
+}
+
+cf_get_origin_cert(){
+  local cert_id="$1" res rc
+  if res="$(cf_get_optional "/certificates/$cert_id")"; then
+    jq -ce '.result | select(type=="object")' <<<"$res" || return 2
+    return 0
+  fi
+  rc=$?; [ "$rc" -eq 3 ] && return 3; return 2
 }
 
 cf_delete_dns_if_expected(){
@@ -413,6 +426,18 @@ cf_delete_pending_rule_if_expected(){
   fi
   [ "$actual" = "$expected" ] || { warn "Response-lost Cloudflare rule $rule_id no longer matches the durable create representation; refusing automatic deletion."; return 1; }
   cf_delete_owned "/zones/$zone_id/rulesets/$ruleset_id/rules/$rule_id"
+}
+
+cf_delete_pending_origin_cert_if_expected(){
+  local cert_id="$1" expected="$2" current rc actual
+  [ -n "$cert_id" ] && [ -n "$expected" ] || return 1
+  if current="$(cf_get_origin_cert "$cert_id")"; then
+    actual="$(cf_origin_cert_intent_fingerprint <<<"$current")"
+  else
+    rc=$?; [ "$rc" -eq 3 ] && return 0; return 1
+  fi
+  [ "$actual" = "$expected" ] || { warn "Response-lost Origin CA certificate $cert_id no longer matches the durable create representation; refusing automatic revocation."; return 1; }
+  cf_delete_owned "/certificates/$cert_id"
 }
 
 cf_clear_pending_write(){
@@ -518,7 +543,7 @@ cf_recover_pending_write(){
   case "$CF_PENDING_KIND" in
     origin-cert-create)
       if found="$(cf_find_origin_cert_by_csr "$CF_PENDING_ZONE" "$CF_PENDING_VALUE")"; then
-        cf_delete_owned "/certificates/$found" || return 1
+        cf_delete_pending_origin_cert_if_expected "$found" "$CF_PENDING_FINGERPRINT" || return 1
       else
         rc=$?; [ "$rc" -eq 1 ] || return 1
       fi
@@ -574,17 +599,20 @@ cf_public_ipv4(){
 }
 
 cf_issue_origin_cert(){
-  local zone_id="$1" host="$2" stage="$3" key="$stage/new.key" csr="$stage/new.csr" crt="$stage/new.crt" csr_value body res key_pub cert_pub
+  local zone_id="$1" host="$2" stage="$3" key="$stage/new.key" csr="$stage/new.csr" crt="$stage/new.crt" csr_value body res key_pub cert_pub pending_fingerprint cert_record
   CF_RESULT_CERT_ID=""
   umask 077
   openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 -out "$key" >/dev/null 2>&1
   openssl req -new -sha256 -key "$key" -out "$csr" -subj "/CN=$host" -addext "subjectAltName=DNS:$host"
   csr_value="$(cat "$csr")"
   body="$(jq -n --arg csr "$csr_value" --arg host "$host" '{hostnames:[$host],request_type:"origin-rsa",requested_validity:1095,csr:$csr}')"
-  cf_set_pending_write origin-cert-create "$zone_id" "$host" "$csr_value" "" "" ""
-  res="$(cf_api POST '/certificates' "$body")" || die "Cloudflare Origin CA certificate issuance response was not confirmed. Durable transaction recovery will reconcile the exact CSR before continuing."
-  jq -r '.result.certificate // empty' <<<"$res" > "$crt"
-  CF_RESULT_CERT_ID="$(jq -r '.result.id // empty' <<<"$res")"
+  pending_fingerprint="$(cf_origin_cert_intent_fingerprint <<<"$body")"
+  cf_set_pending_write origin-cert-create "$zone_id" "$host" "$csr_value" "" "" "$pending_fingerprint"
+  res="$(cf_api POST '/certificates' "$body")" || die "Cloudflare Origin CA certificate issuance response was not confirmed. Durable transaction recovery will verify the exact create representation before any cleanup."
+  cert_record="$(jq -ce '.result | select(type=="object")' <<<"$res")" || die "Cloudflare returned an invalid Origin CA certificate response."
+  [ "$(cf_origin_cert_intent_fingerprint <<<"$cert_record")" = "$pending_fingerprint" ] || die "Cloudflare returned Origin CA certificate metadata that does not match the durable create representation."
+  jq -r '.certificate // empty' <<<"$cert_record" > "$crt"
+  CF_RESULT_CERT_ID="$(jq -r '.id // empty' <<<"$cert_record")"
   [ -s "$crt" ] && [ -n "$CF_RESULT_CERT_ID" ] || die "Cloudflare returned an incomplete Origin CA certificate response."
   openssl pkey -in "$key" -check -noout >/dev/null 2>&1 || die "Generated private key failed validation."
   openssl x509 -in "$crt" -noout -checkhost "$host" >/dev/null || die "Issued certificate does not match $host."
@@ -936,7 +964,7 @@ validate_cloudflare_transaction_state(){
      else
        ((.phase=="prepared" or .phase=="rolling_back") and .pending.zone_id==.zone_id and .pending.hostname==.hostname and (.pending.value|length)>0 and
         (if .pending.kind=="origin-cert-create" then
-           (.pending.phase=="" and .pending.marker=="" and .pending.fingerprint=="")
+           (.pending.phase=="" and .pending.marker=="" and (.pending.fingerprint|hex64))
          elif .pending.kind=="dns-create" then
            (.pending.phase=="" and (.pending.marker|marker) and (.pending.fingerprint|hex64))
          elif .pending.kind=="origin-rule-create" then
