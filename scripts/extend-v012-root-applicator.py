@@ -5,7 +5,7 @@ text = p.read_text()
 marker = "# ROOT_TRUST_EXTENSION_V2"
 if marker in text:
     raise SystemExit('root trust extension already present')
-extension = r'''
+extension = r"""
 
 # ROOT_TRUST_EXTENSION_V2
 # The MCP service needs to refresh only the informational manifest. Keep the
@@ -205,6 +205,6 @@ replace_once(
     '          sudo env AI_SERVER_AGENT_BINARY=/tmp/ai-server-agent AI_SERVER_AGENT_NONINTERACTIVE=1 bash install.sh\n          sudo bash tests/root_trust_boundary.sh\n',
     '          sudo env AI_SERVER_AGENT_BINARY=/tmp/ai-server-agent bash tests/root_trust_migration.sh\n          sudo bash tests/root_trust_boundary.sh\n',
 )
-'''
+"""
 p.write_text(text + extension)
 print('root trust applicator extended for least-write runtime and safe migration')
