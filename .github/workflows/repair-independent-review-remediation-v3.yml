@@ -32,7 +32,7 @@ jobs:
           bash -n manage.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh
           ruby -e 'require "yaml"; ARGV.each { |f| YAML.load_file(f) }' scripts/.tmp-ci.yml scripts/.tmp-release.yml scripts/.tmp-security.yml
           go test -race ./...
-          sudo bash tests/cloudflare_transaction.sh
+          sudo bash -x tests/cloudflare_transaction.sh
           sudo bash tests/cloudflare_crash_recovery.sh
           sudo bash tests/cloudflare_phase_recovery.sh
           grep -qF -- '--verify-tag' scripts/.tmp-release.yml
