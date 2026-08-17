@@ -46,7 +46,7 @@ replace('tests/cloudflare_transaction.sh',
 '''cf_delete_dns_if_expected(){ printf '/zones/%s/dns_records/%s\\n' "$1" "$2" >> "$DELETE_LOG"; return 1; }''')
 replace('tests/cloudflare_transaction.sh',
 '''cf_delete_owned(){ printf '%s\\n' "$1" >> "$DELETE_LOG"; return 0; }\nrecover_cloudflare_transaction''',
-'''cf_delete_dns_if_expected(){ printf '/zones/%s/dns_records/%s\\n' "$1" "$2" >> "$DELETE_LOG"; return 0; }\nrecover_cloudflare_transaction''', count=1)
+'''cf_delete_dns_if_expected(){ printf '/zones/%s/dns_records/%s\\n' "$1" "$2" >> "$DELETE_LOG"; return 0; }\nrecover_cloudflare_transaction''', count=2)
 # State-write rollback test must keep conditional rule mocks active; no change.
 # Append class-level tests before final echo section.
 append = r'''
