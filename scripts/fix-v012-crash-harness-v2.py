@@ -9,7 +9,7 @@ end_marker = "'''\nPath(\"tests/cloudflare_crash_recovery.sh\").write_text(crash
 end = text.find(end_marker, start)
 if end < 0:
     raise SystemExit('crash template end missing')
-new_crash = r'''crash = r'''#!/usr/bin/env bash
+new_crash = r"""crash = r'''#!/usr/bin/env bash
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
@@ -74,7 +74,7 @@ ROOT="$ROOT" STATE_DIR="$STATE_DIR" CONFIG_DIR="$CONFIG_DIR" TLS_DIR="$TLS_DIR" 
 
 echo 'cloudflare crash-recovery test passed'
 '''
-'''
+"""
 text = text[:start] + new_crash + text[end + 4:]
 path.write_text(text)
 print('crash harness process group isolation fixed')
