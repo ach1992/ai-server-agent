@@ -16,8 +16,9 @@ jobs:
       - name: Apply and validate hardening
         run: |
           set -Eeuo pipefail
-          python3 -m py_compile scripts/fix-v012-durable-cf-applicator.py scripts/apply-v012-durable-cf-journal.py scripts/fix-v012-durable-cf-tests.py scripts/fix-v012-crash-harness-v2.py
+          python3 -m py_compile scripts/fix-v012-durable-cf-applicator.py scripts/apply-v012-durable-cf-journal.py scripts/fix-v012-durable-cf-tests.py scripts/fix-v012-crash-harness-v2.py scripts/fix-v012-crash-harness-v3.py
           python3 scripts/fix-v012-durable-cf-applicator.py
+          python3 scripts/fix-v012-crash-harness-v3.py
           python3 scripts/fix-v012-crash-harness-v2.py
           python3 scripts/apply-v012-durable-cf-journal.py
           python3 scripts/fix-v012-durable-cf-tests.py
