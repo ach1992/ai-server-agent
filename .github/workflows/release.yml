@@ -18,14 +18,21 @@ jobs:
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           git fetch origin main
           git merge-base --is-ancestor "$GITHUB_SHA" origin/main
-      - name: Download exact main CI artifact
+      - name: Verify exact main validation and download artifact
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
+          set -Eeuo pipefail
           run_id="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&status=success&head_sha=$GITHUB_SHA&per_page=20" --jq '.workflow_runs[] | select(.event == "push" and .head_branch == "main") | .id' | head -n1)"
           test -n "$run_id" || { echo "No successful main CI run found for $GITHUB_SHA" >&2; exit 1; }
           actual_sha="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$run_id" --jq '.head_sha')"
           test "$actual_sha" = "$GITHUB_SHA" || { echo "Selected CI run is for $actual_sha, expected $GITHUB_SHA" >&2; exit 1; }
+
+          security_run_id="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/security.yml/runs?branch=main&status=success&head_sha=$GITHUB_SHA&per_page=20" --jq '.workflow_runs[] | select(.event == "push" and .head_branch == "main") | .id' | head -n1)"
+          test -n "$security_run_id" || { echo "No successful High Assurance Security run found for main SHA $GITHUB_SHA" >&2; exit 1; }
+          security_sha="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$security_run_id" --jq '.head_sha')"
+          test "$security_sha" = "$GITHUB_SHA" || { echo "Selected security run is for $security_sha, expected $GITHUB_SHA" >&2; exit 1; }
+
           artifact="ai-server-agent-$GITHUB_REF_NAME-$GITHUB_SHA"
           mkdir -p dist
           gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name "$artifact" --dir dist
