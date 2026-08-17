@@ -40,7 +40,7 @@ jobs:
           bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh tests/root_trust_boundary.sh tests/root_trust_migration.sh
           go test -race ./...
           sudo env PATH="$PATH" go test ./internal/executor -run TestRootCommandAndJobIgnoreWorkerStartupFiles -count=1
-          sudo bash tests/cloudflare_transaction.sh
+          sudo bash -x tests/cloudflare_transaction.sh
           sudo bash tests/cloudflare_crash_recovery.sh
           sudo bash tests/cloudflare_phase_recovery.sh
           git diff --check
