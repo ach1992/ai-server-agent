@@ -34,8 +34,8 @@ jobs:
           grep -qF 'ca-certificates curl jq openssl tar xz-utils' install.sh
           grep -qF 'CHANNEL=$STATE_CHANNEL' install.sh
           grep -qF 'TRACK_REF=$TRACK_REF' install.sh
-          grep -qF '1) Status / health' manage.sh
-          grep -qF '2) ChatGPT setup' manage.sh
+          grep -qF 'Status / health' manage.sh
+          grep -qF 'ChatGPT setup' manage.sh
           grep -qF 'Configure or change domain / connection' manage.sh
           grep -qF 'Rotate / renew Cloudflare TLS certificate' manage.sh
           grep -qF 'Safe uninstall (preserve data)' manage.sh
