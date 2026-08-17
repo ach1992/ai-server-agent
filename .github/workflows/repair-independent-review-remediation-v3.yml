@@ -1,0 +1,55 @@
+name: Repair independent review remediation v3
+on:
+  push:
+    branches:
+      - feat/v0.1.2-stable-install-cloudflare
+permissions:
+  contents: write
+jobs:
+  repair:
+    if: github.event.head_commit.message == 'Run clean remediation v3'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: feat/v0.1.2-stable-install-cloudflare
+          fetch-depth: 0
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - name: Apply and validate
+        run: |
+          set -Eeuo pipefail
+          cat scripts/.tmp-irfix-part00 scripts/.tmp-irfix-part01 scripts/.tmp-irfix-part02 scripts/.tmp-irfix-part03 scripts/.tmp-irfix-part04 > scripts/.tmp-independent-review-fix.py
+          sed -n '1,63p' scripts/.tmp-irfix-part05 >> scripts/.tmp-independent-review-fix.py
+          cat scripts/.tmp-independent-review-tail-clean.py >> scripts/.tmp-independent-review-fix.py
+          python3 -m py_compile scripts/.tmp-independent-review-fix.py
+          python3 scripts/.tmp-independent-review-fix.py
+          chmod +x tests/cloudflare_transaction.sh tests/cloudflare_phase_recovery.sh
+          bash -n manage.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh
+          ruby -e 'require "yaml"; ARGV.each { |f| YAML.load_file(f) }' scripts/.tmp-ci.yml scripts/.tmp-release.yml scripts/.tmp-security.yml
+          go test -race ./...
+          sudo bash tests/cloudflare_transaction.sh
+          sudo bash tests/cloudflare_crash_recovery.sh
+          sudo bash tests/cloudflare_phase_recovery.sh
+          grep -qF -- '--verify-tag' scripts/.tmp-release.yml
+          if grep -qF -- '--target "$RELEASE_SHA"' scripts/.tmp-release.yml; then
+            echo 'release workflow still uses unsafe --target' >&2
+            exit 1
+          fi
+          grep -qF 'rulesets?targets=tag&includes_parents=true' scripts/.tmp-release.yml
+          grep -qF 'flock -n "$MANAGEMENT_LOCK_FD"' manage.sh
+          grep -qF 'committed journal finalized with mismatched managed state' tests/cloudflare_phase_recovery.sh
+          git diff --check
+      - name: Commit validated non-workflow changes
+        run: |
+          set -Eeuo pipefail
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          rm -f scripts/.tmp-independent-review-fix.py
+          git rm scripts/.tmp-irfix-part00 scripts/.tmp-irfix-part01 scripts/.tmp-irfix-part02 scripts/.tmp-irfix-part03 scripts/.tmp-irfix-part04 scripts/.tmp-irfix-part05 scripts/.tmp-irfix-part06 scripts/.tmp-repair-trigger2 scripts/.tmp-independent-review-tail-clean.py
+          git add manage.sh tests/cloudflare_transaction.sh tests/cloudflare_phase_recovery.sh README.md docs/ARCHITECTURE.md scripts/.tmp-ci.yml scripts/.tmp-release.yml scripts/.tmp-security.yml
+          git diff --cached --check
+          git commit -m 'Close independent review safety gaps'
+          git push origin HEAD:feat/v0.1.2-stable-install-cloudflare
