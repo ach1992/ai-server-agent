@@ -25,7 +25,7 @@ jobs:
       - name: Build static binary
         run: CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
       - name: Shell syntax
-        run: bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh tests/cloudflare_transaction.sh
+        run: bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/root_trust_boundary.sh tests/root_trust_migration.sh
       - name: Installer compatibility check
         run: sudo bash install.sh --check
       - name: Guided installer and management contract
@@ -38,8 +38,13 @@ jobs:
           grep -qF 'Resume setup with: sudo ai-server-agent-manage' install.sh
           grep -qF 'Configure later - keep the healthy local Agent' manage.sh
           grep -qF 'ca-certificates curl jq openssl tar xz-utils' install.sh
-          grep -qF 'CHANNEL=$STATE_CHANNEL' install.sh
-          grep -qF 'TRACK_REF=$TRACK_REF' install.sh
+          grep -qF 'CONTROL_DIR="$CONFIG_DIR/control"' install.sh
+          grep -qF 'INSTALL_STATE="$CONTROL_DIR/install-state.json"' install.sh
+          grep -qF "'{channel:\$channel,version:\$version,ref:\$ref,track_ref:\$track_ref}'" install.sh
+          if grep -Eq '(^|[[:space:]])(\.|source)[[:space:]]+"\$INSTALL_STATE"' update.sh manage.sh; then
+            echo 'root-trusted install state must never be shell-sourced' >&2
+            exit 1
+          fi
           grep -qF 'Status / health' manage.sh
           grep -qF 'ChatGPT setup' manage.sh
           grep -qF 'Configure or change domain / connection' manage.sh
@@ -47,6 +52,22 @@ jobs:
           grep -qF 'Safe uninstall (preserve data)' manage.sh
           grep -qF 'Purge Agent-owned server data' manage.sh
           grep -qF 'Remove recorded Cloudflare resources' manage.sh
+      - name: Root trust-boundary static contract
+        run: |
+          grep -qF 'install -d -m 0700 -o root -g root "$CONTROL_DIR"' install.sh
+          grep -qF 'install -d -m 0711 -o root -g root "$STATE_DIR"' install.sh
+          grep -qF 'secure_state_container "$STATE_DIR/runtime"' install.sh
+          grep -qF 'secure_state_container "$STATE_DIR/jobs"' install.sh
+          grep -qF 'find "$STATE_DIR/jobs" -mindepth 1 -maxdepth 1 -type l -delete' install.sh
+          grep -qF 'ReadWritePaths=$STATE_DIR/AI_ENVIRONMENT.json' install.sh
+          grep -qF 'DEFAULT_INSTALL_STATE="/etc/ai-server-agent/control/install-state.json"' update.sh
+          grep -qF 'CF_TXN_STATE="$CONTROL_DIR/cloudflare-transaction.json"' manage.sh
+          grep -qF 'install -d -o root -g root -m 0700 "$CONTROL_DIR"' manage.sh
+          grep -qF 'chmod 0600 "$tmp"' manage.sh
+          grep -qF 'syscall.O_NOFOLLOW' internal/executor/executor.go
+          grep -qF 'trustedDir(jobsDir)' internal/executor/executor.go
+          grep -qF 'job path is not a regular file' internal/executor/executor.go
+          grep -qF 'Refusing symlinked browser data directory' internal/browser/browser.go
       - name: Cloudflare guided setup safety contract
         run: |
           grep -qF 'read -r -s CF_TOKEN' manage.sh
@@ -78,7 +99,7 @@ jobs:
           grep -qF 'restore_updated_dns_record(){' manage.sh
           grep -qF 'different Cloudflare zone' manage.sh
           grep -qF 'Recorded ownership state was preserved for a safe retry.' manage.sh
-          grep -qF 'CF_TXN_STATE="$STATE_DIR/cloudflare-transaction.json"' manage.sh
+          grep -qF 'CF_TXN_STATE="$CONTROL_DIR/cloudflare-transaction.json"' manage.sh
           grep -qF 'save_cloudflare_transaction_state(){' manage.sh
           grep -qF 'cloudflare_transaction_exit(){' manage.sh
           grep -qF 'Cloudflare rollback was incomplete. Exact remaining ownership/recovery state was preserved in $CF_TXN_STATE.' manage.sh
@@ -105,10 +126,7 @@ jobs:
         run: |
           state="$(mktemp)"
           cat > "$state" <<'STATE'
-          CHANNEL=stable
-          VERSION=v0.1.1
-          REF=v0.1.1
-          TRACK_REF=v0.1.1
+          {"channel":"stable","version":"v0.1.1","ref":"v0.1.1","track_ref":"v0.1.1"}
           STATE
           sudo env \
             AI_SERVER_AGENT_INSTALL_STATE="$state" \
@@ -219,7 +237,8 @@ jobs:
           sudo systemctl is-active --quiet ai-server-agent-executor.service
           sudo test -x /usr/local/sbin/ai-server-agent-manage
           sudo test -x /usr/local/lib/ai-server-agent/update.sh
-          sudo grep -qF 'CHANNEL=source' /var/lib/ai-server-agent/install-state.env
+          sudo jq -e '.channel == "source" and .version == "source"' /etc/ai-server-agent/control/install-state.json >/dev/null
+          sudo bash tests/root_trust_boundary.sh
           sudo touch /etc/ai-server-agent/lifecycle-config-sentinel
           sudo touch /var/lib/ai-server-agent/lifecycle-state-sentinel
           sudo touch /var/log/ai-server-agent/lifecycle-log-sentinel
