@@ -70,6 +70,7 @@ jobs:
               '        if [ "$CF_TXN_PHASE" = committing ] || [ "$CF_TXN_PHASE" = committed ]; then\n'
               '          printf "phase-debug globals host=<%s> port=<%s> zone_id=<%s> zone_name=<%s> dns_id=<%s> dns_owned=<%s> origin_set=<%s> origin_rule=<%s> ssl_set=<%s> ssl_rule=<%s> cert=<%s>\\n" "$CF_COMMIT_HOST" "$CF_COMMIT_PORT" "$CF_COMMIT_ZONE_ID" "$CF_COMMIT_ZONE_NAME" "$CF_COMMIT_DNS_ID" "$CF_COMMIT_DNS_OWNED" "$CF_COMMIT_ORIGIN_RULESET_ID" "$CF_COMMIT_ORIGIN_RULE_ID" "$CF_COMMIT_SSL_RULESET_ID" "$CF_COMMIT_SSL_RULE_ID" "$CF_COMMIT_CERT_ID" >&2\n'
               '          printf "phase-debug fingerprints dns=<%s> origin=<%s> ssl=<%s>\\n" "${CF_COMMIT_DNS_FINGERPRINT-UNSET}" "${CF_COMMIT_ORIGIN_FINGERPRINT-UNSET}" "${CF_COMMIT_SSL_FINGERPRINT-UNSET}" >&2\n'
+              '          declare -f managed_state_matches_transaction_commit >&2\n'
               '          if managed_state_matches_transaction_commit; then\n'
               '            echo "phase-debug managed-match=true phase=$CF_TXN_PHASE" >&2\n'
               '          else\n'
@@ -113,10 +114,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: repair-debug-${{ github.run_id }}
-          path: |
-            /tmp/repair.log
-            manage.sh
-            tests/cloudflare_phase_recovery.sh
+          path: /tmp/repair.log
           if-no-files-found: error
       - name: Commit validated non-workflow changes
         run: |
