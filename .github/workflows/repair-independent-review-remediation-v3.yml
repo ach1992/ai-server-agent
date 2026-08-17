@@ -63,22 +63,24 @@ jobs:
           p = Path('tests/cloudflare_phase_recovery.sh')
           t = p.read_text()
           anchor = '      cf_recover_pending_write(){ cf_clear_pending_write; return 0; }\n      recover_cloudflare_transaction'
-          replacement = '''      cf_recover_pending_write(){ cf_clear_pending_write; return 0; }
-      if [ -s "$CF_TXN_STATE" ]; then
-        load_cloudflare_transaction_globals
-        if [ "$CF_TXN_PHASE" = committing ] || [ "$CF_TXN_PHASE" = committed ]; then
-          if managed_state_matches_transaction_commit; then
-            echo "phase-debug managed-match=true phase=$CF_TXN_PHASE" >&2
-          else
-            echo "phase-debug managed-match=false phase=$CF_TXN_PHASE" >&2
-            jq -c ".commit" "$CF_TXN_STATE" >&2 || true
-            jq -c "." "$MANAGED_STATE" >&2 || true
-            stat -c "%u:%g:%a %s" "$MANAGED_STATE" >&2 || true
-          fi
-        fi
-      fi
-      recover_cloudflare_transaction
-      if [ -s "$TEST_DELETE_LOG" ]; then echo "phase-debug deletes:" >&2; cat "$TEST_DELETE_LOG" >&2; fi'''
+          replacement = (
+              '      cf_recover_pending_write(){ cf_clear_pending_write; return 0; }\n'
+              '      if [ -s "$CF_TXN_STATE" ]; then\n'
+              '        load_cloudflare_transaction_globals\n'
+              '        if [ "$CF_TXN_PHASE" = committing ] || [ "$CF_TXN_PHASE" = committed ]; then\n'
+              '          if managed_state_matches_transaction_commit; then\n'
+              '            echo "phase-debug managed-match=true phase=$CF_TXN_PHASE" >&2\n'
+              '          else\n'
+              '            echo "phase-debug managed-match=false phase=$CF_TXN_PHASE" >&2\n'
+              '            jq -c ".commit" "$CF_TXN_STATE" >&2 || true\n'
+              '            jq -c "." "$MANAGED_STATE" >&2 || true\n'
+              '            stat -c "%u:%g:%a %s" "$MANAGED_STATE" >&2 || true\n'
+              '          fi\n'
+              '        fi\n'
+              '      fi\n'
+              '      recover_cloudflare_transaction\n'
+              '      if [ -s "$TEST_DELETE_LOG" ]; then echo "phase-debug deletes:" >&2; cat "$TEST_DELETE_LOG" >&2; fi'
+          )
           if t.count(anchor) != 1:
               raise SystemExit(f'expected one phase recovery diagnostic anchor, found {t.count(anchor)}')
           p.write_text(t.replace(anchor, replacement, 1))
