@@ -21,29 +21,38 @@ jobs:
 
           path = Path('.github/workflows/ci.yml')
           text = path.read_text()
-          old = '''          grep -qF 'Refusing to modify it automatically' manage.sh
-          grep -qF 'if [ "$dns_owned" = "true" ] && [ -n "$dns_id" ]; then' manage.sh
-          grep -qF 'if [ "$old_dns_owned" = "true" ] && [ -n "$old_dns" ]; then' manage.sh
-          '''
-          new = '''          grep -qF 'delete_recorded_cloudflare_resources(){' manage.sh
-          grep -qF 'cf_delete_owned(){' manage.sh
-          grep -qF 'Refusing to adopt or modify the replacement record.' manage.sh
-          grep -qF 'Refusing to modify or adopt it automatically.' manage.sh
-          grep -qF 'restore_updated_dns_record(){' manage.sh
-          grep -qF 'different Cloudflare zone' manage.sh
-          grep -qF 'Recorded ownership state was preserved for a safe retry.' manage.sh
-          '''
-          if old not in text:
-              if new in text:
-                  raise SystemExit(0)
-              raise SystemExit('expected CI contract block was not found')
-          path.write_text(text.replace(old, new, 1))
+          replacements = {
+              "grep -qF 'Refusing to modify it automatically' manage.sh": "\n".join([
+                  "grep -qF 'delete_recorded_cloudflare_resources(){' manage.sh",
+                  "          grep -qF 'cf_delete_owned(){' manage.sh",
+                  "          grep -qF 'Refusing to adopt or modify the replacement record.' manage.sh",
+                  "          grep -qF 'Refusing to modify or adopt it automatically.' manage.sh",
+                  "          grep -qF 'restore_updated_dns_record(){' manage.sh",
+                  "          grep -qF 'different Cloudflare zone' manage.sh",
+                  "          grep -qF 'Recorded ownership state was preserved for a safe retry.' manage.sh",
+              ]),
+              "grep -qF 'if [ \"$dns_owned\" = \"true\" ] && [ -n \"$dns_id\" ]; then' manage.sh": "",
+              "grep -qF 'if [ \"$old_dns_owned\" = \"true\" ] && [ -n \"$old_dns\" ]; then' manage.sh": "",
+          }
+          changed = False
+          for old, new in replacements.items():
+              if old in text:
+                  text = text.replace(old, new, 1)
+                  changed = True
+          expected = [
+              "grep -qF 'delete_recorded_cloudflare_resources(){' manage.sh",
+              "grep -qF 'restore_updated_dns_record(){' manage.sh",
+              "grep -qF 'Recorded ownership state was preserved for a safe retry.' manage.sh",
+          ]
+          if not all(item in text for item in expected):
+              raise SystemExit('required reviewed CI contract markers are missing')
+          if "Refusing to modify it automatically" in text:
+              raise SystemExit('stale DNS ownership assertion remains')
+          path.write_text(text)
+          print('updated' if changed else 'already-current')
           PY
           bash -n manage.sh install.sh update.sh uninstall.sh scripts/build-release.sh
           git diff --check
-          grep -qF "grep -qF 'delete_recorded_cloudflare_resources(){' manage.sh" .github/workflows/ci.yml
-          grep -qF "grep -qF 'restore_updated_dns_record(){' manage.sh" .github/workflows/ci.yml
-          grep -qF "grep -qF 'Recorded ownership state was preserved for a safe retry.' manage.sh" .github/workflows/ci.yml
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
           git add .github/workflows/ci.yml
