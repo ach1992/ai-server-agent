@@ -106,6 +106,7 @@ write_prepared_pending(){
       case "$TEST_KIND" in
         dns) cf_set_pending_write dns-create zone1 mcp.example.com 203.0.113.10 "" 0123456789abcdef0123456789abcdef aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa ;;
         origin) cf_set_pending_write origin-rule-create zone1 mcp.example.com ai_server_agent_test http_request_origin 0123456789abcdef0123456789abcdef bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb ;;
+        cert) cf_set_pending_write origin-cert-create zone1 mcp.example.com csr-nonce "" "" dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd ;;
         *) exit 2 ;;
       esac
     '
@@ -207,6 +208,14 @@ write_prepared_pending origin
 jq '.pending.phase="http_config_settings"' "$CF_TXN_STATE" > "$jtmp"
 install -o root -g root -m 0600 "$jtmp" "$CF_TXN_STATE"
 expect_journal_rejected 'origin pending journal with Configuration Rules phase'
+
+# Origin CA pending state is valid only with a durable full semantic fingerprint.
+reset_old_local
+write_prepared_pending cert
+validate_cloudflare_transaction_state "$CF_TXN_STATE"
+jq '.pending.fingerprint=""' "$CF_TXN_STATE" > "$jtmp"
+install -o root -g root -m 0600 "$jtmp" "$CF_TXN_STATE"
+expect_journal_rejected 'Origin CA pending journal without semantic fingerprint'
 
 # Pending create evidence cannot survive into local application/commit phases.
 reset_old_local
