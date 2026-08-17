@@ -37,9 +37,9 @@ jobs:
           old = r'http.host eq \\"mcp.example.com\\"'
           new = r'http.host eq \"mcp.example.com\"'
           count = t.count(old)
-          if count != 1:
-              raise SystemExit(f'expected exactly one doubled-escape SSL fixture, found {count}')
-          p.write_text(t.replace(old, new, 1))
+          if count != 3:
+              raise SystemExit(f'expected exactly three doubled-escape SSL fixtures, found {count}')
+          p.write_text(t.replace(old, new))
           PY
           chmod +x tests/cloudflare_transaction.sh tests/cloudflare_phase_recovery.sh
           bash -n manage.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh
