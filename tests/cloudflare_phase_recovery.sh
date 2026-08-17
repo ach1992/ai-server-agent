@@ -3,12 +3,12 @@ set -Eeuo pipefail
 [ "$(id -u)" -eq 0 ] || { echo "run cloudflare_phase_recovery.sh as root" >&2; exit 1; }
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
-STATE_DIR="$TMP/state"; CONFIG_DIR="$TMP/config"; CONTROL_DIR="$CONFIG_DIR/control"; TLS_DIR="$CONFIG_DIR/tls"; CONFIG_FILE="$CONFIG_DIR/config.json"; MANAGED_STATE="$CONFIG_DIR/managed.json"; CF_TXN_STATE="$CONTROL_DIR/cloudflare-transaction.json"; CF_TXN_BACKUP_DIR="$CONTROL_DIR/cloudflare-transaction-backup"; DELETE_LOG="$TMP/deletes.log"
+STATE_DIR="$TMP/state"; CONFIG_DIR="$TMP/config"; CONTROL_DIR="$CONFIG_DIR/control"; TLS_DIR="$CONFIG_DIR/tls"; CONFIG_FILE="$CONFIG_DIR/config.json"; MANAGED_STATE="$CONFIG_DIR/managed.json"; CF_TXN_STATE="$CONTROL_DIR/cloudflare-transaction.json"; CF_TXN_BACKUP_DIR="$CONTROL_DIR/cloudflare-transaction-backup"; MANAGEMENT_LOCK="$CONTROL_DIR/management.lock"; MANAGEMENT_LOCK_FD=""; DELETE_LOG="$TMP/deletes.log"
 mkdir -p "$STATE_DIR" "$CONFIG_DIR" "$CONTROL_DIR" "$TLS_DIR"
 old_config='{"listen_address":"127.0.0.1:3210","tls_cert_file":"","tls_key_file":""}'
 old_managed='{"active_provider":"local","hostname":"old.example.com","port":3210,"cloudflare":{}}'
 new_config='{"listen_address":"0.0.0.0:3210","tls_cert_file":"new","tls_key_file":"new"}'
-new_managed='{"active_provider":"cloudflare","hostname":"mcp.example.com","port":3210,"cloudflare":{"zone_id":"zone1","zone_name":"example.com","dns_record_id":"dns-new","dns_record_owned":true,"origin_ruleset_id":"origin-set","origin_rule_id":"origin-rule","ssl_config_ruleset_id":"ssl-set","ssl_config_rule_id":"ssl-rule","origin_certificate_id":"cert-new"}}'
+new_managed='{"active_provider":"cloudflare","hostname":"mcp.example.com","port":3210,"cloudflare":{"zone_id":"zone1","zone_name":"example.com","dns_record_id":"dns-new","dns_record_owned":true,"dns_record_fingerprint":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa","origin_ruleset_id":"origin-set","origin_rule_id":"origin-rule","origin_rule_fingerprint":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","ssl_config_ruleset_id":"ssl-set","ssl_config_rule_id":"ssl-rule","ssl_config_rule_fingerprint":"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc","origin_certificate_id":"cert-new"}}'
 
 reset_old_local(){
   rm -rf "$CF_TXN_BACKUP_DIR"; rm -f "$CF_TXN_STATE"; : > "$DELETE_LOG"
@@ -25,18 +25,18 @@ kill_after_boundary(){
   env \
     ROOT="$ROOT" TEST_SCENARIO="$scenario" \
     TEST_STATE_DIR="$STATE_DIR" TEST_CONFIG_DIR="$CONFIG_DIR" TEST_CONTROL_DIR="$CONTROL_DIR" TEST_TLS_DIR="$TLS_DIR" \
-    TEST_CONFIG_FILE="$CONFIG_FILE" TEST_MANAGED_STATE="$MANAGED_STATE" TEST_CF_TXN_STATE="$CF_TXN_STATE" TEST_CF_TXN_BACKUP_DIR="$CF_TXN_BACKUP_DIR" \
+    TEST_CONFIG_FILE="$CONFIG_FILE" TEST_MANAGED_STATE="$MANAGED_STATE" TEST_CF_TXN_STATE="$CF_TXN_STATE" TEST_CF_TXN_BACKUP_DIR="$CF_TXN_BACKUP_DIR" TEST_MANAGEMENT_LOCK="$MANAGEMENT_LOCK" \
     TEST_NEW_CONFIG="$new_config" TEST_NEW_MANAGED="$new_managed" \
     bash -c '
       set -Eeuo pipefail
       export AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1
       source "$ROOT/manage.sh"
       AGENT_USER=root
-      STATE_DIR="$TEST_STATE_DIR"; CONFIG_DIR="$TEST_CONFIG_DIR"; CONTROL_DIR="$TEST_CONTROL_DIR"; TLS_DIR="$TEST_TLS_DIR"; CONFIG_FILE="$TEST_CONFIG_FILE"; MANAGED_STATE="$TEST_MANAGED_STATE"; CF_TXN_STATE="$TEST_CF_TXN_STATE"; CF_TXN_BACKUP_DIR="$TEST_CF_TXN_BACKUP_DIR"
+      STATE_DIR="$TEST_STATE_DIR"; CONFIG_DIR="$TEST_CONFIG_DIR"; CONTROL_DIR="$TEST_CONTROL_DIR"; TLS_DIR="$TEST_TLS_DIR"; CONFIG_FILE="$TEST_CONFIG_FILE"; MANAGED_STATE="$TEST_MANAGED_STATE"; CF_TXN_STATE="$TEST_CF_TXN_STATE"; CF_TXN_BACKUP_DIR="$TEST_CF_TXN_BACKUP_DIR"; MANAGEMENT_LOCK="$TEST_MANAGEMENT_LOCK"; MANAGEMENT_LOCK_FD=""
       host=mcp.example.com; zone_id=zone1; old_port=3210
-      dns_id=dns-new; dns_action=created; dns_old_content=""; dns_old_proxied=""; dns_old_ttl=""
-      origin_ruleset_id=origin-set; origin_rule_id=origin-rule; origin_action=created
-      ssl_ruleset_id=ssl-set; ssl_rule_id=ssl-rule; ssl_action=created; cert_id=cert-new
+      dns_id=dns-new; dns_action=created; dns_old_content=""; dns_old_proxied=""; dns_old_ttl=""; dns_fingerprint=aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+      origin_ruleset_id=origin-set; origin_rule_id=origin-rule; origin_action=created; origin_fingerprint=bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb
+      ssl_ruleset_id=ssl-set; ssl_rule_id=ssl-rule; ssl_action=created; ssl_fingerprint=cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc; cert_id=cert-new
       prepare_cloudflare_local_backup
       CF_TXN_PHASE=applying
       save_current_cloudflare_transaction_state
@@ -45,7 +45,7 @@ kill_after_boundary(){
       case "$TEST_SCENARIO" in
         applying) ;;
         committing|committed)
-          cf_set_commit_intent mcp.example.com 3210 zone1 example.com dns-new true origin-set origin-rule ssl-set ssl-rule cert-new
+          cf_set_commit_intent mcp.example.com 3210 zone1 example.com dns-new true origin-set origin-rule ssl-set ssl-rule cert-new aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc
           printf "%s\n" "$TEST_NEW_MANAGED" > "$MANAGED_STATE"
           if [ "$TEST_SCENARIO" = committed ]; then
             CF_TXN_PHASE=committed
@@ -65,14 +65,16 @@ kill_after_boundary(){
 recover_fresh(){
   env \
     ROOT="$ROOT" TEST_STATE_DIR="$STATE_DIR" TEST_CONFIG_DIR="$CONFIG_DIR" TEST_CONTROL_DIR="$CONTROL_DIR" TEST_TLS_DIR="$TLS_DIR" \
-    TEST_CONFIG_FILE="$CONFIG_FILE" TEST_MANAGED_STATE="$MANAGED_STATE" TEST_CF_TXN_STATE="$CF_TXN_STATE" TEST_CF_TXN_BACKUP_DIR="$CF_TXN_BACKUP_DIR" TEST_DELETE_LOG="$DELETE_LOG" \
+    TEST_CONFIG_FILE="$CONFIG_FILE" TEST_MANAGED_STATE="$MANAGED_STATE" TEST_CF_TXN_STATE="$CF_TXN_STATE" TEST_CF_TXN_BACKUP_DIR="$CF_TXN_BACKUP_DIR" TEST_MANAGEMENT_LOCK="$MANAGEMENT_LOCK" TEST_DELETE_LOG="$DELETE_LOG" \
     bash -c '
       set -Eeuo pipefail
       export AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1
       source "$ROOT/manage.sh"
       AGENT_USER=root
-      STATE_DIR="$TEST_STATE_DIR"; CONFIG_DIR="$TEST_CONFIG_DIR"; CONTROL_DIR="$TEST_CONTROL_DIR"; TLS_DIR="$TEST_TLS_DIR"; CONFIG_FILE="$TEST_CONFIG_FILE"; MANAGED_STATE="$TEST_MANAGED_STATE"; CF_TXN_STATE="$TEST_CF_TXN_STATE"; CF_TXN_BACKUP_DIR="$TEST_CF_TXN_BACKUP_DIR"
+      STATE_DIR="$TEST_STATE_DIR"; CONFIG_DIR="$TEST_CONFIG_DIR"; CONTROL_DIR="$TEST_CONTROL_DIR"; TLS_DIR="$TEST_TLS_DIR"; CONFIG_FILE="$TEST_CONFIG_FILE"; MANAGED_STATE="$TEST_MANAGED_STATE"; CF_TXN_STATE="$TEST_CF_TXN_STATE"; CF_TXN_BACKUP_DIR="$TEST_CF_TXN_BACKUP_DIR"; MANAGEMENT_LOCK="$TEST_MANAGEMENT_LOCK"; MANAGEMENT_LOCK_FD=""
       systemctl(){ return 0; }
+      cf_delete_dns_if_expected(){ printf "/zones/%s/dns_records/%s\n" "$1" "$2" >> "$TEST_DELETE_LOG"; return 0; }
+      cf_delete_rule_if_expected(){ printf "/zones/%s/rulesets/%s/rules/%s\n" "$1" "$2" "$3" >> "$TEST_DELETE_LOG"; return 0; }
       cf_delete_owned(){ printf "%s\n" "$1" >> "$TEST_DELETE_LOG"; return 0; }
       cf_recover_pending_write(){ cf_clear_pending_write; return 0; }
       recover_cloudflare_transaction
@@ -114,6 +116,25 @@ test ! -s "$DELETE_LOG"
 cmp -s <(printf '%s\n' "$new_config") "$CONFIG_FILE"
 cmp -s <(printf '%s\n' "$new_managed") "$MANAGED_STATE"
 test ! -e "$CF_TXN_STATE"; test ! -e "$CF_TXN_BACKUP_DIR"
+
+
+# Committed recovery is terminal only when managed state proves the exact commit.
+reset_old_local
+kill_after_boundary committed
+printf '%s\n' "$old_managed" > "$MANAGED_STATE"
+chown root:root "$MANAGED_STATE"; chmod 0640 "$MANAGED_STATE"
+before="$(sha256sum "$CF_TXN_STATE" | awk '{print $1}')"; : > "$DELETE_LOG"
+if recover_fresh; then echo 'committed journal finalized with mismatched managed state' >&2; exit 1; fi
+test "$(sha256sum "$CF_TXN_STATE" | awk '{print $1}')" = "$before"
+test -d "$CF_TXN_BACKUP_DIR"; test ! -s "$DELETE_LOG"
+
+reset_old_local
+kill_after_boundary committed
+rm -f "$MANAGED_STATE"
+before="$(sha256sum "$CF_TXN_STATE" | awk '{print $1}')"; : > "$DELETE_LOG"
+if recover_fresh; then echo 'committed journal finalized with missing managed state' >&2; exit 1; fi
+test "$(sha256sum "$CF_TXN_STATE" | awk '{print $1}')" = "$before"
+test -d "$CF_TXN_BACKUP_DIR"; test ! -s "$DELETE_LOG"
 
 # Truncated journal fails closed and remains byte-for-byte untouched.
 reset_old_local

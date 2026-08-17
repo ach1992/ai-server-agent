@@ -152,7 +152,7 @@ Cloudflare setup is transactional across certificate issuance, DNS/rule reconcil
 If a remote rollback cannot complete, the manager preserves the exact remaining ownership/recovery data in:
 
 ```text
-/var/lib/ai-server-agent/cloudflare-transaction.json
+/etc/ai-server-agent/control/cloudflare-transaction.json
 ```
 
 A pending transaction journal blocks another Cloudflare configuration attempt. Run `sudo ai-server-agent-manage` and choose **Remove recorded Cloudflare resources** to retry the recorded rollback with a fresh scoped token. The token itself is never written to the journal.
@@ -339,6 +339,7 @@ Cloudflare resources are separate. If you want the Agent-recorded Cloudflare res
 - Do not silently adopt, overwrite, or delete external DNS/rules.
 - Public direct mode requires native TLS and bearer authentication.
 - Stable releases rely on GitHub immutable release enforcement plus per-archive `SHA256SUMS` verification; neither stable install nor stable update accepts a local binary override.
+- Stable release publication also requires an active tag ruleset covering `refs/tags/v*` (or all tags) with tag updates and deletions restricted and no bypass actors; the release workflow creates the exact tag only after verifying that protection.
 - Approval guardrails are not a complete sandbox; privileged shell access is an intentional capability.
 - Keep the v0.1 stable line on a dedicated development/test server.
 
