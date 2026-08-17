@@ -30,7 +30,8 @@ jobs:
               scripts/.tmp-final-security.part6 \
               scripts/.tmp-final-security.part7 \
               scripts/.tmp-final-security.part8 \
-              scripts/.tmp-final-security.part9
+              scripts/.tmp-final-security.part9 \
+              scripts/.tmp-final-security.part10
           } > /tmp/apply-final-security.py
           python3 -m py_compile /tmp/apply-final-security.py
           python3 /tmp/apply-final-security.py
@@ -58,7 +59,8 @@ jobs:
             scripts/.tmp-final-security.part6 \
             scripts/.tmp-final-security.part7 \
             scripts/.tmp-final-security.part8 \
-            scripts/.tmp-final-security.part9
+            scripts/.tmp-final-security.part9 \
+            scripts/.tmp-final-security.part10
           git add \
             manage.sh \
             internal/executor/executor.go \
