@@ -126,6 +126,7 @@ The journal validator enforces semantic relationships, not only JSON types:
 
 - pending kind is bound to the correct Cloudflare ruleset phase;
 - pending zone/hostname must match the transaction identity;
+- every pending create kind carries the kind-specific durable ownership/representation evidence needed by its recovery path;
 - pending creates cannot survive into local `applying`, `committing`, or `committed` state;
 - commit identity must exactly match the transaction/resource identity;
 - `rolled_back` is terminal only when pending evidence, commit intent, rollback-owned resources, and certificate ownership are empty;
@@ -147,13 +148,11 @@ A fresh process may finalize `committing`/`committed` without rollback only when
 
 For confirmed Agent-owned DNS/rules, the manager stores canonical full-resource fingerprints and immediately re-reads the current resource before destructive cleanup. If representation changed, automatic deletion fails closed.
 
-For response-lost POSTs, identity alone is insufficient. Before the POST, the journal stores:
+For response-lost POSTs, discovery identity alone is insufficient. Before the POST, the journal stores the pending create kind and transaction identity plus the exact request-controlled semantic fingerprint. DNS/rule creates also carry an unpredictable Agent marker/nonce used to discover only the Agent-created candidate.
 
-- an unpredictable ownership marker/nonce;
-- the pending create kind and transaction identity;
-- a semantic fingerprint of the exact request-controlled representation.
+Origin CA uses the newly generated CSR as its unpredictable discovery value. The durable Origin CA fingerprint covers `csr`, the hostname set, `request_type`, and `requested_validity`. Recovery first discovers a unique candidate by CSR, then GETs that exact certificate ID, recomputes the complete semantic fingerprint, and revokes only when it still equals the durable pre-POST intent. Ambiguity, representation mismatch, or exact-ID read failure preserves the pending recovery state and fails closed.
 
-Recovery discovers only the nonce-marked candidate, re-reads that exact resource by ID, recomputes the semantic fingerprint, and deletes only if the current representation still matches the durable pre-POST representation. Competing lookalikes, multiple matches, missing representation proof, or drift remain unresolved rather than being destructively guessed.
+DNS/rule recovery likewise re-reads the exact discovered resource by ID, recomputes the semantic fingerprint, and deletes only if the current representation still matches the durable pre-POST representation. Competing lookalikes, multiple matches, missing representation proof, or drift remain unresolved rather than being destructively guessed.
 
 Ruleset recovery deletes only the exact Agent rule, never the shared Ruleset container.
 
@@ -176,7 +175,11 @@ The immutable-tag bootstrap runs before release `install.sh` bytes receive root 
 3. requires exactly one uploaded `install.sh` asset at the exact tag-scoped release URL;
 4. requires the GitHub release asset `sha256:` digest;
 5. downloads that release installer without privileged execution and verifies its bytes against the digest;
-6. invokes `sudo bash` only after successful verification.
+6. crosses the privilege boundary through a fixed bootstrap helper that copies the candidate into a root-owned `0700` staging directory;
+7. recomputes the same expected release-asset digest on the root-controlled copy and fails closed on any mismatch;
+8. executes only that re-verified root-controlled copy.
+
+The original invoking-user-writable pathname is therefore never trusted for root execution after the privilege boundary. Replacing that pathname between the unprivileged hash and `sudo` can at most cause the privileged re-verification to fail; it cannot make different bytes pass into the installer execution path.
 
 The release-scoped `install.sh` is generated with its version/ref pinned to the release tag. Once authenticated by the bootstrap, it rejects `AI_SERVER_AGENT_BINARY` overrides, downloads the release archive plus `SHA256SUMS`, and continues only after archive checksum verification.
 
