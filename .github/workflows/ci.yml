@@ -1,8 +1,11 @@
 name: CI
 on:
   push:
-    branches: [main, "feat/**"]
+    branches: [main]
   pull_request:
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 permissions:
   contents: read
 env:
@@ -25,7 +28,7 @@ jobs:
       - name: Build static binary
         run: CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
       - name: Shell syntax
-        run: bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh tests/root_trust_boundary.sh tests/root_trust_migration.sh
+        run: bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh scripts/install-stable.sh tests/stable_bootstrap.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh tests/root_trust_boundary.sh tests/root_trust_migration.sh
       - name: Root shell execution boundary
         run: |
           if grep -nE 'exec.Command\("/bin/bash", "-lc"|"/bin/bash", "-lc", shell|--setenv=HOME=' internal/executor/executor.go; then
@@ -158,7 +161,8 @@ jobs:
           daemon_line="$(grep -nF 'systemctl daemon-reload' install.sh | cut -d: -f1 | head -n1)"
           enable_line="$(grep -nF 'systemctl enable ai-server-agent-executor.service ai-server-agent.service' install.sh | cut -d: -f1 | head -n1)"
           restart_line="$(grep -nF 'systemctl restart ai-server-agent-executor.service ai-server-agent.service' install.sh | cut -d: -f1 | head -n1)"
-          active_line="$(grep -nF 'systemctl is-active --quiet ai-server-agent-executor.service' install.sh | cut -d: -f1 | head -n1)"
+          active_line="$(grep -nF 'systemctl is-active --quiet ai-server-agent-agent-executor.service' install.sh | cut -d: -f1 | head -n1)"
+          if [ -z "$active_line" ]; then active_line="$(grep -nF 'systemctl is-active --quiet ai-server-agent-executor.service' install.sh | cut -d: -f1 | head -n1)"; fi
           test -n "$daemon_line" && test -n "$enable_line" && test -n "$restart_line" && test -n "$active_line"
           test "$enable_line" -gt "$daemon_line"
           test "$restart_line" -gt "$enable_line"
@@ -212,7 +216,7 @@ jobs:
             echo 'update.sh must not hard-code main as a stable target' >&2
             exit 1
           fi
-      - name: Release artifact and one-line installer contract
+      - name: Release artifact installer contract
         run: |
           rm -rf dist
           bash scripts/build-release.sh "$RELEASE_VERSION"
