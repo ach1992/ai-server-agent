@@ -2,6 +2,8 @@
 set -Eeuo pipefail
 [ "$(id -u)" -eq 0 ] || { echo "run cloudflare_phase_recovery.sh as root" >&2; exit 1; }
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+export AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1
+source "$ROOT/manage.sh"
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 STATE_DIR="$TMP/state"; CONFIG_DIR="$TMP/config"; CONTROL_DIR="$CONFIG_DIR/control"; TLS_DIR="$CONFIG_DIR/tls"; CONFIG_FILE="$CONFIG_DIR/config.json"; MANAGED_STATE="$CONFIG_DIR/managed.json"; CF_TXN_STATE="$CONTROL_DIR/cloudflare-transaction.json"; CF_TXN_BACKUP_DIR="$CONTROL_DIR/cloudflare-transaction-backup"; MANAGEMENT_LOCK="$CONTROL_DIR/management.lock"; MANAGEMENT_LOCK_FD=""; DELETE_LOG="$TMP/deletes.log"
 mkdir -p "$STATE_DIR" "$CONFIG_DIR" "$CONTROL_DIR" "$TLS_DIR"
