@@ -48,6 +48,7 @@ jobs:
               raise SystemExit('required reviewed CI contract markers are missing')
           if "Refusing to modify it automatically" in text:
               raise SystemExit('stale DNS ownership assertion remains')
+          text = "\n".join(line.rstrip() for line in text.splitlines()) + "\n"
           path.write_text(text)
           print('updated' if changed else 'already-current')
           PY
