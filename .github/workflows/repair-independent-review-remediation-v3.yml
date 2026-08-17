@@ -70,7 +70,7 @@ jobs:
           rm -f tests/.tmp-debug-cloudflare-transaction.sh
           sudo bash tests/cloudflare_transaction.sh
           sudo bash tests/cloudflare_crash_recovery.sh
-          sudo bash tests/cloudflare_phase_recovery.sh
+          sudo bash -x tests/cloudflare_phase_recovery.sh
           grep -qF -- '--verify-tag' scripts/.tmp-release.yml
           if grep -qF -- '--target "$RELEASE_SHA"' scripts/.tmp-release.yml; then
             echo 'release workflow still uses unsafe --target' >&2
