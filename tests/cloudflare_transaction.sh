@@ -32,6 +32,8 @@ ORIG_CF_DELETE_RULE_IF_EXPECTED="$(declare -f cf_delete_rule_if_expected)"
 ORIG_CF_GET_OPTIONAL="$(declare -f cf_get_optional)"
 ORIG_CF_GET_DNS_RECORD="$(declare -f cf_get_dns_record)"
 ORIG_CF_GET_RULE="$(declare -f cf_get_rule)"
+ORIG_CF_GET_ORIGIN_CERT="$(declare -f cf_get_origin_cert)"
+ORIG_CF_FIND_ORIGIN_CERT_BY_CSR="$(declare -f cf_find_origin_cert_by_csr)"
 ORIG_CF_FIND_DNS_BY_MARKER="$(declare -f cf_find_dns_by_marker)"
 ORIG_CF_FIND_RULE_BY_MARKER="$(declare -f cf_find_rule_by_marker)"
 ORIG_CF_RECONCILE_SSL_CONFIG_RULE="$(declare -f cf_reconcile_ssl_config_rule)"
@@ -139,6 +141,42 @@ test ! -s "$DELETE_LOG"
 test "$CF_PENDING_KIND" = dns-create
 cf_clear_pending_write
 
+# Origin CA response-lost recovery uses the CSR only for discovery; destructive
+# recovery also requires a complete durable semantic fingerprint and an exact-ID reread.
+expected_pending_cert='{"id":"cert-ambiguous","csr":"csr-nonce","hostnames":["mcp.example.com"],"request_type":"origin-rsa","requested_validity":1095}'
+pending_cert_fp="$(cf_origin_cert_intent_fingerprint <<<"$expected_pending_cert")"
+CF_PENDING_KIND=origin-cert-create; CF_PENDING_ZONE=zone1; CF_PENDING_HOST=mcp.example.com; CF_PENDING_VALUE=csr-nonce; CF_PENDING_PHASE=""; CF_PENDING_MARKER=""; CF_PENDING_FINGERPRINT="$pending_cert_fp"
+cf_find_origin_cert_by_csr(){ printf 'cert-ambiguous\n'; }
+cf_get_origin_cert(){ printf '%s\n' "$expected_pending_cert"; }
+: > "$DELETE_LOG"
+cf_delete_owned(){ printf '%s\n' "$1" >> "$DELETE_LOG"; return 0; }
+cf_recover_pending_write
+grep -Fxq '/certificates/cert-ambiguous' "$DELETE_LOG"
+test -z "$CF_PENDING_KIND"
+
+# A certificate with the same CSR but different create semantics is not owned by
+# this pending transaction and must not be revoked.
+drifted_pending_cert='{"id":"cert-ambiguous","csr":"csr-nonce","hostnames":["other.example.com"],"request_type":"origin-rsa","requested_validity":1095}'
+CF_PENDING_KIND=origin-cert-create; CF_PENDING_ZONE=zone1; CF_PENDING_HOST=mcp.example.com; CF_PENDING_VALUE=csr-nonce; CF_PENDING_PHASE=""; CF_PENDING_MARKER=""; CF_PENDING_FINGERPRINT="$pending_cert_fp"
+cf_find_origin_cert_by_csr(){ printf 'cert-ambiguous\n'; }
+cf_get_origin_cert(){ printf '%s\n' "$drifted_pending_cert"; }
+: > "$DELETE_LOG"
+if cf_recover_pending_write; then echo 'drifted response-lost Origin CA certificate was revoked' >&2; exit 1; fi
+test ! -s "$DELETE_LOG"
+test "$CF_PENDING_KIND" = origin-cert-create
+cf_clear_pending_write
+
+# Failure to reread the exact discovered certificate ID also fails closed and
+# keeps the durable pending evidence for a later retry.
+CF_PENDING_KIND=origin-cert-create; CF_PENDING_ZONE=zone1; CF_PENDING_HOST=mcp.example.com; CF_PENDING_VALUE=csr-nonce; CF_PENDING_PHASE=""; CF_PENDING_MARKER=""; CF_PENDING_FINGERPRINT="$pending_cert_fp"
+cf_find_origin_cert_by_csr(){ printf 'cert-ambiguous\n'; }
+cf_get_origin_cert(){ return 2; }
+: > "$DELETE_LOG"
+if cf_recover_pending_write; then echo 'Origin CA recovery ignored an exact-ID read failure' >&2; exit 1; fi
+test ! -s "$DELETE_LOG"
+test "$CF_PENDING_KIND" = origin-cert-create
+cf_clear_pending_write
+
 # Response-lost rule recovery has the same representation proof and only ever
 # deletes the exact marked rule, never a ruleset container.
 expected_pending_rule='{"id":"ambiguous-rule","ref":"ai_server_agent_test","description":"AI Server Agent origin port txn:abcdef0123456789abcdef0123456789","expression":"http.host eq \"mcp.example.com\"","action":"route","action_parameters":{"origin":{"port":3210}},"enabled":true}'
@@ -179,10 +217,12 @@ test ! -e "$CF_TXN_STATE"
 test -z "$CF_PENDING_KIND"
 
 # Restore production discovery helpers for nonce/ambiguity behavior.
+eval "$ORIG_CF_FIND_ORIGIN_CERT_BY_CSR"
 eval "$ORIG_CF_FIND_DNS_BY_MARKER"
 eval "$ORIG_CF_FIND_RULE_BY_MARKER"
 eval "$ORIG_CF_GET_DNS_RECORD"
 eval "$ORIG_CF_GET_RULE"
+eval "$ORIG_CF_GET_ORIGIN_CERT"
 
 # Durable pre-POST journal contains the exact semantic fingerprint before POST.
 rm -f "$CF_TXN_STATE"
@@ -194,6 +234,14 @@ validate_cloudflare_transaction_state "$CF_TXN_STATE"
 test "$(jq -r '.version' "$CF_TXN_STATE")" = 3
 test "$(jq -r '.pending.marker' "$CF_TXN_STATE")" = 0123456789abcdef0123456789abcdef
 test "$(jq -r '.pending.fingerprint' "$CF_TXN_STATE")" = "$pending_dns_fp"
+clear_cloudflare_transaction_state
+
+# Origin CA pending journals require the same exact semantic fingerprint.
+CF_TXN_PHASE=prepared; CF_TXN_BACKUP_READY=true
+cf_set_pending_write origin-cert-create zone1 mcp.example.com csr-nonce "" "" "$pending_cert_fp"
+test -s "$CF_TXN_STATE"
+validate_cloudflare_transaction_state "$CF_TXN_STATE"
+test "$(jq -r '.pending.fingerprint' "$CF_TXN_STATE")" = "$pending_cert_fp"
 clear_cloudflare_transaction_state
 
 # A same-shape concurrent DNS record without our nonce is ambiguous and must never be adopted.
