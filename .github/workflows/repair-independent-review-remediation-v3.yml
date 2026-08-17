@@ -21,6 +21,7 @@ jobs:
       - name: Apply and validate
         run: |
           set -Eeuo pipefail
+          exec > >(tee /tmp/repair.log) 2>&1
           cat scripts/.tmp-irfix-part00 scripts/.tmp-irfix-part01 > scripts/.tmp-independent-review-fix.py
           sed 's/--argjson port "$CF_COMMIT_PORT"/--arg commit_port "$CF_COMMIT_PORT"/' scripts/.tmp-irfix-part02 >> scripts/.tmp-independent-review-fix.py
           sed -n '5,$p' scripts/.tmp-irfix-part03 | sed '1s/^cf_reset_transaction_globals(){//' >> scripts/.tmp-independent-review-fix.py
@@ -49,6 +50,13 @@ jobs:
           grep -qF 'flock -n "$MANAGEMENT_LOCK_FD"' manage.sh
           grep -qF 'committed journal finalized with mismatched managed state' tests/cloudflare_phase_recovery.sh
           git diff --check
+      - name: Upload repair log
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: repair-debug-${{ github.run_id }}
+          path: /tmp/repair.log
+          if-no-files-found: error
       - name: Commit validated non-workflow changes
         run: |
           set -Eeuo pipefail
