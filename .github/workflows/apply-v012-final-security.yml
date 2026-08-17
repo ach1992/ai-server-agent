@@ -45,13 +45,15 @@ jobs:
           sudo bash tests/cloudflare_crash_recovery.sh
           sudo bash tests/cloudflare_phase_recovery.sh
           git diff --check
-      - name: Commit product changes and remove bridge
+      - name: Commit non-workflow product changes and bridge workflow outputs
         run: |
           set -Eeuo pipefail
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          cp .github/workflows/ci.yml scripts/.final-ci.yml
+          cp .github/workflows/security.yml scripts/.final-security.yml
+          git restore --source=HEAD -- .github/workflows/ci.yml .github/workflows/security.yml
           git rm \
-            .github/workflows/apply-v012-final-security.yml \
             scripts/.tmp-final-security.part1 \
             scripts/.tmp-final-security.part2 \
             scripts/.tmp-final-security.part3 \
@@ -63,7 +65,7 @@ jobs:
             scripts/.tmp-final-security.part9 \
             scripts/.tmp-final-security.part10 \
             scripts/.tmp-final-security.part11
-          git add manage.sh internal/executor/executor.go internal/executor/executor_test.go tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh .github/workflows/ci.yml .github/workflows/security.yml docs/ARCHITECTURE.md
+          git add manage.sh internal/executor/executor.go internal/executor/executor_test.go tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh docs/ARCHITECTURE.md scripts/.final-ci.yml scripts/.final-security.yml
           git diff --cached --check
           test -n "$(git diff --cached --name-only)"
           git commit -m 'Harden privileged execution and Cloudflare recovery'
