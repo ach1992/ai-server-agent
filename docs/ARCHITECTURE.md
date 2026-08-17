@@ -163,9 +163,22 @@ The current design deliberately avoids unconditional in-place mutation of previo
 
 Stable and source channels are distinct.
 
-### Stable install
+### Stable bootstrap and first install
 
-A release-hosted `install.sh` is generated with its version/ref pinned to the release tag. Stable installation rejects `AI_SERVER_AGENT_BINARY` overrides and downloads the release archive plus `SHA256SUMS`; archive installation continues only after checksum verification.
+The release `install.sh` cannot authenticate itself before it executes, so it is deliberately **not** the stable trust root. Initial stable installation begins with `scripts/install-stable.sh` fetched from an exact immutable Git commit URL.
+
+The commit-pinned bootstrap runs before release-supplied code receives root execution. It:
+
+1. resolves an explicit stable tag or GitHub's latest release metadata;
+2. requires the release to be non-draft, non-prerelease and immutable;
+3. requires exactly one uploaded `install.sh` asset at the exact tag-scoped release URL;
+4. requires the GitHub release asset `sha256:` digest;
+5. downloads that release installer without privileged execution and verifies its bytes against the digest;
+6. invokes `sudo bash` only after successful verification.
+
+The release-scoped `install.sh` is generated with its version/ref pinned to the release tag. Once authenticated by the bootstrap, it rejects `AI_SERVER_AGENT_BINARY` overrides, downloads the release archive plus `SHA256SUMS`, and continues only after archive checksum verification.
+
+A direct `releases/.../install.sh | sudo bash` command is intentionally not a supported stable trust path because it would execute the asset before authenticating that same asset.
 
 Stable v0.1 artifacts are amd64-only.
 
@@ -173,7 +186,7 @@ Stable v0.1 artifacts are amd64-only.
 
 Trusted install identity is strict root-only JSON under `/etc/ai-server-agent/control/install-state.json`. Missing, malformed, contradictory, or unsafe identity fails closed; the updater does not guess `main`.
 
-For the stable channel the updater:
+The already-installed trusted updater applies the same release identity/digest invariant without needing the external bootstrap. For the stable channel it:
 
 1. resolves an explicit tag or the latest published immutable release;
 2. requires the release to be non-draft, non-prerelease and immutable;
