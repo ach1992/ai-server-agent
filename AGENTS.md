@@ -16,7 +16,7 @@ Stable v0.1 releases support **Ubuntu 22.04 LTS on amd64/x86_64 only**. `install
 - Cloudflare automation is hostname-scoped and must not mutate whole-zone SSL mode.
 - Never persist Cloudflare API tokens or other user secrets in repository files, logs, managed state, or test fixtures.
 - Stable install/update paths must resolve to immutable published releases and must never silently fall back to `main`.
-- Initial stable installation must authenticate release `install.sh` bytes before privileged execution. The supported one-line path uses the commit-pinned `scripts/install-stable.sh` bootstrap; do not restore a direct `releases/.../install.sh | sudo bash` path.
+- Initial stable installation must authenticate release `install.sh` bytes before privileged execution. The supported one-line path loads `scripts/install-stable.sh` from a published immutable release tag; do not restore a direct `releases/.../install.sh | sudo bash` path or a mutable branch bootstrap.
 
 ## Privileged lifecycle
 
