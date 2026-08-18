@@ -37,7 +37,7 @@ curl(){
   esac
 }
 
-out="$(cf_api GET '/zones/zone1/rulesets')"
+out="$(cf_list_zone_rulesets zone1)"
 [ "$(jq '.result | length' <<<"$out")" -eq 2 ] || fail 'ruleset pages were not merged'
 [ "$(jq -r '.result[] | select(.phase=="http_request_origin") | .id' <<<"$out")" = origin-page-two ] || fail 'second-page phase was not discoverable'
 grep -Fxq "$CF_API/zones/zone1/rulesets?per_page=50" "$CALL_LOG" || fail 'first page did not use per_page=50'
@@ -47,40 +47,40 @@ if grep -Fq 'per_page=100' "$CALL_LOG"; then fail 'invalid per_page=100 was sent
 # Cloudflare documents result_info and cursors as optional. Its own
 # List Zone Rulesets example is a successful response without result_info.
 curl(){ printf '%s' '{"success":true,"result":[{"id":"doc-shaped","kind":"zone","phase":"http_request_origin"}],"errors":[],"messages":[]}'; }
-out="$(cf_api GET '/zones/zone1/rulesets')" || fail 'documented response without result_info was rejected'
+out="$(cf_list_zone_rulesets zone1)" || fail 'documented response without result_info was rejected'
 [ "$(jq -r '.result[0].id' <<<"$out")" = doc-shaped ] || fail 'documented response without result_info was not preserved'
 
 # If optional pagination metadata is absent on a full page, completeness cannot
 # be proven. Fail closed instead of treating the first 50 items as exhaustive.
 curl(){ jq -nc '{success:true,result:[range(0;50) | {id:("r"+tostring),kind:"zone",phase:"http_request_transform"}]}' ; }
-if cf_api GET '/zones/zone1/rulesets' >/dev/null 2>&1; then
+if cf_list_zone_rulesets zone1 >/dev/null 2>&1; then
   fail 'full Rulesets page without continuation metadata was accepted as complete'
 fi
 
 # HTTP failures should surface Cloudflare's structured error without exposing the token.
 curl(){ printf '%s' '{"success":false,"errors":[{"code":10000,"message":"rulesets diagnostic"}]}' ; return 22; }
 set +e
-err="$(cf_api GET '/zones/zone1/rulesets' 2>&1 >/dev/null)"
+err="$(cf_list_zone_rulesets zone1 2>&1 >/dev/null)"
 rc=$?
 set -e
 [ "$rc" -ne 0 ] || fail 'Cloudflare HTTP failure was accepted'
 grep -Fq 'Cloudflare API error 10000: rulesets diagnostic' <<<"$err" || fail 'Cloudflare Rulesets HTTP error body was hidden'
 
 curl(){ printf '%s' '{"success":true,"result":[],"result_info":{}}'; }
-cf_api GET '/zones/zone1/rulesets' >/dev/null || fail 'optional missing cursors object was rejected'
+cf_list_zone_rulesets zone1 >/dev/null || fail 'optional missing cursors object was rejected'
 curl(){ printf '%s' '{"success":true,"result":[],"result_info":{"cursors":{}}}'; }
-cf_api GET '/zones/zone1/rulesets' >/dev/null || fail 'empty cursor metadata was rejected'
+cf_list_zone_rulesets zone1 >/dev/null || fail 'empty cursor metadata was rejected'
 
 # Optional metadata must still be structurally valid when present.
 for bad_info in 'null' 'false' '123' '"bad"' '[]'; do
   curl(){ printf '{"success":true,"result":[],"result_info":%s}' "$bad_info"; }
-  if cf_api GET '/zones/zone1/rulesets' >/dev/null 2>&1; then
+  if cf_list_zone_rulesets zone1 >/dev/null 2>&1; then
     fail "invalid result_info was accepted: $bad_info"
   fi
 done
 for bad_cursors in 'null' 'false' '123' '"bad"' '[]'; do
   curl(){ printf '{"success":true,"result":[],"result_info":{"cursors":%s}}' "$bad_cursors"; }
-  if cf_api GET '/zones/zone1/rulesets' >/dev/null 2>&1; then
+  if cf_list_zone_rulesets zone1 >/dev/null 2>&1; then
     fail "invalid cursors metadata was accepted: $bad_cursors"
   fi
 done
@@ -88,7 +88,7 @@ done
 # If after is present, it must be a non-empty string.
 for bad_after in 'false' 'null' '""' '123' '{}' '[]'; do
   curl(){ printf '{"success":true,"result":[],"result_info":{"cursors":{"after":%s}}}' "$bad_after"; }
-  if cf_api GET '/zones/zone1/rulesets' >/dev/null 2>&1; then
+  if cf_list_zone_rulesets zone1 >/dev/null 2>&1; then
     fail "invalid after cursor was accepted: $bad_after"
   fi
 done
@@ -108,14 +108,14 @@ for bad_result in \
   '[{"id":"r1","kind":"bogus","phase":"http_request_origin"}]' \
   '[{"id":"r1","kind":"zone","phase":"bogus"}]'; do
   curl(){ printf '{"success":true,"result":%s}' "$bad_result"; }
-  if cf_api GET '/zones/zone1/rulesets' >/dev/null 2>&1; then
+  if cf_list_zone_rulesets zone1 >/dev/null 2>&1; then
     fail "malformed ruleset item was accepted: $bad_result"
   fi
 done
 
 for valid_kind in managed custom root zone; do
   curl(){ printf '{"success":true,"result":[{"id":"r1","kind":"%s","phase":"http_request_origin"}]}' "$valid_kind"; }
-  cf_api GET '/zones/zone1/rulesets' >/dev/null || fail "documented ruleset kind was rejected: $valid_kind"
+  cf_list_zone_rulesets zone1 >/dev/null || fail "documented ruleset kind was rejected: $valid_kind"
 done
 for valid_phase in \
   ddos_l4 ddos_l7 http_config_settings http_custom_errors http_log_custom_fields \
@@ -126,13 +126,30 @@ for valid_phase in \
   http_response_firewall_managed http_response_headers_transform magic_transit \
   magic_transit_ids_managed magic_transit_managed magic_transit_ratelimit; do
   curl(){ printf '{"success":true,"result":[{"id":"r1","kind":"zone","phase":"%s"}]}' "$valid_phase"; }
-  cf_api GET '/zones/zone1/rulesets' >/dev/null || fail "documented ruleset phase was rejected: $valid_phase"
+  cf_list_zone_rulesets zone1 >/dev/null || fail "documented ruleset phase was rejected: $valid_phase"
 done
 
 # A non-advancing cursor must fail closed rather than loop or return partial data.
 curl(){ printf '%s' '{"success":true,"result":[],"result_info":{"cursors":{"after":"same-cursor"}}}'; }
-if cf_api GET '/zones/zone1/rulesets' >/dev/null 2>&1; then
+if cf_list_zone_rulesets zone1 >/dev/null 2>&1; then
   fail 'repeated pagination cursor was accepted'
+fi
+
+# A multi-node cursor cycle must be detected immediately, not only by the page cap.
+curl(){
+  local url="${*: -1}"
+  case "$url" in
+    "$CF_API/zones/zone1/rulesets?per_page=50")
+      printf '%s' '{"success":true,"result":[],"result_info":{"cursors":{"after":"cycle-a"}}}' ;;
+    "$CF_API/zones/zone1/rulesets?per_page=50&cursor=cycle-a")
+      printf '%s' '{"success":true,"result":[],"result_info":{"cursors":{"after":"cycle-b"}}}' ;;
+    "$CF_API/zones/zone1/rulesets?per_page=50&cursor=cycle-b")
+      printf '%s' '{"success":true,"result":[],"result_info":{"cursors":{"after":"cycle-a"}}}' ;;
+    *) return 22 ;;
+  esac
+}
+if cf_list_zone_rulesets zone1 >/dev/null 2>&1; then
+  fail 'multi-node pagination cursor cycle was accepted'
 fi
 
 printf 'Cloudflare Rulesets pagination contract passed.\n'
