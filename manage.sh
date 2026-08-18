@@ -314,86 +314,6 @@ cf_api(){
   printf '%s' "$out"
 }
 
-cf_list_zone_rulesets(){
-  local zone_id="$1" cursor="" encoded_cursor path page next_cursor count pages=0 merged='[]'
-  while :; do
-    pages=$((pages + 1))
-    [ "$pages" -le 1000 ] || { warn "Cloudflare Rulesets pagination exceeded the safety bound."; return 1; }
-    if [ -n "$cursor" ]; then
-      encoded_cursor="$(jq -rn --arg cursor "$cursor" '$cursor|@uri')"
-      path="/zones/$zone_id/rulesets?per_page=50&cursor=$encoded_cursor"
-    else
-      path="/zones/$zone_id/rulesets?per_page=50"
-    fi
-
-    page="$(cf_api GET "$path")" || return 1
-    if ! jq -e '
-      def valid_kind: .=="managed" or .=="custom" or .=="root" or .=="zone";
-      def valid_phase:
-        .=="ddos_l4" or .=="ddos_l7" or .=="http_config_settings" or
-        .=="http_custom_errors" or .=="http_log_custom_fields" or .=="http_ratelimit" or
-        .=="http_request_cache_settings" or .=="http_request_dynamic_redirect" or
-        .=="http_request_firewall_custom" or .=="http_request_firewall_managed" or
-        .=="http_request_late_transform" or .=="http_request_origin" or
-        .=="http_request_redirect" or .=="http_request_sanitize" or .=="http_request_sbfm" or
-        .=="http_request_transform" or .=="http_response_cache_settings" or
-        .=="http_response_compression" or .=="http_response_firewall_managed" or
-        .=="http_response_headers_transform" or .=="magic_transit" or
-        .=="magic_transit_ids_managed" or .=="magic_transit_managed" or
-        .=="magic_transit_ratelimit";
-      .success == true and
-      (.result|type)=="array" and
-      all(.result[];
-        type=="object" and
-        (.id|type)=="string" and (.id|length)>0 and
-        (.kind|type)=="string" and (.kind|valid_kind) and
-        (.phase|type)=="string" and (.phase|valid_phase)
-      ) and
-      (
-        (has("result_info")|not) or
-        (
-          (.result_info|type)=="object" and
-          (
-            (.result_info|has("cursors")|not) or
-            (
-              (.result_info.cursors|type)=="object" and
-              (
-                (.result_info.cursors|has("after")|not) or
-                ((.result_info.cursors.after|type)=="string" and (.result_info.cursors.after|length)>0)
-              )
-            )
-          )
-        )
-      )
-    ' >/dev/null 2>&1 <<<"$page"; then
-      warn "Cloudflare Rulesets list response did not match the documented response contract."
-      return 1
-    fi
-
-    merged="$(jq -cn --argjson acc "$merged" --argjson response "$page" '$acc + $response.result')"
-    count="$(jq '.result | length' <<<"$page")"
-
-    if jq -e '(.result_info? | type)=="object" and (.result_info.cursors? | type)=="object" and (.result_info.cursors | has("after"))' >/dev/null 2>&1 <<<"$page"; then
-      next_cursor="$(jq -r '.result_info.cursors.after' <<<"$page")"
-      [ "$next_cursor" != "$cursor" ] || { warn "Cloudflare Rulesets pagination returned a non-advancing cursor."; return 1; }
-      cursor="$next_cursor"
-      continue
-    fi
-
-    if jq -e '(.result_info? | type)=="object" and (.result_info.cursors? | type)=="object"' >/dev/null 2>&1 <<<"$page"; then
-      break
-    fi
-
-    # Cloudflare documents result_info/cursors as optional. With no cursor
-    # metadata, a short page is complete at the requested 50-item page size.
-    # A full page is ambiguous and must not authorize an absence decision.
-    [ "$count" -lt 50 ] || { warn "Cloudflare Rulesets returned a full page without pagination metadata; refusing an incomplete absence decision."; return 1; }
-    break
-  done
-
-  jq -cn --argjson result "$merged" '{success:true,result:$result}'
-}
-
 
 cf_delete_owned(){
   local path="$1" cfg response status body
@@ -415,10 +335,45 @@ cf_get_optional(){
   rm -f "$cfg"
   status="${response##*$'\n'}"; body="${response%$'\n'*}"
   [ "$status" = "404" ] && return 3
-  [[ "$status" =~ ^2[0-9][0-9]$ ]] || return 2
-  jq -e '.success == true' >/dev/null 2>&1 <<<"$body" || return 2
+  if [[ ! "$status" =~ ^2[0-9][0-9]$ ]]; then
+    jq -r '.errors[]? | if (.code // null) == null then (.message // empty) else ((.code|tostring) + ": " + (.message // "")) end' <<<"$body" >&2 2>/dev/null || true
+    return 2
+  fi
+  if ! jq -e '.success == true' >/dev/null 2>&1 <<<"$body"; then
+    jq -r '.errors[]? | if (.code // null) == null then (.message // empty) else ((.code|tostring) + ": " + (.message // "")) end' <<<"$body" >&2 2>/dev/null || true
+    return 2
+  fi
   printf '%s' "$body"
 }
+
+cf_get_zone_phase_ruleset(){
+  local zone_id="$1" phase="$2" res rc
+  case "$phase" in
+    http_request_origin|http_config_settings) ;;
+    *) warn "Unsupported Cloudflare phase lookup requested: $phase"; return 2 ;;
+  esac
+
+  if res="$(cf_get_optional "/zones/$zone_id/rulesets/phases/$phase/entrypoint")"; then
+    if ! jq -e --arg phase "$phase" '
+      .success == true and
+      (.result|type)=="object" and
+      (.result.id|type)=="string" and (.result.id|length)>0 and
+      .result.kind=="zone" and
+      .result.phase==$phase and
+      (.result.rules|type)=="array"
+    ' >/dev/null 2>&1 <<<"$res"; then
+      warn "Cloudflare phase entrypoint response did not match the expected zone Ruleset contract."
+      return 2
+    fi
+    printf '%s' "$res"
+    return 0
+  else
+    rc=$?
+    [ "$rc" -eq 3 ] && return 3
+    return 2
+  fi
+}
+
 
 cf_dns_fingerprint(){
   jq -cS '{id:(.id // ""),type:(.type // ""),name:(.name // ""),content:(.content // ""),ttl:(.ttl // 0),proxied:(.proxied // false),comment:(.comment // "")}' | sha256sum | awk '{print $1}'
@@ -609,21 +564,25 @@ cf_find_dns_by_marker(){
 }
 
 cf_find_rule_by_marker(){
-  local zone_id="$1" phase="$2" ref="$3" marker="$4" list ruleset_id ruleset exact_ids ref_ids id exact_count=0 ref_count=0 found=""
-  list="$(cf_list_zone_rulesets "$zone_id")" || return 2
-  while IFS= read -r ruleset_id; do
-    [ -n "$ruleset_id" ] || continue
-    ruleset="$(cf_api GET "/zones/$zone_id/rulesets/$ruleset_id")" || return 2
-    exact_ids="$(jq -r --arg ref "$ref" --arg marker "$marker" '.result.rules[]? | select((.ref // "")==$ref and ((.description // "") | endswith(" txn:"+$marker))) | .id // empty' <<<"$ruleset")"
-    ref_ids="$(jq -r --arg ref "$ref" '.result.rules[]? | select((.ref // "")==$ref) | .id // empty' <<<"$ruleset")"
-    while IFS= read -r id; do [ -n "$id" ] || continue; found="$ruleset_id|$id"; exact_count=$((exact_count + 1)); done <<<"$exact_ids"
-    while IFS= read -r id; do [ -n "$id" ] || continue; ref_count=$((ref_count + 1)); done <<<"$ref_ids"
-  done < <(jq -r --arg phase "$phase" '.result[]? | select(.kind=="zone" and .phase==$phase) | .id // empty' <<<"$list")
+  local zone_id="$1" phase="$2" ref="$3" marker="$4" ruleset rc ruleset_id exact_ids ref_ids id exact_count=0 ref_count=0 found=""
+  if ruleset="$(cf_get_zone_phase_ruleset "$zone_id" "$phase")"; then
+    :
+  else
+    rc=$?
+    [ "$rc" -eq 3 ] && return 1
+    return 2
+  fi
+  ruleset_id="$(jq -r '.result.id' <<<"$ruleset")"
+  exact_ids="$(jq -r --arg ref "$ref" --arg marker "$marker" '.result.rules[]? | select((.ref // "")==$ref and ((.description // "") | endswith(" txn:"+$marker))) | .id // empty' <<<"$ruleset")"
+  ref_ids="$(jq -r --arg ref "$ref" '.result.rules[]? | select((.ref // "")==$ref) | .id // empty' <<<"$ruleset")"
+  while IFS= read -r id; do [ -n "$id" ] || continue; found="$ruleset_id|$id"; exact_count=$((exact_count + 1)); done <<<"$exact_ids"
+  while IFS= read -r id; do [ -n "$id" ] || continue; ref_count=$((ref_count + 1)); done <<<"$ref_ids"
   [ "$exact_count" -eq 1 ] && { printf '%s\n' "$found"; return 0; }
   [ "$exact_count" -eq 0 ] || return 2
   [ "$ref_count" -eq 0 ] && return 1
   return 2
 }
+
 
 cf_recover_pending_write(){
   local found rc ruleset_id rule_id
@@ -744,12 +703,17 @@ cf_reconcile_dns(){
 
 cf_reconcile_origin_rule(){
   local zone_id="$1" host="$2" port="$3" owned_ruleset="${4:-}" owned_rule="${5:-}" owned_fingerprint="${6:-}"
-  local list ruleset_id rule_ref ref_match rule_body create_body res ruleset marker pending_rule_body ruleset_desc verify_id rule current_fingerprint pending_fingerprint
+  local ruleset_id rule_ref ref_match rule_body create_body res ruleset rc marker pending_rule_body ruleset_desc verify_id rule current_fingerprint pending_fingerprint
   CF_RESULT_ORIGIN_RULESET_ID=""; CF_RESULT_ORIGIN_RULE_ID=""; CF_RESULT_ORIGIN_ACTION=""; CF_RESULT_ORIGIN_FINGERPRINT=""
   rule_ref="ai_server_agent_$(printf '%s' "$host" | sha256sum | cut -c1-16)"
   rule_body="$(jq -n --arg ref "$rule_ref" --arg host "$host" --argjson port "$port" '{ref:$ref,description:"AI Server Agent origin port",expression:("http.host eq \""+$host+"\""),action:"route",action_parameters:{origin:{port:$port}},enabled:true}')"
-  list="$(cf_list_zone_rulesets "$zone_id")" || die "Cloudflare ruleset lookup failed."
-  ruleset_id="$(jq -r '.result[]? | select(.kind=="zone" and .phase=="http_request_origin") | .id' <<<"$list" | head -n1)"
+  if ruleset="$(cf_get_zone_phase_ruleset "$zone_id" http_request_origin)"; then
+    ruleset_id="$(jq -r '.result.id' <<<"$ruleset")"
+  else
+    rc=$?
+    [ "$rc" -eq 3 ] || die "Cloudflare Origin Rules entrypoint lookup failed."
+    ruleset_id=""
+  fi
   if [ -z "$ruleset_id" ]; then
     marker="$(cf_new_ownership_marker)"; ruleset_desc="Hostname-scoped origin routing managed by AI Server Agent"
     pending_rule_body="$(jq -n --arg ref "$rule_ref" --arg host "$host" --argjson port "$port" --arg desc "AI Server Agent origin port txn:$marker" '{ref:$ref,description:$desc,expression:("http.host eq \""+$host+"\""),action:"route",action_parameters:{origin:{port:$port}},enabled:true}')"
@@ -763,7 +727,6 @@ cf_reconcile_origin_rule(){
     CF_RESULT_ORIGIN_FINGERPRINT="$(cf_rule_fingerprint <<<"$rule")"
     ruleset_id="$CF_RESULT_ORIGIN_RULESET_ID"
   else
-    ruleset="$(cf_api GET "/zones/$zone_id/rulesets/$ruleset_id")" || die "Could not read Cloudflare Origin Rules ruleset."
     ref_match="$(jq -r --arg ref "$rule_ref" '.result.rules[]? | select(.ref==$ref) | .id' <<<"$ruleset" | head -n1)"
     if [ -n "$owned_rule" ] && [ "$owned_ruleset" = "$ruleset_id" ]; then
       rule="$(jq -c --arg id "$owned_rule" --arg ref "$rule_ref" '.result.rules[]? | select(.id==$id and .ref==$ref)' <<<"$ruleset" | head -n1)"
@@ -812,12 +775,17 @@ cf_reconcile_origin_rule(){
 
 cf_reconcile_ssl_config_rule(){
   local zone_id="$1" host="$2" owned_ruleset="${3:-}" owned_rule="${4:-}" owned_fingerprint="${5:-}"
-  local list ruleset_id rule_ref ref_match rule_body create_body res ruleset marker pending_rule_body ruleset_desc verify_id rule current_fingerprint pending_fingerprint
+  local ruleset_id rule_ref ref_match rule_body create_body res ruleset rc marker pending_rule_body ruleset_desc verify_id rule current_fingerprint pending_fingerprint
   CF_RESULT_SSL_RULESET_ID=""; CF_RESULT_SSL_RULE_ID=""; CF_RESULT_SSL_ACTION=""; CF_RESULT_SSL_FINGERPRINT=""
   rule_ref="ai_server_agent_ssl_$(printf '%s' "$host" | sha256sum | cut -c1-16)"
   rule_body="$(jq -n --arg ref "$rule_ref" --arg host "$host" '{ref:$ref,description:"AI Server Agent strict SSL",expression:("http.host eq \""+$host+"\""),action:"set_config",action_parameters:{ssl:"strict"},enabled:true}')"
-  list="$(cf_list_zone_rulesets "$zone_id")" || die "Cloudflare ruleset lookup failed."
-  ruleset_id="$(jq -r '.result[]? | select(.kind=="zone" and .phase=="http_config_settings") | .id' <<<"$list" | head -n1)"
+  if ruleset="$(cf_get_zone_phase_ruleset "$zone_id" http_config_settings)"; then
+    ruleset_id="$(jq -r '.result.id' <<<"$ruleset")"
+  else
+    rc=$?
+    [ "$rc" -eq 3 ] || die "Cloudflare Configuration Rules entrypoint lookup failed."
+    ruleset_id=""
+  fi
   if [ -z "$ruleset_id" ]; then
     marker="$(cf_new_ownership_marker)"; ruleset_desc="Hostname-scoped configuration managed by AI Server Agent"
     pending_rule_body="$(jq -n --arg ref "$rule_ref" --arg host "$host" --arg desc "AI Server Agent strict SSL txn:$marker" '{ref:$ref,description:$desc,expression:("http.host eq \""+$host+"\""),action:"set_config",action_parameters:{ssl:"strict"},enabled:true}')"
@@ -831,7 +799,6 @@ cf_reconcile_ssl_config_rule(){
     CF_RESULT_SSL_FINGERPRINT="$(cf_rule_fingerprint <<<"$rule")"
     ruleset_id="$CF_RESULT_SSL_RULESET_ID"
   else
-    ruleset="$(cf_api GET "/zones/$zone_id/rulesets/$ruleset_id")" || die "Could not read Cloudflare Configuration Rules ruleset."
     ref_match="$(jq -r --arg ref "$rule_ref" '.result.rules[]? | select(.ref==$ref) | .id' <<<"$ruleset" | head -n1)"
     if [ -n "$owned_rule" ] && [ "$owned_ruleset" = "$ruleset_id" ]; then
       rule="$(jq -c --arg id "$owned_rule" --arg ref "$rule_ref" '.result.rules[]? | select(.id==$id and .ref==$ref)' <<<"$ruleset" | head -n1)"

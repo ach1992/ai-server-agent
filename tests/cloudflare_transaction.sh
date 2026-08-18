@@ -249,10 +249,11 @@ cf_api(){ printf '%s' '{"success":true,"result":[{"id":"external-dns","type":"A"
 if cf_find_dns_by_marker zone1 mcp.example.com 203.0.113.10 0123456789abcdef0123456789abcdef >/dev/null; then echo 'concurrent DNS was treated as owned' >&2; exit 1; else test "$?" -eq 2; fi
 
 # A deterministic rule ref without our nonce is likewise ambiguous.
-cf_api(){
-  case "$2" in
-    '/zones/zone1/rulesets?per_page=50') printf '%s' '{"success":true,"result":[{"id":"origin-set-race","kind":"zone","phase":"http_request_origin"}]}' ;;
-    '/zones/zone1/rulesets/origin-set-race') printf '%s' '{"success":true,"result":{"rules":[{"id":"external-origin","ref":"ai_server_agent_test","description":"AI Server Agent origin port"}]}}' ;;
+cf_get_optional(){
+  case "$1" in
+    '/zones/zone1/rulesets/phases/http_request_origin/entrypoint')
+      printf '%s' '{"success":true,"result":{"id":"origin-set-race","kind":"zone","phase":"http_request_origin","rules":[{"id":"external-origin","ref":"ai_server_agent_test","description":"AI Server Agent origin port"}]}}'
+      ;;
     *) return 2 ;;
   esac
 }
@@ -283,10 +284,17 @@ eval "$ORIG_CF_RECONCILE_SSL_CONFIG_RULE"
 ssl_ref="ai_server_agent_ssl_$(printf '%s' mcp.example.com | sha256sum | cut -c1-16)"
 ssl_rule_json="$(jq -nc --arg ref "$ssl_ref" '{id:"ssl-rule-owned",ref:$ref,description:"AI Server Agent strict SSL",expression:"http.host eq \"mcp.example.com\"",action:"set_config",action_parameters:{ssl:"strict"},enabled:true}')"
 ssl_fp="$(cf_rule_fingerprint <<<"$ssl_rule_json")"
+cf_get_optional(){
+  case "$1" in
+    '/zones/zone1/rulesets/phases/http_config_settings/entrypoint')
+      jq -nc --argjson rule "$ssl_rule_json" '{success:true,result:{id:"ssl-set-owned",kind:"zone",phase:"http_config_settings",rules:[$rule]}}'
+      ;;
+    *) return 2 ;;
+  esac
+}
 cf_api(){
   case "$2" in
-    '/zones/zone1/rulesets?per_page=50') printf '%s' '{"success":true,"result":[{"id":"ssl-set-owned","kind":"zone","phase":"http_config_settings"}]}' ;;
-    '/zones/zone1/rulesets/ssl-set-owned') jq -nc --argjson rule "$ssl_rule_json" '{success:true,result:{rules:[$rule]}}' ;;
+    '/zones/zone1/rulesets/ssl-set-owned') jq -nc --argjson rule "$ssl_rule_json" '{success:true,result:{id:"ssl-set-owned",kind:"zone",phase:"http_config_settings",rules:[$rule]}}' ;;
     *) return 2 ;;
   esac
 }
