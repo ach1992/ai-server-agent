@@ -50,9 +50,7 @@ fi
 
 # A non-advancing cursor must also fail closed instead of looping or returning
 # a partial discovery result.
-loop_calls=0
 curl(){
-  loop_calls=$((loop_calls + 1))
   printf '%s' '{"success":true,"result":[],"result_info":{"cursors":{"after":"same-cursor"}}}'
 }
 if cf_api GET '/zones/zone1/rulesets?per_page=100' >/dev/null 2>&1; then
