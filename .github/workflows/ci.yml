@@ -28,7 +28,7 @@ jobs:
       - name: Build static binary
         run: CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
       - name: Shell syntax
-        run: bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh scripts/install-stable.sh tests/stable_bootstrap.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh tests/root_trust_boundary.sh tests/root_trust_migration.sh
+        run: bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh scripts/install-stable.sh tests/stable_bootstrap.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh tests/cloudflare_rulesets_pagination.sh tests/root_trust_boundary.sh tests/root_trust_migration.sh
       - name: Root shell execution boundary
         run: |
           if grep -nE 'exec.Command\("/bin/bash", "-lc"|"/bin/bash", "-lc", shell|--setenv=HOME=' internal/executor/executor.go; then
@@ -139,6 +139,8 @@ jobs:
             echo 'Cloudflare credentials must not be persisted in managed state' >&2
             exit 1
           fi
+      - name: Cloudflare Rulesets pagination contract
+        run: bash tests/cloudflare_rulesets_pagination.sh
       - name: Stable update channel contract
         run: |
           state="$(mktemp)"
