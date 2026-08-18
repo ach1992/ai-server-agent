@@ -2,12 +2,14 @@
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 BOOTSTRAP="$ROOT/scripts/install-stable.sh"
-BOOTSTRAP_REF=v0.1.2
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 bash -n "$BOOTSTRAP"
-grep -qF "https://raw.githubusercontent.com/ach1992/ai-server-agent/$BOOTSTRAP_REF/scripts/install-stable.sh | bash" "$ROOT/README.md"
+documented_bootstrap_ref="$(sed -nE 's#^curl -fsSL https://raw\.githubusercontent\.com/ach1992/ai-server-agent/(v[0-9]+\.[0-9]+\.[0-9]+)/scripts/install-stable\.sh \| bash$#\1#p' "$ROOT/README.md")"
+[ -n "$documented_bootstrap_ref" ] || { echo 'README is missing the immutable-tag stable bootstrap command' >&2; exit 1; }
+[ "$(printf '%s\n' "$documented_bootstrap_ref" | wc -l)" -eq 1 ] || { echo 'README has multiple latest-stable bootstrap commands' >&2; exit 1; }
+grep -qF "https://raw.githubusercontent.com/ach1992/ai-server-agent/$documented_bootstrap_ref/scripts/install-stable.sh | bash -s -- $documented_bootstrap_ref" "$ROOT/README.md"
 if grep -qF 'curl -fsSL https://github.com/ach1992/ai-server-agent/releases/latest/download/install.sh | sudo bash' "$ROOT/README.md"; then
   echo 'README restored an unauthenticated release-installer-to-root path' >&2
   exit 1

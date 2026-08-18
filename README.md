@@ -17,18 +17,18 @@ AI Server Agent does not require nginx, Apache, Caddy, Docker, PHP, a database, 
 
 ## Install the latest stable release
 
-Stable installation starts with a small bootstrap loaded from an **immutable published release tag**, separate from the release `install.sh` asset it authenticates. For the v0.1.2 generation, the bootstrap trust anchor is the immutable `v0.1.2` release tag. GitHub locks the associated tag when an immutable release is published, so this path does not depend on a feature branch or merge strategy.
+Stable installation starts with a small bootstrap loaded from an **immutable published release tag**, separate from the release `install.sh` asset it authenticates. The current v0.1 bootstrap trust anchor is the immutable `v0.1.4` release tag. GitHub locks the associated tag when an immutable release is published, so this path does not depend on a feature branch or merge strategy.
 
-`v0.1.2` is published as an immutable release. Install the latest stable release with:
+`v0.1.4` is published as an immutable release. Install the latest stable release with:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.2/scripts/install-stable.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.4/scripts/install-stable.sh | bash
 ```
 
 For an exact stable version through the same immutable bootstrap:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.2/scripts/install-stable.sh | bash -s -- v0.1.2
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.4/scripts/install-stable.sh | bash -s -- v0.1.4
 ```
 
 Do **not** use `releases/latest/download/install.sh | sudo bash` as the stable trust path: that executes release-supplied code as root before the same asset can be authenticated.
