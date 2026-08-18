@@ -18,7 +18,7 @@ jobs:
         shell: bash
         run: |
           set -Eeuo pipefail
-          python3 scripts/apply-review-findings.py
+          python3 scripts/apply-review-findings-v2.py
           bash -n manage.sh tests/cloudflare_rulesets_pagination.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh
           bash tests/cloudflare_rulesets_pagination.sh
           sudo bash tests/cloudflare_transaction.sh
@@ -39,10 +39,10 @@ jobs:
               raise SystemExit('expected exactly one v0.1.3 release target in trusted CI')
           p.write_text(text.replace(old, '  RELEASE_VERSION: v0.1.4\n', 1))
           PY
-          rm -f scripts/apply-review-findings.py
+          rm -f scripts/apply-review-findings.py scripts/apply-review-findings-v2.py
           git diff --check
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add manage.sh tests/cloudflare_rulesets_pagination.sh tests/cloudflare_transaction.sh .github/workflows/ci.yml scripts/apply-review-findings.py
+          git add manage.sh tests/cloudflare_rulesets_pagination.sh tests/cloudflare_transaction.sh .github/workflows/ci.yml scripts/apply-review-findings.py scripts/apply-review-findings-v2.py
           git commit -m 'fix: preserve Cloudflare rule ownership under drift'
           git push origin HEAD:fix/cloudflare-rulesets-contract-v2
