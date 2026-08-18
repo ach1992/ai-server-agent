@@ -58,10 +58,11 @@ cf_get_zone_phase_ruleset(){
     fi
     printf '%s' "$res"
     return 0
+  else
+    rc=$?
+    [ "$rc" -eq 3 ] && return 3
+    return 2
   fi
-  rc=$?
-  [ "$rc" -eq 3 ] && return 3
-  return 2
 }
 '''
 text = text[:start] + replacement + text[end:]
