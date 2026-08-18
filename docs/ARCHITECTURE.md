@@ -100,6 +100,8 @@ It does **not** change whole-zone SSL mode.
 
 Existing external DNS/rules are not silently adopted or overwritten. The manager reuses a matching external proxied DNS record without taking ownership, and otherwise fails closed on conflicts or ambiguous ownership.
 
+Origin Rule and Configuration Rule discovery is intentionally phase-specific. The manager reads the exact zone phase entrypoint for `http_request_origin` or `http_config_settings`; it does not enumerate the zone's broad Rulesets collection and infer absence from pagination. An authoritative 404 means the phase entrypoint is absent. Other provider/transport errors, malformed entrypoints, malformed Rule arrays, duplicate Rule IDs, or ownership/identity drift fail closed before any absence-based CREATE or destructive recovery decision.
+
 ## 6. Cloudflare transaction and recovery model
 
 Cloudflare configuration is a root-only durable transaction. The journal is:
@@ -164,7 +166,7 @@ Stable and source channels are distinct.
 
 ### Stable bootstrap and first install
 
-The release `install.sh` cannot authenticate itself before it executes, so it is deliberately **not** the stable trust root. Initial stable installation begins with `scripts/install-stable.sh` loaded from a Git tag already bound to a published immutable GitHub Release. For the v0.1.2 generation, that durable bootstrap source identity is `v0.1.2` itself once the release has been published immutable.
+The release `install.sh` cannot authenticate itself before it executes, so it is deliberately **not** the stable trust root. Initial stable installation begins with `scripts/install-stable.sh` loaded from a Git tag already bound to a published immutable GitHub Release. The current v0.1 bootstrap source identity is the immutable `v0.1.4` tag.
 
 GitHub immutable releases lock their associated tag against movement/deletion while the release exists, and a deleted immutable release does not permit reuse of the same tag name. The bootstrap source therefore does not depend on preservation of a feature branch or a particular merge strategy.
 
@@ -195,7 +197,7 @@ The already-installed trusted updater applies the same release identity/digest i
 
 1. resolves an explicit tag or the latest published immutable release;
 2. requires the release to be non-draft, non-prerelease and immutable;
-3. requires exactly one uploaded `install.sh` asset at the exact tag-scoped release URL;
+3. requires exactly one uploaded tag-scoped `install.sh` asset at the exact tag-scoped release URL;
 4. requires the GitHub release asset `sha256:` digest;
 5. downloads `install.sh` and verifies its bytes against that digest before execution;
 6. lets the release-scoped installer verify the archive with `SHA256SUMS`.
