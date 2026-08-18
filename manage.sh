@@ -290,10 +290,42 @@ load_cf_token(){
 
 cf_api(){
   local method="$1" path="$2" body="${3:-}" cfg out
+  local ruleset_base cursor="" encoded_cursor page_path page_out next_cursor pages=0 merged='[]'
   local -a retry_args=()
   cfg="$(mktemp)"; chmod 0600 "$cfg"
   printf 'header = "Authorization: Bearer %s"\n' "$CF_TOKEN" > "$cfg"
   case "$method" in GET|PATCH|DELETE) retry_args=(--retry 2) ;; esac
+
+  # The Rulesets list endpoint is cursor-paginated and currently caps per_page at 50.
+  # Existing callers request a complete list with the legacy per_page=100 sentinel;
+  # translate that logical request into bounded cursor traversal so absence decisions
+  # are made only after every returned page has been inspected.
+  if [ "$method" = GET ] && [[ "$path" =~ ^(/zones/[^/?]+/rulesets)\?per_page=100$ ]]; then
+    ruleset_base="${BASH_REMATCH[1]}"
+    while :; do
+      pages=$((pages + 1)); [ "$pages" -le 1000 ] || { rm -f "$cfg"; return 1; }
+      if [ -n "$cursor" ]; then
+        encoded_cursor="$(jq -rn --arg cursor "$cursor" '$cursor|@uri')"
+        page_path="$ruleset_base?per_page=50&cursor=$encoded_cursor"
+      else
+        page_path="$ruleset_base?per_page=50"
+      fi
+      page_out="$(curl -sS --fail-with-body "${retry_args[@]}" --request GET --config "$cfg" -H 'Content-Type: application/json' "$CF_API$page_path")" || { rm -f "$cfg"; return 1; }
+      if ! jq -e '.success == true and (.result|type)=="array" and (.result_info|type)=="object"' >/dev/null 2>&1 <<<"$page_out"; then
+        jq -r '.errors[]?.message // empty' <<<"$page_out" >&2 || true
+        rm -f "$cfg"; return 1
+      fi
+      merged="$(jq -cn --argjson acc "$merged" --argjson response "$page_out" '$acc + $response.result')"
+      next_cursor="$(jq -r '.result_info.cursors.after // empty' <<<"$page_out")"
+      [ -n "$next_cursor" ] || break
+      [ "$next_cursor" != "$cursor" ] || { rm -f "$cfg"; return 1; }
+      cursor="$next_cursor"
+    done
+    rm -f "$cfg"
+    jq -cn --argjson result "$merged" '{success:true,result:$result}'
+    return 0
+  fi
+
   if [ -n "$body" ]; then
     out="$(curl -sS --fail-with-body "${retry_args[@]}" --request "$method" --config "$cfg" -H 'Content-Type: application/json' --data-binary "$body" "$CF_API$path")" || { rm -f "$cfg"; return 1; }
   else
@@ -930,7 +962,7 @@ save_cloudflare_transaction_state(){
 validate_cloudflare_transaction_state(){
   local f="${1:-$CF_TXN_STATE}" size
   [ -f "$f" ] && [ ! -L "$f" ] || return 1
-  [ "$(stat -c '%u:%g:%a' "$f" 2>/dev/null)" = "0:0:600" ] || return 1
+  [ "$(stat -c '%u:%g:%:a' "$f" 2>/dev/null)" = "0:0:600" ] || [ "$(stat -c '%u:%g:%a' "$f" 2>/dev/null)" = "0:0:600" ] || return 1
   size="$(stat -c '%s' "$f" 2>/dev/null || printf 999999)"; [ "$size" -gt 0 ] && [ "$size" -le 131072 ] || return 1
   jq -e '
     def hex64: type=="string" and test("^[0-9a-f]{64}$");
