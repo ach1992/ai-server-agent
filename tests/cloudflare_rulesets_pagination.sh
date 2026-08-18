@@ -50,16 +50,30 @@ set -e
 [ "$rc" -eq 2 ] || fail 'unsupported internal phase input was not rejected'
 [ "$(wc -l < "$CALL_LOG")" -eq "$before" ] || fail 'unsupported phase input reached Cloudflare'
 
+# Entrypoint identity and the Rules used for ownership/absence decisions must be
+# structurally safe. A malformed Rule must never be silently treated as absent.
 for bad in \
   '{"success":true,"result":{"id":"","kind":"zone","phase":"http_request_origin","rules":[]}}' \
   '{"success":true,"result":{"id":"r1","kind":"root","phase":"http_request_origin","rules":[]}}' \
   '{"success":true,"result":{"id":"r1","kind":"zone","phase":"http_config_settings","rules":[]}}' \
-  '{"success":true,"result":{"id":"r1","kind":"zone","phase":"http_request_origin","rules":{}}}'; do
+  '{"success":true,"result":{"id":"r1","kind":"zone","phase":"http_request_origin","rules":{}}}' \
+  '{"success":true,"result":{"id":"r1","kind":"zone","phase":"http_request_origin","rules":[null]}}' \
+  '{"success":true,"result":{"id":"r1","kind":"zone","phase":"http_request_origin","rules":[{"ref":"x"}]}}' \
+  '{"success":true,"result":{"id":"r1","kind":"zone","phase":"http_request_origin","rules":[{"id":""}]}}' \
+  '{"success":true,"result":{"id":"r1","kind":"zone","phase":"http_request_origin","rules":[{"id":123}]}}' \
+  '{"success":true,"result":{"id":"r1","kind":"zone","phase":"http_request_origin","rules":[{"id":"rule1","ref":""}]}}' \
+  '{"success":true,"result":{"id":"r1","kind":"zone","phase":"http_request_origin","rules":[{"id":"rule1","ref":123}]}}' \
+  '{"success":true,"result":{"id":"r1","kind":"zone","phase":"http_request_origin","rules":[{"id":"rule1","description":123}]}}'; do
   curl(){ printf '%s\n200' "$bad"; }
   if cf_get_phase_entrypoint zone1 http_request_origin >/dev/null 2>&1; then
     fail "malformed phase entrypoint was accepted: $bad"
   fi
 done
+
+# Null optional ref/description are tolerated by the transport schema; if
+# present as strings, ref must be non-empty and description may be empty.
+curl(){ printf '%s\n200' '{"success":true,"result":{"id":"r1","kind":"zone","phase":"http_request_origin","rules":[{"id":"rule1","ref":null,"description":null},{"id":"rule2","description":""}]}}'; }
+cf_get_phase_entrypoint zone1 http_request_origin >/dev/null || fail 'valid optional rule fields were rejected'
 
 curl(){ printf '%s\n403' '{"success":false,"errors":[{"code":9109,"message":"permission denied"}]}' ; }
 set +e
