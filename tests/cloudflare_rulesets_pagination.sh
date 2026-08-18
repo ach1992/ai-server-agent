@@ -50,6 +50,22 @@ curl(){ printf '%s' '{"success":true,"result":[{"id":"doc-shaped","kind":"zone",
 out="$(cf_api GET '/zones/zone1/rulesets')" || fail 'documented response without result_info was rejected'
 [ "$(jq -r '.result[0].id' <<<"$out")" = doc-shaped ] || fail 'documented response without result_info was not preserved'
 
+# If optional pagination metadata is absent on a full page, completeness cannot
+# be proven. Fail closed instead of treating the first 50 items as exhaustive.
+curl(){ jq -nc '{success:true,result:[range(0;50) | {id:("r"+tostring),kind:"zone",phase:"http_request_transform"}]}' ; }
+if cf_api GET '/zones/zone1/rulesets' >/dev/null 2>&1; then
+  fail 'full Rulesets page without continuation metadata was accepted as complete'
+fi
+
+# HTTP failures should surface Cloudflare's structured error without exposing the token.
+curl(){ printf '%s' '{"success":false,"errors":[{"code":10000,"message":"rulesets diagnostic"}]}' ; return 22; }
+set +e
+err="$(cf_api GET '/zones/zone1/rulesets' 2>&1 >/dev/null)"
+rc=$?
+set -e
+[ "$rc" -ne 0 ] || fail 'Cloudflare HTTP failure was accepted'
+grep -Fq 'Cloudflare API error 10000: rulesets diagnostic' <<<"$err" || fail 'Cloudflare Rulesets HTTP error body was hidden'
+
 curl(){ printf '%s' '{"success":true,"result":[],"result_info":{}}'; }
 cf_api GET '/zones/zone1/rulesets' >/dev/null || fail 'optional missing cursors object was rejected'
 curl(){ printf '%s' '{"success":true,"result":[],"result_info":{"cursors":{}}}'; }

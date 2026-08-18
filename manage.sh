@@ -311,13 +311,22 @@ cf_api(){
       else
         page_path="$ruleset_base?per_page=50"
       fi
-      page_out="$(curl -sS --fail-with-body "${retry_args[@]}" --request GET --config "$cfg" -H 'Content-Type: application/json' "$CF_API$page_path")" || { rm -f "$cfg"; return 1; }
+      if ! page_out="$(curl -sS --fail-with-body "${retry_args[@]}" --request GET --config "$cfg" -H 'Content-Type: application/json' "$CF_API$page_path")"; then
+        jq -r '.errors[]? | if .code != null then "Cloudflare API error \(.code): \(.message)" else .message end' <<<"$page_out" >&2 || true
+        rm -f "$cfg"
+        return 1
+      fi
       if ! jq -e 'def valid_kind: .=="managed" or .=="custom" or .=="root" or .=="zone"; def valid_phase: .=="ddos_l4" or .=="ddos_l7" or .=="http_config_settings" or .=="http_custom_errors" or .=="http_log_custom_fields" or .=="http_ratelimit" or .=="http_request_cache_settings" or .=="http_request_dynamic_redirect" or .=="http_request_firewall_custom" or .=="http_request_firewall_managed" or .=="http_request_late_transform" or .=="http_request_origin" or .=="http_request_redirect" or .=="http_request_sanitize" or .=="http_request_sbfm" or .=="http_request_transform" or .=="http_response_cache_settings" or .=="http_response_compression" or .=="http_response_firewall_managed" or .=="http_response_headers_transform" or .=="magic_transit" or .=="magic_transit_ids_managed" or .=="magic_transit_managed" or .=="magic_transit_ratelimit"; .success == true and (.result|type)=="array" and all(.result[]; type=="object" and (.id|type)=="string" and (.id|length)>0 and (.kind|type)=="string" and (.kind|valid_kind) and (.phase|type)=="string" and (.phase|valid_phase)) and (if has("result_info") then ((.result_info|type)=="object" and (if (.result_info|has("cursors")) then ((.result_info.cursors|type)=="object" and (if (.result_info.cursors|has("after")) then ((.result_info.cursors.after|type)=="string" and (.result_info.cursors.after|length)>0) else true end)) else true end)) else true end)' >/dev/null 2>&1 <<<"$page_out"; then
         jq -r '.errors[]?.message // empty' <<<"$page_out" >&2 || true
         rm -f "$cfg"; return 1
       fi
       merged="$(jq -cn --argjson acc "$merged" --argjson response "$page_out" '$acc + $response.result')"
       next_cursor="$(jq -r '.result_info.cursors.after // empty' <<<"$page_out")"
+      if [ -z "$next_cursor" ] && [ "$(jq '.result | length' <<<"$page_out")" -eq 50 ]; then
+        printf 'Cloudflare Rulesets returned a full 50-item page without a continuation cursor; refusing to infer complete discovery.\n' >&2
+        rm -f "$cfg"
+        return 1
+      fi
       [ -n "$next_cursor" ] || break
       [ "$next_cursor" != "$cursor" ] || { rm -f "$cfg"; return 1; }
       cursor="$next_cursor"
