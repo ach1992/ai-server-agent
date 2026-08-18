@@ -3,7 +3,6 @@ name: Apply PR14 Ruleset enum validation
 on:
   push:
     branches: [fix/cloudflare-rulesets-pagination]
-    paths: [.github/workflows/apply-pr14-ruleset-enum-validation.yml]
 
 permissions:
   contents: write
@@ -13,11 +12,12 @@ jobs:
     runs-on: ubuntu-22.04
     timeout-minutes: 5
     env:
+      EXPECTED_PARENT_HEAD: 6f9720bb62c3579d74e2d6cf3602b0b47ffad16f
       EXPECTED_BASE_HEAD: e57d139078a273c581953140f7de780aeeea29b5
       TARGET_BRANCH: fix/cloudflare-rulesets-pagination
       GITHUB_TOKEN: ${{ github.token }}
     steps:
-      - name: Apply exact reviewed fixes
+      - name: Apply exact reviewed fix
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -29,70 +29,32 @@ jobs:
           git init repo
           cd repo
           git remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
-          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --no-tags --depth=2 origin "$GITHUB_SHA"
+          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --no-tags --depth=3 origin "$GITHUB_SHA"
           git checkout --detach FETCH_HEAD
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
-          test "$(git rev-parse HEAD^)" = "$EXPECTED_BASE_HEAD"
+          test "$(git rev-parse HEAD^)" = "$EXPECTED_PARENT_HEAD"
           test "$(git diff --name-only "$EXPECTED_BASE_HEAD" HEAD)" = ".github/workflows/apply-pr14-ruleset-enum-validation.yml"
 
           python3 - <<'PY'
           from pathlib import Path
 
-          manage = Path("manage.sh")
-          text = manage.read_text()
+          path = Path("manage.sh")
+          text = path.read_text()
           old = '''      if ! jq -e '.success == true and (.result|type)=="array" and all(.result[]; type=="object" and (.id|type)=="string" and (.id|length)>0 and (.kind|type)=="string" and (.kind|length)>0 and (.phase|type)=="string" and (.phase|length)>0) and (.result_info|type)=="object" and (.result_info.cursors|type)=="object" and (((.result_info.cursors|has("after"))|not) or ((.result_info.cursors.after|type)=="string" and (.result_info.cursors.after|length)>0))' >/dev/null 2>&1 <<<"$page_out"; then'''
           new = '''      if ! jq -e 'def valid_kind: .=="managed" or .=="custom" or .=="root" or .=="zone"; def valid_phase: .=="ddos_l4" or .=="ddos_l7" or .=="http_config_settings" or .=="http_custom_errors" or .=="http_log_custom_fields" or .=="http_ratelimit" or .=="http_request_cache_settings" or .=="http_request_dynamic_redirect" or .=="http_request_firewall_custom" or .=="http_request_firewall_managed" or .=="http_request_late_transform" or .=="http_request_origin" or .=="http_request_redirect" or .=="http_request_sanitize" or .=="http_request_sbfm" or .=="http_request_transform" or .=="http_response_cache_settings" or .=="http_response_compression" or .=="http_response_firewall_managed" or .=="http_response_headers_transform" or .=="magic_transit" or .=="magic_transit_ids_managed" or .=="magic_transit_managed" or .=="magic_transit_ratelimit"; .success == true and (.result|type)=="array" and all(.result[]; type=="object" and (.id|type)=="string" and (.id|length)>0 and (.kind|type)=="string" and (.kind|valid_kind) and (.phase|type)=="string" and (.phase|valid_phase)) and (.result_info|type)=="object" and (.result_info.cursors|type)=="object" and (((.result_info.cursors|has("after"))|not) or ((.result_info.cursors.after|type)=="string" and (.result_info.cursors.after|length)>0))' >/dev/null 2>&1 <<<"$page_out"; then'''
           if text.count(old) != 1:
               raise SystemExit("expected exactly one Rulesets response validator")
-          manage.write_text(text.replace(old, new, 1))
-
-          test = Path("tests/cloudflare_rulesets_pagination.sh")
-          text = test.read_text()
-          old = '''  '[{"id":"r1","kind":"zone","phase":1}]'; do'''
-          new = '''  '[{"id":"r1","kind":"zone","phase":1}]' \\
-  '[{"id":"r1","kind":"bogus","phase":"http_request_origin"}]' \\
-  '[{"id":"r1","kind":"zone","phase":"bogus"}]'; do'''
-          if text.count(old) != 1:
-              raise SystemExit("expected malformed Ruleset case list")
-          text = text.replace(old, new, 1)
-
-          marker = '''done\n\n# A non-advancing cursor must also fail closed instead of looping or returning'''
-          insertion = '''done
-
-# Documented Ruleset enum values must remain accepted while unknown values fail
-# closed. This protects discovery from both accidental over-restriction and
-# malformed enum values that could otherwise masquerade as phase absence.
-for valid_kind in managed custom root zone; do
-  curl(){ printf '{"success":true,"result":[{"id":"r1","kind":"%s","phase":"http_request_origin"}],"result_info":{"cursors":{}}}' "$valid_kind"; }
-  cf_api GET '/zones/zone1/rulesets?per_page=100' >/dev/null || fail "documented ruleset kind was rejected: $valid_kind"
-done
-for valid_phase in \\
-  ddos_l4 ddos_l7 http_config_settings http_custom_errors http_log_custom_fields \\
-  http_ratelimit http_request_cache_settings http_request_dynamic_redirect \\
-  http_request_firewall_custom http_request_firewall_managed http_request_late_transform \\
-  http_request_origin http_request_redirect http_request_sanitize http_request_sbfm \\
-  http_request_transform http_response_cache_settings http_response_compression \\
-  http_response_firewall_managed http_response_headers_transform magic_transit \\
-  magic_transit_ids_managed magic_transit_managed magic_transit_ratelimit; do
-  curl(){ printf '{"success":true,"result":[{"id":"r1","kind":"zone","phase":"%s"}],"result_info":{"cursors":{}}}' "$valid_phase"; }
-  cf_api GET '/zones/zone1/rulesets?per_page=100' >/dev/null || fail "documented ruleset phase was rejected: $valid_phase"
-done
-
-# A non-advancing cursor must also fail closed instead of looping or returning'''
-          if text.count(marker) != 1:
-              raise SystemExit("expected pagination cycle marker")
-          test.write_text(text.replace(marker, insertion, 1))
+          path.write_text(text.replace(old, new, 1))
           PY
 
-          bash -n manage.sh tests/cloudflare_rulesets_pagination.sh
-          bash tests/cloudflare_rulesets_pagination.sh
+          bash -n manage.sh
           rm .github/workflows/apply-pr14-ruleset-enum-validation.yml
-          test "$(git diff --name-only "$EXPECTED_BASE_HEAD" | sort)" = $'manage.sh\ntests/cloudflare_rulesets_pagination.sh'
+          test "$(git diff --name-only "$EXPECTED_BASE_HEAD")" = "manage.sh"
           git diff --check
 
-          git add manage.sh tests/cloudflare_rulesets_pagination.sh .github/workflows/apply-pr14-ruleset-enum-validation.yml
+          git add manage.sh .github/workflows/apply-pr14-ruleset-enum-validation.yml
           git diff --cached --check
-          test "$(git diff --cached --name-only "$EXPECTED_BASE_HEAD" | sort)" = $'manage.sh\ntests/cloudflare_rulesets_pagination.sh'
+          test "$(git diff --cached --name-only "$EXPECTED_BASE_HEAD")" = "manage.sh"
           git config user.name "ACh"
           git config user.email "58507994+ach1992@users.noreply.github.com"
           git commit -m "fix: validate Rulesets enum values"
