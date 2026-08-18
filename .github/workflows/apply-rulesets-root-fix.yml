@@ -1,289 +1,39 @@
 name: Apply Rulesets root-cause fix
 
 on:
-  pull_request:
+  push:
     branches:
-      - main
+      - fix/rulesets-contract-v014
 
 permissions:
   contents: write
 
 jobs:
   patch:
-    if: github.head_ref == 'fix/rulesets-contract-v014'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
           ref: fix/rulesets-contract-v014
           fetch-depth: 0
-
-      - name: Apply root-cause patch
+      - name: Apply and validate root-cause patch
         shell: bash
         run: |
           set -Eeuo pipefail
-          python3 - <<'PY'
-          from pathlib import Path
-
-          path = Path('manage.sh')
-          text = path.read_text()
-
-          marker = '  # The Rulesets list endpoint is cursor-paginated and currently caps per_page at 50.\n'
-          start = text.find(marker)
-          if start < 0:
-              raise SystemExit('legacy Rulesets sentinel block not found')
-          end_marker = '  if [ -n "$body" ]; then\n'
-          end = text.find(end_marker, start)
-          if end < 0:
-              raise SystemExit('cf_api generic request block not found')
-          text = text[:start] + text[end:]
-
-          old_local = '  local ruleset_base cursor="" encoded_cursor page_path page_out next_cursor pages=0 merged=\'[]\'\n'
-          if old_local not in text:
-              raise SystemExit('legacy cf_api Rulesets locals not found')
-          text = text.replace(old_local, '', 1)
-
-          anchor = '\n}\n\ncf_delete_owned(){\n'
-          pos = text.find(anchor, text.find('cf_api(){'))
-          if pos < 0:
-              raise SystemExit('cf_api end anchor not found')
-
-          helper = r'''
-
-cf_list_zone_rulesets(){
-  local zone_id="$1" cursor="" encoded_cursor path page next_cursor count pages=0 merged='[]'
-  while :; do
-    pages=$((pages + 1))
-    [ "$pages" -le 1000 ] || { warn "Cloudflare Rulesets pagination exceeded the safety bound."; return 1; }
-    if [ -n "$cursor" ]; then
-      encoded_cursor="$(jq -rn --arg cursor "$cursor" '$cursor|@uri')"
-      path="/zones/$zone_id/rulesets?per_page=50&cursor=$encoded_cursor"
-    else
-      path="/zones/$zone_id/rulesets?per_page=50"
-    fi
-
-    page="$(cf_api GET "$path")" || return 1
-    if ! jq -e '
-      def valid_kind: .=="managed" or .=="custom" or .=="root" or .=="zone";
-      def valid_phase:
-        .=="ddos_l4" or .=="ddos_l7" or .=="http_config_settings" or
-        .=="http_custom_errors" or .=="http_log_custom_fields" or .=="http_ratelimit" or
-        .=="http_request_cache_settings" or .=="http_request_dynamic_redirect" or
-        .=="http_request_firewall_custom" or .=="http_request_firewall_managed" or
-        .=="http_request_late_transform" or .=="http_request_origin" or
-        .=="http_request_redirect" or .=="http_request_sanitize" or .=="http_request_sbfm" or
-        .=="http_request_transform" or .=="http_response_cache_settings" or
-        .=="http_response_compression" or .=="http_response_firewall_managed" or
-        .=="http_response_headers_transform" or .=="magic_transit" or
-        .=="magic_transit_ids_managed" or .=="magic_transit_managed" or
-        .=="magic_transit_ratelimit";
-      .success == true and
-      (.result|type)=="array" and
-      all(.result[];
-        type=="object" and
-        (.id|type)=="string" and (.id|length)>0 and
-        (.kind|type)=="string" and (.kind|valid_kind) and
-        (.phase|type)=="string" and (.phase|valid_phase)
-      ) and
-      (
-        (has("result_info")|not) or
-        (
-          (.result_info|type)=="object" and
-          (
-            (.result_info|has("cursors")|not) or
-            (
-              (.result_info.cursors|type)=="object" and
-              (
-                (.result_info.cursors|has("after")|not) or
-                ((.result_info.cursors.after|type)=="string" and (.result_info.cursors.after|length)>0)
-              )
-            )
-          )
-        )
-      )
-    ' >/dev/null 2>&1 <<<"$page"; then
-      warn "Cloudflare Rulesets list response did not match the documented response contract."
-      return 1
-    fi
-
-    merged="$(jq -cn --argjson acc "$merged" --argjson response "$page" '$acc + $response.result')"
-    count="$(jq '.result | length' <<<"$page")"
-
-    if jq -e '(.result_info? | type)=="object" and (.result_info.cursors? | type)=="object" and (.result_info.cursors | has("after"))' >/dev/null 2>&1 <<<"$page"; then
-      next_cursor="$(jq -r '.result_info.cursors.after' <<<"$page")"
-      [ "$next_cursor" != "$cursor" ] || { warn "Cloudflare Rulesets pagination returned a non-advancing cursor."; return 1; }
-      cursor="$next_cursor"
-      continue
-    fi
-
-    if jq -e '(.result_info? | type)=="object" and (.result_info.cursors? | type)=="object"' >/dev/null 2>&1 <<<"$page"; then
-      break
-    fi
-
-    # Cloudflare documents result_info and cursors as optional. When both are
-    # omitted, a short page is complete by the requested page-size bound. A full
-    # 50-item page without pagination metadata is ambiguous, so fail closed.
-    [ "$count" -lt 50 ] || { warn "Cloudflare Rulesets returned a full page without pagination metadata; refusing an incomplete absence decision."; return 1; }
-    break
-  done
-
-  jq -cn --argjson result "$merged" '{success:true,result:$result}'
-}
-'''
-          text = text[:pos + 2] + helper + text[pos + 2:]
-
-          old_call = 'cf_api GET "/zones/$zone_id/rulesets?per_page=100"'
-          count = text.count(old_call)
-          if count != 3:
-              raise SystemExit(f'expected exactly 3 legacy Rulesets call sites, found {count}')
-          text = text.replace(old_call, 'cf_list_zone_rulesets "$zone_id"')
-          if 'rulesets?per_page=100' in text:
-              raise SystemExit('legacy Rulesets per_page=100 remains after patch')
-
-          path.write_text(text)
-
-          ci = Path('.github/workflows/ci.yml')
-          ci_text = ci.read_text()
-          if ci_text.count('RELEASE_VERSION: v0.1.3') != 1:
-              raise SystemExit('expected one v0.1.3 CI release target')
-          ci.write_text(ci_text.replace('RELEASE_VERSION: v0.1.3', 'RELEASE_VERSION: v0.1.4', 1))
-          PY
-
-          cat > tests/cloudflare_rulesets_pagination.sh <<'EOF'
-          #!/usr/bin/env bash
-          set -Eeuo pipefail
-
-          ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-          export AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1
-          # shellcheck source=../manage.sh
-          source "$ROOT/manage.sh"
-
-          CF_TOKEN=test
-          CF_API="https://api.cloudflare.com/client/v4"
-          TMP="$(mktemp -d)"
-          trap 'rm -rf "$TMP"' EXIT
-          CALL_LOG="$TMP/calls.log"
-
-          fail(){ echo "FAIL: $*" >&2; exit 1; }
-
-          # Multi-page discovery follows the opaque cursor, URL-encodes it, and
-          # accepts a final short page when Cloudflare omits optional result_info.
-          curl(){
-            local url="${*: -1}"
-            printf '%s\n' "$url" >> "$CALL_LOG"
-            case "$url" in
-              "$CF_API/zones/zone1/rulesets?per_page=50")
-                printf '%s' '{"success":true,"result":[{"id":"first-page","kind":"zone","phase":"http_request_transform"}],"result_info":{"cursors":{"after":"cursor +/="}}}'
-                ;;
-              "$CF_API/zones/zone1/rulesets?per_page=50&cursor=cursor%20%2B%2F%3D")
-                printf '%s' '{"success":true,"result":[{"id":"origin-page-two","kind":"zone","phase":"http_request_origin"}]}'
-                ;;
-              *)
-                echo "unexpected curl URL: $url" >&2
-                return 22
-                ;;
-            esac
-          }
-
-          out="$(cf_list_zone_rulesets zone1)"
-          [ "$(jq '.result | length' <<<"$out")" -eq 2 ] || fail 'ruleset pages were not merged'
-          [ "$(jq -r '.result[] | select(.phase=="http_request_origin") | .id' <<<"$out")" = origin-page-two ] || fail 'second-page phase was not discoverable'
-          grep -Fxq "$CF_API/zones/zone1/rulesets?per_page=50" "$CALL_LOG" || fail 'first page did not use per_page=50'
-          grep -Fxq "$CF_API/zones/zone1/rulesets?per_page=50&cursor=cursor%20%2B%2F%3D" "$CALL_LOG" || fail 'opaque cursor was not URL-encoded'
-          if grep -Fq 'per_page=100' "$CALL_LOG"; then fail 'invalid per_page=100 was sent to Cloudflare'; fi
-
-          # Cloudflare documents result_info and cursors as optional. A short
-          # single page without either is therefore a valid complete response.
-          curl(){ printf '%s' '{"success":true,"result":[]}'; }
-          cf_list_zone_rulesets zone1 >/dev/null || fail 'short response without result_info was rejected'
-          curl(){ printf '%s' '{"success":true,"result":[],"result_info":{}}'; }
-          cf_list_zone_rulesets zone1 >/dev/null || fail 'short response without cursors was rejected'
-          curl(){ printf '%s' '{"success":true,"result":[],"result_info":{"cursors":{}}}'; }
-          cf_list_zone_rulesets zone1 >/dev/null || fail 'explicit terminal cursor object was rejected'
-
-          # A full page with optional pagination metadata omitted is ambiguous:
-          # fail closed instead of concluding that a phase-specific ruleset is absent.
-          full_page="$(jq -cn '[range(0;50) | {id:("r"+tostring),kind:"zone",phase:"http_request_transform"}]')"
-          curl(){ printf '{"success":true,"result":%s}' "$full_page"; }
-          if cf_list_zone_rulesets zone1 >/dev/null 2>&1; then
-            fail 'full page without pagination metadata was accepted as complete'
-          fi
-
-          # If after is present it must be a non-empty string.
-          for bad_after in 'false' 'null' '""' '123' '{}' '[]'; do
-            curl(){ printf '{"success":true,"result":[],"result_info":{"cursors":{"after":%s}}}' "$bad_after"; }
-            if cf_list_zone_rulesets zone1 >/dev/null 2>&1; then
-              fail "invalid after cursor was accepted: $bad_after"
-            fi
-          done
-
-          # Ruleset entries used for phase-absence decisions must have valid
-          # identity and documented kind/phase values.
-          for bad_result in \
-            '[null]' \
-            '[{"kind":"zone","phase":"http_request_origin"}]' \
-            '[{"id":"r1","phase":"http_request_origin"}]' \
-            '[{"id":"r1","kind":"zone"}]' \
-            '[{"id":"","kind":"zone","phase":"http_request_origin"}]' \
-            '[{"id":"r1","kind":"","phase":"http_request_origin"}]' \
-            '[{"id":"r1","kind":"zone","phase":""}]' \
-            '[{"id":1,"kind":"zone","phase":"http_request_origin"}]' \
-            '[{"id":"r1","kind":1,"phase":"http_request_origin"}]' \
-            '[{"id":"r1","kind":"zone","phase":1}]' \
-            '[{"id":"r1","kind":"bogus","phase":"http_request_origin"}]' \
-            '[{"id":"r1","kind":"zone","phase":"bogus"}]'; do
-            curl(){ printf '{"success":true,"result":%s}' "$bad_result"; }
-            if cf_list_zone_rulesets zone1 >/dev/null 2>&1; then
-              fail "malformed ruleset item was accepted: $bad_result"
-            fi
-          done
-
-          for valid_kind in managed custom root zone; do
-            curl(){ printf '{"success":true,"result":[{"id":"r1","kind":"%s","phase":"http_request_origin"}]}' "$valid_kind"; }
-            cf_list_zone_rulesets zone1 >/dev/null || fail "documented ruleset kind was rejected: $valid_kind"
-          done
-          for valid_phase in \
-            ddos_l4 ddos_l7 http_config_settings http_custom_errors http_log_custom_fields \
-            http_ratelimit http_request_cache_settings http_request_dynamic_redirect \
-            http_request_firewall_custom http_request_firewall_managed http_request_late_transform \
-            http_request_origin http_request_redirect http_request_sanitize http_request_sbfm \
-            http_request_transform http_response_cache_settings http_response_compression \
-            http_response_firewall_managed http_response_headers_transform magic_transit \
-            magic_transit_ids_managed magic_transit_managed magic_transit_ratelimit; do
-            curl(){ printf '{"success":true,"result":[{"id":"r1","kind":"zone","phase":"%s"}]}' "$valid_phase"; }
-            cf_list_zone_rulesets zone1 >/dev/null || fail "documented ruleset phase was rejected: $valid_phase"
-          done
-
-          # A non-advancing cursor must fail instead of looping or returning a
-          # partial discovery result.
-          curl(){ printf '%s' '{"success":true,"result":[],"result_info":{"cursors":{"after":"same-cursor"}}}'; }
-          if cf_list_zone_rulesets zone1 >/dev/null 2>&1; then
-            fail 'repeated pagination cursor was accepted'
-          fi
-
-          # Production callers must use the dedicated discovery abstraction.
-          if grep -Fq 'rulesets?per_page=100' "$ROOT/manage.sh"; then
-            fail 'legacy Rulesets per_page=100 sentinel remains in manage.sh'
-          fi
-          [ "$(grep -Fc 'cf_list_zone_rulesets "$zone_id"' "$ROOT/manage.sh")" -eq 3 ] || fail 'not all Rulesets discovery callers use the dedicated helper'
-
-          printf 'Cloudflare Rulesets discovery contract passed.\n'
-          EOF
-          chmod +x tests/cloudflare_rulesets_pagination.sh
-
+          python3 scripts/apply-rulesets-root-fix.py
           bash -n manage.sh tests/cloudflare_rulesets_pagination.sh
           bash tests/cloudflare_rulesets_pagination.sh
           bash tests/cloudflare_transaction.sh
           bash tests/cloudflare_crash_recovery.sh
-
-      - name: Commit patched candidate
+          git diff --check
+      - name: Commit final candidate and remove one-shot tooling
         shell: bash
         run: |
           set -Eeuo pipefail
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
+          git rm .github/workflows/apply-rulesets-root-fix.yml scripts/apply-rulesets-root-fix.py
           git add manage.sh tests/cloudflare_rulesets_pagination.sh .github/workflows/ci.yml
           git diff --cached --check
-          git diff --cached --quiet && { echo 'No patch changes produced' >&2; exit 1; }
           git commit -m 'fix: align Rulesets discovery with Cloudflare contract'
           git push origin HEAD:fix/rulesets-contract-v014
