@@ -197,7 +197,7 @@ The already-installed trusted updater applies the same release identity/digest i
 
 1. resolves an explicit tag or the latest published immutable release;
 2. requires the release to be non-draft, non-prerelease and immutable;
-3. requires exactly one uploaded tag-scoped `install.sh` asset at the exact tag-scoped release URL;
+3. requires exactly one uploaded `install.sh` asset at the exact tag-scoped release URL;
 4. requires the GitHub release asset `sha256:` digest;
 5. downloads `install.sh` and verifies its bytes against that digest before execution;
 6. lets the release-scoped installer verify the archive with `SHA256SUMS`.
