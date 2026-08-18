@@ -19,10 +19,15 @@ jobs:
         run: |
           set -Eeuo pipefail
           python3 scripts/apply-rulesets-root-fix.py
+          echo '== shell syntax =='
           bash -n manage.sh tests/cloudflare_rulesets_pagination.sh
+          echo '== rulesets contract =='
           bash tests/cloudflare_rulesets_pagination.sh
+          echo '== transaction rollback =='
           bash tests/cloudflare_transaction.sh
+          echo '== crash recovery =='
           bash tests/cloudflare_crash_recovery.sh
+          echo '== diff check =='
           git diff --check
       - name: Restore trusted CI, remove one-shot tooling, and push candidate
         shell: bash
