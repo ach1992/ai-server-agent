@@ -31,7 +31,7 @@ jobs:
           new = textwrap.dedent(r'''
           cf_report_api_errors(){
             local payload="$1"
-            jq -r '.errors[]? | if .code != null then "Cloudflare API error \(.code): \(.message)" else .message end' <<<"$payload" 2>/dev/null >&2 || true
+            jq -r '.errors[]? | if .code != null then "Cloudflare API error \(.code): \(.message)" else .message end' <<<"$payload" >&2 2>/dev/null || true
           }
 
           cf_api(){
@@ -63,7 +63,7 @@ jobs:
 
           cf_list_zone_rulesets(){
             local zone_id="$1" cursor="" encoded_cursor page_path page_out next_cursor page_count pages=0 merged='[]'
-            local -A seen_cursors=()
+            local seen_cursor_hashes='|' cursor_hash
             while :; do
               pages=$((pages + 1)); [ "$pages" -le 1000 ] || return 1
               if [ -n "$cursor" ]; then
@@ -85,11 +85,14 @@ jobs:
                 return 1
               fi
               [ -n "$next_cursor" ] || break
-              if [ -n "${seen_cursors[$next_cursor]+x}" ]; then
-                printf 'Cloudflare Rulesets returned a repeated pagination cursor; refusing a cyclic/incomplete discovery.\n' >&2
-                return 1
-              fi
-              seen_cursors["$next_cursor"]=1
+              cursor_hash="$(printf '%s' "$next_cursor" | sha256sum | awk '{print $1}')"
+              case "$seen_cursor_hashes" in
+                *"|$cursor_hash|"*)
+                  printf 'Cloudflare Rulesets returned a repeated pagination cursor; refusing a cyclic/incomplete discovery.\n' >&2
+                  return 1
+                  ;;
+              esac
+              seen_cursor_hashes="${seen_cursor_hashes}${cursor_hash}|"
               cursor="$next_cursor"
             done
             jq -cn --argjson result "$merged" '{success:true,result:$result}'
