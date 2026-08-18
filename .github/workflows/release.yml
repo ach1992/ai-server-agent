@@ -1,19 +1,174 @@
 name: Release
 on:
-  push:
-    tags: ['v*']
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Stable release tag to create (for example v0.1.2)'
+        required: true
+        type: string
+      release_sha:
+        description: 'Exact validated main commit SHA to release'
+        required: true
+        type: string
+      immutability_confirmation:
+        description: 'After verifying Settings -> Releases -> Enable release immutability is enabled, type IMMUTABLE_RELEASES_ENABLED'
+        required: true
+        type: string
+      tag_protection_confirmation:
+        description: 'After verifying an active tag ruleset protects refs/tags/v* from update/delete with no bypass actors, type RELEASE_TAG_PROTECTION_VERIFIED'
+        required: true
+        type: string
+concurrency:
+  group: stable-release
+  cancel-in-progress: false
 permissions:
   contents: write
+  actions: read
 jobs:
   release:
     runs-on: ubuntu-latest
+    env:
+      RELEASE_TAG: ${{ inputs.tag }}
+      RELEASE_SHA: ${{ inputs.release_sha }}
+      IMMUTABILITY_CONFIRMATION: ${{ inputs.immutability_confirmation }}
+      TAG_PROTECTION_CONFIRMATION: ${{ inputs.tag_protection_confirmation }}
     steps:
+      - name: Pre-publication operator release-control gate
+        run: |
+          set -Eeuo pipefail
+          [[ "$RELEASE_TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "Release tag must be semantic, for example v0.1.2." >&2; exit 1; }
+          [[ "$RELEASE_SHA" =~ ^[0-9a-f]{40}$ ]] || { echo "release_sha must be an exact 40-character commit SHA." >&2; exit 1; }
+          test "$IMMUTABILITY_CONFIRMATION" = 'IMMUTABLE_RELEASES_ENABLED' || {
+            echo "Publication is blocked. Verify Repository Settings -> Releases -> Enable release immutability is enabled immediately before dispatch, then enter IMMUTABLE_RELEASES_ENABLED." >&2
+            exit 1
+          }
+          test "$TAG_PROTECTION_CONFIRMATION" = 'RELEASE_TAG_PROTECTION_VERIFIED' || {
+            echo "Publication is blocked. Immediately before dispatch, verify an active repository tag ruleset covers refs/tags/v* (or all release tags), restricts update and deletion, and has no bypass actors that can move/delete the release tag. Then enter RELEASE_TAG_PROTECTION_VERIFIED." >&2
+            exit 1
+          }
+          # GitHub intentionally omits ruleset bypass_actors unless the API
+          # caller has write access to that ruleset. GITHUB_TOKEN is therefore
+          # not used to pretend it can prove the no-bypass property.
+          echo "Operator release-control verification recorded for $RELEASE_TAG at $RELEASE_SHA."
       - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
         with:
-          go-version: '1.26.x'
-          cache: false
-      - run: ./scripts/build-release.sh "$GITHUB_REF_NAME"
-      - env:
+          ref: ${{ inputs.release_sha }}
+          fetch-depth: 0
+      - name: Verify release commit and main ancestry
+        run: |
+          set -Eeuo pipefail
+          test "$(git rev-parse HEAD)" = "$RELEASE_SHA"
+          git fetch origin main --tags
+          git merge-base --is-ancestor "$RELEASE_SHA" origin/main
+      - name: Require an unpublished absent release tag
+        env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/*.tar.gz dist/SHA256SUMS --generate-notes
+        run: |
+          set -Eeuo pipefail
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $RELEASE_TAG already exists; refusing to mutate an existing release." >&2
+            exit 1
+          fi
+          if gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG" >/dev/null 2>&1; then
+            echo "Tag $RELEASE_TAG already exists. Publication requires an absent tag so create-only tag creation can bind the exact validated SHA." >&2
+            exit 1
+          fi
+      - name: Verify exact main validation and download artifact
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          run_id="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?branch=main&status=success&head_sha=$RELEASE_SHA&per_page=20" --jq '.workflow_runs[] | select(.event == "push" and .head_branch == "main") | .id' | head -n1)"
+          test -n "$run_id" || { echo "No successful main CI run found for $RELEASE_SHA" >&2; exit 1; }
+          actual_sha="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$run_id" --jq '.head_sha')"
+          test "$actual_sha" = "$RELEASE_SHA" || { echo "Selected CI run is for $actual_sha, expected $RELEASE_SHA" >&2; exit 1; }
+
+          security_run_id="$(gh api "/repos/$GITHUB_REPOSITORY/actions/workflows/security.yml/runs?branch=main&status=success&head_sha=$RELEASE_SHA&per_page=20" --jq '.workflow_runs[] | select(.event == "push" and .head_branch == "main") | .id' | head -n1)"
+          test -n "$security_run_id" || { echo "No successful High Assurance Security run found for main SHA $RELEASE_SHA" >&2; exit 1; }
+          security_sha="$(gh api "/repos/$GITHUB_REPOSITORY/actions/runs/$security_run_id" --jq '.head_sha')"
+          test "$security_sha" = "$RELEASE_SHA" || { echo "Selected security run is for $security_sha, expected $RELEASE_SHA" >&2; exit 1; }
+
+          artifact="ai-server-agent-$RELEASE_TAG-$RELEASE_SHA"
+          mkdir -p dist
+          gh run download "$run_id" --repo "$GITHUB_REPOSITORY" --name "$artifact" --dir dist
+      - name: Verify promoted release payload
+        run: |
+          set -Eeuo pipefail
+          version="${RELEASE_TAG#v}"
+          archive="dist/ai-server-agent_${version}_linux_amd64.tar.gz"
+          test -f "$archive"
+          test -f dist/SHA256SUMS
+          test -f dist/install.sh
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 3
+          test "$(wc -l < dist/SHA256SUMS)" -eq 1
+          grep -qF "  ai-server-agent_${version}_linux_amd64.tar.gz" dist/SHA256SUMS
+          test "$(sed -n '1p' dist/install.sh)" = '#!/usr/bin/env bash'
+          test "$(sed -n '2p' dist/install.sh)" = "export AI_SERVER_AGENT_VERSION=$RELEASE_TAG"
+          test "$(sed -n '3p' dist/install.sh)" = "export AI_SERVER_AGENT_REF=$RELEASE_TAG"
+          (cd dist && sha256sum -c SHA256SUMS)
+      - name: Recheck operator release-control gate before publication
+        run: |
+          set -Eeuo pipefail
+          test "$IMMUTABILITY_CONFIRMATION" = 'IMMUTABLE_RELEASES_ENABLED'
+          test "$TAG_PROTECTION_CONFIRMATION" = 'RELEASE_TAG_PROTECTION_VERIFIED'
+          echo "Proceeding only on the operator's immediately preceding repository-setting verification."
+      - name: Create and verify exact protected release tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          gh api --method POST "/repos/$GITHUB_REPOSITORY/git/refs" \
+            -f ref="refs/tags/$RELEASE_TAG" \
+            -f sha="$RELEASE_SHA" >/tmp/release-tag-create.json
+          test "$(jq -r '.object.type' /tmp/release-tag-create.json)" = commit
+          test "$(jq -r '.object.sha' /tmp/release-tag-create.json)" = "$RELEASE_SHA"
+          remote_tag_json="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG")"
+          test "$(jq -r '.object.type' <<<"$remote_tag_json")" = commit
+          test "$(jq -r '.object.sha' <<<"$remote_tag_json")" = "$RELEASE_SHA"
+      - name: Publish release payload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          remote_tag_json="$(gh api "/repos/$GITHUB_REPOSITORY/git/ref/tags/$RELEASE_TAG")"
+          test "$(jq -r '.object.type' <<<"$remote_tag_json")" = commit
+          test "$(jq -r '.object.sha' <<<"$remote_tag_json")" = "$RELEASE_SHA"
+          version="${RELEASE_TAG#v}"
+          gh release create "$RELEASE_TAG" \
+            "dist/ai-server-agent_${version}_linux_amd64.tar.gz" \
+            dist/SHA256SUMS \
+            dist/install.sh \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --generate-notes \
+            --latest \
+            --fail-on-no-commits
+      - name: Verify immutable release and attestations
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -Eeuo pipefail
+          release_json="$(gh api -H 'X-GitHub-Api-Version: 2026-03-10' "/repos/$GITHUB_REPOSITORY/releases/tags/$RELEASE_TAG")"
+          jq -e --arg tag "$RELEASE_TAG" '.tag_name == $tag and .draft == false and .prerelease == false and .immutable == true' >/dev/null <<<"$release_json" || {
+            echo "Published release is not immutable. Treat this release as failed and do not use the latest-stable path." >&2
+            exit 1
+          }
+          git fetch --force origin "refs/tags/$RELEASE_TAG:refs/tags/$RELEASE_TAG"
+          test "$(git rev-parse "$RELEASE_TAG^{}")" = "$RELEASE_SHA"
+          verified=0
+          for attempt in 1 2 3 4 5 6; do
+            if gh release verify "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/tmp/release-attestation.json 2>/tmp/release-attestation.err; then
+              verified=1
+              break
+            fi
+            sleep 5
+          done
+          if [ "$verified" -ne 1 ]; then
+            cat /tmp/release-attestation.err >&2 || true
+            echo "GitHub release attestation verification did not succeed." >&2
+            exit 1
+          fi
+          version="${RELEASE_TAG#v}"
+          gh release verify-asset "$RELEASE_TAG" "dist/ai-server-agent_${version}_linux_amd64.tar.gz" --repo "$GITHUB_REPOSITORY"
+          gh release verify-asset "$RELEASE_TAG" dist/SHA256SUMS --repo "$GITHUB_REPOSITORY"
+          gh release verify-asset "$RELEASE_TAG" dist/install.sh --repo "$GITHUB_REPOSITORY"

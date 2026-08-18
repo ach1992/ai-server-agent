@@ -1,178 +1,231 @@
-# Release Test Plan
+# Testing and Validation
 
-A stable release must not be published until the applicable release matrix and end-to-end connectivity checks have passed on clean, snapshot-backed servers. Pre-release implementation may merge to `main` after current CI, code/security review, and the primary validated platform pass; keep Issue #1 open for remaining stable-release gates.
+This document describes the validation model that applies to the current v0.1 codebase. It is not a historical release log.
 
-## Supported server matrix
+## 1. Supported stable test target
 
-Run the core installation and MCP tests on:
+Stable v0.1 release support is intentionally narrow:
 
 - Ubuntu 22.04 LTS
-- Ubuntu 24.04 LTS or newer supported Ubuntu
-- Debian 11
-- Debian 12 or newer supported Debian
-- amd64; additionally validate arm64 before claiming arm64 release support
+- amd64/x86_64
+- systemd
+- dedicated development/test server use
 
-## 1. Fresh installation
+CI and release artifacts must not imply stable support for Debian, Ubuntu 24.04, arm64, or other platforms merely because the source installer can run on a broader development/source matrix.
 
-On a disposable server, fetch the installer through the GitHub Contents API so slash-containing branch refs are handled correctly:
+The source-install compatibility path currently accepts Ubuntu 22.04+ and Debian 11+ on amd64/arm64. That path is useful for development, but it is not the stable v0.1 release matrix.
 
-```bash
-REF='feat/v0.1-agent'
-curl -fsSLG \
-  -H 'Accept: application/vnd.github.raw+json' \
-  --data-urlencode "ref=$REF" \
-  'https://api.github.com/repos/ach1992/ai-server-agent/contents/install.sh' | \
-  sudo AI_SERVER_AGENT_REF="$REF" bash
-```
+## 2. Validation layers
 
-For the first validation choose `local` bind mode and the default port `3210`.
+Use the narrowest relevant check first, then the applicable broader layer.
 
-Verify:
+### Go correctness
+
+CI runs:
 
 ```bash
-sudo systemctl is-active ai-server-agent.service
-sudo systemctl is-active ai-server-agent-executor.service
-curl -fsS http://127.0.0.1:3210/healthz
-sudo ss -lntp | grep ':3210'
-sudo cat /var/lib/ai-server-agent/AI_ENVIRONMENT.json
+test -z "$(gofmt -l .)"
+go vet ./...
+go test -race ./...
+CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
 ```
 
-Acceptance:
+These cover Go unit/behavior tests, race detection and the production binary build.
 
-- both services are `active`;
-- health returns `{"status":"ok","service":"ai-server-agent"}`;
-- port 3210 is loopback-only in local mode;
-- ports 80 and 443 are untouched;
-- the manifest lists the control-plane services, paths, socket, endpoint and preservation rules;
-- nginx, Apache, Docker, PHP, database servers, Node.js, Python, tmux and hosting panels were not installed by the core installer.
+### Shell syntax
 
-## 2. ChatGPT Business MCP connection
+CI validates the established installer, updater, uninstaller, management, release-builder and security-test paths. `tests/stable_bootstrap.sh` also syntax-checks the stable bootstrap before exercising it behaviorally.
 
-Connect the local `/mcp` endpoint through the current OpenAI-supported private/remote MCP connectivity path. For a private/on-premises server, current OpenAI guidance supports Secure MCP Tunnel. In ChatGPT Business Developer Mode, create the custom MCP app and scan its tools.
+### Ubuntu 22.04 lifecycle integration
 
-Acceptance:
+The main CI workflow performs a real privileged lifecycle on an Ubuntu 22.04 amd64 GitHub runner:
 
-- the official MCP handshake succeeds;
-- all expected tools are discoverable;
-- `agent_environment` is advertised read-only;
-- root and browser action tools are advertised as potentially destructive/action-capable;
-- reconnecting the chat/app does not require reinstalling the server agent.
+1. install a locally built Agent binary;
+2. verify both systemd services are active;
+3. verify the installed management/update paths;
+4. execute root trust-boundary tests;
+5. safe-uninstall and verify preserved Agent data/users/workspace;
+6. reinstall;
+7. purge and verify Agent-owned config/state/log/runtime and `aiagent` are removed;
+8. verify `aiworker` and `/srv/ai-workspace` remain.
 
-## 3. Normal and root execution
+A separate first-run test proves that choosing "Configure later" is a successful core installation, not an installer failure.
 
-From ChatGPT:
+## 3. High Assurance Security workflow
 
-```text
-run_command: id -un
-```
+`.github/workflows/security.yml` is the stronger validation path for the high-risk surfaces.
 
-Expected: `aiworker`.
+### Cloudflare transaction behavior
 
-Then:
+`tests/cloudflare_transaction.sh` exercises production shell functions with a mocked Cloudflare provider. It covers, among other things:
 
-```text
-run_root_command: id -u
-```
+- rollback of transaction-created resources;
+- preserved recovery state after incomplete rollback;
+- current-representation fingerprints before destructive cleanup;
+- response-lost DNS/rule create recovery with durable nonce + semantic fingerprint;
+- response-lost Origin CA discovery by generated CSR plus complete create-semantic fingerprint and exact-certificate-ID re-read before revoke;
+- fail-closed handling of DNS/rule/certificate representation drift, exact-ID read failure, and competing lookalikes;
+- exact-rule cleanup rather than deleting a shared Ruleset container;
+- management-lock exclusion behavior.
 
-Expected: `0`.
+The Cloudflare provider is mocked. This is behavioral testing of production transaction/recovery code, not a live-zone integration test.
 
-Also verify normal commands cannot write a root-owned test file while `run_root_command` can create and remove it.
+### Crash recovery
 
-## 4. Connection/destruction guard
+`tests/cloudflare_crash_recovery.sh` performs real process `SIGKILL` after mocked remote creates have committed but before the POST response returns. The durable pre-POST journal and local rollback snapshot must survive, and a fresh process must recover through the production discovery + exact-representation re-read/delete path.
 
-Ask ChatGPT to attempt these **without approval=true**:
+The crash suite covers both:
 
-```text
-reboot
-ufw reset
-iptables -P INPUT DROP
-systemctl stop ai-server-agent.service
-rm -rf /etc/ai-server-agent
-```
+- DNS response-lost create using the Agent nonce/marker and exact semantic fingerprint;
+- Origin CA response-lost create using the generated CSR for discovery, a complete `csr`/hostname-set/`request_type`/`requested_validity` fingerprint, exact certificate-ID GET, and representation-checked revoke.
 
-Acceptance: each returns `approval_required` and none executes.
+`tests/cloudflare_phase_recovery.sh` performs real `SIGKILL` + fresh-process recovery at durable local/commit boundaries, including:
 
-Do not approve these commands during the smoke test. The test proves the guard blocks the first attempt; it does not require damaging the VM.
+- local mutation while phase is `applying`;
+- persisted `rolling_back` recovery;
+- `committing` with matching trusted managed state;
+- `committed` finalization;
+- malformed/contradictory journal rejection;
+- pending kind/phase/identity relationships;
+- required Origin CA pending semantic fingerprint evidence;
+- terminal-state consistency.
 
-## 5. Persistent jobs and reconnect
+### Root trust boundary
 
-Start a harmless delayed job through `start_job`, for example:
+`tests/root_trust_boundary.sh` and `tests/root_trust_migration.sh` exercise hostile legacy layouts, symlink/replacement attempts, root-only control state, root-controlled state containers and the global lifecycle lock.
+
+The lifecycle overlap tests use the installed management wrapper and the real `/run/lock/ai-server-agent/management.lock` namespace to verify that configure/update/install/purge cannot overlap before mutation.
+
+`tests/root_trust_boundary.sh` also invokes `tests/stable_bootstrap.sh`, so the initial stable-install privilege handoff is exercised by the existing High Assurance root-trust job rather than by a separate duplicate workflow.
+
+### Privileged shell isolation
+
+Go tests exercise root command environment isolation and the persistent-job command construction. The current persistent-job isolation test uses a fake `systemd-run` command to inspect/execute the generated invocation.
+
+**Known coverage limit:** CI does not currently exercise an actual privileged systemd transient job end-to-end. A real Ubuntu/systemd transient-unit integration test is useful additional confidence, but it is not a substitute for the existing command/environment tests and is not currently a v0.1.2 release blocker by itself.
+
+## 4. Stable installer and updater trust
+
+### Stable bootstrap
+
+Initial stable installation deliberately separates the bootstrap trust root from the release installer it authenticates. The supported one-line command loads `scripts/install-stable.sh` from a Git tag already bound to a published immutable GitHub Release (`v0.1.2` for this generation), not from a mutable branch, a transient feature commit, or the release asset that is about to be verified. The immutable-release tag is the durable source identity for the bootstrap after publication.
+
+`tests/stable_bootstrap.sh` guards the documented immutable-tag source and uses a deterministic mocked GitHub HTTP surface plus a fake `sudo` boundary to verify that the bootstrap:
+
+- accepts a valid latest immutable release and an explicit valid stable tag;
+- requires exactly the expected tag-scoped `install.sh` asset representation;
+- rejects a mutable release before downloading or executing the release installer;
+- rejects an unexpected asset URL before installer download/execution;
+- rejects an installer digest mismatch after download but before the privileged handoff;
+- copies the candidate through the privileged boundary into a root-controlled staging directory and re-verifies the same expected release-asset digest there before execution;
+- fails closed when the invoking-user-writable installer pathname is adversarially replaced after the first verification but before privileged staging;
+- proves that neither the original nor substituted installer executes when privileged re-verification fails.
+
+This test is behavioral for bootstrap control flow, privilege ordering, and the local verified-path replacement threat. GitHub Release HTTP and the `sudo` command are mocked; the root-trust High Assurance job executes the same production bootstrap/test under the privileged supported-runner context. The test does not prove future GitHub repository settings or external network behavior.
+
+### Release-scoped installer
+
+The security workflow builds the candidate release assets and verifies:
+
+- `install.sh` is generated with the expected version/ref at the release-scoped header;
+- stable binary override is rejected;
+- corrupted archive bytes are rejected by `SHA256SUMS` verification;
+- stable v0.1 artifacts remain amd64-only.
+
+The release-scoped installer is not its own trust root; the stable bootstrap or already-installed trusted updater authenticates its bytes before execution.
+
+### Stable updater
+
+Updater tests use a mocked GitHub HTTP surface so they can exercise trust decisions deterministically without depending on an unpublished release.
+
+They verify that the updater:
+
+- refuses a mutable/non-immutable stable release before installer execution;
+- accepts a valid immutable release asset only when `install.sh` bytes match the GitHub release asset SHA-256 digest;
+- rejects digest mismatch before executing the downloaded installer;
+- never turns the stable path into an implicit `main` source update.
+
+These tests validate updater behavior. They do not prove the future repository settings used at release time.
+
+## 5. Release-provenance validation
+
+The release workflow is structurally checked in High Assurance Security. The checks verify that it is manual-dispatch, exact-SHA based, requires successful `main` CI/Security provenance, promotes the CI artifact, performs create-only exact tag creation, uses `--verify-tag`, and verifies immutable release/attestation state after publication.
+
+### Operator-only repository properties
+
+Some release properties cannot be authoritatively proven by the workflow's `GITHUB_TOKEN`.
+
+In particular, GitHub may omit Rulesets `bypass_actors` unless the caller has sufficient ruleset access. Therefore CI must **not** interpret an omitted field as an empty bypass list.
+
+Immediately before release dispatch, the operator must verify the actual repository settings and provide the workflow's explicit confirmations for:
+
+- release immutability enabled;
+- active release-tag protection covering the intended release tag pattern, blocking update/delete and having no bypass actor that can move/delete the release tag.
+
+Those are human/operator gates, not green-CI claims.
+
+## 6. Static contract checks
+
+CI contains grep/static assertions for security-sensitive implementation shape, including examples such as:
+
+- root shell startup flags/environment;
+- expected management/menu/install identity paths;
+- Cloudflare hostname-scoped rule constructs;
+- no whole-zone SSL mutation fallback;
+- native TLS/bearer configuration;
+- release workflow ordering and required controls.
+
+These checks are useful regression tripwires. They are **not** independent proof that the production behavior is secure or correct. High-risk invariants should have behavioral tests where practical, and a static contract should be removed or revised when it no longer represents a real invariant.
+
+## 7. What CI does not prove
+
+A green CI/High Assurance result does not by itself prove:
+
+- live Cloudflare API permissions or behavior on a real user zone;
+- real public DNS/TLS propagation;
+- ChatGPT Business tool discovery and end-to-end MCP use;
+- an actual persistent job through a real transient `systemd-run` unit;
+- current repository Rulesets bypass configuration;
+- future release immutability settings before publication;
+- production VPS behavior outside the supported validated target.
+
+Do not replace these gaps with grep tests that merely search for reassuring strings.
+
+## 8. Developer checks
+
+On a compatible development host, a useful pre-push sequence is:
 
 ```bash
-sleep 45; echo persistent-job-ok
+test -z "$(gofmt -l .)"
+go vet ./...
+go test -race ./...
+bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh scripts/install-stable.sh tests/*.sh
+bash tests/stable_bootstrap.sh
 ```
 
-Record the returned job id. Disconnect/reconnect the MCP client or restart only `ai-server-agent.service` from the server console/SSH, then query `job_status` and `job_output`.
+For privileged/cloudflare/root-boundary changes, run the applicable security tests on a disposable supported Ubuntu 22.04 environment when practical. Never point test fixtures at the live Cloudflare zone or a production VPS.
 
-Acceptance: the job continues independently and its final output contains `persistent-job-ok`.
+## 9. Candidate review and release validation
 
-## 6. Optional browser
+Independent HIGH_ASSURANCE review is an integration/release gate for a frozen candidate, not an iterative lint service for a moving implementation. During active development, use self-review, targeted behavioral tests and current CI to converge. When the accepted feature scope is complete, freeze an exact base/HEAD and obtain independent review if the risk/profile requires it. If a BLOCKER/REQUIRED finding changes the candidate, that review identity is obsolete; fix the root cause, revalidate and refreeze before another independent gate review.
 
-Call `browser_setup`. Confirm the installation action when prompted. Verify:
+Before a stable release is published:
 
-```bash
-sudo test -x /opt/ai-server-agent/browser/node/bin/node
-sudo stat -c '%U:%G %a' /opt/ai-server-agent/browser
-sudo test -d /var/lib/ai-server-agent/runtime/browser
-```
+1. the intended change must be reviewed against the current base-to-head diff;
+2. PR-head CI and High Assurance Security must be green for the exact frozen candidate;
+3. required independent review must pass the exact frozen candidate;
+4. after integration, **main-push** CI and High Assurance Security must be green for the exact release SHA;
+5. the release workflow must promote the exact CI-produced artifact for that SHA;
+6. the operator repository-setting gates must be verified immediately before release dispatch;
+7. post-publication checks must verify immutable release state, exact tag SHA and release/asset attestations.
 
-Use `browser_run` to navigate to a harmless test URL, read its title, inspect console/network state and persist a cookie or local-storage value across two browser calls.
+For real VPS validation, use a dedicated/replacement supported server. Human-operated privileged validation should proceed one safe operation at a time, with the expected result and rollback understood before the next state mutation.
 
-Acceptance:
+## 10. Preservation acceptance
 
-- browser automation works;
-- engine files are root-owned and not writable by `aiworker`;
-- persistent profile/session data survives separate MCP calls;
-- installing the browser does not change the MCP listen address or ports 80/443.
+Any lifecycle validation involving uninstall/purge must continue to prove:
 
-## 7. Host-software non-interference
-
-This is a core product requirement.
-
-Install a normal web stack component such as nginx using `run_root_command`. After installation and restart of nginx, re-run MCP health and tool discovery.
-
-Acceptance: nginx may own ports 80/443 while AI Server Agent remains healthy on its dedicated endpoint.
-
-For aaPanel validation, use a fresh snapshot/VM and follow the panel's supported installation requirements. Before and after installation, verify the MCP services, endpoint, executor socket and manifest. If aaPanel modifies networking/firewall rules, those changes must not make the MCP path unreachable without explicit user approval.
-
-## 8. Update
-
-For reproducible validation, update from an immutable commit SHA:
-
-```bash
-sudo AI_SERVER_AGENT_REF='<40-character-commit-sha>' ./update.sh
-```
-
-Branch and tag refs are also accepted; the updater resolves them to a commit SHA before fetching the installer and source archive.
-
-Acceptance:
-
-- the requested ref is reported as a resolved immutable commit;
-- existing bind mode and port are preserved;
-- both services are restarted onto the newly installed binary;
-- health succeeds after restart;
-- existing workspace, tokens, job history and browser profile are preserved unless a migration explicitly documents otherwise.
-
-## 9. Uninstall and purge
-
-First test normal uninstall. It must remove services/binary while preserving config, state, optional runtimes, users and workspace.
-
-Then reinstall and test:
-
-```bash
-sudo AI_SERVER_AGENT_YES=1 ./uninstall.sh --purge
-```
-
-Acceptance:
-
-- agent services, binary, config, state, logs, `/opt/ai-server-agent` optional runtime and `aiagent` are removed;
-- `/srv/ai-workspace` and `aiworker` remain intentionally preserved;
-- unrelated host software and ports are untouched.
-
-## Merge gate
-
-A pre-release implementation may merge to `main` once the current head passes CI and final code/security review, and the primary validated platform has passed the core install/MCP/root/job/browser/update/non-interference flows. Merge does not imply stable-release support for untested OS/architecture/panel combinations.
-
-## Stable release gate
-
-Do not create a stable version tag/release until the supported-server matrix, arm64 coverage for any arm64 support claim, aaPanel compatibility claim (if retained), and end-to-end ChatGPT connection are validated. Any failure is fixed and the affected test is rerun before stable release.
+- `/srv/ai-workspace` is preserved;
+- `aiworker` and its group are preserved;
+- safe uninstall preserves Agent configuration/state needed for reinstall/repair;
+- purge removes Agent-owned config/state/log/runtime and `aiagent` without silently deleting Cloudflare resources.

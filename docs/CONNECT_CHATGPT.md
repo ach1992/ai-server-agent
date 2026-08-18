@@ -1,70 +1,86 @@
-# Connect ChatGPT Business
+# Connect ChatGPT
 
-ChatGPT Business supports custom MCP apps in Developer Mode. AI Server Agent supports two connection topologies while keeping bearer authentication enabled.
+AI Server Agent supports two connection topologies while keeping bearer authentication enabled:
+
+1. a remote public HTTPS MCP endpoint;
+2. a private/local MCP endpoint carried through OpenAI Secure MCP Tunnel.
+
+ChatGPT full MCP/developer-mode functionality is currently available for Business, Enterprise and Edu workspaces on ChatGPT web and is still evolving. UI labels, permissions and action-confirmation behavior can change, so treat the current OpenAI documentation as authoritative for the ChatGPT-side workflow.
+
+Current OpenAI guidance:
+
+- Developer mode and MCP apps: <https://help.openai.com/en/articles/12584461-developer-mode-and-mcp-apps-in-chatgpt>
+- Apps in ChatGPT: <https://help.openai.com/en/articles/11487775-apps-in-chatgpt>
 
 ## Direct remote MCP
 
-For the primary public deployment path, expose the Agent through a public HTTPS hostname while keeping the Agent on its dedicated high port:
+The guided Cloudflare path is the simplest supported direct-public configuration:
 
 ```text
-ChatGPT Business
-        |
-        | HTTPS :443
-        v
-public edge / DNS provider
-        |
-        | HTTPS to dedicated origin port
-        v
+ChatGPT
+    |
+    | HTTPS :443
+    v
+Cloudflare edge / public DNS
+    |
+    | HTTPS to the dedicated Agent origin port
+    v
 ai-server-agent :3210
 (native TLS + bearer authentication)
 ```
 
-The Agent does not install nginx, Caddy, Apache, `cloudflared`, or any other web/tunnel daemon, and it does not reserve ports 80/443. Public bind mode requires native TLS and refuses to start with plaintext HTTP.
+The Agent does not install a web server/tunnel daemon or reserve ports 80/443. Public bind mode requires native TLS and does not support a plaintext public MCP endpoint.
 
-Prepare a certificate and private key at absolute paths readable by the `aiagent` service, then install or reconfigure with:
+Configure the server first:
 
 ```bash
-sudo AI_SERVER_AGENT_BIND_MODE=public \
-  AI_SERVER_AGENT_PORT=3210 \
-  AI_SERVER_AGENT_TLS_CERT_FILE=/etc/ai-server-agent/tls/origin.crt \
-  AI_SERVER_AGENT_TLS_KEY_FILE=/etc/ai-server-agent/tls/origin.key \
-  bash install.sh
+sudo ai-server-agent-manage configure-cloudflare
 ```
 
-Keep encryption enabled from the public edge all the way to the Agent and keep the bearer token private. The installer never prints the public-mode token; it remains in `/etc/ai-server-agent/mcp.token` with restricted permissions.
+or, when you already manage the public edge and certificate yourself:
 
-In ChatGPT Business:
+```bash
+sudo ai-server-agent-manage configure-manual-tls
+```
 
-1. Enable Developer Mode for the workspace admin/owner account that will create the app.
-2. Go to Workspace Settings → Apps → Create.
-3. Enter the public MCP endpoint, for example `https://mcp.example.com/mcp`.
-4. Select `Access token / API key` authentication.
-5. Select the `Bearer` header scheme and enter the Agent bearer token in the ChatGPT connection UI. Do not copy the token into documentation, logs, issue comments, or source control.
-6. Scan Tools and verify that a non-empty action list is discovered.
-7. Publish/connect the app only when the intended workspace release gates permit it.
+Then show the current MCP URL/auth guidance:
 
-### Validated ChatGPT Business flow
+```bash
+sudo ai-server-agent-manage chatgpt-setup
+```
 
-The v0.1 validation on 2026-08-14 used the flow above successfully with the published `AI Server Agent Dev` custom app:
+The protected Authorization value is revealed only after explicit confirmation in the terminal. Do not paste it into chat, issue comments, documentation, screenshots, shell history or source control.
 
-- `Access token / API key` with `Bearer` connected successfully.
-- ChatGPT discovered the Agent actions.
-- `agent_environment` executed successfully through the real ChatGPT connection.
-- `run_command` executed successfully as `aiworker` in `/srv/ai-workspace`.
-- The protected `read_file` approval flow was exercised end-to-end: `approval=false` returned `approval_required`, and after explicit user confirmation `approval=true` succeeded. The bearer token itself was not exposed.
+## Create/test the custom MCP app in ChatGPT
 
-### Current ChatGPT safety limitation
+Use the current ChatGPT developer-mode flow for your workspace. At a high level:
 
-During the same validation, ChatGPT blocked direct `run_root_command` and `browser_run` calls with an OpenAI safety check before either call reached the MCP server. Do not claim those real ChatGPT calls succeeded and do not repeatedly retry identical blocked calls without new platform evidence.
+1. ensure Developer mode/custom MCP apps are enabled for the account that will configure the app;
+2. open **Apps → Create** from the current workspace/user settings flow;
+3. enter the remote MCP endpoint shown by `ai-server-agent-manage chatgpt-setup`, for example `https://mcp.example.com/mcp`;
+4. choose the available bearer/access-token authentication option and provide the protected Agent credential only in the ChatGPT connection UI;
+5. run **Scan Tools** and verify that the expected Agent tools are discovered;
+6. create the app as a draft and test it before publishing;
+7. publish only through the workspace controls appropriate to your plan and organization.
 
-Treat this as a current ChatGPT client/platform limitation, not an Agent regression. Server-side root approval behavior and browser capability remain covered by direct MCP, CI, and VPS validation. Do not weaken bearer authentication, tool annotations, or server guardrails to work around the client-side block.
+OpenAI currently notes that write/modify actions may require ChatGPT-side confirmation depending on app permissions and action context, and some especially risky actions can be blocked rather than offered for approval. Do not weaken Agent bearer authentication, tool metadata or server-side root guardrails to work around a client-side safety decision.
 
 ## Private MCP with Secure MCP Tunnel
 
-The default installation remains bearer-authenticated `127.0.0.1:3210/mcp`. Loopback prevents network exposure but is not an authentication boundary, so MCP requests still require the token.
+The default Agent installation is bearer-authenticated and loopback-only at `127.0.0.1:3210`.
 
-For private/on-premises deployments, use OpenAI Secure MCP Tunnel according to the current OpenAI documentation. The installer creates `/etc/ai-server-agent/mcp.authorization`, containing the complete `Bearer ...` header value for a trusted local tunnel client. Keep that file readable only by the service identity that needs it and never copy the token into source control or shell history.
+ChatGPT does not connect directly to a local/private MCP server. For a private network, on-premises server or development machine, use OpenAI Secure MCP Tunnel according to the current OpenAI instructions instead of exposing the loopback listener directly to the internet.
 
-## Validation before publishing
+The Agent's local MCP endpoint remains bearer-authenticated. Use the protected Authorization value from the server only where the trusted tunnel/client setup requires it.
 
-For the real ChatGPT path, validate authentication, action discovery, a read-only call such as `agent_environment`, `run_command`, and one protected-resource approval flow. If ChatGPT blocks broader action-capable tools upstream before MCP, record that limitation accurately and rely on direct server-side evidence for those capabilities instead of weakening the Agent security model.
+## Validation
+
+Before treating the ChatGPT connection as ready, verify at least:
+
+1. the app/tool scan succeeds;
+2. a read-only call such as `agent_environment` returns the expected server identity;
+3. an ordinary `run_command` executes as `aiworker` in `/srv/ai-workspace`;
+4. authentication rejection is observed when the bearer credential is missing/invalid;
+5. any action-capable/root behavior you intend to allow still observes both ChatGPT-side controls and the Agent's own approval/policy boundary.
+
+Do not record a ChatGPT client limitation or one successful historical run as a permanent architecture guarantee. Re-validate client-side behavior against the current ChatGPT product when it matters for a release.

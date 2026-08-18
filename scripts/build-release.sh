@@ -3,7 +3,8 @@ set -Eeuo pipefail
 
 VERSION="${1:?usage: build-release.sh VERSION}"
 VERSION="${VERSION#v}"
-[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "VERSION must be a stable semantic version such as v0.1.1" >&2; exit 2; }
+[[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "VERSION must be a stable semantic version such as v0.1.2" >&2; exit 2; }
+TAG="v$VERSION"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEV_VERSION="$(sed -n 's/.*const version = "\([0-9][0-9.]*-dev\)".*/\1/p' "$ROOT/internal/mcp/server.go" | head -n1)"
 DIST="$ROOT/dist"
@@ -30,6 +31,17 @@ mkdir -p "$OUT"
 cp "$ROOT/README.md" "$ROOT/LICENSE" "$ROOT/manage.sh" "$ROOT/update.sh" "$ROOT/uninstall.sh" "$OUT/"
 tar -C "$DIST" -czf "$DIST/ai-server-agent_${VERSION}_linux_${ARCH}.tar.gz" "$(basename "$OUT")"
 rm -rf "$OUT"
+
+# The public install.sh release asset is pinned to this exact stable tag. The
+# embedded installer still verifies the release archive against SHA256SUMS.
+{
+  printf '#!/usr/bin/env bash\n'
+  printf 'export AI_SERVER_AGENT_VERSION=%q\n' "$TAG"
+  printf 'export AI_SERVER_AGENT_REF=%q\n' "$TAG"
+  tail -n +2 "$ROOT/install.sh"
+} > "$DIST/install.sh"
+chmod 0755 "$DIST/install.sh"
+
 (
   cd "$DIST"
   sha256sum "ai-server-agent_${VERSION}_linux_${ARCH}.tar.gz" > SHA256SUMS
