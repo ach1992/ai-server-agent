@@ -12,6 +12,7 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 CALL_LOG="$TMP/calls.log"
 fail(){ echo "FAIL: $*" >&2; exit 1; }
+ORIG_CF_GET_OPTIONAL="$(declare -f cf_get_optional)"
 
 # Historical filename retained for CI compatibility. Production discovery now
 # uses exact phase entrypoints and must not depend on zone-wide list pagination.
@@ -74,6 +75,33 @@ done
 # present as strings, ref must be non-empty and description may be empty.
 curl(){ printf '%s\n200' '{"success":true,"result":{"id":"r1","kind":"zone","phase":"http_request_origin","rules":[{"id":"rule1","ref":null,"description":null},{"id":"rule2","description":""}]}}'; }
 cf_get_phase_entrypoint zone1 http_request_origin >/dev/null || fail 'valid optional rule fields were rejected'
+
+# Exact Ruleset reads used by cleanup/recovery must distinguish malformed
+# successful responses from a valid Ruleset in which the target Rule is absent.
+for malformed in \
+  '{"success":true,"result":null}' \
+  '{"success":true,"result":{}}' \
+  '{"success":true,"result":{"rules":null}}' \
+  '{"success":true,"result":{"rules":{}}}' \
+  '{"success":true,"result":{"rules":[null]}}' \
+  '{"success":true,"result":{"rules":[{"id":null}]}}' \
+  '{"success":true,"result":{"rules":[{"id":"target"},{"id":"target"}]}}'; do
+  cf_get_optional(){ printf '%s' "$malformed"; }
+  set +e
+  cf_get_rule zone1 ruleset1 target >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -eq 2 ] || fail "malformed exact Ruleset response became absence: $malformed (rc=$rc)"
+done
+cf_get_optional(){ printf '%s' '{"success":true,"result":{"rules":[]}}'; }
+set +e
+cf_get_rule zone1 ruleset1 target >/dev/null 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 3 ] || fail "valid empty Ruleset did not report target absence: $rc"
+cf_get_optional(){ printf '%s' '{"success":true,"result":{"rules":[{"id":"target","ref":null}]}}'; }
+[ "$(jq -r '.id' <<<"$(cf_get_rule zone1 ruleset1 target)")" = target ] || fail 'valid exact Rule lookup failed'
+eval "$ORIG_CF_GET_OPTIONAL"
 
 curl(){ printf '%s\n403' '{"success":false,"errors":[{"code":9109,"message":"permission denied"}]}' ; }
 set +e

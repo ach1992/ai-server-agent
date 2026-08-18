@@ -363,6 +363,7 @@ cf_get_phase_entrypoint(){
           .kind=="zone" and
           .phase==$phase and
           (.rules|type)=="array" and
+          (([.rules[].id] | length) == ([.rules[].id] | unique | length)) and
           all(.rules[];
             type=="object" and
             (.id|type)=="string" and (.id|length)>0 and
@@ -411,15 +412,24 @@ cf_get_dns_record(){
 }
 
 cf_get_rule(){
-  local zone_id="$1" ruleset_id="$2" rule_id="$3" res rc rule
+  local zone_id="$1" ruleset_id="$2" rule_id="$3" res rc count
   if res="$(cf_get_optional "/zones/$zone_id/rulesets/$ruleset_id")"; then
     :
   else
     rc=$?; [ "$rc" -eq 3 ] && return 3; return 2
   fi
-  rule="$(jq -c --arg id "$rule_id" '.result.rules[]? | select(.id==$id)' <<<"$res" | head -n1)"
-  [ -n "$rule" ] || return 3
-  printf '%s\n' "$rule"
+  if ! jq -e '
+    (.result|type)=="object" and
+    (.result.rules|type)=="array" and
+    all(.result.rules[]; type=="object" and (.id|type)=="string" and (.id|length)>0) and
+    (([.result.rules[].id] | length) == ([.result.rules[].id] | unique | length))
+  ' >/dev/null 2>&1 <<<"$res"; then
+    return 2
+  fi
+  count="$(jq --arg id "$rule_id" '[.result.rules[] | select(.id==$id)] | length' <<<"$res")"
+  [ "$count" -eq 0 ] && return 3
+  [ "$count" -eq 1 ] || return 2
+  jq -c --arg id "$rule_id" '.result.rules[] | select(.id==$id)' <<<"$res"
 }
 
 cf_get_origin_cert(){
@@ -574,7 +584,7 @@ cf_find_dns_by_marker(){
 
 
 cf_find_rule_by_marker(){
-  local zone_id="$1" phase="$2" ref="$3" marker="$4" entry rc ruleset_id exact_ids ref_ids id exact_count=0 ref_count=0 found=""
+  local zone_id="$1" phase="$2" ref="$3" marker="$4" entry rc ruleset_id marker_ids ref_ids id marker_count=0 ref_count=0 found=""
   if entry="$(cf_get_phase_entrypoint "$zone_id" "$phase")"; then
     ruleset_id="$(jq -r '.id' <<<"$entry")"
   else
@@ -582,12 +592,12 @@ cf_find_rule_by_marker(){
     [ "$rc" -eq 3 ] && return 1
     return 2
   fi
-  exact_ids="$(jq -r --arg ref "$ref" --arg marker "$marker" '.rules[]? | select((.ref // "")==$ref and ((.description // "") | endswith(" txn:"+$marker))) | .id // empty' <<<"$entry")"
-  ref_ids="$(jq -r --arg ref "$ref" '.rules[]? | select((.ref // "")==$ref) | .id // empty' <<<"$entry")"
-  while IFS= read -r id; do [ -n "$id" ] || continue; found="$ruleset_id|$id"; exact_count=$((exact_count + 1)); done <<<"$exact_ids"
+  marker_ids="$(jq -r --arg marker "$marker" '.rules[] | select(((.description // "") | endswith(" txn:"+$marker))) | .id' <<<"$entry")"
+  ref_ids="$(jq -r --arg ref "$ref" '.rules[] | select((.ref // "")==$ref) | .id' <<<"$entry")"
+  while IFS= read -r id; do [ -n "$id" ] || continue; found="$ruleset_id|$id"; marker_count=$((marker_count + 1)); done <<<"$marker_ids"
   while IFS= read -r id; do [ -n "$id" ] || continue; ref_count=$((ref_count + 1)); done <<<"$ref_ids"
-  [ "$exact_count" -eq 1 ] && { printf '%s\n' "$found"; return 0; }
-  [ "$exact_count" -eq 0 ] || return 2
+  [ "$marker_count" -eq 1 ] && { printf '%s\n' "$found"; return 0; }
+  [ "$marker_count" -eq 0 ] || return 2
   [ "$ref_count" -eq 0 ] && return 1
   return 2
 }
@@ -711,7 +721,7 @@ cf_reconcile_dns(){
 
 cf_reconcile_origin_rule(){
   local zone_id="$1" host="$2" port="$3" owned_ruleset="${4:-}" owned_rule="${5:-}" owned_fingerprint="${6:-}"
-  local phase_entry rc ruleset_id rule_ref ref_match rule_body create_body res ruleset marker pending_rule_body ruleset_desc verify_id rule current_fingerprint pending_fingerprint
+  local phase_entry rc ruleset_id rule_ref ref_match id_count rule_body create_body res ruleset marker pending_rule_body ruleset_desc verify_id rule current_fingerprint pending_fingerprint
   CF_RESULT_ORIGIN_RULESET_ID=""; CF_RESULT_ORIGIN_RULE_ID=""; CF_RESULT_ORIGIN_ACTION=""; CF_RESULT_ORIGIN_FINGERPRINT=""
   rule_ref="ai_server_agent_$(printf '%s' "$host" | sha256sum | cut -c1-16)"
   rule_body="$(jq -n --arg ref "$rule_ref" --arg host "$host" --argjson port "$port" '{ref:$ref,description:"AI Server Agent origin port",expression:("http.host eq \""+$host+"\""),action:"route",action_parameters:{origin:{port:$port}},enabled:true}')"
@@ -737,8 +747,11 @@ cf_reconcile_origin_rule(){
     ruleset_id="$CF_RESULT_ORIGIN_RULESET_ID"
   else
     ref_match="$(jq -r --arg ref "$rule_ref" '.result.rules[]? | select(.ref==$ref) | .id' <<<"$ruleset" | head -n1)"
-    if [ -n "$owned_rule" ] && [ "$owned_ruleset" = "$ruleset_id" ]; then
-      rule="$(jq -c --arg id "$owned_rule" --arg ref "$rule_ref" '.result.rules[]? | select(.id==$id and .ref==$ref)' <<<"$ruleset" | head -n1)"
+    if [ -n "$owned_rule" ]; then
+      [ "$owned_ruleset" = "$ruleset_id" ] || die "The recorded Agent-owned Origin Rule ruleset no longer matches the current phase entrypoint. Refusing to create or adopt a replacement automatically."
+      id_count="$(jq --arg id "$owned_rule" '[.result.rules[] | select(.id==$id)] | length' <<<"$ruleset")"
+      [ "$id_count" -le 1 ] || die "Cloudflare returned duplicate entries for the recorded Agent-owned Origin Rule ID. Refusing ambiguous reconciliation."
+      rule="$(jq -c --arg id "$owned_rule" '.result.rules[] | select(.id==$id)' <<<"$ruleset")"
       if [ -n "$rule" ]; then
         current_fingerprint="$(cf_rule_fingerprint <<<"$rule")"
         [ -z "$owned_fingerprint" ] || [ "$owned_fingerprint" = "$current_fingerprint" ] || die "The recorded Agent-owned Origin Rule changed outside this transaction. Refusing automatic mutation; resolve the Cloudflare drift explicitly."
@@ -784,7 +797,7 @@ cf_reconcile_origin_rule(){
 
 cf_reconcile_ssl_config_rule(){
   local zone_id="$1" host="$2" owned_ruleset="${3:-}" owned_rule="${4:-}" owned_fingerprint="${5:-}"
-  local phase_entry rc ruleset_id rule_ref ref_match rule_body create_body res ruleset marker pending_rule_body ruleset_desc verify_id rule current_fingerprint pending_fingerprint
+  local phase_entry rc ruleset_id rule_ref ref_match id_count rule_body create_body res ruleset marker pending_rule_body ruleset_desc verify_id rule current_fingerprint pending_fingerprint
   CF_RESULT_SSL_RULESET_ID=""; CF_RESULT_SSL_RULE_ID=""; CF_RESULT_SSL_ACTION=""; CF_RESULT_SSL_FINGERPRINT=""
   rule_ref="ai_server_agent_ssl_$(printf '%s' "$host" | sha256sum | cut -c1-16)"
   rule_body="$(jq -n --arg ref "$rule_ref" --arg host "$host" '{ref:$ref,description:"AI Server Agent strict SSL",expression:("http.host eq \""+$host+"\""),action:"set_config",action_parameters:{ssl:"strict"},enabled:true}')"
@@ -810,8 +823,11 @@ cf_reconcile_ssl_config_rule(){
     ruleset_id="$CF_RESULT_SSL_RULESET_ID"
   else
     ref_match="$(jq -r --arg ref "$rule_ref" '.result.rules[]? | select(.ref==$ref) | .id' <<<"$ruleset" | head -n1)"
-    if [ -n "$owned_rule" ] && [ "$owned_ruleset" = "$ruleset_id" ]; then
-      rule="$(jq -c --arg id "$owned_rule" --arg ref "$rule_ref" '.result.rules[]? | select(.id==$id and .ref==$ref)' <<<"$ruleset" | head -n1)"
+    if [ -n "$owned_rule" ]; then
+      [ "$owned_ruleset" = "$ruleset_id" ] || die "The recorded Agent-owned Configuration Rule ruleset no longer matches the current phase entrypoint. Refusing to create or adopt a replacement automatically."
+      id_count="$(jq --arg id "$owned_rule" '[.result.rules[] | select(.id==$id)] | length' <<<"$ruleset")"
+      [ "$id_count" -le 1 ] || die "Cloudflare returned duplicate entries for the recorded Agent-owned Configuration Rule ID. Refusing ambiguous reconciliation."
+      rule="$(jq -c --arg id "$owned_rule" '.result.rules[] | select(.id==$id)' <<<"$ruleset")"
       if [ -n "$rule" ]; then
         current_fingerprint="$(cf_rule_fingerprint <<<"$rule")"
         [ -z "$owned_fingerprint" ] || [ "$owned_fingerprint" = "$current_fingerprint" ] || die "The recorded Agent-owned Configuration Rule changed outside this transaction. Refusing automatic mutation; resolve the Cloudflare drift explicitly."
