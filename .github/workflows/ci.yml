@@ -23,8 +23,8 @@ jobs:
           bash -n manage.sh tests/cloudflare_rulesets_pagination.sh
           echo '== rulesets contract =='
           bash tests/cloudflare_rulesets_pagination.sh
-          echo '== transaction rollback =='
-          bash tests/cloudflare_transaction.sh
+          echo '== transaction rollback trace =='
+          bash -x tests/cloudflare_transaction.sh
           echo '== crash recovery =='
           bash tests/cloudflare_crash_recovery.sh
           echo '== diff check =='
