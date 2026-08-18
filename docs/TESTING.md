@@ -65,8 +65,12 @@ A separate first-run test proves that choosing "Configure later" is a successful
 - response-lost DNS/rule create recovery with durable nonce + semantic fingerprint;
 - response-lost Origin CA discovery by generated CSR plus complete create-semantic fingerprint and exact-certificate-ID re-read before revoke;
 - fail-closed handling of DNS/rule/certificate representation drift, exact-ID read failure, and competing lookalikes;
+- recorded Rule-ID ownership checks independent of mutable `ref`, with drift blocking replacement creation;
+- marker-based response-lost Rule recovery independent of `ref`, followed by full durable fingerprint verification before deletion;
 - exact-rule cleanup rather than deleting a shared Ruleset container;
 - management-lock exclusion behavior.
+
+`tests/cloudflare_rulesets_pagination.sh` is retained as the historical test filename, but the production contract it now exercises is phase-entrypoint discovery rather than broad Rulesets pagination. It verifies direct zone phase-entrypoint reads for `http_request_origin` and `http_config_settings`, authoritative 404-as-absence handling, provider-error propagation, entrypoint/rule schema validation, malformed successful exact-Ruleset responses, duplicate Rule IDs, and valid exact/empty Ruleset lookups. A malformed or ambiguous provider representation must never become proof of absence.
 
 The Cloudflare provider is mocked. This is behavioral testing of production transaction/recovery code, not a live-zone integration test.
 
@@ -102,13 +106,13 @@ The lifecycle overlap tests use the installed management wrapper and the real `/
 
 Go tests exercise root command environment isolation and the persistent-job command construction. The current persistent-job isolation test uses a fake `systemd-run` command to inspect/execute the generated invocation.
 
-**Known coverage limit:** CI does not currently exercise an actual privileged systemd transient job end-to-end. A real Ubuntu/systemd transient-unit integration test is useful additional confidence, but it is not a substitute for the existing command/environment tests and is not currently a v0.1.2 release blocker by itself.
+**Known coverage limit:** CI does not currently exercise an actual privileged systemd transient job end-to-end. A real Ubuntu/systemd transient-unit integration test is useful additional confidence, but it is not a substitute for the existing command/environment tests and is not currently a stable v0.1 release blocker by itself.
 
 ## 4. Stable installer and updater trust
 
 ### Stable bootstrap
 
-Initial stable installation deliberately separates the bootstrap trust root from the release installer it authenticates. The supported one-line command loads `scripts/install-stable.sh` from a Git tag already bound to a published immutable GitHub Release (`v0.1.2` for this generation), not from a mutable branch, a transient feature commit, or the release asset that is about to be verified. The immutable-release tag is the durable source identity for the bootstrap after publication.
+Initial stable installation deliberately separates the bootstrap trust root from the release installer it authenticates. The supported one-line command loads `scripts/install-stable.sh` from a Git tag already bound to a published immutable GitHub Release (`v0.1.4` for the current v0.1 bootstrap), not from a mutable branch, a transient feature commit, or the release asset that is about to be verified. The immutable-release tag is the durable source identity for the bootstrap after publication.
 
 `tests/stable_bootstrap.sh` guards the documented immutable-tag source and uses a deterministic mocked GitHub HTTP surface plus a fake `sudo` boundary to verify that the bootstrap:
 
