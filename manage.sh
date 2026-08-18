@@ -290,54 +290,110 @@ load_cf_token(){
 
 cf_api(){
   local method="$1" path="$2" body="${3:-}" cfg out
-  local ruleset_base cursor="" encoded_cursor page_path page_out next_cursor pages=0 merged='[]'
   local -a retry_args=()
   cfg="$(mktemp)"; chmod 0600 "$cfg"
   printf 'header = "Authorization: Bearer %s"\n' "$CF_TOKEN" > "$cfg"
   case "$method" in GET|PATCH|DELETE) retry_args=(--retry 2) ;; esac
 
-  # The Rulesets list endpoint is cursor-paginated and currently caps per_page at 50.
-  # Existing callers request a complete list with the legacy per_page=100 sentinel;
-  # translate that logical request into bounded cursor traversal so absence decisions
-  # are made only after every returned page has been inspected.
-  if [ "$method" = GET ] && [[ "$path" =~ ^(/zones/[^/?]+/rulesets)\?per_page=100$ ]]; then
-    ruleset_base="${BASH_REMATCH[1]}"
-    while :; do
-      pages=$((pages + 1)); [ "$pages" -le 1000 ] || { rm -f "$cfg"; return 1; }
-      if [ -n "$cursor" ]; then
-        encoded_cursor="$(jq -rn --arg cursor "$cursor" '$cursor|@uri')"
-        page_path="$ruleset_base?per_page=50&cursor=$encoded_cursor"
-      else
-        page_path="$ruleset_base?per_page=50"
-      fi
-      page_out="$(curl -sS --fail-with-body "${retry_args[@]}" --request GET --config "$cfg" -H 'Content-Type: application/json' "$CF_API$page_path")" || { rm -f "$cfg"; return 1; }
-      if ! jq -e 'def valid_kind: .=="managed" or .=="custom" or .=="root" or .=="zone"; def valid_phase: .=="ddos_l4" or .=="ddos_l7" or .=="http_config_settings" or .=="http_custom_errors" or .=="http_log_custom_fields" or .=="http_ratelimit" or .=="http_request_cache_settings" or .=="http_request_dynamic_redirect" or .=="http_request_firewall_custom" or .=="http_request_firewall_managed" or .=="http_request_late_transform" or .=="http_request_origin" or .=="http_request_redirect" or .=="http_request_sanitize" or .=="http_request_sbfm" or .=="http_request_transform" or .=="http_response_cache_settings" or .=="http_response_compression" or .=="http_response_firewall_managed" or .=="http_response_headers_transform" or .=="magic_transit" or .=="magic_transit_ids_managed" or .=="magic_transit_managed" or .=="magic_transit_ratelimit"; .success == true and (.result|type)=="array" and all(.result[]; type=="object" and (.id|type)=="string" and (.id|length)>0 and (.kind|type)=="string" and (.kind|valid_kind) and (.phase|type)=="string" and (.phase|valid_phase)) and (.result_info|type)=="object" and (.result_info.cursors|type)=="object" and (((.result_info.cursors|has("after"))|not) or ((.result_info.cursors.after|type)=="string" and (.result_info.cursors.after|length)>0))' >/dev/null 2>&1 <<<"$page_out"; then
-        jq -r '.errors[]?.message // empty' <<<"$page_out" >&2 || true
-        rm -f "$cfg"; return 1
-      fi
-      merged="$(jq -cn --argjson acc "$merged" --argjson response "$page_out" '$acc + $response.result')"
-      next_cursor="$(jq -r 'if (.result_info.cursors|has("after")) then .result_info.cursors.after else empty end' <<<"$page_out")"
-      [ -n "$next_cursor" ] || break
-      [ "$next_cursor" != "$cursor" ] || { rm -f "$cfg"; return 1; }
-      cursor="$next_cursor"
-    done
-    rm -f "$cfg"
-    jq -cn --argjson result "$merged" '{success:true,result:$result}'
-    return 0
-  fi
-
   if [ -n "$body" ]; then
-    out="$(curl -sS --fail-with-body "${retry_args[@]}" --request "$method" --config "$cfg" -H 'Content-Type: application/json' --data-binary "$body" "$CF_API$path")" || { rm -f "$cfg"; return 1; }
+    if ! out="$(curl -sS --fail-with-body "${retry_args[@]}" --request "$method" --config "$cfg" -H 'Content-Type: application/json' --data-binary "$body" "$CF_API$path")"; then
+      jq -r '.errors[]? | if (.code // null) == null then (.message // empty) else ((.code|tostring) + ": " + (.message // "")) end' <<<"$out" >&2 2>/dev/null || true
+      rm -f "$cfg"; return 1
+    fi
   else
-    out="$(curl -sS --fail-with-body "${retry_args[@]}" --request "$method" --config "$cfg" -H 'Content-Type: application/json' "$CF_API$path")" || { rm -f "$cfg"; return 1; }
+    if ! out="$(curl -sS --fail-with-body "${retry_args[@]}" --request "$method" --config "$cfg" -H 'Content-Type: application/json' "$CF_API$path")"; then
+      jq -r '.errors[]? | if (.code // null) == null then (.message // empty) else ((.code|tostring) + ": " + (.message // "")) end' <<<"$out" >&2 2>/dev/null || true
+      rm -f "$cfg"; return 1
+    fi
   fi
   rm -f "$cfg"
   if ! jq -e '.success == true' >/dev/null 2>&1 <<<"$out"; then
-    jq -r '.errors[]?.message // empty' <<<"$out" >&2 || true
+    jq -r '.errors[]? | if (.code // null) == null then (.message // empty) else ((.code|tostring) + ": " + (.message // "")) end' <<<"$out" >&2 || true
     return 1
   fi
   printf '%s' "$out"
 }
+
+cf_list_zone_rulesets(){
+  local zone_id="$1" cursor="" encoded_cursor path page next_cursor count pages=0 merged='[]'
+  while :; do
+    pages=$((pages + 1))
+    [ "$pages" -le 1000 ] || { warn "Cloudflare Rulesets pagination exceeded the safety bound."; return 1; }
+    if [ -n "$cursor" ]; then
+      encoded_cursor="$(jq -rn --arg cursor "$cursor" '$cursor|@uri')"
+      path="/zones/$zone_id/rulesets?per_page=50&cursor=$encoded_cursor"
+    else
+      path="/zones/$zone_id/rulesets?per_page=50"
+    fi
+
+    page="$(cf_api GET "$path")" || return 1
+    if ! jq -e '
+      def valid_kind: .=="managed" or .=="custom" or .=="root" or .=="zone";
+      def valid_phase:
+        .=="ddos_l4" or .=="ddos_l7" or .=="http_config_settings" or
+        .=="http_custom_errors" or .=="http_log_custom_fields" or .=="http_ratelimit" or
+        .=="http_request_cache_settings" or .=="http_request_dynamic_redirect" or
+        .=="http_request_firewall_custom" or .=="http_request_firewall_managed" or
+        .=="http_request_late_transform" or .=="http_request_origin" or
+        .=="http_request_redirect" or .=="http_request_sanitize" or .=="http_request_sbfm" or
+        .=="http_request_transform" or .=="http_response_cache_settings" or
+        .=="http_response_compression" or .=="http_response_firewall_managed" or
+        .=="http_response_headers_transform" or .=="magic_transit" or
+        .=="magic_transit_ids_managed" or .=="magic_transit_managed" or
+        .=="magic_transit_ratelimit";
+      .success == true and
+      (.result|type)=="array" and
+      all(.result[];
+        type=="object" and
+        (.id|type)=="string" and (.id|length)>0 and
+        (.kind|type)=="string" and (.kind|valid_kind) and
+        (.phase|type)=="string" and (.phase|valid_phase)
+      ) and
+      (
+        (has("result_info")|not) or
+        (
+          (.result_info|type)=="object" and
+          (
+            (.result_info|has("cursors")|not) or
+            (
+              (.result_info.cursors|type)=="object" and
+              (
+                (.result_info.cursors|has("after")|not) or
+                ((.result_info.cursors.after|type)=="string" and (.result_info.cursors.after|length)>0)
+              )
+            )
+          )
+        )
+      )
+    ' >/dev/null 2>&1 <<<"$page"; then
+      warn "Cloudflare Rulesets list response did not match the documented response contract."
+      return 1
+    fi
+
+    merged="$(jq -cn --argjson acc "$merged" --argjson response "$page" '$acc + $response.result')"
+    count="$(jq '.result | length' <<<"$page")"
+
+    if jq -e '(.result_info? | type)=="object" and (.result_info.cursors? | type)=="object" and (.result_info.cursors | has("after"))' >/dev/null 2>&1 <<<"$page"; then
+      next_cursor="$(jq -r '.result_info.cursors.after' <<<"$page")"
+      [ "$next_cursor" != "$cursor" ] || { warn "Cloudflare Rulesets pagination returned a non-advancing cursor."; return 1; }
+      cursor="$next_cursor"
+      continue
+    fi
+
+    if jq -e '(.result_info? | type)=="object" and (.result_info.cursors? | type)=="object"' >/dev/null 2>&1 <<<"$page"; then
+      break
+    fi
+
+    # Cloudflare documents result_info/cursors as optional. With no cursor
+    # metadata, a short page is complete at the requested 50-item page size.
+    # A full page is ambiguous and must not authorize an absence decision.
+    [ "$count" -lt 50 ] || { warn "Cloudflare Rulesets returned a full page without pagination metadata; refusing an incomplete absence decision."; return 1; }
+    break
+  done
+
+  jq -cn --argjson result "$merged" '{success:true,result:$result}'
+}
+
 
 cf_delete_owned(){
   local path="$1" cfg response status body
@@ -554,7 +610,7 @@ cf_find_dns_by_marker(){
 
 cf_find_rule_by_marker(){
   local zone_id="$1" phase="$2" ref="$3" marker="$4" list ruleset_id ruleset exact_ids ref_ids id exact_count=0 ref_count=0 found=""
-  list="$(cf_api GET "/zones/$zone_id/rulesets?per_page=100")" || return 2
+  list="$(cf_list_zone_rulesets "$zone_id")" || return 2
   while IFS= read -r ruleset_id; do
     [ -n "$ruleset_id" ] || continue
     ruleset="$(cf_api GET "/zones/$zone_id/rulesets/$ruleset_id")" || return 2
@@ -692,7 +748,7 @@ cf_reconcile_origin_rule(){
   CF_RESULT_ORIGIN_RULESET_ID=""; CF_RESULT_ORIGIN_RULE_ID=""; CF_RESULT_ORIGIN_ACTION=""; CF_RESULT_ORIGIN_FINGERPRINT=""
   rule_ref="ai_server_agent_$(printf '%s' "$host" | sha256sum | cut -c1-16)"
   rule_body="$(jq -n --arg ref "$rule_ref" --arg host "$host" --argjson port "$port" '{ref:$ref,description:"AI Server Agent origin port",expression:("http.host eq \""+$host+"\""),action:"route",action_parameters:{origin:{port:$port}},enabled:true}')"
-  list="$(cf_api GET "/zones/$zone_id/rulesets?per_page=100")" || die "Cloudflare ruleset lookup failed."
+  list="$(cf_list_zone_rulesets "$zone_id")" || die "Cloudflare ruleset lookup failed."
   ruleset_id="$(jq -r '.result[]? | select(.kind=="zone" and .phase=="http_request_origin") | .id' <<<"$list" | head -n1)"
   if [ -z "$ruleset_id" ]; then
     marker="$(cf_new_ownership_marker)"; ruleset_desc="Hostname-scoped origin routing managed by AI Server Agent"
@@ -760,7 +816,7 @@ cf_reconcile_ssl_config_rule(){
   CF_RESULT_SSL_RULESET_ID=""; CF_RESULT_SSL_RULE_ID=""; CF_RESULT_SSL_ACTION=""; CF_RESULT_SSL_FINGERPRINT=""
   rule_ref="ai_server_agent_ssl_$(printf '%s' "$host" | sha256sum | cut -c1-16)"
   rule_body="$(jq -n --arg ref "$rule_ref" --arg host "$host" '{ref:$ref,description:"AI Server Agent strict SSL",expression:("http.host eq \""+$host+"\""),action:"set_config",action_parameters:{ssl:"strict"},enabled:true}')"
-  list="$(cf_api GET "/zones/$zone_id/rulesets?per_page=100")" || die "Cloudflare ruleset lookup failed."
+  list="$(cf_list_zone_rulesets "$zone_id")" || die "Cloudflare ruleset lookup failed."
   ruleset_id="$(jq -r '.result[]? | select(.kind=="zone" and .phase=="http_config_settings") | .id' <<<"$list" | head -n1)"
   if [ -z "$ruleset_id" ]; then
     marker="$(cf_new_ownership_marker)"; ruleset_desc="Hostname-scoped configuration managed by AI Server Agent"

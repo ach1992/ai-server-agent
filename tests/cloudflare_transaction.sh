@@ -251,7 +251,7 @@ if cf_find_dns_by_marker zone1 mcp.example.com 203.0.113.10 0123456789abcdef0123
 # A deterministic rule ref without our nonce is likewise ambiguous.
 cf_api(){
   case "$2" in
-    '/zones/zone1/rulesets?per_page=100') printf '%s' '{"success":true,"result":[{"id":"origin-set-race","kind":"zone","phase":"http_request_origin"}]}' ;;
+    '/zones/zone1/rulesets?per_page=50') printf '%s' '{"success":true,"result":[{"id":"origin-set-race","kind":"zone","phase":"http_request_origin"}]}' ;;
     '/zones/zone1/rulesets/origin-set-race') printf '%s' '{"success":true,"result":{"rules":[{"id":"external-origin","ref":"ai_server_agent_test","description":"AI Server Agent origin port"}]}}' ;;
     *) return 2 ;;
   esac
@@ -285,7 +285,7 @@ ssl_rule_json="$(jq -nc --arg ref "$ssl_ref" '{id:"ssl-rule-owned",ref:$ref,desc
 ssl_fp="$(cf_rule_fingerprint <<<"$ssl_rule_json")"
 cf_api(){
   case "$2" in
-    '/zones/zone1/rulesets?per_page=100') printf '%s' '{"success":true,"result":[{"id":"ssl-set-owned","kind":"zone","phase":"http_config_settings"}]}' ;;
+    '/zones/zone1/rulesets?per_page=50') printf '%s' '{"success":true,"result":[{"id":"ssl-set-owned","kind":"zone","phase":"http_config_settings"}]}' ;;
     '/zones/zone1/rulesets/ssl-set-owned') jq -nc --argjson rule "$ssl_rule_json" '{success:true,result:{rules:[$rule]}}' ;;
     *) return 2 ;;
   esac
