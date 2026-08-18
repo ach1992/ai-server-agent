@@ -68,4 +68,18 @@ set -e
 grep -Fq 'Cloudflare API error 9109: permission denied' <<<"$err" || fail 'structured Cloudflare phase lookup error was hidden'
 if grep -Fq 'Bearer test' <<<"$err"; then fail 'Cloudflare token leaked into diagnostics'; fi
 
+# Optional-read wrappers must preserve the first-class 404/absence status.
+cf_get_optional(){ return 3; }
+for helper in dns rule cert; do
+  set +e
+  case "$helper" in
+    dns) cf_get_dns_record zone1 missing >/dev/null 2>&1 ;;
+    rule) cf_get_rule zone1 ruleset1 missing >/dev/null 2>&1 ;;
+    cert) cf_get_origin_cert missing >/dev/null 2>&1 ;;
+  esac
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "$helper optional-read wrapper lost 404 absence status: $rc"
+done
+
 printf 'Cloudflare Rulesets phase-entrypoint discovery contract passed.\n'

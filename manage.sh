@@ -390,13 +390,16 @@ cf_get_dns_record(){
   if res="$(cf_get_optional "/zones/$zone_id/dns_records/$dns_id")"; then
     jq -ce '.result | select(type=="object")' <<<"$res" || return 2
     return 0
+  else
+    rc=$?; [ "$rc" -eq 3 ] && return 3; return 2
   fi
-  rc=$?; [ "$rc" -eq 3 ] && return 3; return 2
 }
 
 cf_get_rule(){
   local zone_id="$1" ruleset_id="$2" rule_id="$3" res rc rule
-  if ! res="$(cf_get_optional "/zones/$zone_id/rulesets/$ruleset_id")"; then
+  if res="$(cf_get_optional "/zones/$zone_id/rulesets/$ruleset_id")"; then
+    :
+  else
     rc=$?; [ "$rc" -eq 3 ] && return 3; return 2
   fi
   rule="$(jq -c --arg id "$rule_id" '.result.rules[]? | select(.id==$id)' <<<"$res" | head -n1)"
@@ -409,8 +412,9 @@ cf_get_origin_cert(){
   if res="$(cf_get_optional "/certificates/$cert_id")"; then
     jq -ce '.result | select(type=="object")' <<<"$res" || return 2
     return 0
+  else
+    rc=$?; [ "$rc" -eq 3 ] && return 3; return 2
   fi
-  rc=$?; [ "$rc" -eq 3 ] && return 3; return 2
 }
 
 cf_delete_dns_if_expected(){
