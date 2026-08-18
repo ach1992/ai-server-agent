@@ -52,6 +52,34 @@ if cf_api GET '/zones/zone1/rulesets?per_page=100' >/dev/null 2>&1; then
   fail 'missing cursor metadata was accepted as complete discovery'
 fi
 
+# An after cursor is optional only by absence. If present, it must be a
+# non-empty string; malformed values must not be mistaken for completion.
+for bad_after in 'false' 'null' '""' '123' '{}' '[]'; do
+  curl(){ printf '{"success":true,"result":[],"result_info":{"cursors":{"after":%s}}}' "$bad_after"; }
+  if cf_api GET '/zones/zone1/rulesets?per_page=100' >/dev/null 2>&1; then
+    fail "invalid after cursor was accepted: $bad_after"
+  fi
+done
+
+# Ruleset entries used to decide phase absence must contain the identity and
+# classification fields required by discovery. Malformed items fail closed.
+for bad_result in \
+  '[null]' \
+  '[{"kind":"zone","phase":"http_request_origin"}]' \
+  '[{"id":"r1","phase":"http_request_origin"}]' \
+  '[{"id":"r1","kind":"zone"}]' \
+  '[{"id":"","kind":"zone","phase":"http_request_origin"}]' \
+  '[{"id":"r1","kind":"","phase":"http_request_origin"}]' \
+  '[{"id":"r1","kind":"zone","phase":""}]' \
+  '[{"id":1,"kind":"zone","phase":"http_request_origin"}]' \
+  '[{"id":"r1","kind":1,"phase":"http_request_origin"}]' \
+  '[{"id":"r1","kind":"zone","phase":1}]'; do
+  curl(){ printf '{"success":true,"result":%s,"result_info":{"cursors":{}}}' "$bad_result"; }
+  if cf_api GET '/zones/zone1/rulesets?per_page=100' >/dev/null 2>&1; then
+    fail "malformed ruleset item was accepted: $bad_result"
+  fi
+done
+
 # A non-advancing cursor must also fail closed instead of looping or returning
 # a partial discovery result.
 curl(){
