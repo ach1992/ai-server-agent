@@ -1,0 +1,66 @@
+name: Apply PR14 review fixes
+
+on:
+  push:
+    branches: [fix/cloudflare-rulesets-pagination]
+    paths: [.github/workflows/apply-pr14-review-fixes.yml]
+
+permissions:
+  contents: write
+
+jobs:
+  apply:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 5
+    env:
+      EXPECTED_BASE_HEAD: a2ef267276e7ba18e4fea85aed2c2376d93baaab
+      TARGET_BRANCH: fix/cloudflare-rulesets-pagination
+      GITHUB_TOKEN: ${{ github.token }}
+    steps:
+      - name: Apply exact reviewed fixes
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          auth="$(printf 'x-access-token:%s' "$GITHUB_TOKEN" | base64 -w0)"
+          git init repo
+          cd repo
+          git remote add origin "https://github.com/$GITHUB_REPOSITORY.git"
+          git -c http.extraheader="AUTHORIZATION: basic $auth" fetch --no-tags --depth=2 origin "$GITHUB_SHA"
+          git checkout --detach FETCH_HEAD
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test "$(git rev-parse HEAD^)" = "$EXPECTED_BASE_HEAD"
+          test "$(git diff --name-only "$EXPECTED_BASE_HEAD" HEAD)" = ".github/workflows/apply-pr14-review-fixes.yml"
+
+          python3 - <<'PY'
+          from pathlib import Path
+
+          path = Path("manage.sh")
+          text = path.read_text()
+
+          old_validator = '''      if ! jq -e '.success == true and (.result|type)=="array" and (.result_info|type)=="object" and (.result_info.cursors|type)=="object"' >/dev/null 2>&1 <<<"$page_out"; then'''
+          new_validator = '''      if ! jq -e '.success == true and (.result|type)=="array" and all(.result[]; type=="object" and (.id|type)=="string" and (.id|length)>0 and (.kind|type)=="string" and (.kind|length)>0 and (.phase|type)=="string" and (.phase|length)>0) and (.result_info|type)=="object" and (.result_info.cursors|type)=="object" and (((.result_info.cursors|has("after"))|not) or ((.result_info.cursors.after|type)=="string" and (.result_info.cursors.after|length)>0))' >/dev/null 2>&1 <<<"$page_out"; then'''
+          old_cursor = '''      next_cursor="$(jq -r '.result_info.cursors.after // empty' <<<"$page_out")"'''
+          new_cursor = '''      next_cursor="$(jq -r 'if (.result_info.cursors|has("after")) then .result_info.cursors.after else empty end' <<<"$page_out")"'''
+
+          if text.count(old_validator) != 1:
+              raise SystemExit("expected exactly one Rulesets response validator")
+          if text.count(old_cursor) != 1:
+              raise SystemExit("expected exactly one Rulesets cursor extraction")
+
+          text = text.replace(old_validator, new_validator, 1)
+          text = text.replace(old_cursor, new_cursor, 1)
+          path.write_text(text)
+          PY
+
+          bash -n manage.sh
+          rm .github/workflows/apply-pr14-review-fixes.yml
+          test "$(git diff --name-only "$EXPECTED_BASE_HEAD")" = "manage.sh"
+          git diff --check
+
+          git add manage.sh .github/workflows/apply-pr14-review-fixes.yml
+          git diff --cached --check
+          test "$(git diff --cached --name-only "$EXPECTED_BASE_HEAD")" = "manage.sh"
+          git config user.name "ACh"
+          git config user.email "58507994+ach1992@users.noreply.github.com"
+          git commit -m "fix: validate Rulesets response shape"
+          git -c http.extraheader="AUTHORIZATION: basic $auth" push origin HEAD:"refs/heads/$TARGET_BRANCH"
