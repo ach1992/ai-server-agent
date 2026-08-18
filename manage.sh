@@ -290,10 +290,42 @@ load_cf_token(){
 
 cf_api(){
   local method="$1" path="$2" body="${3:-}" cfg out
+  local ruleset_base cursor="" encoded_cursor page_path page_out next_cursor pages=0 merged='[]'
   local -a retry_args=()
   cfg="$(mktemp)"; chmod 0600 "$cfg"
   printf 'header = "Authorization: Bearer %s"\n' "$CF_TOKEN" > "$cfg"
   case "$method" in GET|PATCH|DELETE) retry_args=(--retry 2) ;; esac
+
+  # The Rulesets list endpoint is cursor-paginated and currently caps per_page at 50.
+  # Existing callers request a complete list with the legacy per_page=100 sentinel;
+  # translate that logical request into bounded cursor traversal so absence decisions
+  # are made only after every returned page has been inspected.
+  if [ "$method" = GET ] && [[ "$path" =~ ^(/zones/[^/?]+/rulesets)\?per_page=100$ ]]; then
+    ruleset_base="${BASH_REMATCH[1]}"
+    while :; do
+      pages=$((pages + 1)); [ "$pages" -le 1000 ] || { rm -f "$cfg"; return 1; }
+      if [ -n "$cursor" ]; then
+        encoded_cursor="$(jq -rn --arg cursor "$cursor" '$cursor|@uri')"
+        page_path="$ruleset_base?per_page=50&cursor=$encoded_cursor"
+      else
+        page_path="$ruleset_base?per_page=50"
+      fi
+      page_out="$(curl -sS --fail-with-body "${retry_args[@]}" --request GET --config "$cfg" -H 'Content-Type: application/json' "$CF_API$page_path")" || { rm -f "$cfg"; return 1; }
+      if ! jq -e 'def valid_kind: .=="managed" or .=="custom" or .=="root" or .=="zone"; def valid_phase: .=="ddos_l4" or .=="ddos_l7" or .=="http_config_settings" or .=="http_custom_errors" or .=="http_log_custom_fields" or .=="http_ratelimit" or .=="http_request_cache_settings" or .=="http_request_dynamic_redirect" or .=="http_request_firewall_custom" or .=="http_request_firewall_managed" or .=="http_request_late_transform" or .=="http_request_origin" or .=="http_request_redirect" or .=="http_request_sanitize" or .=="http_request_sbfm" or .=="http_request_transform" or .=="http_response_cache_settings" or .=="http_response_compression" or .=="http_response_firewall_managed" or .=="http_response_headers_transform" or .=="magic_transit" or .=="magic_transit_ids_managed" or .=="magic_transit_managed" or .=="magic_transit_ratelimit"; .success == true and (.result|type)=="array" and all(.result[]; type=="object" and (.id|type)=="string" and (.id|length)>0 and (.kind|type)=="string" and (.kind|valid_kind) and (.phase|type)=="string" and (.phase|valid_phase)) and (.result_info|type)=="object" and (.result_info.cursors|type)=="object" and (((.result_info.cursors|has("after"))|not) or ((.result_info.cursors.after|type)=="string" and (.result_info.cursors.after|length)>0))' >/dev/null 2>&1 <<<"$page_out"; then
+        jq -r '.errors[]?.message // empty' <<<"$page_out" >&2 || true
+        rm -f "$cfg"; return 1
+      fi
+      merged="$(jq -cn --argjson acc "$merged" --argjson response "$page_out" '$acc + $response.result')"
+      next_cursor="$(jq -r 'if (.result_info.cursors|has("after")) then .result_info.cursors.after else empty end' <<<"$page_out")"
+      [ -n "$next_cursor" ] || break
+      [ "$next_cursor" != "$cursor" ] || { rm -f "$cfg"; return 1; }
+      cursor="$next_cursor"
+    done
+    rm -f "$cfg"
+    jq -cn --argjson result "$merged" '{success:true,result:$result}'
+    return 0
+  fi
+
   if [ -n "$body" ]; then
     out="$(curl -sS --fail-with-body "${retry_args[@]}" --request "$method" --config "$cfg" -H 'Content-Type: application/json' --data-binary "$body" "$CF_API$path")" || { rm -f "$cfg"; return 1; }
   else
