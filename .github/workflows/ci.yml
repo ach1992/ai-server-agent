@@ -20,11 +20,11 @@ jobs:
           set -Eeuo pipefail
           python3 scripts/apply-rulesets-root-fix.py
           echo '== shell syntax =='
-          bash -n manage.sh tests/cloudflare_rulesets_pagination.sh
+          bash -n manage.sh tests/cloudflare_rulesets_pagination.sh tests/cloudflare_transaction.sh
           echo '== rulesets contract =='
           bash tests/cloudflare_rulesets_pagination.sh
-          echo '== transaction rollback trace =='
-          bash -x tests/cloudflare_transaction.sh
+          echo '== transaction rollback =='
+          bash tests/cloudflare_transaction.sh
           echo '== crash recovery =='
           bash tests/cloudflare_crash_recovery.sh
           echo '== diff check =='
@@ -38,7 +38,7 @@ jobs:
           sed -i 's/RELEASE_VERSION: v0.1.3/RELEASE_VERSION: v0.1.4/' .github/workflows/ci.yml
           test "$(grep -Fc 'RELEASE_VERSION: v0.1.4' .github/workflows/ci.yml)" -eq 1
           git rm .github/workflows/apply-rulesets-root-fix.yml scripts/apply-rulesets-root-fix.py
-          git add manage.sh tests/cloudflare_rulesets_pagination.sh .github/workflows/ci.yml
+          git add manage.sh tests/cloudflare_rulesets_pagination.sh tests/cloudflare_transaction.sh .github/workflows/ci.yml
           git diff --cached --check
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
