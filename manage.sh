@@ -962,7 +962,7 @@ save_cloudflare_transaction_state(){
 validate_cloudflare_transaction_state(){
   local f="${1:-$CF_TXN_STATE}" size
   [ -f "$f" ] && [ ! -L "$f" ] || return 1
-  [ "$(stat -c '%u:%g:%:a' "$f" 2>/dev/null)" = "0:0:600" ] || [ "$(stat -c '%u:%g:%a' "$f" 2>/dev/null)" = "0:0:600" ] || return 1
+  [ "$(stat -c '%u:%g:%a' "$f" 2>/dev/null)" = "0:0:600" ] || return 1
   size="$(stat -c '%s' "$f" 2>/dev/null || printf 999999)"; [ "$size" -gt 0 ] && [ "$size" -le 131072 ] || return 1
   jq -e '
     def hex64: type=="string" and test("^[0-9a-f]{64}$");
