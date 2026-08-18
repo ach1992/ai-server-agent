@@ -41,11 +41,15 @@ grep -Fxq "$CF_API/zones/zone1/rulesets?per_page=50" "$CALL_LOG" || fail 'first 
 grep -Fxq "$CF_API/zones/zone1/rulesets?per_page=50&cursor=cursor%20%2B%2F%3D" "$CALL_LOG" || fail 'opaque cursor was not URL-encoded'
 if grep -Fq 'per_page=100' "$CALL_LOG"; then fail 'invalid per_page=100 was sent to Cloudflare'; fi
 
-# If Cloudflare omits cursor metadata, completeness is unknown. Fail closed
+# If Cloudflare omits pagination metadata, completeness is unknown. Fail closed
 # rather than treating a potentially truncated page as proof of absence.
 curl(){ printf '%s' '{"success":true,"result":[]}'; }
 if cf_api GET '/zones/zone1/rulesets?per_page=100' >/dev/null 2>&1; then
-  fail 'missing pagination metadata was accepted as complete discovery'
+  fail 'missing result_info was accepted as complete discovery'
+fi
+curl(){ printf '%s' '{"success":true,"result":[],"result_info":{}}'; }
+if cf_api GET '/zones/zone1/rulesets?per_page=100' >/dev/null 2>&1; then
+  fail 'missing cursor metadata was accepted as complete discovery'
 fi
 
 # A non-advancing cursor must also fail closed instead of looping or returning
