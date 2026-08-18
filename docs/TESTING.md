@@ -209,6 +209,10 @@ For privileged/cloudflare/root-boundary changes, run the applicable security tes
 
 Independent HIGH_ASSURANCE review is an integration/release gate for a frozen candidate, not an iterative lint service for a moving implementation. During active development, use self-review, targeted behavioral tests and current CI to converge. When the accepted feature scope is complete, freeze an exact base/HEAD and obtain independent review if the risk/profile requires it. If a BLOCKER/REQUIRED finding changes the candidate, that review identity is obsolete; fix the root cause, revalidate and refreeze before another independent gate review.
 
+GitHub Copilot pull-request review is not part of this project's review model. Do not request, enable, or use Copilot review for iterative review, project review evidence, or an independent HIGH_ASSURANCE gate. Historical Copilot review results may be retained as past finding context, but they do not satisfy a current review requirement.
+
+When review independent from the Master is required, the Master must prepare a ready-to-paste `INDEPENDENT REVIEW CHAT` prompt using the `github-project-orchestrator` independent-review handoff. The user relays that prompt to a separate fresh reviewer context, person, or review tool. The returned review must identify the exact candidate SHA it reviewed, state `APPROVE` or `CHANGES_REQUIRED`, and list evidence-backed findings; the Master then reconciles the result and refreshes candidate/base identity before relying on it.
+
 Before a stable release is published:
 
 1. the intended change must be reviewed against the current base-to-head diff;
