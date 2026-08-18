@@ -311,12 +311,12 @@ cf_api(){
         page_path="$ruleset_base?per_page=50"
       fi
       page_out="$(curl -sS --fail-with-body "${retry_args[@]}" --request GET --config "$cfg" -H 'Content-Type: application/json' "$CF_API$page_path")" || { rm -f "$cfg"; return 1; }
-      if ! jq -e '.success == true and (.result|type)=="array" and (.result_info|type)=="object" and (.result_info.cursors|type)=="object"' >/dev/null 2>&1 <<<"$page_out"; then
+      if ! jq -e '.success == true and (.result|type)=="array" and all(.result[]; type=="object" and (.id|type)=="string" and (.id|length)>0 and (.kind|type)=="string" and (.kind|length)>0 and (.phase|type)=="string" and (.phase|length)>0) and (.result_info|type)=="object" and (.result_info.cursors|type)=="object" and (((.result_info.cursors|has("after"))|not) or ((.result_info.cursors.after|type)=="string" and (.result_info.cursors.after|length)>0))' >/dev/null 2>&1 <<<"$page_out"; then
         jq -r '.errors[]?.message // empty' <<<"$page_out" >&2 || true
         rm -f "$cfg"; return 1
       fi
       merged="$(jq -cn --argjson acc "$merged" --argjson response "$page_out" '$acc + $response.result')"
-      next_cursor="$(jq -r '.result_info.cursors.after // empty' <<<"$page_out")"
+      next_cursor="$(jq -r 'if (.result_info.cursors|has("after")) then .result_info.cursors.after else empty end' <<<"$page_out")"
       [ -n "$next_cursor" ] || break
       [ "$next_cursor" != "$cursor" ] || { rm -f "$cfg"; return 1; }
       cursor="$next_cursor"
