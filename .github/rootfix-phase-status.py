@@ -11,16 +11,16 @@ for line in src[start:]:
     else:
         break
 script = '\n'.join(body) + '\n'
-old = '''    fi
+old = '''  fi
+  rc=$?
+  [ "$rc" -eq 3 ] && return 3
+  return 2
+'''
+new = '''  else
     rc=$?
     [ "$rc" -eq 3 ] && return 3
     return 2
-'''
-new = '''    else
-      rc=$?
-      [ "$rc" -eq 3 ] && return 3
-      return 2
-    fi
+  fi
 '''
 if script.count(old) != 1:
     raise SystemExit(f'unexpected phase helper status shape: {script.count(old)}')
