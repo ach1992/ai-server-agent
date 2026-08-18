@@ -1,4 +1,4 @@
-name: Rootfix Dedicated Rulesets Helper
+name: Rootfix Phase Entrypoint Discovery
 
 on:
   pull_request:
@@ -16,7 +16,7 @@ jobs:
         with:
           ref: fix/cloudflare-rulesets-contract-v2
           fetch-depth: 0
-      - name: Centralize Rulesets discovery and validate
+      - name: Replace zone-wide Rulesets listing with exact phase entrypoints
         shell: bash
         run: |
           set -Eeuo pipefail
@@ -26,130 +26,191 @@ jobs:
 
           manage = Path('manage.sh')
           text = manage.read_text()
-          start = text.index('cf_api(){\n')
+
+          # Remove the zone-wide Rulesets list/pagination helper entirely.
+          start = text.index('cf_list_zone_rulesets(){\n')
           end = text.index('\n\ncf_delete_owned(){', start)
-          new = textwrap.dedent(r'''
-          cf_report_api_errors(){
-            local payload="$1"
-            jq -r '.errors[]? | if .code != null then "Cloudflare API error \(.code): \(.message)" else .message end' <<<"$payload" >&2 2>/dev/null || true
-          }
+          text = text[:start] + text[end:]
 
-          cf_api(){
-            local method="$1" path="$2" body="${3:-}" cfg out
-            local -a retry_args=()
-            cfg="$(mktemp)"; chmod 0600 "$cfg"
-            printf 'header = "Authorization: Bearer %s"\n' "$CF_TOKEN" > "$cfg"
-            case "$method" in GET|PATCH|DELETE) retry_args=(--retry 2) ;; esac
-            if [ -n "$body" ]; then
-              if ! out="$(curl -sS --fail-with-body "${retry_args[@]}" --request "$method" --config "$cfg" -H 'Content-Type: application/json' --data-binary "$body" "$CF_API$path")"; then
-                cf_report_api_errors "$out"
-                rm -f "$cfg"
-                return 1
-              fi
+          # Optional GETs keep 404 as a first-class absence result, but expose
+          # structured Cloudflare errors for all other API failures.
+          old_optional = '''  [ "$status" = "404" ] && return 3\n  [[ "$status" =~ ^2[0-9][0-9]$ ]] || return 2\n  jq -e '.success == true' >/dev/null 2>&1 <<<"$body" || return 2\n  printf '%s' "$body"\n}\n'''
+          new_optional = '''  [ "$status" = "404" ] && return 3\n  [[ "$status" =~ ^2[0-9][0-9]$ ]] || { cf_report_api_errors "$body"; return 2; }\n  jq -e '.success == true' >/dev/null 2>&1 <<<"$body" || { cf_report_api_errors "$body"; return 2; }\n  printf '%s' "$body"\n}\n'''
+          if text.count(old_optional) != 1:
+              raise SystemExit(f'unexpected cf_get_optional shape: {text.count(old_optional)}')
+          text = text.replace(old_optional, new_optional)
+
+          marker = '\n\ncf_dns_fingerprint(){'
+          helper = textwrap.dedent(r'''
+
+          cf_get_phase_entrypoint(){
+            local zone_id="$1" phase="$2" res rc result
+            [ -n "$zone_id" ] || return 2
+            case "$phase" in
+              http_request_origin|http_config_settings) ;;
+              *) return 2 ;;
+            esac
+            if res="$(cf_get_optional "/zones/$zone_id/rulesets/phases/$phase/entrypoint")"; then
+              result="$(jq -ce --arg phase "$phase" '.result | select(type=="object" and (.id|type)=="string" and (.id|length)>0 and .kind=="zone" and .phase==$phase and (.rules|type)=="array")' <<<"$res")" || return 2
+              printf '%s\n' "$result"
+              return 0
+            fi
+            rc=$?
+            [ "$rc" -eq 3 ] && return 3
+            return 2
+          }
+          ''').rstrip()
+          if text.count(marker) != 1:
+              raise SystemExit('unexpected cf_get_optional insertion point')
+          text = text.replace(marker, helper + marker)
+
+          # Recovery now searches the single documented phase entrypoint rather
+          # than listing/filtering all zone Rulesets.
+          start = text.index('cf_find_rule_by_marker(){\n')
+          end = text.index('\n\ncf_recover_pending_write(){', start)
+          replacement = textwrap.dedent(r'''
+          cf_find_rule_by_marker(){
+            local zone_id="$1" phase="$2" ref="$3" marker="$4" entry rc ruleset_id exact_ids ref_ids id exact_count=0 ref_count=0 found=""
+            if entry="$(cf_get_phase_entrypoint "$zone_id" "$phase")"; then
+              ruleset_id="$(jq -r '.id' <<<"$entry")"
             else
-              if ! out="$(curl -sS --fail-with-body "${retry_args[@]}" --request "$method" --config "$cfg" -H 'Content-Type: application/json' "$CF_API$path")"; then
-                cf_report_api_errors "$out"
-                rm -f "$cfg"
-                return 1
-              fi
+              rc=$?
+              [ "$rc" -eq 3 ] && return 1
+              return 2
             fi
-            rm -f "$cfg"
-            if ! jq -e '.success == true' >/dev/null 2>&1 <<<"$out"; then
-              cf_report_api_errors "$out"
-              return 1
-            fi
-            printf '%s' "$out"
+            exact_ids="$(jq -r --arg ref "$ref" --arg marker "$marker" '.rules[]? | select((.ref // "")==$ref and ((.description // "") | endswith(" txn:"+$marker))) | .id // empty' <<<"$entry")"
+            ref_ids="$(jq -r --arg ref "$ref" '.rules[]? | select((.ref // "")==$ref) | .id // empty' <<<"$entry")"
+            while IFS= read -r id; do [ -n "$id" ] || continue; found="$ruleset_id|$id"; exact_count=$((exact_count + 1)); done <<<"$exact_ids"
+            while IFS= read -r id; do [ -n "$id" ] || continue; ref_count=$((ref_count + 1)); done <<<"$ref_ids"
+            [ "$exact_count" -eq 1 ] && { printf '%s\n' "$found"; return 0; }
+            [ "$exact_count" -eq 0 ] || return 2
+            [ "$ref_count" -eq 0 ] && return 1
+            return 2
           }
+          ''').rstrip()
+          text = text[:start] + replacement + text[end:]
 
-          cf_list_zone_rulesets(){
-            local zone_id="$1" cursor="" encoded_cursor page_path page_out next_cursor page_count pages=0 merged='[]'
-            local seen_cursor_hashes='|' cursor_hash
-            while :; do
-              pages=$((pages + 1)); [ "$pages" -le 1000 ] || return 1
-              if [ -n "$cursor" ]; then
-                encoded_cursor="$(jq -rn --arg cursor "$cursor" '$cursor|@uri')"
-                page_path="/zones/$zone_id/rulesets?per_page=50&cursor=$encoded_cursor"
-              else
-                page_path="/zones/$zone_id/rulesets?per_page=50"
-              fi
-              page_out="$(cf_api GET "$page_path")" || return 1
-              if ! jq -e 'def valid_kind: .=="managed" or .=="custom" or .=="root" or .=="zone"; def valid_phase: .=="ddos_l4" or .=="ddos_l7" or .=="http_config_settings" or .=="http_custom_errors" or .=="http_log_custom_fields" or .=="http_ratelimit" or .=="http_request_cache_settings" or .=="http_request_dynamic_redirect" or .=="http_request_firewall_custom" or .=="http_request_firewall_managed" or .=="http_request_late_transform" or .=="http_request_origin" or .=="http_request_redirect" or .=="http_request_sanitize" or .=="http_request_sbfm" or .=="http_request_transform" or .=="http_response_cache_settings" or .=="http_response_compression" or .=="http_response_firewall_managed" or .=="http_response_headers_transform" or .=="magic_transit" or .=="magic_transit_ids_managed" or .=="magic_transit_managed" or .=="magic_transit_ratelimit"; .success == true and (.result|type)=="array" and all(.result[]; type=="object" and (.id|type)=="string" and (.id|length)>0 and (.kind|type)=="string" and (.kind|valid_kind) and (.phase|type)=="string" and (.phase|valid_phase)) and (if has("result_info") then ((.result_info|type)=="object" and (if (.result_info|has("cursors")) then ((.result_info.cursors|type)=="object" and (if (.result_info.cursors|has("after")) then ((.result_info.cursors.after|type)=="string" and (.result_info.cursors.after|length)>0) else true end)) else true end)) else true end)' >/dev/null 2>&1 <<<"$page_out"; then
-                cf_report_api_errors "$page_out"
-                return 1
-              fi
-              merged="$(jq -cn --argjson acc "$merged" --argjson response "$page_out" '$acc + $response.result')"
-              next_cursor="$(jq -r '.result_info.cursors.after // empty' <<<"$page_out")"
-              page_count="$(jq '.result | length' <<<"$page_out")"
-              if [ -z "$next_cursor" ] && [ "$page_count" -eq 50 ]; then
-                printf 'Cloudflare Rulesets returned a full 50-item page without a continuation cursor; refusing to infer complete discovery.\n' >&2
-                return 1
-              fi
-              [ -n "$next_cursor" ] || break
-              cursor_hash="$(printf '%s' "$next_cursor" | sha256sum | awk '{print $1}')"
-              case "$seen_cursor_hashes" in
-                *"|$cursor_hash|"*)
-                  printf 'Cloudflare Rulesets returned a repeated pagination cursor; refusing a cyclic/incomplete discovery.\n' >&2
-                  return 1
-                  ;;
-              esac
-              seen_cursor_hashes="${seen_cursor_hashes}${cursor_hash}|"
-              cursor="$next_cursor"
-            done
-            jq -cn --argjson result "$merged" '{success:true,result:$result}'
-          }
-          ''').lstrip()
-          text = text[:start] + new.rstrip() + text[end:]
-          old_call = 'cf_api GET "/zones/$zone_id/rulesets"'
-          count = text.count(old_call)
-          if count != 3:
-              raise SystemExit(f'expected 3 Rulesets list callers, found {count}')
-          text = text.replace(old_call, 'cf_list_zone_rulesets "$zone_id"')
-          if 'rulesets?per_page=100' in text:
-              raise SystemExit('legacy Rulesets sentinel remains in manage.sh')
+          # Reconcile Origin Rules via the exact phase entrypoint. 404 is the
+          # only absence signal allowed to reach the create path.
+          old_local = '  local list ruleset_id rule_ref ref_match rule_body create_body res ruleset marker pending_rule_body ruleset_desc verify_id rule current_fingerprint pending_fingerprint\n'
+          new_local = '  local phase_entry rc ruleset_id rule_ref ref_match rule_body create_body res ruleset marker pending_rule_body ruleset_desc verify_id rule current_fingerprint pending_fingerprint\n'
+          if text.count(old_local) != 2:
+              raise SystemExit(f'unexpected reconcile local shape: {text.count(old_local)}')
+          text = text.replace(old_local, new_local)
+
+          old_origin_discovery = '''  list="$(cf_list_zone_rulesets "$zone_id")" || die "Cloudflare ruleset lookup failed."\n  ruleset_id="$(jq -r '.result[]? | select(.kind=="zone" and .phase=="http_request_origin") | .id' <<<"$list" | head -n1)"\n'''
+          new_origin_discovery = '''  if phase_entry="$(cf_get_phase_entrypoint "$zone_id" http_request_origin)"; then\n    ruleset_id="$(jq -r '.id' <<<"$phase_entry")"\n    ruleset="$(jq -cn --argjson result "$phase_entry" '{success:true,result:$result}')"\n  else\n    rc=$?\n    [ "$rc" -eq 3 ] || die "Cloudflare Origin Rules entrypoint lookup failed."\n    ruleset_id=""\n  fi\n'''
+          if text.count(old_origin_discovery) != 1:
+              raise SystemExit('unexpected Origin Rules discovery shape')
+          text = text.replace(old_origin_discovery, new_origin_discovery)
+          old_origin_reread = '    ruleset="$(cf_api GET "/zones/$zone_id/rulesets/$ruleset_id")" || die "Could not read Cloudflare Origin Rules ruleset."\n'
+          if text.count(old_origin_reread) != 1:
+              raise SystemExit('unexpected Origin Rules reread shape')
+          text = text.replace(old_origin_reread, '')
+
+          old_ssl_discovery = '''  list="$(cf_list_zone_rulesets "$zone_id")" || die "Cloudflare ruleset lookup failed."\n  ruleset_id="$(jq -r '.result[]? | select(.kind=="zone" and .phase=="http_config_settings") | .id' <<<"$list" | head -n1)"\n'''
+          new_ssl_discovery = '''  if phase_entry="$(cf_get_phase_entrypoint "$zone_id" http_config_settings)"; then\n    ruleset_id="$(jq -r '.id' <<<"$phase_entry")"\n    ruleset="$(jq -cn --argjson result "$phase_entry" '{success:true,result:$result}')"\n  else\n    rc=$?\n    [ "$rc" -eq 3 ] || die "Cloudflare Configuration Rules entrypoint lookup failed."\n    ruleset_id=""\n  fi\n'''
+          if text.count(old_ssl_discovery) != 1:
+              raise SystemExit('unexpected Configuration Rules discovery shape')
+          text = text.replace(old_ssl_discovery, new_ssl_discovery)
+          old_ssl_reread = '    ruleset="$(cf_api GET "/zones/$zone_id/rulesets/$ruleset_id")" || die "Could not read Cloudflare Configuration Rules ruleset."\n'
+          if text.count(old_ssl_reread) != 1:
+              raise SystemExit('unexpected Configuration Rules reread shape')
+          text = text.replace(old_ssl_reread, '')
+
+          if 'cf_list_zone_rulesets' in text or '/rulesets?per_page=50' in text or 'rulesets?per_page=100' in text:
+              raise SystemExit('zone-wide Rulesets discovery remains in production code')
           manage.write_text(text)
 
-          pagination = Path('tests/cloudflare_rulesets_pagination.sh')
-          p = pagination.read_text().replace("cf_api GET '/zones/zone1/rulesets'", 'cf_list_zone_rulesets zone1')
-          if "cf_api GET '/zones/zone1/rulesets'" in p:
-              raise SystemExit('pagination test still calls generic API for complete discovery')
-          marker = "printf 'Cloudflare Rulesets pagination contract passed.\\n'\n"
-          cycle = textwrap.dedent(r'''
-          # A multi-node cursor cycle must be detected immediately, not only by the page cap.
-          curl(){
-            local url="${*: -1}"
-            case "$url" in
-              "$CF_API/zones/zone1/rulesets?per_page=50")
-                printf '%s' '{"success":true,"result":[],"result_info":{"cursors":{"after":"cycle-a"}}}' ;;
-              "$CF_API/zones/zone1/rulesets?per_page=50&cursor=cycle-a")
-                printf '%s' '{"success":true,"result":[],"result_info":{"cursors":{"after":"cycle-b"}}}' ;;
-              "$CF_API/zones/zone1/rulesets?per_page=50&cursor=cycle-b")
-                printf '%s' '{"success":true,"result":[],"result_info":{"cursors":{"after":"cycle-a"}}}' ;;
-              *) return 22 ;;
-            esac
-          }
-          if cf_list_zone_rulesets zone1 >/dev/null 2>&1; then
-            fail 'multi-node pagination cursor cycle was accepted'
+          # Replace the pagination regression with a phase-entrypoint contract.
+          discovery = Path('tests/cloudflare_rulesets_discovery.sh')
+          discovery.write_text(textwrap.dedent(r'''
+          #!/usr/bin/env bash
+          set -Eeuo pipefail
+
+          ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+          export AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1
+          # shellcheck source=../manage.sh
+          source "$ROOT/manage.sh"
+
+          CF_TOKEN=test
+          CF_API="https://api.cloudflare.com/client/v4"
+          TMP="$(mktemp -d)"
+          trap 'rm -rf "$TMP"' EXIT
+          CALL_LOG="$TMP/calls.log"
+
+          fail(){ echo "FAIL: $*" >&2; exit 1; }
+
+          if grep -Fq 'cf_list_zone_rulesets' "$ROOT/manage.sh" || grep -Fq '/rulesets?per_page=' "$ROOT/manage.sh"; then
+            fail 'production code still depends on zone-wide Rulesets pagination'
           fi
 
-          printf 'Cloudflare Rulesets pagination contract passed.\n'
-          ''').lstrip()
-          if p.count(marker) != 1:
-              raise SystemExit('unexpected pagination test footer')
-          p = p.replace(marker, cycle)
-          pagination.write_text(p)
+          curl(){
+            local url="${*: -1}"
+            printf '%s\n' "$url" >> "$CALL_LOG"
+            case "$url" in
+              "$CF_API/zones/zone1/rulesets/phases/http_request_origin/entrypoint")
+                printf '%s\n200' '{"success":true,"result":{"id":"origin-set","kind":"zone","phase":"http_request_origin","rules":[{"id":"r1","ref":"origin-ref"}]}}'
+                ;;
+              "$CF_API/zones/zone1/rulesets/phases/http_config_settings/entrypoint")
+                printf '%s\n404' '{"success":false,"errors":[{"code":10000,"message":"entrypoint not found"}]}'
+                ;;
+              *) echo "unexpected curl URL: $url" >&2; return 22 ;;
+            esac
+          }
 
+          origin="$(cf_get_phase_entrypoint zone1 http_request_origin)" || fail 'existing Origin Rules entrypoint was not discovered'
+          [ "$(jq -r '.id' <<<"$origin")" = origin-set ] || fail 'wrong Origin Rules entrypoint ID'
+          [ "$(jq -r '.phase' <<<"$origin")" = http_request_origin ] || fail 'wrong Origin Rules phase'
+          grep -Fxq "$CF_API/zones/zone1/rulesets/phases/http_request_origin/entrypoint" "$CALL_LOG" || fail 'exact Origin Rules phase endpoint was not used'
+
+          set +e
+          cf_get_phase_entrypoint zone1 http_config_settings >/dev/null 2>&1
+          rc=$?
+          set -e
+          [ "$rc" -eq 3 ] || fail "missing Configuration Rules entrypoint did not return absence status: $rc"
+
+          before="$(wc -l < "$CALL_LOG")"
+          set +e
+          cf_get_phase_entrypoint zone1 http_request_snippets >/dev/null 2>&1
+          rc=$?
+          set -e
+          [ "$rc" -eq 2 ] || fail 'unsupported internal phase input was not rejected'
+          [ "$(wc -l < "$CALL_LOG")" -eq "$before" ] || fail 'unsupported phase input reached Cloudflare'
+
+          # A successful entrypoint response must match the exact requested phase,
+          # zone-level kind, non-empty ID, and contain a rules array.
+          for bad in \
+            '{"success":true,"result":{"id":"","kind":"zone","phase":"http_request_origin","rules":[]}}' \
+            '{"success":true,"result":{"id":"r1","kind":"root","phase":"http_request_origin","rules":[]}}' \
+            '{"success":true,"result":{"id":"r1","kind":"zone","phase":"http_config_settings","rules":[]}}' \
+            '{"success":true,"result":{"id":"r1","kind":"zone","phase":"http_request_origin","rules":{}}}'; do
+            curl(){ printf '%s\n200' "$bad"; }
+            if cf_get_phase_entrypoint zone1 http_request_origin >/dev/null 2>&1; then
+              fail "malformed phase entrypoint was accepted: $bad"
+            fi
+          done
+
+          # Non-404 API failures are diagnostics, not absence, and their structured
+          # Cloudflare error is surfaced without exposing the bearer token.
+          curl(){ printf '%s\n403' '{"success":false,"errors":[{"code":9109,"message":"permission denied"}]}' ; }
+          set +e
+          err="$(cf_get_phase_entrypoint zone1 http_request_origin 2>&1 >/dev/null)"
+          rc=$?
+          set -e
+          [ "$rc" -eq 2 ] || fail 'non-404 phase lookup failure was treated as absence'
+          grep -Fq 'Cloudflare API error 9109: permission denied' <<<"$err" || fail 'structured Cloudflare phase lookup error was hidden'
+          if grep -Fq 'Bearer test' <<<"$err"; then fail 'Cloudflare token leaked into diagnostics'; fi
+
+          printf 'Cloudflare Rulesets phase-entrypoint discovery contract passed.\n'
+          ''').lstrip())
+          discovery.chmod(0o755)
+          Path('tests/cloudflare_rulesets_pagination.sh').unlink()
+
+          # Transaction/recovery fixtures now mock the phase-level abstraction.
           txn = Path('tests/cloudflare_transaction.sh')
           t = txn.read_text()
           old_origin = textwrap.dedent(r'''
-          cf_api(){
-            case "$2" in
-              '/zones/zone1/rulesets') printf '%s' '{"success":true,"result":[{"id":"origin-set-race","kind":"zone","phase":"http_request_origin"}]}' ;;
-              '/zones/zone1/rulesets/origin-set-race') printf '%s' '{"success":true,"result":{"rules":[{"id":"external-origin","ref":"ai_server_agent_test","description":"AI Server Agent origin port"}]}}' ;;
-              *) return 2 ;;
-            esac
-          }
-          ''').lstrip()
-          new_origin = textwrap.dedent(r'''
           cf_list_zone_rulesets(){ printf '%s' '{"success":true,"result":[{"id":"origin-set-race","kind":"zone","phase":"http_request_origin"}]}' ; }
           cf_api(){
             case "$2" in
@@ -158,19 +219,12 @@ jobs:
             esac
           }
           ''').lstrip()
+          new_origin = '''cf_get_phase_entrypoint(){ printf '%s' '{"id":"origin-set-race","kind":"zone","phase":"http_request_origin","rules":[{"id":"external-origin","ref":"ai_server_agent_test","description":"AI Server Agent origin port"}]}' ; }\n'''
           if t.count(old_origin) != 1:
-              raise SystemExit('unexpected origin transaction mock shape')
+              raise SystemExit('unexpected Origin recovery fixture shape')
           t = t.replace(old_origin, new_origin)
+
           old_ssl = textwrap.dedent(r'''
-          cf_api(){
-            case "$2" in
-              '/zones/zone1/rulesets') printf '%s' '{"success":true,"result":[{"id":"ssl-set-owned","kind":"zone","phase":"http_config_settings"}]}' ;;
-              '/zones/zone1/rulesets/ssl-set-owned') jq -nc --argjson rule "$ssl_rule_json" '{success:true,result:{rules:[$rule]}}' ;;
-              *) return 2 ;;
-            esac
-          }
-          ''').lstrip()
-          new_ssl = textwrap.dedent(r'''
           cf_list_zone_rulesets(){ printf '%s' '{"success":true,"result":[{"id":"ssl-set-owned","kind":"zone","phase":"http_config_settings"}]}' ; }
           cf_api(){
             case "$2" in
@@ -179,17 +233,19 @@ jobs:
             esac
           }
           ''').lstrip()
+          new_ssl = '''cf_get_phase_entrypoint(){ jq -nc --argjson rule "$ssl_rule_json" '{id:"ssl-set-owned",kind:"zone",phase:"http_config_settings",rules:[$rule]}' ; }\n'''
           if t.count(old_ssl) != 1:
-              raise SystemExit('unexpected SSL transaction mock shape')
+              raise SystemExit('unexpected SSL fixture shape')
           t = t.replace(old_ssl, new_ssl)
           txn.write_text(t)
           PY
-          bash -n manage.sh tests/cloudflare_transaction.sh tests/cloudflare_rulesets_pagination.sh
+
+          bash -n manage.sh tests/cloudflare_transaction.sh tests/cloudflare_rulesets_discovery.sh
           sudo bash tests/cloudflare_transaction.sh
-          bash tests/cloudflare_rulesets_pagination.sh
+          bash tests/cloudflare_rulesets_discovery.sh
           git diff --check
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          git add manage.sh tests/cloudflare_rulesets_pagination.sh tests/cloudflare_transaction.sh
-          git commit -m 'refactor: isolate Cloudflare Rulesets discovery'
+          git add manage.sh tests/cloudflare_transaction.sh tests/cloudflare_rulesets_discovery.sh tests/cloudflare_rulesets_pagination.sh
+          git commit -m 'refactor: discover exact Cloudflare phase entrypoints'
           git push origin HEAD:fix/cloudflare-rulesets-contract-v2
