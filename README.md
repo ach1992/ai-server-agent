@@ -19,7 +19,7 @@ AI Server Agent does not require nginx, Apache, Caddy, Docker, PHP, a database, 
 
 Stable installation starts with a small bootstrap loaded from an **immutable published release tag**, separate from the release `install.sh` asset it authenticates. For the v0.1.2 generation, the bootstrap trust anchor is the immutable `v0.1.2` release tag. GitHub locks the associated tag when an immutable release is published, so this path does not depend on a feature branch or merge strategy.
 
-After v0.1.2 is published as an immutable release, install the latest stable release with:
+`v0.1.2` is published as an immutable release. Install the latest stable release with:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.2/scripts/install-stable.sh | bash
@@ -40,7 +40,8 @@ The stable bootstrap does **not** fall back to `main`. It:
 3. requires exactly one uploaded `install.sh` asset at the exact tag-scoped release URL;
 4. requires the GitHub release asset `sha256:` digest;
 5. downloads `install.sh` without root execution and verifies its bytes against that digest;
-6. invokes `sudo bash` only after the installer bytes are authenticated.
+6. crosses the privilege boundary only after that unprivileged verification succeeds;
+7. copies the candidate into a root-controlled staging directory, re-verifies the same authenticated digest on the protected copy, and executes only that protected copy.
 
 ### What the verified release installer does
 
@@ -163,7 +164,11 @@ sudo ai-server-agent-manage chatgpt-setup
 
 The manager prints the MCP URL and the protected bearer-auth setup guidance. The Authorization value is stored on the server and is revealed only after an explicit terminal confirmation.
 
-The public endpoint remains bearer-authenticated. Treat the bearer credential as a privileged server-control credential.
+ChatGPT full MCP/custom-app support is an evolving client-side feature. For Business workspaces, the current flow is controlled by workspace admins/owners through Developer mode and the custom-app UI on ChatGPT web. Use the current OpenAI product guidance at connection time rather than treating historical UI labels as a stable protocol contract.
+
+See [docs/CONNECT_CHATGPT.md](docs/CONNECT_CHATGPT.md) for the direct-public and Secure MCP Tunnel topologies, current ChatGPT-side setup flow, and end-to-end validation checklist.
+
+The public endpoint remains bearer-authenticated. Treat the bearer credential as a privileged server-control credential and provide it only to the trusted ChatGPT connection UI when configuring the app.
 
 ## Management commands
 
