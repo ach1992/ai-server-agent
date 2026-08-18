@@ -288,56 +288,39 @@ load_cf_token(){
   [ -n "$CF_TOKEN" ] || die "Cloudflare API token is empty."
 }
 
+cf_report_api_errors(){
+  local payload="$1"
+  jq -r '.errors[]? | if .code != null then "Cloudflare API error \(.code): \(.message)" else .message end' <<<"$payload" >&2 2>/dev/null || true
+}
+
 cf_api(){
   local method="$1" path="$2" body="${3:-}" cfg out
-  local ruleset_base cursor="" encoded_cursor page_path page_out next_cursor pages=0 merged='[]'
   local -a retry_args=()
   cfg="$(mktemp)"; chmod 0600 "$cfg"
   printf 'header = "Authorization: Bearer %s"\n' "$CF_TOKEN" > "$cfg"
   case "$method" in GET|PATCH|DELETE) retry_args=(--retry 2) ;; esac
-
-  # The Rulesets list endpoint is cursor-paginated and currently caps per_page at 50.
-  # Existing callers request a complete list with the legacy per_page=100 sentinel;
-  # translate that logical request into bounded cursor traversal so absence decisions
-  # are made only after every returned page has been inspected.
-  if [ "$method" = GET ] && [[ "$path" =~ ^(/zones/[^/?]+/rulesets)\?per_page=100$ ]]; then
-    ruleset_base="${BASH_REMATCH[1]}"
-    while :; do
-      pages=$((pages + 1)); [ "$pages" -le 1000 ] || { rm -f "$cfg"; return 1; }
-      if [ -n "$cursor" ]; then
-        encoded_cursor="$(jq -rn --arg cursor "$cursor" '$cursor|@uri')"
-        page_path="$ruleset_base?per_page=50&cursor=$encoded_cursor"
-      else
-        page_path="$ruleset_base?per_page=50"
-      fi
-      page_out="$(curl -sS --fail-with-body "${retry_args[@]}" --request GET --config "$cfg" -H 'Content-Type: application/json' "$CF_API$page_path")" || { rm -f "$cfg"; return 1; }
-      if ! jq -e 'def valid_kind: .=="managed" or .=="custom" or .=="root" or .=="zone"; def valid_phase: .=="ddos_l4" or .=="ddos_l7" or .=="http_config_settings" or .=="http_custom_errors" or .=="http_log_custom_fields" or .=="http_ratelimit" or .=="http_request_cache_settings" or .=="http_request_dynamic_redirect" or .=="http_request_firewall_custom" or .=="http_request_firewall_managed" or .=="http_request_late_transform" or .=="http_request_origin" or .=="http_request_redirect" or .=="http_request_sanitize" or .=="http_request_sbfm" or .=="http_request_transform" or .=="http_response_cache_settings" or .=="http_response_compression" or .=="http_response_firewall_managed" or .=="http_response_headers_transform" or .=="magic_transit" or .=="magic_transit_ids_managed" or .=="magic_transit_managed" or .=="magic_transit_ratelimit"; .success == true and (.result|type)=="array" and all(.result[]; type=="object" and (.id|type)=="string" and (.id|length)>0 and (.kind|type)=="string" and (.kind|valid_kind) and (.phase|type)=="string" and (.phase|valid_phase)) and (.result_info|type)=="object" and (.result_info.cursors|type)=="object" and (((.result_info.cursors|has("after"))|not) or ((.result_info.cursors.after|type)=="string" and (.result_info.cursors.after|length)>0))' >/dev/null 2>&1 <<<"$page_out"; then
-        jq -r '.errors[]?.message // empty' <<<"$page_out" >&2 || true
-        rm -f "$cfg"; return 1
-      fi
-      merged="$(jq -cn --argjson acc "$merged" --argjson response "$page_out" '$acc + $response.result')"
-      next_cursor="$(jq -r 'if (.result_info.cursors|has("after")) then .result_info.cursors.after else empty end' <<<"$page_out")"
-      [ -n "$next_cursor" ] || break
-      [ "$next_cursor" != "$cursor" ] || { rm -f "$cfg"; return 1; }
-      cursor="$next_cursor"
-    done
-    rm -f "$cfg"
-    jq -cn --argjson result "$merged" '{success:true,result:$result}'
-    return 0
-  fi
-
   if [ -n "$body" ]; then
-    out="$(curl -sS --fail-with-body "${retry_args[@]}" --request "$method" --config "$cfg" -H 'Content-Type: application/json' --data-binary "$body" "$CF_API$path")" || { rm -f "$cfg"; return 1; }
+    if ! out="$(curl -sS --fail-with-body "${retry_args[@]}" --request "$method" --config "$cfg" -H 'Content-Type: application/json' --data-binary "$body" "$CF_API$path")"; then
+      cf_report_api_errors "$out"
+      rm -f "$cfg"
+      return 1
+    fi
   else
-    out="$(curl -sS --fail-with-body "${retry_args[@]}" --request "$method" --config "$cfg" -H 'Content-Type: application/json' "$CF_API$path")" || { rm -f "$cfg"; return 1; }
+    if ! out="$(curl -sS --fail-with-body "${retry_args[@]}" --request "$method" --config "$cfg" -H 'Content-Type: application/json' "$CF_API$path")"; then
+      cf_report_api_errors "$out"
+      rm -f "$cfg"
+      return 1
+    fi
   fi
   rm -f "$cfg"
   if ! jq -e '.success == true' >/dev/null 2>&1 <<<"$out"; then
-    jq -r '.errors[]?.message // empty' <<<"$out" >&2 || true
+    cf_report_api_errors "$out"
     return 1
   fi
   printf '%s' "$out"
 }
+
+
 
 cf_delete_owned(){
   local path="$1" cfg response status body
@@ -359,9 +342,43 @@ cf_get_optional(){
   rm -f "$cfg"
   status="${response##*$'\n'}"; body="${response%$'\n'*}"
   [ "$status" = "404" ] && return 3
-  [[ "$status" =~ ^2[0-9][0-9]$ ]] || return 2
-  jq -e '.success == true' >/dev/null 2>&1 <<<"$body" || return 2
+  [[ "$status" =~ ^2[0-9][0-9]$ ]] || { cf_report_api_errors "$body"; return 2; }
+  jq -e '.success == true' >/dev/null 2>&1 <<<"$body" || { cf_report_api_errors "$body"; return 2; }
   printf '%s' "$body"
+}
+
+cf_get_phase_entrypoint(){
+  local zone_id="$1" phase="$2" res rc result
+  [ -n "$zone_id" ] || return 2
+  case "$phase" in
+    http_request_origin|http_config_settings) ;;
+    *) return 2 ;;
+  esac
+  if res="$(cf_get_optional "/zones/$zone_id/rulesets/phases/$phase/entrypoint")"; then
+    result="$(jq -ce --arg phase "$phase" '
+      .result
+      | select(
+          type=="object" and
+          (.id|type)=="string" and (.id|length)>0 and
+          .kind=="zone" and
+          .phase==$phase and
+          (.rules|type)=="array" and
+          (([.rules[].id] | length) == ([.rules[].id] | unique | length)) and
+          all(.rules[];
+            type=="object" and
+            (.id|type)=="string" and (.id|length)>0 and
+            ((has("ref")|not) or .ref==null or ((.ref|type)=="string" and (.ref|length)>0)) and
+            ((has("description")|not) or .description==null or (.description|type)=="string")
+          )
+        )
+    ' <<<"$res")" || return 2
+    printf '%s\n' "$result"
+    return 0
+  else
+    rc=$?
+    [ "$rc" -eq 3 ] && return 3
+    return 2
+  fi
 }
 
 cf_dns_fingerprint(){
@@ -389,18 +406,30 @@ cf_get_dns_record(){
   if res="$(cf_get_optional "/zones/$zone_id/dns_records/$dns_id")"; then
     jq -ce '.result | select(type=="object")' <<<"$res" || return 2
     return 0
+  else
+    rc=$?; [ "$rc" -eq 3 ] && return 3; return 2
   fi
-  rc=$?; [ "$rc" -eq 3 ] && return 3; return 2
 }
 
 cf_get_rule(){
-  local zone_id="$1" ruleset_id="$2" rule_id="$3" res rc rule
-  if ! res="$(cf_get_optional "/zones/$zone_id/rulesets/$ruleset_id")"; then
+  local zone_id="$1" ruleset_id="$2" rule_id="$3" res rc count
+  if res="$(cf_get_optional "/zones/$zone_id/rulesets/$ruleset_id")"; then
+    :
+  else
     rc=$?; [ "$rc" -eq 3 ] && return 3; return 2
   fi
-  rule="$(jq -c --arg id "$rule_id" '.result.rules[]? | select(.id==$id)' <<<"$res" | head -n1)"
-  [ -n "$rule" ] || return 3
-  printf '%s\n' "$rule"
+  if ! jq -e '
+    (.result|type)=="object" and
+    (.result.rules|type)=="array" and
+    all(.result.rules[]; type=="object" and (.id|type)=="string" and (.id|length)>0) and
+    (([.result.rules[].id] | length) == ([.result.rules[].id] | unique | length))
+  ' >/dev/null 2>&1 <<<"$res"; then
+    return 2
+  fi
+  count="$(jq --arg id "$rule_id" '[.result.rules[] | select(.id==$id)] | length' <<<"$res")"
+  [ "$count" -eq 0 ] && return 3
+  [ "$count" -eq 1 ] || return 2
+  jq -c --arg id "$rule_id" '.result.rules[] | select(.id==$id)' <<<"$res"
 }
 
 cf_get_origin_cert(){
@@ -408,8 +437,9 @@ cf_get_origin_cert(){
   if res="$(cf_get_optional "/certificates/$cert_id")"; then
     jq -ce '.result | select(type=="object")' <<<"$res" || return 2
     return 0
+  else
+    rc=$?; [ "$rc" -eq 3 ] && return 3; return 2
   fi
-  rc=$?; [ "$rc" -eq 3 ] && return 3; return 2
 }
 
 cf_delete_dns_if_expected(){
@@ -552,19 +582,22 @@ cf_find_dns_by_marker(){
   return 2
 }
 
+
 cf_find_rule_by_marker(){
-  local zone_id="$1" phase="$2" ref="$3" marker="$4" list ruleset_id ruleset exact_ids ref_ids id exact_count=0 ref_count=0 found=""
-  list="$(cf_api GET "/zones/$zone_id/rulesets?per_page=100")" || return 2
-  while IFS= read -r ruleset_id; do
-    [ -n "$ruleset_id" ] || continue
-    ruleset="$(cf_api GET "/zones/$zone_id/rulesets/$ruleset_id")" || return 2
-    exact_ids="$(jq -r --arg ref "$ref" --arg marker "$marker" '.result.rules[]? | select((.ref // "")==$ref and ((.description // "") | endswith(" txn:"+$marker))) | .id // empty' <<<"$ruleset")"
-    ref_ids="$(jq -r --arg ref "$ref" '.result.rules[]? | select((.ref // "")==$ref) | .id // empty' <<<"$ruleset")"
-    while IFS= read -r id; do [ -n "$id" ] || continue; found="$ruleset_id|$id"; exact_count=$((exact_count + 1)); done <<<"$exact_ids"
-    while IFS= read -r id; do [ -n "$id" ] || continue; ref_count=$((ref_count + 1)); done <<<"$ref_ids"
-  done < <(jq -r --arg phase "$phase" '.result[]? | select(.kind=="zone" and .phase==$phase) | .id // empty' <<<"$list")
-  [ "$exact_count" -eq 1 ] && { printf '%s\n' "$found"; return 0; }
-  [ "$exact_count" -eq 0 ] || return 2
+  local zone_id="$1" phase="$2" ref="$3" marker="$4" entry rc ruleset_id marker_ids ref_ids id marker_count=0 ref_count=0 found=""
+  if entry="$(cf_get_phase_entrypoint "$zone_id" "$phase")"; then
+    ruleset_id="$(jq -r '.id' <<<"$entry")"
+  else
+    rc=$?
+    [ "$rc" -eq 3 ] && return 1
+    return 2
+  fi
+  marker_ids="$(jq -r --arg marker "$marker" '.rules[] | select(((.description // "") | endswith(" txn:"+$marker))) | .id' <<<"$entry")"
+  ref_ids="$(jq -r --arg ref "$ref" '.rules[] | select((.ref // "")==$ref) | .id' <<<"$entry")"
+  while IFS= read -r id; do [ -n "$id" ] || continue; found="$ruleset_id|$id"; marker_count=$((marker_count + 1)); done <<<"$marker_ids"
+  while IFS= read -r id; do [ -n "$id" ] || continue; ref_count=$((ref_count + 1)); done <<<"$ref_ids"
+  [ "$marker_count" -eq 1 ] && { printf '%s\n' "$found"; return 0; }
+  [ "$marker_count" -eq 0 ] || return 2
   [ "$ref_count" -eq 0 ] && return 1
   return 2
 }
@@ -688,12 +721,18 @@ cf_reconcile_dns(){
 
 cf_reconcile_origin_rule(){
   local zone_id="$1" host="$2" port="$3" owned_ruleset="${4:-}" owned_rule="${5:-}" owned_fingerprint="${6:-}"
-  local list ruleset_id rule_ref ref_match rule_body create_body res ruleset marker pending_rule_body ruleset_desc verify_id rule current_fingerprint pending_fingerprint
+  local phase_entry rc ruleset_id rule_ref ref_match id_count rule_body create_body res ruleset marker pending_rule_body ruleset_desc verify_id rule current_fingerprint pending_fingerprint
   CF_RESULT_ORIGIN_RULESET_ID=""; CF_RESULT_ORIGIN_RULE_ID=""; CF_RESULT_ORIGIN_ACTION=""; CF_RESULT_ORIGIN_FINGERPRINT=""
   rule_ref="ai_server_agent_$(printf '%s' "$host" | sha256sum | cut -c1-16)"
   rule_body="$(jq -n --arg ref "$rule_ref" --arg host "$host" --argjson port "$port" '{ref:$ref,description:"AI Server Agent origin port",expression:("http.host eq \""+$host+"\""),action:"route",action_parameters:{origin:{port:$port}},enabled:true}')"
-  list="$(cf_api GET "/zones/$zone_id/rulesets?per_page=100")" || die "Cloudflare ruleset lookup failed."
-  ruleset_id="$(jq -r '.result[]? | select(.kind=="zone" and .phase=="http_request_origin") | .id' <<<"$list" | head -n1)"
+  if phase_entry="$(cf_get_phase_entrypoint "$zone_id" http_request_origin)"; then
+    ruleset_id="$(jq -r '.id' <<<"$phase_entry")"
+    ruleset="$(jq -cn --argjson result "$phase_entry" '{success:true,result:$result}')"
+  else
+    rc=$?
+    [ "$rc" -eq 3 ] || die "Cloudflare Origin Rules entrypoint lookup failed."
+    ruleset_id=""
+  fi
   if [ -z "$ruleset_id" ]; then
     marker="$(cf_new_ownership_marker)"; ruleset_desc="Hostname-scoped origin routing managed by AI Server Agent"
     pending_rule_body="$(jq -n --arg ref "$rule_ref" --arg host "$host" --argjson port "$port" --arg desc "AI Server Agent origin port txn:$marker" '{ref:$ref,description:$desc,expression:("http.host eq \""+$host+"\""),action:"route",action_parameters:{origin:{port:$port}},enabled:true}')"
@@ -707,10 +746,12 @@ cf_reconcile_origin_rule(){
     CF_RESULT_ORIGIN_FINGERPRINT="$(cf_rule_fingerprint <<<"$rule")"
     ruleset_id="$CF_RESULT_ORIGIN_RULESET_ID"
   else
-    ruleset="$(cf_api GET "/zones/$zone_id/rulesets/$ruleset_id")" || die "Could not read Cloudflare Origin Rules ruleset."
     ref_match="$(jq -r --arg ref "$rule_ref" '.result.rules[]? | select(.ref==$ref) | .id' <<<"$ruleset" | head -n1)"
-    if [ -n "$owned_rule" ] && [ "$owned_ruleset" = "$ruleset_id" ]; then
-      rule="$(jq -c --arg id "$owned_rule" --arg ref "$rule_ref" '.result.rules[]? | select(.id==$id and .ref==$ref)' <<<"$ruleset" | head -n1)"
+    if [ -n "$owned_rule" ]; then
+      [ "$owned_ruleset" = "$ruleset_id" ] || die "The recorded Agent-owned Origin Rule ruleset no longer matches the current phase entrypoint. Refusing to create or adopt a replacement automatically."
+      id_count="$(jq --arg id "$owned_rule" '[.result.rules[] | select(.id==$id)] | length' <<<"$ruleset")"
+      [ "$id_count" -le 1 ] || die "Cloudflare returned duplicate entries for the recorded Agent-owned Origin Rule ID. Refusing ambiguous reconciliation."
+      rule="$(jq -c --arg id "$owned_rule" '.result.rules[] | select(.id==$id)' <<<"$ruleset")"
       if [ -n "$rule" ]; then
         current_fingerprint="$(cf_rule_fingerprint <<<"$rule")"
         [ -z "$owned_fingerprint" ] || [ "$owned_fingerprint" = "$current_fingerprint" ] || die "The recorded Agent-owned Origin Rule changed outside this transaction. Refusing automatic mutation; resolve the Cloudflare drift explicitly."
@@ -756,12 +797,18 @@ cf_reconcile_origin_rule(){
 
 cf_reconcile_ssl_config_rule(){
   local zone_id="$1" host="$2" owned_ruleset="${3:-}" owned_rule="${4:-}" owned_fingerprint="${5:-}"
-  local list ruleset_id rule_ref ref_match rule_body create_body res ruleset marker pending_rule_body ruleset_desc verify_id rule current_fingerprint pending_fingerprint
+  local phase_entry rc ruleset_id rule_ref ref_match id_count rule_body create_body res ruleset marker pending_rule_body ruleset_desc verify_id rule current_fingerprint pending_fingerprint
   CF_RESULT_SSL_RULESET_ID=""; CF_RESULT_SSL_RULE_ID=""; CF_RESULT_SSL_ACTION=""; CF_RESULT_SSL_FINGERPRINT=""
   rule_ref="ai_server_agent_ssl_$(printf '%s' "$host" | sha256sum | cut -c1-16)"
   rule_body="$(jq -n --arg ref "$rule_ref" --arg host "$host" '{ref:$ref,description:"AI Server Agent strict SSL",expression:("http.host eq \""+$host+"\""),action:"set_config",action_parameters:{ssl:"strict"},enabled:true}')"
-  list="$(cf_api GET "/zones/$zone_id/rulesets?per_page=100")" || die "Cloudflare ruleset lookup failed."
-  ruleset_id="$(jq -r '.result[]? | select(.kind=="zone" and .phase=="http_config_settings") | .id' <<<"$list" | head -n1)"
+  if phase_entry="$(cf_get_phase_entrypoint "$zone_id" http_config_settings)"; then
+    ruleset_id="$(jq -r '.id' <<<"$phase_entry")"
+    ruleset="$(jq -cn --argjson result "$phase_entry" '{success:true,result:$result}')"
+  else
+    rc=$?
+    [ "$rc" -eq 3 ] || die "Cloudflare Configuration Rules entrypoint lookup failed."
+    ruleset_id=""
+  fi
   if [ -z "$ruleset_id" ]; then
     marker="$(cf_new_ownership_marker)"; ruleset_desc="Hostname-scoped configuration managed by AI Server Agent"
     pending_rule_body="$(jq -n --arg ref "$rule_ref" --arg host "$host" --arg desc "AI Server Agent strict SSL txn:$marker" '{ref:$ref,description:$desc,expression:("http.host eq \""+$host+"\""),action:"set_config",action_parameters:{ssl:"strict"},enabled:true}')"
@@ -775,10 +822,12 @@ cf_reconcile_ssl_config_rule(){
     CF_RESULT_SSL_FINGERPRINT="$(cf_rule_fingerprint <<<"$rule")"
     ruleset_id="$CF_RESULT_SSL_RULESET_ID"
   else
-    ruleset="$(cf_api GET "/zones/$zone_id/rulesets/$ruleset_id")" || die "Could not read Cloudflare Configuration Rules ruleset."
     ref_match="$(jq -r --arg ref "$rule_ref" '.result.rules[]? | select(.ref==$ref) | .id' <<<"$ruleset" | head -n1)"
-    if [ -n "$owned_rule" ] && [ "$owned_ruleset" = "$ruleset_id" ]; then
-      rule="$(jq -c --arg id "$owned_rule" --arg ref "$rule_ref" '.result.rules[]? | select(.id==$id and .ref==$ref)' <<<"$ruleset" | head -n1)"
+    if [ -n "$owned_rule" ]; then
+      [ "$owned_ruleset" = "$ruleset_id" ] || die "The recorded Agent-owned Configuration Rule ruleset no longer matches the current phase entrypoint. Refusing to create or adopt a replacement automatically."
+      id_count="$(jq --arg id "$owned_rule" '[.result.rules[] | select(.id==$id)] | length' <<<"$ruleset")"
+      [ "$id_count" -le 1 ] || die "Cloudflare returned duplicate entries for the recorded Agent-owned Configuration Rule ID. Refusing ambiguous reconciliation."
+      rule="$(jq -c --arg id "$owned_rule" '.result.rules[] | select(.id==$id)' <<<"$ruleset")"
       if [ -n "$rule" ]; then
         current_fingerprint="$(cf_rule_fingerprint <<<"$rule")"
         [ -z "$owned_fingerprint" ] || [ "$owned_fingerprint" = "$current_fingerprint" ] || die "The recorded Agent-owned Configuration Rule changed outside this transaction. Refusing automatic mutation; resolve the Cloudflare drift explicitly."

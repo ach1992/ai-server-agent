@@ -36,6 +36,8 @@ ORIG_CF_GET_ORIGIN_CERT="$(declare -f cf_get_origin_cert)"
 ORIG_CF_FIND_ORIGIN_CERT_BY_CSR="$(declare -f cf_find_origin_cert_by_csr)"
 ORIG_CF_FIND_DNS_BY_MARKER="$(declare -f cf_find_dns_by_marker)"
 ORIG_CF_FIND_RULE_BY_MARKER="$(declare -f cf_find_rule_by_marker)"
+ORIG_CF_GET_PHASE_ENTRYPOINT="$(declare -f cf_get_phase_entrypoint)"
+ORIG_CF_RECONCILE_ORIGIN_RULE="$(declare -f cf_reconcile_origin_rule)"
 ORIG_CF_RECONCILE_SSL_CONFIG_RULE="$(declare -f cf_reconcile_ssl_config_rule)"
 cf_delete_owned(){ printf '%s\n' "$1" >> "$DELETE_LOG"; return 0; }
 cf_delete_dns_if_expected(){ printf '/zones/%s/dns_records/%s\n' "$1" "$2" >> "$DELETE_LOG"; [ -n "$3" ]; }
@@ -224,6 +226,22 @@ eval "$ORIG_CF_GET_DNS_RECORD"
 eval "$ORIG_CF_GET_RULE"
 eval "$ORIG_CF_GET_ORIGIN_CERT"
 
+# Marker discovery is independent of mutable Rule ref. If the exact marked Rule
+# survives but its ref drifts, full intent verification must fail and preserve
+# the pending journal without deleting anything.
+marker_drift_rule="$(jq -nc '{id:"marker-drift-rule",ref:"external-ref",description:"AI Server Agent origin port txn:abcdef0123456789abcdef0123456789",expression:"http.host eq \"mcp.example.com\"",action:"route",action_parameters:{origin:{port:3210}},enabled:true}')"
+CF_PENDING_KIND=origin-rule-create; CF_PENDING_ZONE=zone1; CF_PENDING_HOST=mcp.example.com; CF_PENDING_VALUE=ai_server_agent_test; CF_PENDING_PHASE=http_request_origin; CF_PENDING_MARKER=abcdef0123456789abcdef0123456789; CF_PENDING_FINGERPRINT="$pending_rule_fp"
+cf_get_phase_entrypoint(){ jq -nc --argjson rule "$marker_drift_rule" '{id:"shared-set",kind:"zone",phase:"http_request_origin",rules:[$rule]}' ; }
+cf_get_optional(){ case "$1" in '/zones/zone1/rulesets/shared-set') jq -nc --argjson rule "$marker_drift_rule" '{success:true,result:{rules:[$rule]}}' ;; *) return 2 ;; esac; }
+: > "$DELETE_LOG"
+cf_delete_owned(){ printf '%s\n' "$1" >> "$DELETE_LOG"; return 0; }
+if cf_recover_pending_write; then echo 'marker-only drift was treated as pending-rule absence' >&2; exit 1; fi
+test ! -s "$DELETE_LOG"
+test "$CF_PENDING_KIND" = origin-rule-create
+cf_clear_pending_write
+eval "$ORIG_CF_GET_OPTIONAL"
+eval "$ORIG_CF_GET_PHASE_ENTRYPOINT"
+
 # Durable pre-POST journal contains the exact semantic fingerprint before POST.
 rm -f "$CF_TXN_STATE"
 CF_TXN_PHASE=prepared; CF_TXN_BACKUP_READY=true
@@ -249,9 +267,9 @@ cf_api(){ printf '%s' '{"success":true,"result":[{"id":"external-dns","type":"A"
 if cf_find_dns_by_marker zone1 mcp.example.com 203.0.113.10 0123456789abcdef0123456789abcdef >/dev/null; then echo 'concurrent DNS was treated as owned' >&2; exit 1; else test "$?" -eq 2; fi
 
 # A deterministic rule ref without our nonce is likewise ambiguous.
+cf_get_phase_entrypoint(){ printf '%s' '{"id":"origin-set-race","kind":"zone","phase":"http_request_origin","rules":[{"id":"external-origin","ref":"ai_server_agent_test","description":"AI Server Agent origin port"}]}' ; }
 cf_api(){
   case "$2" in
-    '/zones/zone1/rulesets?per_page=100') printf '%s' '{"success":true,"result":[{"id":"origin-set-race","kind":"zone","phase":"http_request_origin"}]}' ;;
     '/zones/zone1/rulesets/origin-set-race') printf '%s' '{"success":true,"result":{"rules":[{"id":"external-origin","ref":"ai_server_agent_test","description":"AI Server Agent origin port"}]}}' ;;
     *) return 2 ;;
   esac
@@ -277,15 +295,32 @@ wait "$lock_pid"
 eval "$ORIG_CF_DELETE_DNS_IF_EXPECTED"
 eval "$ORIG_CF_DELETE_RULE_IF_EXPECTED"
 eval "$ORIG_CF_GET_OPTIONAL"
+eval "$ORIG_CF_RECONCILE_ORIGIN_RULE"
 eval "$ORIG_CF_RECONCILE_SSL_CONFIG_RULE"
+
+# Recorded Rule ID is ownership evidence independent of mutable ref. Ref drift
+# must fail before any remote mutation even when no legacy fingerprint exists.
+MUTATION_LOG="$TMP/rule-mutations.log"
+origin_drift_rule="$(jq -nc '{id:"origin-rule-owned",ref:"external-ref",description:"AI Server Agent origin port",expression:"http.host eq \"mcp.example.com\"",action:"route",action_parameters:{origin:{port:3210}},enabled:true}')"
+cf_get_phase_entrypoint(){ jq -nc --argjson rule "$origin_drift_rule" '{id:"origin-set-owned",kind:"zone",phase:"http_request_origin",rules:[$rule]}' ; }
+cf_api(){ printf '%s %s\n' "$1" "$2" >> "$MUTATION_LOG"; return 2; }
+: > "$MUTATION_LOG"
+if ( cf_reconcile_origin_rule zone1 mcp.example.com 3210 origin-set-owned origin-rule-owned '' ) >/dev/null 2>&1; then echo 'Origin Rule ref drift was accepted' >&2; exit 1; fi
+test ! -s "$MUTATION_LOG" || { echo 'Origin Rule ref drift attempted a remote mutation' >&2; exit 1; }
+
+ssl_drift_rule="$(jq -nc '{id:"ssl-rule-owned",ref:null,description:"AI Server Agent strict SSL",expression:"http.host eq \"mcp.example.com\"",action:"set_config",action_parameters:{ssl:"strict"},enabled:true}')"
+cf_get_phase_entrypoint(){ jq -nc --argjson rule "$ssl_drift_rule" '{id:"ssl-set-owned",kind:"zone",phase:"http_config_settings",rules:[$rule]}' ; }
+: > "$MUTATION_LOG"
+if ( cf_reconcile_ssl_config_rule zone1 mcp.example.com ssl-set-owned ssl-rule-owned '' ) >/dev/null 2>&1; then echo 'Configuration Rule ref drift was accepted' >&2; exit 1; fi
+test ! -s "$MUTATION_LOG" || { echo 'Configuration Rule ref drift attempted a remote mutation' >&2; exit 1; }
 
 # Same-host canonical owned SSL rule is a no-op.
 ssl_ref="ai_server_agent_ssl_$(printf '%s' mcp.example.com | sha256sum | cut -c1-16)"
 ssl_rule_json="$(jq -nc --arg ref "$ssl_ref" '{id:"ssl-rule-owned",ref:$ref,description:"AI Server Agent strict SSL",expression:"http.host eq \"mcp.example.com\"",action:"set_config",action_parameters:{ssl:"strict"},enabled:true}')"
 ssl_fp="$(cf_rule_fingerprint <<<"$ssl_rule_json")"
+cf_get_phase_entrypoint(){ jq -nc --argjson rule "$ssl_rule_json" '{id:"ssl-set-owned",kind:"zone",phase:"http_config_settings",rules:[$rule]}' ; }
 cf_api(){
   case "$2" in
-    '/zones/zone1/rulesets?per_page=100') printf '%s' '{"success":true,"result":[{"id":"ssl-set-owned","kind":"zone","phase":"http_config_settings"}]}' ;;
     '/zones/zone1/rulesets/ssl-set-owned') jq -nc --argjson rule "$ssl_rule_json" '{success:true,result:{rules:[$rule]}}' ;;
     *) return 2 ;;
   esac
