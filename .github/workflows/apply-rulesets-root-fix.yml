@@ -1,15 +1,16 @@
 name: Apply Rulesets root-cause fix
 
 on:
-  push:
+  pull_request:
     branches:
-      - fix/rulesets-contract-v014
+      - main
 
 permissions:
   contents: write
 
 jobs:
   patch:
+    if: github.head_ref == 'fix/rulesets-contract-v014'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
