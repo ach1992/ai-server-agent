@@ -355,7 +355,22 @@ cf_get_phase_entrypoint(){
     *) return 2 ;;
   esac
   if res="$(cf_get_optional "/zones/$zone_id/rulesets/phases/$phase/entrypoint")"; then
-    result="$(jq -ce --arg phase "$phase" '.result | select(type=="object" and (.id|type)=="string" and (.id|length)>0 and .kind=="zone" and .phase==$phase and (.rules|type)=="array")' <<<"$res")" || return 2
+    result="$(jq -ce --arg phase "$phase" '
+      .result
+      | select(
+          type=="object" and
+          (.id|type)=="string" and (.id|length)>0 and
+          .kind=="zone" and
+          .phase==$phase and
+          (.rules|type)=="array" and
+          all(.rules[];
+            type=="object" and
+            (.id|type)=="string" and (.id|length)>0 and
+            ((has("ref")|not) or .ref==null or ((.ref|type)=="string" and (.ref|length)>0)) and
+            ((has("description")|not) or .description==null or (.description|type)=="string")
+          )
+        )
+    ' <<<"$res")" || return 2
     printf '%s\n' "$result"
     return 0
   else
