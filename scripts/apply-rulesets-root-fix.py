@@ -154,8 +154,16 @@ if text.count('cf_list_zone_rulesets "$zone_id"') != 3:
     raise SystemExit("not all Rulesets callers use the dedicated helper")
 manage.write_text(text)
 
-ci = Path(".github/workflows/ci.yml")
-ci_text = ci.read_text()
-if ci_text.count("RELEASE_VERSION: v0.1.3") != 1:
-    raise SystemExit("expected exactly one v0.1.3 release target in CI")
-ci.write_text(ci_text.replace("RELEASE_VERSION: v0.1.3", "RELEASE_VERSION: v0.1.4", 1))
+# Transaction tests contain transport fixtures for production Rulesets discovery.
+# Keep those mocks aligned with the dedicated helper's real request; rollback
+# behavior itself is unchanged.
+txn = Path("tests/cloudflare_transaction.sh")
+txn_text = txn.read_text()
+legacy_fixture = "/zones/zone1/rulesets?per_page=100"
+fixture_count = txn_text.count(legacy_fixture)
+if fixture_count < 1:
+    raise SystemExit("expected legacy Rulesets transaction fixtures")
+txn_text = txn_text.replace(legacy_fixture, "/zones/zone1/rulesets?per_page=50")
+if legacy_fixture in txn_text:
+    raise SystemExit("legacy Rulesets transaction fixture remains")
+txn.write_text(txn_text)
