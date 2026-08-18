@@ -61,8 +61,9 @@ for bad_after in 'false' 'null' '""' '123' '{}' '[]'; do
   fi
 done
 
-# Ruleset entries used to decide phase absence must contain the identity and
-# classification fields required by discovery. Malformed items fail closed.
+# Ruleset entries used to decide phase absence must contain valid identity and
+# classification fields. Missing, mistyped, empty, or unknown enum values fail
+# closed instead of being treated as proof that a phase-specific ruleset is absent.
 for bad_result in \
   '[null]' \
   '[{"kind":"zone","phase":"http_request_origin"}]' \
@@ -73,11 +74,32 @@ for bad_result in \
   '[{"id":"r1","kind":"zone","phase":""}]' \
   '[{"id":1,"kind":"zone","phase":"http_request_origin"}]' \
   '[{"id":"r1","kind":1,"phase":"http_request_origin"}]' \
-  '[{"id":"r1","kind":"zone","phase":1}]'; do
+  '[{"id":"r1","kind":"zone","phase":1}]' \
+  '[{"id":"r1","kind":"bogus","phase":"http_request_origin"}]' \
+  '[{"id":"r1","kind":"zone","phase":"bogus"}]'; do
   curl(){ printf '{"success":true,"result":%s,"result_info":{"cursors":{}}}' "$bad_result"; }
   if cf_api GET '/zones/zone1/rulesets?per_page=100' >/dev/null 2>&1; then
     fail "malformed ruleset item was accepted: $bad_result"
   fi
+done
+
+# Keep the validator aligned with Cloudflare's documented RulesetKind and
+# RulesetPhase enums so tightening malformed-response handling does not reject
+# documented values.
+for valid_kind in managed custom root zone; do
+  curl(){ printf '{"success":true,"result":[{"id":"r1","kind":"%s","phase":"http_request_origin"}],"result_info":{"cursors":{}}}' "$valid_kind"; }
+  cf_api GET '/zones/zone1/rulesets?per_page=100' >/dev/null || fail "documented ruleset kind was rejected: $valid_kind"
+done
+for valid_phase in \
+  ddos_l4 ddos_l7 http_config_settings http_custom_errors http_log_custom_fields \
+  http_ratelimit http_request_cache_settings http_request_dynamic_redirect \
+  http_request_firewall_custom http_request_firewall_managed http_request_late_transform \
+  http_request_origin http_request_redirect http_request_sanitize http_request_sbfm \
+  http_request_transform http_response_cache_settings http_response_compression \
+  http_response_firewall_managed http_response_headers_transform magic_transit \
+  magic_transit_ids_managed magic_transit_managed magic_transit_ratelimit; do
+  curl(){ printf '{"success":true,"result":[{"id":"r1","kind":"zone","phase":"%s"}],"result_info":{"cursors":{}}}' "$valid_phase"; }
+  cf_api GET '/zones/zone1/rulesets?per_page=100' >/dev/null || fail "documented ruleset phase was rejected: $valid_phase"
 done
 
 # A non-advancing cursor must also fail closed instead of looping or returning
