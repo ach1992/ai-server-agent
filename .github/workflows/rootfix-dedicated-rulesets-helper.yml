@@ -1,0 +1,157 @@
+name: Rootfix Dedicated Rulesets Helper
+
+on:
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: write
+
+jobs:
+  refactor:
+    if: github.event.pull_request.head.repo.full_name == github.repository && github.head_ref == 'fix/cloudflare-rulesets-contract-v2'
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: fix/cloudflare-rulesets-contract-v2
+          fetch-depth: 0
+      - name: Centralize Rulesets discovery and validate
+        shell: bash
+        run: |
+          set -Eeuo pipefail
+          python3 <<'PY'
+          from pathlib import Path
+
+          manage = Path('manage.sh')
+          text = manage.read_text()
+          start = text.index('cf_api(){\n')
+          end = text.index('\n\ncf_delete_owned(){', start)
+          new = r'''cf_report_api_errors(){
+  local payload="$1"
+  jq -r '.errors[]? | if .code != null then "Cloudflare API error \(.code): \(.message)" else .message end' <<<"$payload" 2>/dev/null >&2 || true
+}
+
+cf_api(){
+  local method="$1" path="$2" body="${3:-}" cfg out
+  local -a retry_args=()
+  cfg="$(mktemp)"; chmod 0600 "$cfg"
+  printf 'header = "Authorization: Bearer %s"\n' "$CF_TOKEN" > "$cfg"
+  case "$method" in GET|PATCH|DELETE) retry_args=(--retry 2) ;; esac
+  if [ -n "$body" ]; then
+    if ! out="$(curl -sS --fail-with-body "${retry_args[@]}" --request "$method" --config "$cfg" -H 'Content-Type: application/json' --data-binary "$body" "$CF_API$path")"; then
+      cf_report_api_errors "$out"
+      rm -f "$cfg"
+      return 1
+    fi
+  else
+    if ! out="$(curl -sS --fail-with-body "${retry_args[@]}" --request "$method" --config "$cfg" -H 'Content-Type: application/json' "$CF_API$path")"; then
+      cf_report_api_errors "$out"
+      rm -f "$cfg"
+      return 1
+    fi
+  fi
+  rm -f "$cfg"
+  if ! jq -e '.success == true' >/dev/null 2>&1 <<<"$out"; then
+    cf_report_api_errors "$out"
+    return 1
+  fi
+  printf '%s' "$out"
+}
+
+cf_list_zone_rulesets(){
+  local zone_id="$1" cursor="" encoded_cursor page_path page_out next_cursor page_count pages=0 merged='[]'
+  local -A seen_cursors=()
+  while :; do
+    pages=$((pages + 1)); [ "$pages" -le 1000 ] || return 1
+    if [ -n "$cursor" ]; then
+      encoded_cursor="$(jq -rn --arg cursor "$cursor" '$cursor|@uri')"
+      page_path="/zones/$zone_id/rulesets?per_page=50&cursor=$encoded_cursor"
+    else
+      page_path="/zones/$zone_id/rulesets?per_page=50"
+    fi
+    page_out="$(cf_api GET "$page_path")" || return 1
+    if ! jq -e 'def valid_kind: .=="managed" or .=="custom" or .=="root" or .=="zone"; def valid_phase: .=="ddos_l4" or .=="ddos_l7" or .=="http_config_settings" or .=="http_custom_errors" or .=="http_log_custom_fields" or .=="http_ratelimit" or .=="http_request_cache_settings" or .=="http_request_dynamic_redirect" or .=="http_request_firewall_custom" or .=="http_request_firewall_managed" or .=="http_request_late_transform" or .=="http_request_origin" or .=="http_request_redirect" or .=="http_request_sanitize" or .=="http_request_sbfm" or .=="http_request_transform" or .=="http_response_cache_settings" or .=="http_response_compression" or .=="http_response_firewall_managed" or .=="http_response_headers_transform" or .=="magic_transit" or .=="magic_transit_ids_managed" or .=="magic_transit_managed" or .=="magic_transit_ratelimit"; .success == true and (.result|type)=="array" and all(.result[]; type=="object" and (.id|type)=="string" and (.id|length)>0 and (.kind|type)=="string" and (.kind|valid_kind) and (.phase|type)=="string" and (.phase|valid_phase)) and (if has("result_info") then ((.result_info|type)=="object" and (if (.result_info|has("cursors")) then ((.result_info.cursors|type)=="object" and (if (.result_info.cursors|has("after")) then ((.result_info.cursors.after|type)=="string" and (.result_info.cursors.after|length)>0) else true end)) else true end)) else true end)' >/dev/null 2>&1 <<<"$page_out"; then
+      cf_report_api_errors "$page_out"
+      return 1
+    fi
+    merged="$(jq -cn --argjson acc "$merged" --argjson response "$page_out" '$acc + $response.result')"
+    next_cursor="$(jq -r '.result_info.cursors.after // empty' <<<"$page_out")"
+    page_count="$(jq '.result | length' <<<"$page_out")"
+    if [ -z "$next_cursor" ] && [ "$page_count" -eq 50 ]; then
+      printf 'Cloudflare Rulesets returned a full 50-item page without a continuation cursor; refusing to infer complete discovery.\n' >&2
+      return 1
+    fi
+    [ -n "$next_cursor" ] || break
+    if [ -n "${seen_cursors[$next_cursor]+x}" ]; then
+      printf 'Cloudflare Rulesets returned a repeated pagination cursor; refusing a cyclic/incomplete discovery.\n' >&2
+      return 1
+    fi
+    seen_cursors["$next_cursor"]=1
+    cursor="$next_cursor"
+  done
+  jq -cn --argjson result "$merged" '{success:true,result:$result}'
+}'''
+          text = text[:start] + new + text[end:]
+          old_call = 'cf_api GET "/zones/$zone_id/rulesets"'
+          count = text.count(old_call)
+          if count != 3:
+              raise SystemExit(f'expected 3 Rulesets list callers, found {count}')
+          text = text.replace(old_call, 'cf_list_zone_rulesets "$zone_id"')
+          if 'rulesets?per_page=100' in text:
+              raise SystemExit('legacy Rulesets sentinel remains in manage.sh')
+          manage.write_text(text)
+
+          pagination = Path('tests/cloudflare_rulesets_pagination.sh')
+          p = pagination.read_text()
+          p = p.replace("cf_api GET '/zones/zone1/rulesets'", 'cf_list_zone_rulesets zone1')
+          if "cf_api GET '/zones/zone1/rulesets'" in p:
+              raise SystemExit('pagination test still calls generic API for complete discovery')
+          marker = "printf 'Cloudflare Rulesets pagination contract passed.\\n'\n"
+          cycle = r'''# A multi-node cursor cycle must be detected immediately, not only by the page cap.
+curl(){
+  local url="${*: -1}"
+  case "$url" in
+    "$CF_API/zones/zone1/rulesets?per_page=50")
+      printf '%s' '{"success":true,"result":[],"result_info":{"cursors":{"after":"cycle-a"}}}' ;;
+    "$CF_API/zones/zone1/rulesets?per_page=50&cursor=cycle-a")
+      printf '%s' '{"success":true,"result":[],"result_info":{"cursors":{"after":"cycle-b"}}}' ;;
+    "$CF_API/zones/zone1/rulesets?per_page=50&cursor=cycle-b")
+      printf '%s' '{"success":true,"result":[],"result_info":{"cursors":{"after":"cycle-a"}}}' ;;
+    *) return 22 ;;
+  esac
+}
+if cf_list_zone_rulesets zone1 >/dev/null 2>&1; then
+  fail 'multi-node pagination cursor cycle was accepted'
+fi
+
+printf 'Cloudflare Rulesets pagination contract passed.\n'
+'''
+          if p.count(marker) != 1:
+              raise SystemExit('unexpected pagination test footer')
+          p = p.replace(marker, cycle)
+          pagination.write_text(p)
+
+          txn = Path('tests/cloudflare_transaction.sh')
+          t = txn.read_text()
+          old_origin = '''cf_api(){\n  case "$2" in\n    '/zones/zone1/rulesets') printf '%s' '{"success":true,"result":[{"id":"origin-set-race","kind":"zone","phase":"http_request_origin"}]}' ;;\n    '/zones/zone1/rulesets/origin-set-race') printf '%s' '{"success":true,"result":{"rules":[{"id":"external-origin","ref":"ai_server_agent_test","description":"AI Server Agent origin port"}]}}' ;;\n    *) return 2 ;;\n  esac\n}\n'''
+          new_origin = '''cf_list_zone_rulesets(){ printf '%s' '{"success":true,"result":[{"id":"origin-set-race","kind":"zone","phase":"http_request_origin"}]}' ; }\ncf_api(){\n  case "$2" in\n    '/zones/zone1/rulesets/origin-set-race') printf '%s' '{"success":true,"result":{"rules":[{"id":"external-origin","ref":"ai_server_agent_test","description":"AI Server Agent origin port"}]}}' ;;\n    *) return 2 ;;\n  esac\n}\n'''
+          if t.count(old_origin) != 1:
+              raise SystemExit('unexpected origin transaction mock shape')
+          t = t.replace(old_origin, new_origin)
+          old_ssl = '''cf_api(){\n  case "$2" in\n    '/zones/zone1/rulesets') printf '%s' '{"success":true,"result":[{"id":"ssl-set-owned","kind":"zone","phase":"http_config_settings"}]}' ;;\n    '/zones/zone1/rulesets/ssl-set-owned') jq -nc --argjson rule "$ssl_rule_json" '{success:true,result:{rules:[$rule]}}' ;;\n    *) return 2 ;;\n  esac\n}\n'''
+          new_ssl = '''cf_list_zone_rulesets(){ printf '%s' '{"success":true,"result":[{"id":"ssl-set-owned","kind":"zone","phase":"http_config_settings"}]}' ; }\ncf_api(){\n  case "$2" in\n    '/zones/zone1/rulesets/ssl-set-owned') jq -nc --argjson rule "$ssl_rule_json" '{success:true,result:{rules:[$rule]}}' ;;\n    *) return 2 ;;\n  esac\n}\n'''
+          if t.count(old_ssl) != 1:
+              raise SystemExit('unexpected SSL transaction mock shape')
+          t = t.replace(old_ssl, new_ssl)
+          txn.write_text(t)
+          PY
+          bash -n manage.sh tests/cloudflare_transaction.sh tests/cloudflare_rulesets_pagination.sh
+          sudo bash tests/cloudflare_transaction.sh
+          bash tests/cloudflare_rulesets_pagination.sh
+          git diff --check
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git add manage.sh tests/cloudflare_rulesets_pagination.sh tests/cloudflare_transaction.sh
+          git commit -m 'refactor: isolate Cloudflare Rulesets discovery'
+          git push origin HEAD:fix/cloudflare-rulesets-contract-v2
