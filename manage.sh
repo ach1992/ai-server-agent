@@ -311,7 +311,7 @@ cf_api(){
         page_path="$ruleset_base?per_page=50"
       fi
       page_out="$(curl -sS --fail-with-body "${retry_args[@]}" --request GET --config "$cfg" -H 'Content-Type: application/json' "$CF_API$page_path")" || { rm -f "$cfg"; return 1; }
-      if ! jq -e '.success == true and (.result|type)=="array" and (.result_info|type)=="object"' >/dev/null 2>&1 <<<"$page_out"; then
+      if ! jq -e '.success == true and (.result|type)=="array" and (.result_info|type)=="object" and (.result_info.cursors|type)=="object"' >/dev/null 2>&1 <<<"$page_out"; then
         jq -r '.errors[]?.message // empty' <<<"$page_out" >&2 || true
         rm -f "$cfg"; return 1
       fi
