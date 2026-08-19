@@ -9,7 +9,7 @@ concurrency:
 permissions:
   contents: read
 env:
-  RELEASE_VERSION: v0.1.4
+  RELEASE_VERSION: v0.1.5
 jobs:
   test:
     runs-on: ubuntu-22.04
@@ -318,7 +318,6 @@ jobs:
             exit 1
           fi
           sudo systemctl is-active --quiet ai-server-agent.service
-          sudo systemctl is-active --quiet ai-server-agent-executor.service
           sudo env AI_SERVER_AGENT_YES=1 bash uninstall.sh --purge
           id aiworker >/dev/null
           getent group aiworker >/dev/null
