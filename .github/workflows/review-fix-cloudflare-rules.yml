@@ -21,7 +21,8 @@ jobs:
 
           p = Path('manage.sh')
           s = p.read_text()
-          if 'The recorded Agent-owned Origin Rule is absent, but Cloudflare already has' not in s:
+          guard_marker = 'The recorded Agent-owned Origin Rule is absent, but Cloudflare already has'
+          if guard_marker not in s:
               lines = s.splitlines()
               checks = {
                   'Cloudflare returned an invalid created Origin Rule.': 'Cloudflare returned an Origin Rule that does not match the requested transaction intent.',
@@ -32,45 +33,33 @@ jobs:
                   'Cloudflare returned an invalid or ambiguous created Configuration Rule.': 'Cloudflare returned a Configuration Rule that does not match the requested transaction intent.',
               }
               seen = {k: 0 for k in checks}
+              origin_guard = 0
+              ssl_guard = 0
               out = []
-              for line in lines:
+              for i, line in enumerate(lines):
                   out.append(line)
                   for needle, message in checks.items():
                       if needle in line:
                           seen[needle] += 1
                           indent = line[:len(line) - len(line.lstrip())]
                           out.append(f'{indent}[ "$(cf_rule_intent_fingerprint <<<"$rule")" = "$pending_fingerprint" ] || die "{message}"')
-              if any(v != 1 for v in seen.values()):
-                  raise SystemExit(f'unexpected create-response structure: {seen}')
-              s = '\n'.join(out) + '\n'
-
-              origin_old = '''      elif [ -n "$ref_match" ]; then
-                die "An Origin Rule uses the Agent ref but is not the rule recorded as Agent-owned. Refusing to adopt or overwrite it."
-              else
-                marker="$(cf_new_ownership_marker)"'''
-              origin_new = '''      elif [ -n "$ref_match" ]; then
-                die "An Origin Rule uses the Agent ref but is not the rule recorded as Agent-owned. Refusing to adopt or overwrite it."
-              else
-                [ "$semantic_count" -eq 0 ] || die "The recorded Agent-owned Origin Rule is absent, but Cloudflare already has $semantic_count equivalent external Origin Rule(s) in ruleset $ruleset_id for $host:$port. Refusing to recreate a duplicate or adopt external rules automatically."
-                marker="$(cf_new_ownership_marker)"'''
-              ssl_old = '''      elif [ -n "$ref_match" ]; then
-                die "A Configuration Rule uses the Agent SSL ref but is not the rule recorded as Agent-owned. Refusing to adopt or overwrite it."
-              else
-                marker="$(cf_new_ownership_marker)"'''
-              ssl_new = '''      elif [ -n "$ref_match" ]; then
-                die "A Configuration Rule uses the Agent SSL ref but is not the rule recorded as Agent-owned. Refusing to adopt or overwrite it."
-              else
-                [ "$semantic_count" -eq 0 ] || die "The recorded Agent-owned Configuration Rule is absent, but Cloudflare already has $semantic_count equivalent external strict SSL Configuration Rule(s) in ruleset $ruleset_id for $host. Refusing to recreate a duplicate or adopt external rules automatically."
-                marker="$(cf_new_ownership_marker)"'''
-              if s.count(origin_old) != 1 or s.count(ssl_old) != 1:
-                  raise SystemExit('stale-owned branch structure changed')
-              s = s.replace(origin_old, origin_new, 1).replace(ssl_old, ssl_new, 1)
-              p.write_text(s)
+                  if line.strip() == 'else' and i > 0:
+                      prev = lines[i - 1]
+                      indent = line[:len(line) - len(line.lstrip())] + '  '
+                      if 'An Origin Rule uses the Agent ref but is not the rule recorded as Agent-owned.' in prev:
+                          origin_guard += 1
+                          out.append(indent + '[ "$semantic_count" -eq 0 ] || die "The recorded Agent-owned Origin Rule is absent, but Cloudflare already has $semantic_count equivalent external Origin Rule(s) in ruleset $ruleset_id for $host:$port. Refusing to recreate a duplicate or adopt external rules automatically."')
+                      elif 'A Configuration Rule uses the Agent SSL ref but is not the rule recorded as Agent-owned.' in prev:
+                          ssl_guard += 1
+                          out.append(indent + '[ "$semantic_count" -eq 0 ] || die "The recorded Agent-owned Configuration Rule is absent, but Cloudflare already has $semantic_count equivalent external strict SSL Configuration Rule(s) in ruleset $ruleset_id for $host. Refusing to recreate a duplicate or adopt external rules automatically."')
+              if any(v != 1 for v in seen.values()) or origin_guard != 1 or ssl_guard != 1:
+                  raise SystemExit(f'unexpected reconciliation structure: checks={seen}, origin_guard={origin_guard}, ssl_guard={ssl_guard}')
+              p.write_text('\n'.join(out) + '\n')
 
           tp = Path('tests/cloudflare_rulesets_pagination.sh')
           t = tp.read_text()
-          marker = '# Stale recorded ownership plus an external equivalent must fail before'
-          if marker not in t:
+          test_marker = '# Stale recorded ownership plus an external equivalent must fail before'
+          if test_marker not in t:
               end = "printf 'Cloudflare Rulesets phase-entrypoint discovery contract passed.\\n'\n"
               if t.count(end) != 1: raise SystemExit('test completion marker drift')
               extra = r'''
