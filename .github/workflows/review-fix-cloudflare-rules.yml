@@ -21,90 +21,59 @@ jobs:
 
           p = Path('manage.sh')
           s = p.read_text()
+          if 'The recorded Agent-owned Origin Rule is absent, but Cloudflare already has' not in s:
+              lines = s.splitlines()
+              checks = {
+                  'Cloudflare returned an invalid created Origin Rule.': 'Cloudflare returned an Origin Rule that does not match the requested transaction intent.',
+                  'Cloudflare returned an invalid or ambiguous recreated Origin Rule.': 'Cloudflare returned a recreated Origin Rule that does not match the requested transaction intent.',
+                  'Cloudflare returned an invalid or ambiguous created Origin Rule.': 'Cloudflare returned an Origin Rule that does not match the requested transaction intent.',
+                  'Cloudflare returned an invalid created Configuration Rule.': 'Cloudflare returned a Configuration Rule that does not match the requested transaction intent.',
+                  'Cloudflare returned an invalid or ambiguous recreated Configuration Rule.': 'Cloudflare returned a recreated Configuration Rule that does not match the requested transaction intent.',
+                  'Cloudflare returned an invalid or ambiguous created Configuration Rule.': 'Cloudflare returned a Configuration Rule that does not match the requested transaction intent.',
+              }
+              seen = {k: 0 for k in checks}
+              out = []
+              for line in lines:
+                  out.append(line)
+                  for needle, message in checks.items():
+                      if needle in line:
+                          seen[needle] += 1
+                          indent = line[:len(line) - len(line.lstrip())]
+                          out.append(f'{indent}[ "$(cf_rule_intent_fingerprint <<<"$rule")" = "$pending_fingerprint" ] || die "{message}"')
+              if any(v != 1 for v in seen.values()):
+                  raise SystemExit(f'unexpected create-response structure: {seen}')
+              s = '\n'.join(out) + '\n'
 
-          # Every successful create response must preserve the exact pre-POST
-          # semantic representation, not merely the transaction marker/ref.
-          pairs = [
-            (
-              '''    rule="$(jq -ce '.result.rules[0] | select(type=="object")' <<<"$res")" || die "Cloudflare returned an invalid created Origin Rule."
-              CF_RESULT_ORIGIN_FINGERPRINT="$(cf_rule_fingerprint <<<"$rule")"''',
-              '''    rule="$(jq -ce '.result.rules[0] | select(type=="object")' <<<"$res")" || die "Cloudflare returned an invalid created Origin Rule."
-              [ "$(cf_rule_intent_fingerprint <<<"$rule")" = "$pending_fingerprint" ] || die "Cloudflare returned an Origin Rule that does not match the requested transaction intent."
-              CF_RESULT_ORIGIN_FINGERPRINT="$(cf_rule_fingerprint <<<"$rule")"'''
-            ),
-            (
-              '''        rule="$(jq -ce --arg ref "$rule_ref" --arg marker "$marker" '[.result.rules[]? | select(.ref==$ref and ((.description // "") | endswith(" txn:"+$marker)))] | select(length==1) | .[0]' <<<"$res")" || die "Cloudflare returned an invalid or ambiguous recreated Origin Rule."
-              CF_RESULT_ORIGIN_RULESET_ID="$ruleset_id";''',
-              '''        rule="$(jq -ce --arg ref "$rule_ref" --arg marker "$marker" '[.result.rules[]? | select(.ref==$ref and ((.description // "") | endswith(" txn:"+$marker)))] | select(length==1) | .[0]' <<<"$res")" || die "Cloudflare returned an invalid or ambiguous recreated Origin Rule."
-              [ "$(cf_rule_intent_fingerprint <<<"$rule")" = "$pending_fingerprint" ] || die "Cloudflare returned a recreated Origin Rule that does not match the requested transaction intent."
-              CF_RESULT_ORIGIN_RULESET_ID="$ruleset_id";'''
-            ),
-            (
-              '''      rule="$(jq -ce --arg ref "$rule_ref" --arg marker "$marker" '[.result.rules[]? | select(.ref==$ref and ((.description // "") | endswith(" txn:"+$marker)))] | select(length==1) | .[0]' <<<"$res")" || die "Cloudflare returned an invalid or ambiguous created Origin Rule."
-              CF_RESULT_ORIGIN_RULESET_ID="$ruleset_id";''',
-              '''      rule="$(jq -ce --arg ref "$rule_ref" --arg marker "$marker" '[.result.rules[]? | select(.ref==$ref and ((.description // "") | endswith(" txn:"+$marker)))] | select(length==1) | .[0]' <<<"$res")" || die "Cloudflare returned an invalid or ambiguous created Origin Rule."
-              [ "$(cf_rule_intent_fingerprint <<<"$rule")" = "$pending_fingerprint" ] || die "Cloudflare returned an Origin Rule that does not match the requested transaction intent."
-              CF_RESULT_ORIGIN_RULESET_ID="$ruleset_id";'''
-            ),
-            (
-              '''    rule="$(jq -ce '.result.rules[0] | select(type=="object")' <<<"$res")" || die "Cloudflare returned an invalid created Configuration Rule."
-              CF_RESULT_SSL_FINGERPRINT="$(cf_rule_fingerprint <<<"$rule")"''',
-              '''    rule="$(jq -ce '.result.rules[0] | select(type=="object")' <<<"$res")" || die "Cloudflare returned an invalid created Configuration Rule."
-              [ "$(cf_rule_intent_fingerprint <<<"$rule")" = "$pending_fingerprint" ] || die "Cloudflare returned a Configuration Rule that does not match the requested transaction intent."
-              CF_RESULT_SSL_FINGERPRINT="$(cf_rule_fingerprint <<<"$rule")"'''
-            ),
-            (
-              '''        rule="$(jq -ce --arg ref "$rule_ref" --arg marker "$marker" '[.result.rules[]? | select(.ref==$ref and .action=="set_config" and .action_parameters.ssl=="strict" and ((.description // "") | endswith(" txn:"+$marker)))] | select(length==1) | .[0]' <<<"$res")" || die "Cloudflare returned an invalid or ambiguous recreated Configuration Rule."
-              CF_RESULT_SSL_RULESET_ID="$ruleset_id";''',
-              '''        rule="$(jq -ce --arg ref "$rule_ref" --arg marker "$marker" '[.result.rules[]? | select(.ref==$ref and .action=="set_config" and .action_parameters.ssl=="strict" and ((.description // "") | endswith(" txn:"+$marker)))] | select(length==1) | .[0]' <<<"$res")" || die "Cloudflare returned an invalid or ambiguous recreated Configuration Rule."
-              [ "$(cf_rule_intent_fingerprint <<<"$rule")" = "$pending_fingerprint" ] || die "Cloudflare returned a recreated Configuration Rule that does not match the requested transaction intent."
-              CF_RESULT_SSL_RULESET_ID="$ruleset_id";'''
-            ),
-            (
-              '''      rule="$(jq -ce --arg ref "$rule_ref" --arg marker "$marker" '[.result.rules[]? | select(.ref==$ref and .action=="set_config" and .action_parameters.ssl=="strict" and ((.description // "") | endswith(" txn:"+$marker)))] | select(length==1) | .[0]' <<<"$res")" || die "Cloudflare returned an invalid or ambiguous created Configuration Rule."
-              CF_RESULT_SSL_RULESET_ID="$ruleset_id";''',
-              '''      rule="$(jq -ce --arg ref "$rule_ref" --arg marker "$marker" '[.result.rules[]? | select(.ref==$ref and .action=="set_config" and .action_parameters.ssl=="strict" and ((.description // "") | endswith(" txn:"+$marker)))] | select(length==1) | .[0]' <<<"$res")" || die "Cloudflare returned an invalid or ambiguous created Configuration Rule."
-              [ "$(cf_rule_intent_fingerprint <<<"$rule")" = "$pending_fingerprint" ] || die "Cloudflare returned a Configuration Rule that does not match the requested transaction intent."
-              CF_RESULT_SSL_RULESET_ID="$ruleset_id";'''
-            ),
-          ]
-          for old, new in pairs:
-              if s.count(old) != 1:
-                  raise SystemExit('intent-validation patch drift')
-              s = s.replace(old, new, 1)
-
-          # A stale recorded Agent-owned ID must not authorize recreation when
-          # an external semantic equivalent already exists.
-          old = '''      elif [ -n "$ref_match" ]; then
+              origin_old = '''      elif [ -n "$ref_match" ]; then
                 die "An Origin Rule uses the Agent ref but is not the rule recorded as Agent-owned. Refusing to adopt or overwrite it."
               else
                 marker="$(cf_new_ownership_marker)"'''
-          new = '''      elif [ -n "$ref_match" ]; then
+              origin_new = '''      elif [ -n "$ref_match" ]; then
                 die "An Origin Rule uses the Agent ref but is not the rule recorded as Agent-owned. Refusing to adopt or overwrite it."
               else
                 [ "$semantic_count" -eq 0 ] || die "The recorded Agent-owned Origin Rule is absent, but Cloudflare already has $semantic_count equivalent external Origin Rule(s) in ruleset $ruleset_id for $host:$port. Refusing to recreate a duplicate or adopt external rules automatically."
                 marker="$(cf_new_ownership_marker)"'''
-          if s.count(old) != 1: raise SystemExit('stale Origin branch drift')
-          s = s.replace(old, new, 1)
-
-          old = '''      elif [ -n "$ref_match" ]; then
+              ssl_old = '''      elif [ -n "$ref_match" ]; then
                 die "A Configuration Rule uses the Agent SSL ref but is not the rule recorded as Agent-owned. Refusing to adopt or overwrite it."
               else
                 marker="$(cf_new_ownership_marker)"'''
-          new = '''      elif [ -n "$ref_match" ]; then
+              ssl_new = '''      elif [ -n "$ref_match" ]; then
                 die "A Configuration Rule uses the Agent SSL ref but is not the rule recorded as Agent-owned. Refusing to adopt or overwrite it."
               else
                 [ "$semantic_count" -eq 0 ] || die "The recorded Agent-owned Configuration Rule is absent, but Cloudflare already has $semantic_count equivalent external strict SSL Configuration Rule(s) in ruleset $ruleset_id for $host. Refusing to recreate a duplicate or adopt external rules automatically."
                 marker="$(cf_new_ownership_marker)"'''
-          if s.count(old) != 1: raise SystemExit('stale Configuration branch drift')
-          s = s.replace(old, new, 1)
-          p.write_text(s)
+              if s.count(origin_old) != 1 or s.count(ssl_old) != 1:
+                  raise SystemExit('stale-owned branch structure changed')
+              s = s.replace(origin_old, origin_new, 1).replace(ssl_old, ssl_new, 1)
+              p.write_text(s)
 
           tp = Path('tests/cloudflare_rulesets_pagination.sh')
           t = tp.read_text()
-          end = "printf 'Cloudflare Rulesets phase-entrypoint discovery contract passed.\\n'\n"
-          if t.count(end) != 1: raise SystemExit('test completion marker drift')
-          extra = r'''
+          marker = '# Stale recorded ownership plus an external equivalent must fail before'
+          if marker not in t:
+              end = "printf 'Cloudflare Rulesets phase-entrypoint discovery contract passed.\\n'\n"
+              if t.count(end) != 1: raise SystemExit('test completion marker drift')
+              extra = r'''
 
           # Stale recorded ownership plus an external equivalent must fail before
           # any create/journal mutation instead of recreating a duplicate.
@@ -134,7 +103,7 @@ jobs:
           set +e; out="$(cf_reconcile_origin_rule zone1 mcp.example.com 3210 '' '' '' 2>&1)"; rc=$?; set -e
           [ "$rc" -ne 0 ] && grep -Fq 'does not match the requested transaction intent' <<<"$out" || fail 'semantic drift in a create response was accepted as confirmation'
           '''
-          tp.write_text(t.replace(end, extra + '\n' + end))
+              tp.write_text(t.replace(end, extra + '\n' + end))
           PY
           bash -n manage.sh tests/cloudflare_rulesets_pagination.sh
           bash tests/cloudflare_rulesets_pagination.sh
