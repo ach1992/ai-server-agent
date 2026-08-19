@@ -128,29 +128,74 @@ done
 
 
 # Existing-ruleset POST /rules returns the updated Ruleset. Select and
-# fingerprint the exact marked Rule, never the Ruleset container ID.
+# fingerprint the exact marked Rule, never the Ruleset container ID or a
+# pre-existing/distractor Rule from the returned Ruleset.
 CF_PENDING_MARKER=""
 cf_set_pending_write(){ CF_PENDING_MARKER="$6"; }
 cf_new_ownership_marker(){ printf '%s\n' 11111111111111111111111111111111; }
 origin_ref="ai_server_agent_$(printf '%s' mcp.example.com | sha256sum | cut -c1-16)"
 ssl_ref="ai_server_agent_ssl_$(printf '%s' mcp.example.com | sha256sum | cut -c1-16)"
-cf_get_phase_entrypoint(){ case "$2:$TEST_MODE" in http_request_origin:create) jq -nc '{id:"origin-set",kind:"zone",phase:"http_request_origin",rules:[]}' ;; http_config_settings:create) jq -nc '{id:"ssl-set",kind:"zone",phase:"http_config_settings",rules:[]}' ;; *) return 2 ;; esac; }
+expected_origin="$(jq -nc --arg ref "$origin_ref" '{id:"origin-new",ref:$ref,description:"AI Server Agent origin port txn:11111111111111111111111111111111",expression:"http.host eq \"mcp.example.com\"",action:"route",action_parameters:{origin:{port:3210}},enabled:true}')"
+expected_ssl="$(jq -nc --arg ref "$ssl_ref" '{id:"ssl-new",ref:$ref,description:"AI Server Agent strict SSL txn:11111111111111111111111111111111",expression:"http.host eq \"mcp.example.com\"",action:"set_config",action_parameters:{ssl:"strict"},enabled:true}')"
+expected_origin_fp="$(cf_rule_fingerprint <<<"$expected_origin")"
+expected_ssl_fp="$(cf_rule_fingerprint <<<"$expected_ssl")"
+origin_before="$(jq -nc '{id:"origin-before",ref:"manual-before",description:"existing origin before",expression:"http.host eq \"before.example.com\"",action:"route",action_parameters:{origin:{port:443}},enabled:true}')"
+origin_after="$(jq -nc '{id:"origin-after",ref:"manual-after",description:"existing origin after",expression:"http.host eq \"after.example.com\"",action:"route",action_parameters:{origin:{port:8443}},enabled:true}')"
+ssl_before="$(jq -nc '{id:"ssl-before",ref:"manual-ssl-before",description:"existing ssl before",expression:"http.host eq \"before.example.com\"",action:"set_config",action_parameters:{ssl:"flexible"},enabled:true}')"
+ssl_after="$(jq -nc '{id:"ssl-after",ref:"manual-ssl-after",description:"existing ssl after",expression:"http.host eq \"after.example.com\"",action:"set_config",action_parameters:{ssl:"full"},enabled:true}')"
+cf_get_phase_entrypoint(){
+  case "$2:$TEST_MODE" in
+    http_request_origin:create|http_request_origin:ambiguous-origin) jq -nc '{id:"origin-set",kind:"zone",phase:"http_request_origin",rules:[]}' ;;
+    http_config_settings:create|http_config_settings:ambiguous-ssl) jq -nc '{id:"ssl-set",kind:"zone",phase:"http_config_settings",rules:[]}' ;;
+    *) return 2 ;;
+  esac
+}
 cf_api(){
-  local method="$1" path="$2" body="${3:-}" rule
+  local method="$1" path="$2" body="${3:-}" rule duplicate
   case "$TEST_MODE:$method:$path" in
-    create:POST:/zones/zone1/rulesets/origin-set/rules) rule="$(jq -nc --argjson body "$body" '$body+{id:"origin-new"}')"; jq -nc --argjson rule "$rule" '{success:true,result:{id:"origin-set",rules:[$rule]}}' ;;
-    create:GET:/zones/zone1/rulesets/origin-set) rule="$(jq -nc --arg ref "$origin_ref" '{id:"origin-new",ref:$ref,description:"AI Server Agent origin port txn:11111111111111111111111111111111",expression:"http.host eq \"mcp.example.com\"",action:"route",action_parameters:{origin:{port:3210}},enabled:true}')"; jq -nc --argjson rule "$rule" '{success:true,result:{id:"origin-set",rules:[$rule]}}' ;;
-    create:POST:/zones/zone1/rulesets/ssl-set/rules) rule="$(jq -nc --argjson body "$body" '$body+{id:"ssl-new"}')"; jq -nc --argjson rule "$rule" '{success:true,result:{id:"ssl-set",rules:[$rule]}}' ;;
-    create:GET:/zones/zone1/rulesets/ssl-set) rule="$(jq -nc --arg ref "$ssl_ref" '{id:"ssl-new",ref:$ref,description:"AI Server Agent strict SSL txn:11111111111111111111111111111111",expression:"http.host eq \"mcp.example.com\"",action:"set_config",action_parameters:{ssl:"strict"},enabled:true}')"; jq -nc --argjson rule "$rule" '{success:true,result:{id:"ssl-set",rules:[$rule]}}' ;;
+    create:POST:/zones/zone1/rulesets/origin-set/rules)
+      rule="$(jq -nc --argjson body "$body" '$body+{id:"origin-new"}')"
+      jq -nc --argjson before "$origin_before" --argjson rule "$rule" --argjson after "$origin_after" '{success:true,result:{id:"origin-set",rules:[$before,$rule,$after]}}'
+      ;;
+    create:GET:/zones/zone1/rulesets/origin-set)
+      jq -nc --argjson before "$origin_before" --argjson rule "$expected_origin" --argjson after "$origin_after" '{success:true,result:{id:"origin-set",rules:[$before,$rule,$after]}}'
+      ;;
+    create:POST:/zones/zone1/rulesets/ssl-set/rules)
+      rule="$(jq -nc --argjson body "$body" '$body+{id:"ssl-new"}')"
+      jq -nc --argjson before "$ssl_before" --argjson rule "$rule" --argjson after "$ssl_after" '{success:true,result:{id:"ssl-set",rules:[$before,$rule,$after]}}'
+      ;;
+    create:GET:/zones/zone1/rulesets/ssl-set)
+      jq -nc --argjson before "$ssl_before" --argjson rule "$expected_ssl" --argjson after "$ssl_after" '{success:true,result:{id:"ssl-set",rules:[$before,$rule,$after]}}'
+      ;;
+    ambiguous-origin:POST:/zones/zone1/rulesets/origin-set/rules)
+      rule="$(jq -nc --argjson body "$body" '$body+{id:"origin-a"}')"
+      duplicate="$(jq -nc --argjson body "$body" '$body+{id:"origin-b"}')"
+      jq -nc --argjson a "$rule" --argjson b "$duplicate" '{success:true,result:{id:"origin-set",rules:[$a,$b]}}'
+      ;;
+    ambiguous-ssl:POST:/zones/zone1/rulesets/ssl-set/rules)
+      rule="$(jq -nc --argjson body "$body" '$body+{id:"ssl-a"}')"
+      duplicate="$(jq -nc --argjson body "$body" '$body+{id:"ssl-b"}')"
+      jq -nc --argjson a "$rule" --argjson b "$duplicate" '{success:true,result:{id:"ssl-set",rules:[$a,$b]}}'
+      ;;
     *) fail "unexpected create-response API call: $TEST_MODE $method $path" ;;
   esac
 }
 TEST_MODE=create
 cf_reconcile_origin_rule zone1 mcp.example.com 3210 '' '' '' >/dev/null
-[ "$CF_RESULT_ORIGIN_RULESET_ID" = origin-set ] && [ "$CF_RESULT_ORIGIN_RULE_ID" = origin-new ] && [ "$CF_RESULT_ORIGIN_ACTION" = created ] && [ -n "$CF_RESULT_ORIGIN_FINGERPRINT" ] || fail 'Origin updated-Ruleset response was parsed as a Rule'
+[ "$CF_RESULT_ORIGIN_RULESET_ID" = origin-set ] && [ "$CF_RESULT_ORIGIN_RULE_ID" = origin-new ] && [ "$CF_RESULT_ORIGIN_ACTION" = created ] && [ "$CF_RESULT_ORIGIN_FINGERPRINT" = "$expected_origin_fp" ] || fail 'Origin updated-Ruleset response did not select/fingerprint the exact created Rule'
 CF_PENDING_MARKER=""
 cf_reconcile_ssl_config_rule zone1 mcp.example.com '' '' '' >/dev/null
-[ "$CF_RESULT_SSL_RULESET_ID" = ssl-set ] && [ "$CF_RESULT_SSL_RULE_ID" = ssl-new ] && [ "$CF_RESULT_SSL_ACTION" = created ] && [ -n "$CF_RESULT_SSL_FINGERPRINT" ] || fail 'Configuration updated-Ruleset response was parsed as a Rule'
+[ "$CF_RESULT_SSL_RULESET_ID" = ssl-set ] && [ "$CF_RESULT_SSL_RULE_ID" = ssl-new ] && [ "$CF_RESULT_SSL_ACTION" = created ] && [ "$CF_RESULT_SSL_FINGERPRINT" = "$expected_ssl_fp" ] || fail 'Configuration updated-Ruleset response did not select/fingerprint the exact created Rule'
+
+TEST_MODE=ambiguous-origin; CF_PENDING_MARKER=""; set +e
+out="$(cf_reconcile_origin_rule zone1 mcp.example.com 3210 '' '' '' 2>&1)"; rc=$?
+set -e
+[ "$rc" -ne 0 ] && grep -Fq 'invalid or ambiguous created Origin Rule' <<<"$out" || fail 'ambiguous Origin create response was accepted'
+
+TEST_MODE=ambiguous-ssl; CF_PENDING_MARKER=""; set +e
+out="$(cf_reconcile_ssl_config_rule zone1 mcp.example.com '' '' '' 2>&1)"; rc=$?
+set -e
+[ "$rc" -ne 0 ] && grep -Fq 'invalid or ambiguous created Configuration Rule' <<<"$out" || fail 'ambiguous Configuration create response was accepted'
 
 # External semantic equivalents are preserved and block duplicate creation.
 # A recorded Agent-owned Rule remains authoritative on rerun.
