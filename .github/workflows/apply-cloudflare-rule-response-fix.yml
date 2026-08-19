@@ -22,20 +22,19 @@ jobs:
           bash -n manage.sh tests/cloudflare_rulesets_pagination.sh
           bash tests/cloudflare_rulesets_pagination.sh
           grep -qF 'RELEASE_VERSION: v0.1.5' .github/workflows/ci.yml
+          git restore .github/workflows/ci.yml
           git diff --check
-      - name: Commit final candidate
+      - name: Commit code and regression candidate
         run: |
           set -Eeuo pipefail
           git config user.name github-actions[bot]
           git config user.email 41898282+github-actions[bot]@users.noreply.github.com
           git rm -f --ignore-unmatch \
             .cloudflare-rule-fix-trigger \
-            .github/workflows/apply-cloudflare-rule-fix.yml \
-            .github/workflows/apply-cloudflare-rule-response-fix.yml \
             .bootstrap/patch_response.py \
             .bootstrap/patch_semantic.py \
             .bootstrap/patch_tests_ci.py
-          git add manage.sh tests/cloudflare_rulesets_pagination.sh .github/workflows/ci.yml
+          git add manage.sh tests/cloudflare_rulesets_pagination.sh
           git diff --cached --check
           git commit -m 'fix: reconcile Cloudflare rule responses safely'
           git push origin HEAD:${{ github.head_ref }}
