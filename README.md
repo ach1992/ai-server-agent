@@ -2,6 +2,8 @@
 
 AI Server Agent turns a dedicated Linux development/test server into a bearer-authenticated MCP endpoint for ChatGPT. Ordinary commands run as an unprivileged worker; host-level actions go through a separate root executor with policy and approval guardrails.
 
+The project is intentionally a **development/test-server control plane**, not a general hosting panel. It gives ChatGPT enough capability to work on a dedicated Linux host while keeping the Agent's own control plane, credentials, connectivity, and destructive operations behind explicit boundaries.
+
 ## Stable v0.1 support
 
 Stable v0.1 releases support:
@@ -17,18 +19,18 @@ AI Server Agent does not require nginx, Apache, Caddy, Docker, PHP, a database, 
 
 ## Install the latest stable release
 
-Stable installation starts with a small bootstrap loaded from an **immutable published release tag**, separate from the release `install.sh` asset it authenticates. The current v0.1 bootstrap trust anchor is the immutable `v0.1.4` release tag. GitHub locks the associated tag when an immutable release is published, so this path does not depend on a feature branch or merge strategy.
+Stable installation starts with a small bootstrap loaded from an **immutable published release tag**, separate from the release `install.sh` asset it authenticates. The current v0.1 bootstrap trust anchor is the immutable `v0.1.5` release tag. GitHub locks the associated tag when an immutable release is published, so this path does not depend on a feature branch or merge strategy.
 
-`v0.1.4` is published as an immutable release. Install the latest stable release with:
+`v0.1.5` is published as an immutable release. Install the latest stable release with:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.4/scripts/install-stable.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.5/scripts/install-stable.sh | bash
 ```
 
-For an exact stable version through the same immutable bootstrap:
+For exact `v0.1.5` installation through the same immutable bootstrap:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.4/scripts/install-stable.sh | bash -s -- v0.1.4
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.5/scripts/install-stable.sh | bash -s -- v0.1.5
 ```
 
 Do **not** use `releases/latest/download/install.sh | sudo bash` as the stable trust path: that executes release-supplied code as root before the same asset can be authenticated.
@@ -67,7 +69,7 @@ Main paths:
 | `/usr/local/lib/ai-server-agent/` | management/update/uninstall implementation |
 | `/etc/ai-server-agent/` | root-controlled configuration, TLS and managed state |
 | `/etc/ai-server-agent/control/` | root-only install identity and recovery control state |
-| `/var/lib/ai-server-agent/` | Agent runtime/state and persistent-job metadata |
+| `/var/lib/ai-server-agent/` | Agent runtime/state, browser profile data and persistent-job metadata |
 | `/var/log/ai-server-agent/` | logs/audit data |
 | `/srv/ai-workspace/` | `aiworker` project workspace; intentionally preserved by purge |
 | `/run/lock/ai-server-agent/` | root lifecycle serialization lock |
@@ -130,7 +132,7 @@ The manager does not silently adopt or overwrite conflicting external Cloudflare
 
 Transaction-created resources are durably journaled. Confirmed Agent-owned resources are fingerprinted and re-read before destructive cleanup. If a POST response is lost, recovery requires both an unpredictable ownership marker and the exact durable pre-POST representation fingerprint before deleting the discovered resource. Concurrent representation drift fails closed.
 
-Cloudflare Ruleset recovery deletes only the exact Agent-owned rule, never a shared Ruleset container.
+Cloudflare Ruleset recovery deletes only the exact Agent-owned rule, never a shared Ruleset container. Equivalent external/manual hostname-scoped rules are not silently adopted or deleted; recorded Agent-owned rules remain authoritative on rerun, while stale ownership plus an external semantic equivalent fails closed.
 
 If old Agent-managed resources remain after a hostname/certificate change, use the explicit Cloudflare cleanup path; do not rely on purge to delete remote resources.
 
@@ -162,13 +164,74 @@ After public setup succeeds:
 sudo ai-server-agent-manage chatgpt-setup
 ```
 
-The manager prints the MCP URL and the protected bearer-auth setup guidance. The Authorization value is stored on the server and is revealed only after an explicit terminal confirmation.
+The manager prints the MCP URL and the protected bearer-auth setup guidance. The Authorization value is stored on the server and is revealed only after explicit terminal confirmation.
 
-ChatGPT full MCP/custom-app support is an evolving client-side feature. For Business workspaces, the current flow is controlled by workspace admins/owners through Developer mode and the custom-app UI on ChatGPT web. Use the current OpenAI product guidance at connection time rather than treating historical UI labels as a stable protocol contract.
+ChatGPT full MCP/custom-app support is an evolving client-side feature. For Business workspaces, the flow is controlled by workspace admins/owners through Developer mode and the custom-app UI on ChatGPT web. UI ordering, labels, connection screens and confirmation behavior can change independently of the Agent, so use the current OpenAI product guidance at connection time rather than treating a historical screenshot or screen sequence as a protocol contract.
 
-See [docs/CONNECT_CHATGPT.md](docs/CONNECT_CHATGPT.md) for the direct-public and Secure MCP Tunnel topologies, current ChatGPT-side setup flow, and end-to-end validation checklist.
+See [docs/CONNECT_CHATGPT.md](docs/CONNECT_CHATGPT.md) for connection topologies and the validation checklist. When that document's client-side UI wording differs from the current ChatGPT product, current OpenAI guidance and the live UI are authoritative for the client-side steps; the Agent-side endpoint/auth/tool contract remains the durable part documented here.
 
 The public endpoint remains bearer-authenticated. Treat the bearer credential as a privileged server-control credential and provide it only to the trusted ChatGPT connection UI when configuring the app.
+
+## MCP capability surface
+
+Once ChatGPT is connected, the Agent exposes a compact tool surface designed for real server work:
+
+| Tool | Purpose |
+| --- | --- |
+| `agent_environment` | read the current self-preservation manifest before host-wide changes |
+| `run_command` | run ordinary Bash as `aiworker` in `/srv/ai-workspace` |
+| `run_root_command` | run Bash as root, subject to executor policy/approval guardrails |
+| `start_job` | start a persistent transient-systemd background job that survives MCP/ChatGPT disconnects |
+| `job_status` / `job_output` / `job_stop` | inspect, read output from, or stop a persistent Agent job |
+| `read_file` | read a host file through the privileged executor; protected Agent state requires approval |
+| `write_file` | write complete host-file content; protected Agent state requires approval |
+| `browser_setup` | install the optional private Node.js + Playwright + Chromium runtime and required shared libraries |
+| `browser_run` | run Playwright JavaScript in server-side headless Chromium using a persistent browser profile |
+
+### Ordinary commands and root commands
+
+Use `run_command` for normal development work, builds, tests, Git, project package managers and diagnostics that do not require host privilege. It runs as `aiworker` with `/srv/ai-workspace` as HOME/CWD.
+
+Use `run_root_command` only when host-level privilege is genuinely required. Normal root commands can execute directly, but commands that reference protected Agent resources, can interrupt connectivity/control-plane services, or match destructive-operation policy return `approval_required` first. ChatGPT should explain the exact risk and retry with `approval=true` only after explicit user confirmation.
+
+This is a safety guardrail, not a claim that arbitrary root shell access is mathematically incapable of causing damage. Root remains powerful; the design combines AI-visible self-preservation instructions, server-enforced approval policy, minimal/sanitized root execution environment, audit logging and explicit human gates for known high-risk categories.
+
+### Self-preservation manifest
+
+Before host-wide package, service, firewall, network, disk, user, web-stack or control-panel changes, ChatGPT is instructed to call `agent_environment` and preserve the critical resources it reports.
+
+The manifest identifies, among other things:
+
+- `ai-server-agent.service` and `ai-server-agent-executor.service`;
+- `/usr/local/bin/ai-server-agent`;
+- `/etc/ai-server-agent`;
+- `/var/lib/ai-server-agent`;
+- `/var/log/ai-server-agent`;
+- the private executor Unix socket under `/run/ai-server-agent/`;
+- the configured MCP listen endpoint/port;
+- required host primitives such as Bash, systemd and `systemd-run`.
+
+The executor separately protects Agent names/paths/socket/listen address and known connection-risk/destructive command patterns. The intent is that ChatGPT both **knows what must survive** and is **server-side gated** when a command directly threatens those resources.
+
+### File I/O and downloads
+
+`read_file` and `write_file` operate on host paths through the Agent. Ordinary project files can also be created/read through `run_command` as `aiworker` inside `/srv/ai-workspace`.
+
+The host can download project dependencies or public files through ordinary command-line tools such as `curl` when the project needs them. Agent credentials/config/state remain protected and must not be copied into chat, source control or public logs.
+
+The MCP file tools are content/path based; they are **not a generic automatic synchronization layer for arbitrary ChatGPT UI attachments**. If a workflow needs a user attachment transferred to/from the VPS, use an explicit supported transfer path and validate that path for the specific client/runtime instead of assuming attachment sync from `read_file`/`write_file` alone.
+
+### Persistent jobs
+
+Use `start_job` for commands that should continue if ChatGPT disconnects or the MCP request ends. The Agent uses transient systemd units and stores bounded job output/status under Agent state. Non-root jobs run as `aiworker`; root jobs go through the same approval policy before starting.
+
+### Browser capability
+
+Browser automation is optional and installed on demand. The core MCP service does not depend on Node.js or Chromium.
+
+When browser work is first needed, `browser_setup` can install a private root-owned Node.js/Playwright/Chromium engine under `/opt/ai-server-agent/browser` and the required system libraries. Because this changes host packages/runtime, the setup path requires explicit approval before installation.
+
+After setup, `browser_run` uses **server-side headless Chromium**, not the user's personal desktop browser. Browser profile/session data is kept separately under Agent state so cookies/session state can persist across browser runs without making browser binaries writable by the Agent service account.
 
 ## Management commands
 
@@ -254,14 +317,18 @@ Key boundaries:
 - public MCP access requires bearer authentication;
 - direct public mode requires native TLS;
 - ordinary commands run as `aiworker`;
-- root commands are intentional capabilities evaluated by the executor policy/approval guardrails;
+- root commands are intentional capabilities evaluated by executor policy/approval guardrails;
+- ChatGPT is instructed to inspect the current `agent_environment` manifest before host-wide changes;
+- protected Agent resources and known connection-risk/destructive root command patterns require explicit approval before execution;
 - root shell execution uses `/root` HOME/CWD, a minimal explicit environment and shell startup-file suppression;
 - root-consumed control state is stored under root-controlled directories and validated before use;
 - persistent job files use no-follow/exclusive creation and checked reads under root-controlled state containers;
 - worker-writable workspace/state must not implicitly influence root execution;
 - Cloudflare destructive recovery requires ownership plus current representation proof;
 - stable install/update/release identity must remain immutable and must not drift to `main`;
-- release installer bytes must be authenticated before privileged execution through a bootstrap source anchored to an immutable release tag.
+- release installer bytes must be authenticated before privileged execution through a bootstrap source anchored to an immutable release tag;
+- optional browser binaries are root-owned and browser profile/session data is isolated under Agent state;
+- secrets such as the Agent bearer and Cloudflare token must never be persisted in repository content, issue comments, screenshots, chat transcripts or ordinary shell history.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for details.
 
@@ -272,6 +339,8 @@ Stable release publication is manual and exact-SHA based. The release workflow r
 Immediately before publication, the operator must separately verify repository controls that the workflow credential cannot authoritatively prove, including release immutability and release-tag protection/no-bypass conditions. Automation must not treat an omitted Rulesets `bypass_actors` field as proof that no bypass exists.
 
 The release workflow then creates the previously absent tag at the exact validated SHA, publishes with `--verify-tag`, and performs post-publication immutable-release/tag/attestation checks. Once that release is immutable, its associated tag is the durable source identity for the stable bootstrap path.
+
+Documentation-only commits do not imply a release. The release workflow is manually dispatched with an explicit tag and exact validated `main` SHA.
 
 ## Source/development install
 
@@ -301,6 +370,53 @@ bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh scr
 ```
 
 Cloudflare, privileged lifecycle and release-provenance changes also have dedicated High Assurance Security coverage.
+
+### Live acceptance baseline
+
+Immutable `v0.1.5` received a real end-to-end acceptance on the supported dedicated VPS path, including:
+
+- supported stable update and installed identity/health;
+- real Cloudflare hostname-scoped reconciliation and public native-TLS connectivity;
+- missing/invalid bearer rejection plus authenticated MCP initialize;
+- real ChatGPT Business custom-MCP connection and tool discovery;
+- `agent_environment` self-preservation discovery;
+- ordinary `run_command` as `aiworker` in `/srv/ai-workspace`;
+- root execution plus `approval_required` behavior for protected/connection-risk operations;
+- protected-file guard behavior;
+- server-side file read/write and outbound download;
+- a real persistent transient-systemd job;
+- on-demand Playwright/Chromium installation and a real `browser_run` page/DOM read.
+
+The durable acceptance record is [Issue #11](https://github.com/ach1992/ai-server-agent/issues/11). It is historical evidence, not a reason to skip revalidation when a future change affects the relevant contract.
+
+### When to repeat expensive live/fresh-install validation
+
+Use change impact rather than ritual repetition:
+
+- repeat clean/fresh-install validation when `install.sh`, `scripts/install-stable.sh`, lifecycle/bootstrap logic, supported OS/architecture assumptions, or a defect specifically involving fresh-install state changes;
+- repeat live Cloudflare validation when Cloudflare reconciliation, ownership/recovery, TLS, DNS, public binding or provider API assumptions change;
+- repeat real ChatGPT custom-MCP validation when endpoint/auth behavior, MCP tool schema/annotations, approval semantics, or important client-side compatibility assumptions change;
+- repeat browser setup/run validation when browser installer/runtime/profile behavior changes;
+- repeat privileged/root safety validation when executor policy, protected resources, root execution environment or approval behavior changes.
+
+A documentation-only change that does not alter these contracts does not by itself require a new stable release or destructive fresh-install cycle.
+
+## Project map and future development
+
+For future work, use the repository as a graph of authoritative sources rather than reconstructing state from old chat history:
+
+- **README.md** — supported installation, operation, capabilities and safety overview;
+- **[AGENTS.md](AGENTS.md)** — stable engineering invariants, development rules and validation expectations for coding agents/contributors;
+- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — trust boundaries and implementation architecture;
+- **[docs/TESTING.md](docs/TESTING.md)** — validation model, behavioral coverage and known limits;
+- **[docs/CONNECT_CHATGPT.md](docs/CONNECT_CHATGPT.md)** — ChatGPT connection topologies and client-side validation guidance; current OpenAI UI/docs override stale UI wording;
+- **GitHub Issues** — authoritative place for unresolved actionable work; do not create speculative backlog merely for ceremony;
+- **Pull requests and commit history** — implementation/review/integration evidence;
+- **GitHub Releases and attestations** — immutable stable-delivery identities and provenance;
+- **Issue #11** — completed `v0.1.5` live VPS/Cloudflare/ChatGPT acceptance evidence;
+- **Issue #12 / PR #19** — completed root-cause/fix evidence for the Cloudflare Rulesets response-contract defect that led to `v0.1.5`.
+
+When new development begins, start from current `main`, inspect open Issues/PRs and the nearest relevant source/docs/tests, then create only the smallest durable Issue/PR state needed for the new outcome. Do not reopen historical acceptance work unless the same unresolved problem actually returns.
 
 ## License
 
