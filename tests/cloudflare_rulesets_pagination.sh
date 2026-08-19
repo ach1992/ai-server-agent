@@ -167,4 +167,34 @@ TEST_MODE=external; : > "$MUTATION_LOG"; CF_PENDING_MARKER=""; set +e; out="$(cf
 TEST_MODE=owned; : > "$MUTATION_LOG"; fp="$(cf_rule_fingerprint <<<"$owned_origin")"; out="$(cf_reconcile_origin_rule zone1 mcp.example.com 3210 origin-set owned-origin "$fp" 2>&1)"; grep -Fq 'found 2 equivalent Origin Rules' <<<"$out" && test ! -s "$MUTATION_LOG" || fail 'owned Origin rerun mutated or hid external equivalent'
 TEST_MODE=owned; : > "$MUTATION_LOG"; fp="$(cf_rule_fingerprint <<<"$owned_ssl")"; out="$(cf_reconcile_ssl_config_rule zone1 mcp.example.com ssl-set owned-ssl "$fp" 2>&1)"; grep -Fq 'found 2 equivalent strict SSL Configuration Rules' <<<"$out" && test ! -s "$MUTATION_LOG" || fail 'owned Configuration rerun mutated or hid external equivalent'
 
+
+
+# Stale recorded ownership plus an external equivalent must fail before
+# any create/journal mutation instead of recreating a duplicate.
+TEST_MODE=external; : > "$MUTATION_LOG"; CF_PENDING_MARKER=""
+set +e; out="$(cf_reconcile_origin_rule zone1 mcp.example.com 3210 origin-set missing-origin '' 2>&1)"; rc=$?; set -e
+[ "$rc" -ne 0 ] && grep -Fq 'recorded Agent-owned Origin Rule is absent' <<<"$out" && test ! -s "$MUTATION_LOG" || fail 'stale Origin ownership recreated around an external equivalent'
+TEST_MODE=external; : > "$MUTATION_LOG"; CF_PENDING_MARKER=""
+set +e; out="$(cf_reconcile_ssl_config_rule zone1 mcp.example.com ssl-set missing-ssl '' 2>&1)"; rc=$?; set -e
+[ "$rc" -ne 0 ] && grep -Fq 'recorded Agent-owned Configuration Rule is absent' <<<"$out" && test ! -s "$MUTATION_LOG" || fail 'stale Configuration ownership recreated around an external equivalent'
+
+# A create response with the right marker/ref but mutated semantics is
+# not confirmation of the durable pre-POST intent.
+cf_get_phase_entrypoint(){ case "$2" in http_request_origin) jq -nc '{id:"origin-set",kind:"zone",phase:"http_request_origin",rules:[]}' ;; *) return 2 ;; esac; }
+cf_set_pending_write(){ CF_PENDING_MARKER="$6"; }
+cf_new_ownership_marker(){ printf '%s\n' 44444444444444444444444444444444; }
+cf_api(){
+  local method="$1" path="$2" body="${3:-}" rule
+  case "$method:$path" in
+    POST:/zones/zone1/rulesets/origin-set/rules)
+      rule="$(jq -nc --argjson body "$body" '$body + {id:"drifted-origin"} | .action_parameters.origin.port=9999')"
+      jq -nc --argjson rule "$rule" '{success:true,result:{id:"origin-set",rules:[$rule]}}'
+      ;;
+    *) fail "unexpected intent-drift API call: $method $path" ;;
+  esac
+}
+CF_PENDING_MARKER=""
+set +e; out="$(cf_reconcile_origin_rule zone1 mcp.example.com 3210 '' '' '' 2>&1)"; rc=$?; set -e
+[ "$rc" -ne 0 ] && grep -Fq 'does not match the requested transaction intent' <<<"$out" || fail 'semantic drift in a create response was accepted as confirmation'
+
 printf 'Cloudflare Rulesets phase-entrypoint discovery contract passed.\n'

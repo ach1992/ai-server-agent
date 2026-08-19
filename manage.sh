@@ -743,6 +743,7 @@ cf_reconcile_origin_rule(){
     CF_RESULT_ORIGIN_RULESET_ID="$(jq -r '.result.id // empty' <<<"$res")"; CF_RESULT_ORIGIN_RULE_ID="$(jq -r '.result.rules[0].id // empty' <<<"$res")"; CF_RESULT_ORIGIN_ACTION=created
     [ -n "$CF_RESULT_ORIGIN_RULESET_ID" ] && [ -n "$CF_RESULT_ORIGIN_RULE_ID" ] || die "Cloudflare did not return the created Origin Rules IDs."
     rule="$(jq -ce '.result.rules[0] | select(type=="object")' <<<"$res")" || die "Cloudflare returned an invalid created Origin Rule."
+    [ "$(cf_rule_intent_fingerprint <<<"$rule")" = "$pending_fingerprint" ] || die "Cloudflare returned an Origin Rule that does not match the requested transaction intent."
     CF_RESULT_ORIGIN_FINGERPRINT="$(cf_rule_fingerprint <<<"$rule")"
     ruleset_id="$CF_RESULT_ORIGIN_RULESET_ID"
   else
@@ -770,6 +771,7 @@ cf_reconcile_origin_rule(){
       elif [ -n "$ref_match" ]; then
         die "An Origin Rule uses the Agent ref but is not the rule recorded as Agent-owned. Refusing to adopt or overwrite it."
       else
+        [ "$semantic_count" -eq 0 ] || die "The recorded Agent-owned Origin Rule is absent, but Cloudflare already has $semantic_count equivalent external Origin Rule(s) in ruleset $ruleset_id for $host:$port. Refusing to recreate a duplicate or adopt external rules automatically."
         marker="$(cf_new_ownership_marker)"
         pending_rule_body="$(jq -n --arg ref "$rule_ref" --arg host "$host" --argjson port "$port" --arg desc "AI Server Agent origin port txn:$marker" '{ref:$ref,description:$desc,expression:("http.host eq \""+$host+"\""),action:"route",action_parameters:{origin:{port:$port}},enabled:true}')"
         pending_fingerprint="$(cf_rule_intent_fingerprint <<<"$pending_rule_body")"
@@ -777,6 +779,7 @@ cf_reconcile_origin_rule(){
         res="$(cf_api POST "/zones/$zone_id/rulesets/$ruleset_id/rules" "$pending_rule_body")" || die "Cloudflare Origin Rule recreate response was not confirmed. Durable recovery will verify the exact marked rule representation before any cleanup."
         [ "$(jq -r '.result.id // empty' <<<"$res")" = "$ruleset_id" ] || die "Cloudflare returned an unexpected Origin Ruleset ID after rule creation."
         rule="$(jq -ce --arg ref "$rule_ref" --arg marker "$marker" '[.result.rules[]? | select(.ref==$ref and ((.description // "") | endswith(" txn:"+$marker)))] | select(length==1) | .[0]' <<<"$res")" || die "Cloudflare returned an invalid or ambiguous recreated Origin Rule."
+        [ "$(cf_rule_intent_fingerprint <<<"$rule")" = "$pending_fingerprint" ] || die "Cloudflare returned a recreated Origin Rule that does not match the requested transaction intent."
         CF_RESULT_ORIGIN_RULESET_ID="$ruleset_id"; CF_RESULT_ORIGIN_RULE_ID="$(jq -r '.id // empty' <<<"$rule")"; CF_RESULT_ORIGIN_ACTION=created
         [ -n "$CF_RESULT_ORIGIN_RULE_ID" ] || die "Cloudflare did not return the recreated Origin Rule ID."
         CF_RESULT_ORIGIN_FINGERPRINT="$(cf_rule_fingerprint <<<"$rule")"
@@ -792,6 +795,7 @@ cf_reconcile_origin_rule(){
       res="$(cf_api POST "/zones/$zone_id/rulesets/$ruleset_id/rules" "$pending_rule_body")" || die "Cloudflare Origin Rule create response was not confirmed. Durable recovery will verify the exact marked rule representation before any cleanup."
       [ "$(jq -r '.result.id // empty' <<<"$res")" = "$ruleset_id" ] || die "Cloudflare returned an unexpected Origin Ruleset ID after rule creation."
       rule="$(jq -ce --arg ref "$rule_ref" --arg marker "$marker" '[.result.rules[]? | select(.ref==$ref and ((.description // "") | endswith(" txn:"+$marker)))] | select(length==1) | .[0]' <<<"$res")" || die "Cloudflare returned an invalid or ambiguous created Origin Rule."
+      [ "$(cf_rule_intent_fingerprint <<<"$rule")" = "$pending_fingerprint" ] || die "Cloudflare returned an Origin Rule that does not match the requested transaction intent."
       CF_RESULT_ORIGIN_RULESET_ID="$ruleset_id"; CF_RESULT_ORIGIN_RULE_ID="$(jq -r '.id // empty' <<<"$rule")"; CF_RESULT_ORIGIN_ACTION=created
       [ -n "$CF_RESULT_ORIGIN_RULE_ID" ] || die "Cloudflare did not return the created Origin Rule ID."
       CF_RESULT_ORIGIN_FINGERPRINT="$(cf_rule_fingerprint <<<"$rule")"
@@ -836,6 +840,7 @@ cf_reconcile_ssl_config_rule(){
     CF_RESULT_SSL_RULESET_ID="$(jq -r '.result.id // empty' <<<"$res")"; CF_RESULT_SSL_RULE_ID="$(jq -r '.result.rules[0].id // empty' <<<"$res")"; CF_RESULT_SSL_ACTION=created
     [ -n "$CF_RESULT_SSL_RULESET_ID" ] && [ -n "$CF_RESULT_SSL_RULE_ID" ] || die "Cloudflare did not return the created Configuration Rules IDs."
     rule="$(jq -ce '.result.rules[0] | select(type=="object")' <<<"$res")" || die "Cloudflare returned an invalid created Configuration Rule."
+    [ "$(cf_rule_intent_fingerprint <<<"$rule")" = "$pending_fingerprint" ] || die "Cloudflare returned a Configuration Rule that does not match the requested transaction intent."
     CF_RESULT_SSL_FINGERPRINT="$(cf_rule_fingerprint <<<"$rule")"
     ruleset_id="$CF_RESULT_SSL_RULESET_ID"
   else
@@ -863,6 +868,7 @@ cf_reconcile_ssl_config_rule(){
       elif [ -n "$ref_match" ]; then
         die "A Configuration Rule uses the Agent SSL ref but is not the rule recorded as Agent-owned. Refusing to adopt or overwrite it."
       else
+        [ "$semantic_count" -eq 0 ] || die "The recorded Agent-owned Configuration Rule is absent, but Cloudflare already has $semantic_count equivalent external strict SSL Configuration Rule(s) in ruleset $ruleset_id for $host. Refusing to recreate a duplicate or adopt external rules automatically."
         marker="$(cf_new_ownership_marker)"
         pending_rule_body="$(jq -n --arg ref "$rule_ref" --arg host "$host" --arg desc "AI Server Agent strict SSL txn:$marker" '{ref:$ref,description:$desc,expression:("http.host eq \""+$host+"\""),action:"set_config",action_parameters:{ssl:"strict"},enabled:true}')"
         pending_fingerprint="$(cf_rule_intent_fingerprint <<<"$pending_rule_body")"
@@ -870,6 +876,7 @@ cf_reconcile_ssl_config_rule(){
         res="$(cf_api POST "/zones/$zone_id/rulesets/$ruleset_id/rules" "$pending_rule_body")" || die "Cloudflare Configuration Rule recreate response was not confirmed. Durable recovery will verify the exact marked rule representation before any cleanup."
         [ "$(jq -r '.result.id // empty' <<<"$res")" = "$ruleset_id" ] || die "Cloudflare returned an unexpected Configuration Ruleset ID after rule creation."
         rule="$(jq -ce --arg ref "$rule_ref" --arg marker "$marker" '[.result.rules[]? | select(.ref==$ref and .action=="set_config" and .action_parameters.ssl=="strict" and ((.description // "") | endswith(" txn:"+$marker)))] | select(length==1) | .[0]' <<<"$res")" || die "Cloudflare returned an invalid or ambiguous recreated Configuration Rule."
+        [ "$(cf_rule_intent_fingerprint <<<"$rule")" = "$pending_fingerprint" ] || die "Cloudflare returned a recreated Configuration Rule that does not match the requested transaction intent."
         CF_RESULT_SSL_RULESET_ID="$ruleset_id"; CF_RESULT_SSL_RULE_ID="$(jq -r '.id // empty' <<<"$rule")"; CF_RESULT_SSL_ACTION=created
         [ -n "$CF_RESULT_SSL_RULE_ID" ] || die "Cloudflare did not return the recreated Configuration Rule ID."
         CF_RESULT_SSL_FINGERPRINT="$(cf_rule_fingerprint <<<"$rule")"
@@ -885,6 +892,7 @@ cf_reconcile_ssl_config_rule(){
       res="$(cf_api POST "/zones/$zone_id/rulesets/$ruleset_id/rules" "$pending_rule_body")" || die "Cloudflare Configuration Rule create response was not confirmed. Durable recovery will verify the exact marked rule representation before any cleanup."
       [ "$(jq -r '.result.id // empty' <<<"$res")" = "$ruleset_id" ] || die "Cloudflare returned an unexpected Configuration Ruleset ID after rule creation."
       rule="$(jq -ce --arg ref "$rule_ref" --arg marker "$marker" '[.result.rules[]? | select(.ref==$ref and .action=="set_config" and .action_parameters.ssl=="strict" and ((.description // "") | endswith(" txn:"+$marker)))] | select(length==1) | .[0]' <<<"$res")" || die "Cloudflare returned an invalid or ambiguous created Configuration Rule."
+      [ "$(cf_rule_intent_fingerprint <<<"$rule")" = "$pending_fingerprint" ] || die "Cloudflare returned a Configuration Rule that does not match the requested transaction intent."
       CF_RESULT_SSL_RULESET_ID="$ruleset_id"; CF_RESULT_SSL_RULE_ID="$(jq -r '.id // empty' <<<"$rule")"; CF_RESULT_SSL_ACTION=created
       [ -n "$CF_RESULT_SSL_RULE_ID" ] || die "Cloudflare did not return the created Configuration Rule ID."
       CF_RESULT_SSL_FINGERPRINT="$(cf_rule_fingerprint <<<"$rule")"
