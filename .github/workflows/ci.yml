@@ -9,7 +9,7 @@ concurrency:
 permissions:
   contents: read
 env:
-  RELEASE_VERSION: v0.1.4
+  RELEASE_VERSION: v0.1.5
 jobs:
   test:
     runs-on: ubuntu-22.04
