@@ -19,18 +19,18 @@ AI Server Agent does not require nginx, Apache, Caddy, Docker, PHP, a database, 
 
 ## Install the latest stable release
 
-Stable installation starts with a small bootstrap loaded from an **immutable published release tag**, separate from the release `install.sh` asset it authenticates. The current v0.1 bootstrap trust anchor is the immutable `v0.1.5` release tag. GitHub locks the associated tag when an immutable release is published, so this path does not depend on a feature branch or merge strategy.
+Stable installation starts with a small bootstrap loaded from an **immutable published release tag**, separate from the release `install.sh` asset it authenticates. The current v0.1 bootstrap trust anchor is the immutable `v0.1.6` release tag. GitHub locks the associated tag when an immutable release is published, so this path does not depend on a feature branch or merge strategy.
 
-`v0.1.5` is published as an immutable release. Install the latest stable release with:
+`v0.1.6` is published as an immutable release. Install the latest stable release with:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.5/scripts/install-stable.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.6/scripts/install-stable.sh | bash
 ```
 
-For exact `v0.1.5` installation through the same immutable bootstrap:
+For exact `v0.1.6` installation through the same immutable bootstrap:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.5/scripts/install-stable.sh | bash -s -- v0.1.5
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.6/scripts/install-stable.sh | bash -s -- v0.1.6
 ```
 
 Do **not** use `releases/latest/download/install.sh | sudo bash` as the stable trust path: that executes release-supplied code as root before the same asset can be authenticated.
@@ -192,6 +192,8 @@ Once ChatGPT is connected, the Agent exposes a compact tool surface designed for
 
 Use `run_command` for normal development work, builds, tests, Git, project package managers and diagnostics that do not require host privilege. It runs as `aiworker` with `/srv/ai-workspace` as HOME/CWD.
 
+`/srv/ai-workspace` is persistent. Connected models are instructed to inspect and reuse existing repositories, worktrees and task environments before creating duplicates, prefer `git worktree` when another checkout of the same repository is appropriate, and never treat dirty, untracked, ambiguous or unknown workspace state as safe to delete.
+
 Use `run_root_command` only when host-level privilege is genuinely required. Normal root commands can execute directly, but commands that reference protected Agent resources, can interrupt connectivity/control-plane services, or match destructive-operation policy return `approval_required` first. ChatGPT should explain the exact risk and retry with `approval=true` only after explicit user confirmation.
 
 This is a safety guardrail, not a claim that arbitrary root shell access is mathematically incapable of causing damage. Root remains powerful; the design combines AI-visible self-preservation instructions, server-enforced approval policy, minimal/sanitized root execution environment, audit logging and explicit human gates for known high-risk categories.
@@ -209,7 +211,8 @@ The manifest identifies, among other things:
 - `/var/log/ai-server-agent`;
 - the private executor Unix socket under `/run/ai-server-agent/`;
 - the configured MCP listen endpoint/port;
-- required host primitives such as Bash, systemd and `systemd-run`.
+- required host primitives such as Bash, systemd and `systemd-run`;
+- read-only capacity for the filesystem backing the configured workspace, including an advisory warning when available space is below 2 GiB or 10%; filesystem telemetry never performs cleanup and a telemetry read failure does not make `agent_environment` fail.
 
 The executor separately protects Agent names/paths/socket/listen address and known connection-risk/destructive command patterns. The intent is that ChatGPT both **knows what must survive** and is **server-side gated** when a command directly threatens those resources.
 
