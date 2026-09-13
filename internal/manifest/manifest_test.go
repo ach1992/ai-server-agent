@@ -9,15 +9,16 @@ import (
 )
 
 func TestFilesystemInfoReportsUsage(t *testing.T) {
-	info := filesystemInfo("/srv/ai-workspace", 100, 25, 4096)
+	const blockSize uint64 = 1024 * 1024 * 1024
+	info := filesystemInfo("/srv/ai-workspace", 100, 25, blockSize)
 	if info.Path != "/srv/ai-workspace" {
 		t.Fatalf("path = %q, want /srv/ai-workspace", info.Path)
 	}
-	if info.TotalBytes != 409600 {
-		t.Fatalf("total bytes = %d, want 409600", info.TotalBytes)
+	if info.TotalBytes != 100*blockSize {
+		t.Fatalf("total bytes = %d, want %d", info.TotalBytes, 100*blockSize)
 	}
-	if info.AvailableBytes != 102400 {
-		t.Fatalf("available bytes = %d, want 102400", info.AvailableBytes)
+	if info.AvailableBytes != 25*blockSize {
+		t.Fatalf("available bytes = %d, want %d", info.AvailableBytes, 25*blockSize)
 	}
 	if info.AvailablePercent != 25 {
 		t.Fatalf("available percent = %d, want 25", info.AvailablePercent)
