@@ -264,41 +264,54 @@ func (s *Server) auth(next http.Handler) http.Handler {
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.Handle(s.cfg.HealthPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc(s.cfg.HealthPath, func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			w.WriteHeader(http.StatusMethodNotAllowed)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"ok":true,"service":"ai-server-agent","version":"` + version + `"}`))
-	}))
+		_, _ = w.Write([]byte(`{"status":"ok","service":"ai-server-agent"}`))
+	})
 	mux.Handle("/agent-environment.json", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			w.WriteHeader(http.StatusMethodNotAllowed)
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(manifest.Build(s.cfg))
 	})))
-	mux.Handle(s.cfg.MCPPath, s.auth(s.mcp))
-	return requestLogMiddleware(mux)
-}
 
-func requestLogMiddleware(next http.Handler) http.Handler {
-	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		start := time.Now()
-		ww := &statusWriter{ResponseWriter: w, status: http.StatusOK}
-		next.ServeHTTP(ww, r)
-		fmt.Fprintf(os.Stderr, "request method=%s path=%s status=%d duration_ms=%d\n", r.Method, r.URL.Path, ww.status, time.Since(start).Milliseconds())
+	streamable := mcpsdk.NewStreamableHTTPHandler(func(r *http.Request) *mcpsdk.Server {
+		return s.mcp
+	}, &mcpsdk.StreamableHTTPOptions{
+		Stateless:                    true,
+		JSONResponse:                 true,
+		MaxRequestBodyBytes:          8 << 20,
+		PropagateRequestCancellation: true,
 	})
+	originProtection := http.NewCrossOriginProtection()
+	mux.Handle(s.cfg.MCPPath, s.auth(originProtection.Handler(streamable)))
+	return mux
 }
 
-type statusWriter struct {
-	http.ResponseWriter
-	status int
-}
-
-func (w *statusWriter) WriteHeader(code int) {
-	w.status = code
-	w.ResponseWriter.WriteHeader(code)
+func Serve(cfg config.Config) error {
+	s, err := New(cfg)
+	if err != nil {
+		return err
+	}
+	if err := os.MkdirAll(cfg.StateDir, 0750); err != nil {
+		return err
+	}
+	if err := manifest.Write(filepath.Join(cfg.StateDir, "AI_ENVIRONMENT.json"), manifest.Build(cfg)); err != nil {
+		return err
+	}
+	httpServer := &http.Server{
+		Addr:              cfg.ListenAddress,
+		Handler:           s.Handler(),
+		ReadHeaderTimeout: 10 * time.Second,
+		IdleTimeout:       90 * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+	fmt.Printf("ai-server-agent listening on %s%s\n", cfg.ListenAddress, cfg.MCPPath)
+	return httpServer.ListenAndServe()
 }
