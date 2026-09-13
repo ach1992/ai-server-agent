@@ -89,6 +89,7 @@ func TestInstructionsDescribePersistentWorkspace(t *testing.T) {
 	got := instructions("/srv/ai-workspace")
 	for _, want := range []string{
 		"/srv/ai-workspace is persistent",
+		"task environments",
 		"prefer git worktree",
 		"never delete dirty, untracked, ambiguous, or unknown workspace state",
 	} {
