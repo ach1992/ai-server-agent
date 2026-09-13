@@ -5,9 +5,15 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/ach1992/ai-server-agent/internal/config"
+)
+
+const (
+	lowDiskAvailablePercent = 10
+	lowDiskAvailableBytes   = 2 * 1024 * 1024 * 1024
 )
 
 type Component struct {
@@ -20,28 +26,38 @@ type Component struct {
 	Notes     string   `json:"notes,omitempty"`
 }
 
+type FilesystemInfo struct {
+	Path             string `json:"path"`
+	TotalBytes       uint64 `json:"total_bytes,omitempty"`
+	AvailableBytes   uint64 `json:"available_bytes,omitempty"`
+	AvailablePercent uint64 `json:"available_percent,omitempty"`
+	Warning          string `json:"warning,omitempty"`
+}
+
 type Manifest struct {
-	SchemaVersion int         `json:"schema_version"`
-	GeneratedAt   string      `json:"generated_at"`
-	Purpose       string      `json:"purpose"`
-	WorkerUser    string      `json:"worker_user"`
-	AgentUser     string      `json:"agent_user"`
-	WorkspaceDir  string      `json:"workspace_dir"`
-	Critical      []Component `json:"critical_components"`
-	Optional      []Component `json:"optional_components"`
-	Rules         []string    `json:"rules_for_ai"`
+	SchemaVersion       int            `json:"schema_version"`
+	GeneratedAt         string         `json:"generated_at"`
+	Purpose             string         `json:"purpose"`
+	WorkerUser          string         `json:"worker_user"`
+	AgentUser           string         `json:"agent_user"`
+	WorkspaceDir        string         `json:"workspace_dir"`
+	WorkspaceFilesystem FilesystemInfo `json:"workspace_filesystem"`
+	Critical            []Component    `json:"critical_components"`
+	Optional            []Component    `json:"optional_components"`
+	Rules               []string       `json:"rules_for_ai"`
 }
 
 func Build(c config.Config) Manifest {
 	browserEngine := "/opt/ai-server-agent/browser"
 	browserData := filepath.Join(c.StateDir, "runtime/browser")
 	return Manifest{
-		SchemaVersion: 1,
-		GeneratedAt:   time.Now().UTC().Format(time.RFC3339),
-		Purpose:       "This server is dedicated to AI-operated development, deployment validation, diagnostics, and testing. Preserve the AI Server Agent control plane while changing the rest of the host as required.",
-		WorkerUser:    c.WorkerUser,
-		AgentUser:     c.AgentUser,
-		WorkspaceDir:  c.WorkspaceDir,
+		SchemaVersion:       1,
+		GeneratedAt:         time.Now().UTC().Format(time.RFC3339),
+		Purpose:             "This server is dedicated to AI-operated development, deployment validation, diagnostics, and testing. Preserve the AI Server Agent control plane while changing the rest of the host as required.",
+		WorkerUser:          c.WorkerUser,
+		AgentUser:           c.AgentUser,
+		WorkspaceDir:        c.WorkspaceDir,
+		WorkspaceFilesystem: workspaceFilesystemInfo(c.WorkspaceDir),
 		Critical: []Component{
 			{Name: "control-plane", Required: true, Installed: true, Paths: []string{"/usr/local/bin/ai-server-agent", "/etc/ai-server-agent", c.StateDir, c.LogDir}, Services: []string{"ai-server-agent.service", "ai-server-agent-executor.service"}, Ports: []string{c.ListenAddress}, Notes: "Do not stop, disable, remove, overwrite, firewall, or rebind these resources unless the user explicitly requests maintenance of the agent itself."},
 			{Name: "executor-socket", Required: true, Installed: true, Paths: []string{c.ExecutorSocket}, Notes: "Private local Unix socket used for privileged execution. It must remain local and must not be exposed over TCP."},
@@ -54,6 +70,8 @@ func Build(c config.Config) Manifest {
 		},
 		Rules: []string{
 			"Before host-wide package, firewall, network, service, disk, user, or web-stack changes, call agent_environment and preserve all critical components.",
+			fmt.Sprintf("%s is persistent. Inspect and reuse existing repositories, worktrees, and temporary resources before creating duplicates; prefer git worktree when another checkout of the same repository is needed.", c.WorkspaceDir),
+			"Remove only resources that are clearly disposable and owned by the current task. Dirty, untracked, ambiguous, or unknown workspace state is not safe to delete.",
 			"The agent intentionally does not own ports 80 or 443 and does not require nginx, Apache, PHP, MySQL, Docker, Node.js, Python, or a control panel.",
 			"Installing or replacing nginx, Apache, aaPanel, Docker, databases, language runtimes, and project dependencies is allowed when needed by the project.",
 			"Do not stop or disable ai-server-agent.service or ai-server-agent-executor.service during ordinary project work.",
@@ -63,6 +81,37 @@ func Build(c config.Config) Manifest {
 			"Prefer reversible changes, backups, and staged validation before destructive production-like operations.",
 		},
 	}
+}
+
+func workspaceFilesystemInfo(path string) FilesystemInfo {
+	var stat syscall.Statfs_t
+	if err := syscall.Statfs(path, &stat); err != nil {
+		return FilesystemInfo{
+			Path:    path,
+			Warning: fmt.Sprintf("Workspace filesystem usage is unavailable for %s; inspect disk capacity before creating large workspace artifacts.", path),
+		}
+	}
+	return filesystemInfo(path, stat.Blocks, stat.Bavail, uint64(stat.Bsize))
+}
+
+func filesystemInfo(path string, blocks, availableBlocks, blockSize uint64) FilesystemInfo {
+	if availableBlocks > blocks {
+		availableBlocks = blocks
+	}
+	info := FilesystemInfo{
+		Path:           path,
+		TotalBytes:     blocks * blockSize,
+		AvailableBytes: availableBlocks * blockSize,
+	}
+	if blocks == 0 {
+		info.Warning = fmt.Sprintf("Workspace filesystem usage is unavailable for %s; inspect disk capacity before creating large workspace artifacts.", path)
+		return info
+	}
+	info.AvailablePercent = availableBlocks * 100 / blocks
+	if info.AvailableBytes < lowDiskAvailableBytes || info.AvailablePercent < lowDiskAvailablePercent {
+		info.Warning = "Workspace filesystem is materially constrained; reuse existing workspace resources and avoid large new artifacts until disk space is reviewed."
+	}
+	return info
 }
 
 func fileExists(path string) bool { _, err := os.Stat(path); return err == nil }

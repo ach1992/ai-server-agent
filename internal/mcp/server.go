@@ -89,7 +89,7 @@ func New(cfg config.Config) (*Server, error) {
 	s.mcp = mcpsdk.NewServer(
 		&mcpsdk.Implementation{Name: "ai-server-agent", Version: version},
 		&mcpsdk.ServerOptions{
-			Instructions: instructions(),
+			Instructions: instructions(cfg.WorkspaceDir),
 			Capabilities: &mcpsdk.ServerCapabilities{},
 		},
 	)
@@ -97,8 +97,8 @@ func New(cfg config.Config) (*Server, error) {
 	return s, nil
 }
 
-func instructions() string {
-	return "Dedicated AI-operated test-server control plane. Before host-wide package, firewall, network, service, disk, user, web-stack, or control-panel changes, call agent_environment and preserve all critical components it reports. The control plane intentionally does not own ports 80/443 and does not require nginx, Apache, PHP, MySQL, Docker, Node.js, Python, or aaPanel. Use run_command for ordinary work and run_root_command only when host-level privileges are required. If a tool returns approval_required, explain the exact risk to the user and retry with approval=true only after explicit confirmation. Use start_job for long-running work so it survives MCP/ChatGPT disconnects. Optional interactive terminal workflows may install and use tmux through root shell without making tmux a core dependency."
+func instructions(workspaceDir string) string {
+	return fmt.Sprintf("Dedicated AI-operated test-server control plane. Before host-wide package, firewall, network, service, disk, user, web-stack, or control-panel changes, call agent_environment and preserve all critical components it reports. The workspace at %s is persistent: inspect and reuse existing repositories, worktrees, and task environments before creating duplicates, prefer git worktree when another checkout of the same repository is needed, and never delete dirty, untracked, ambiguous, or unknown workspace state. The control plane intentionally does not own ports 80/443 and does not require nginx, Apache, PHP, MySQL, Docker, Node.js, Python, or aaPanel. Use run_command for ordinary work and run_root_command only when host-level privileges are required. If a tool returns approval_required, explain the exact risk to the user and retry with approval=true only after explicit confirmation. Use start_job for long-running work so it survives MCP/ChatGPT disconnects. Optional interactive terminal workflows may install and use tmux through root shell without making tmux a core dependency.", workspaceDir)
 }
 
 func annotations(readOnly, destructive, idempotent, openWorld bool) *mcpsdk.ToolAnnotations {

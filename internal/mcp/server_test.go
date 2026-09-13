@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/ach1992/ai-server-agent/internal/config"
@@ -81,6 +82,20 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 	}
 	if !foundEnvironment || !foundRoot || !foundBrowser {
 		t.Fatalf("required tools missing: environment=%v root=%v browser=%v", foundEnvironment, foundRoot, foundBrowser)
+	}
+}
+
+func TestInstructionsDescribePersistentWorkspace(t *testing.T) {
+	got := instructions("/srv/ai-workspace")
+	for _, want := range []string{
+		"/srv/ai-workspace is persistent",
+		"task environments",
+		"prefer git worktree",
+		"never delete dirty, untracked, ambiguous, or unknown workspace state",
+	} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("instructions missing %q", want)
+		}
 	}
 }
 
