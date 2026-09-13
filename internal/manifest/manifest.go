@@ -35,16 +35,16 @@ type FilesystemInfo struct {
 }
 
 type Manifest struct {
-	SchemaVersion        int            `json:"schema_version"`
-	GeneratedAt          string         `json:"generated_at"`
-	Purpose              string         `json:"purpose"`
-	WorkerUser           string         `json:"worker_user"`
-	AgentUser            string         `json:"agent_user"`
-	WorkspaceDir         string         `json:"workspace_dir"`
-	WorkspaceFilesystem  FilesystemInfo `json:"workspace_filesystem"`
-	Critical             []Component    `json:"critical_components"`
-	Optional             []Component    `json:"optional_components"`
-	Rules                []string       `json:"rules_for_ai"`
+	SchemaVersion       int            `json:"schema_version"`
+	GeneratedAt         string         `json:"generated_at"`
+	Purpose             string         `json:"purpose"`
+	WorkerUser          string         `json:"worker_user"`
+	AgentUser           string         `json:"agent_user"`
+	WorkspaceDir        string         `json:"workspace_dir"`
+	WorkspaceFilesystem FilesystemInfo `json:"workspace_filesystem"`
+	Critical            []Component    `json:"critical_components"`
+	Optional            []Component    `json:"optional_components"`
+	Rules               []string       `json:"rules_for_ai"`
 }
 
 func Build(c config.Config) Manifest {
