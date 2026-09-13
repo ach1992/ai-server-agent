@@ -67,7 +67,7 @@ func Build(c config.Config) Manifest {
 		},
 		Rules: []string{
 			"Before host-wide package, firewall, network, service, disk, user, or web-stack changes, call agent_environment and preserve all critical components.",
-			"The configured workspace is persistent. Inspect and reuse existing repositories, worktrees, and temporary resources before creating duplicates; prefer git worktree when another checkout of the same repository is needed.",
+			fmt.Sprintf("%s is persistent. Inspect and reuse existing repositories, worktrees, and temporary resources before creating duplicates; prefer git worktree when another checkout of the same repository is needed.", c.WorkspaceDir),
 			"Remove only resources that are clearly disposable and owned by the current task. Dirty, untracked, ambiguous, or unknown workspace state is not safe to delete.",
 			"The agent intentionally does not own ports 80 or 443 and does not require nginx, Apache, PHP, MySQL, Docker, Node.js, Python, or a control panel.",
 			"Installing or replacing nginx, Apache, aaPanel, Docker, databases, language runtimes, and project dependencies is allowed when needed by the project.",
