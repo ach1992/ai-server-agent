@@ -98,7 +98,7 @@ func New(cfg config.Config) (*Server, error) {
 }
 
 func instructions(workspaceDir string) string {
-	return fmt.Sprintf("Dedicated AI-operated test-server control plane. Before host-wide package, firewall, network, service, disk, user, web-stack, or control-panel changes, call agent_environment and preserve all critical components it reports. The workspace at %s is persistent: inspect and reuse existing repositories and worktrees before creating duplicates, prefer git worktree when another checkout of the same repository is needed, and never delete dirty, untracked, ambiguous, or unknown workspace state. The control plane intentionally does not own ports 80/443 and does not require nginx, Apache, PHP, MySQL, Docker, Node.js, Python, or aaPanel. Use run_command for ordinary work and run_root_command only when host-level privileges are required. If a tool returns approval_required, explain the exact risk to the user and retry with approval=true only after explicit confirmation. Use start_job for long-running work so it survives MCP/ChatGPT disconnects. Optional interactive terminal workflows may install and use tmux through root shell without making tmux a core dependency.", workspaceDir)
+	return fmt.Sprintf("Dedicated AI-operated test-server control plane. Before host-wide package, firewall, network, service, disk, user, web-stack, or control-panel changes, call agent_environment and preserve all critical components it reports. The workspace at %s is persistent: inspect and reuse existing repositories, worktrees, and task environments before creating duplicates, prefer git worktree when another checkout of the same repository is needed, and never delete dirty, untracked, ambiguous, or unknown workspace state. The control plane intentionally does not own ports 80/443 and does not require nginx, Apache, PHP, MySQL, Docker, Node.js, Python, or aaPanel. Use run_command for ordinary work and run_root_command only when host-level privileges are required. If a tool returns approval_required, explain the exact risk to the user and retry with approval=true only after explicit confirmation. Use start_job for long-running work so it survives MCP/ChatGPT disconnects. Optional interactive terminal workflows may install and use tmux through root shell without making tmux a core dependency.", workspaceDir)
 }
 
 func annotations(readOnly, destructive, idempotent, openWorld bool) *mcpsdk.ToolAnnotations {
@@ -264,54 +264,41 @@ func (s *Server) auth(next http.Handler) http.Handler {
 
 func (s *Server) Handler() http.Handler {
 	mux := http.NewServeMux()
-	mux.HandleFunc(s.cfg.HealthPath, func(w http.ResponseWriter, r *http.Request) {
+	mux.Handle(s.cfg.HealthPath, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
-		_, _ = w.Write([]byte(`{"status":"ok","service":"ai-server-agent"}`))
-	})
+		_, _ = w.Write([]byte(`{"ok":true,"service":"ai-server-agent","version":"` + version + `"}`))
+	}))
 	mux.Handle("/agent-environment.json", s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodGet {
-			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			w.WriteHeader(http.StatusMethodNotAllowed)
 			return
 		}
 		w.Header().Set("Content-Type", "application/json")
 		_ = json.NewEncoder(w).Encode(manifest.Build(s.cfg))
 	})))
-
-	streamable := mcpsdk.NewStreamableHTTPHandler(func(r *http.Request) *mcpsdk.Server {
-		return s.mcp
-	}, &mcpsdk.StreamableHTTPOptions{
-		Stateless:                    true,
-		JSONResponse:                 true,
-		MaxRequestBodyBytes:          8 << 20,
-		PropagateRequestCancellation: true,
-	})
-	originProtection := http.NewCrossOriginProtection()
-	mux.Handle(s.cfg.MCPPath, s.auth(originProtection.Handler(streamable)))
-	return mux
+	mux.Handle(s.cfg.MCPPath, s.auth(s.mcp))
+	return requestLogMiddleware(mux)
 }
 
-func Serve(cfg config.Config) error {
-	s, err := New(cfg)
-	if err != nil {
-		return err
-	}
-	if err := os.MkdirAll(cfg.StateDir, 0750); err != nil {
-		return err
-	}
-	if err := manifest.Write(filepath.Join(cfg.StateDir, "AI_ENVIRONMENT.json"), manifest.Build(cfg)); err != nil {
-		return err
-	}
-	httpServer := &http.Server{
-		Addr:              cfg.ListenAddress,
-		Handler:           s.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       90 * time.Second,
-		MaxHeaderBytes:    1 << 20,
-	}
-	fmt.Printf("ai-server-agent listening on %s%s\n", cfg.ListenAddress, cfg.MCPPath)
-	return httpServer.ListenAndServe()
+func requestLogMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		start := time.Now()
+		ww := &statusWriter{ResponseWriter: w, status: http.StatusOK}
+		next.ServeHTTP(ww, r)
+		fmt.Fprintf(os.Stderr, "request method=%s path=%s status=%d duration_ms=%d\n", r.Method, r.URL.Path, ww.status, time.Since(start).Milliseconds())
+	})
+}
+
+type statusWriter struct {
+	http.ResponseWriter
+	status int
+}
+
+func (w *statusWriter) WriteHeader(code int) {
+	w.status = code
+	w.ResponseWriter.WriteHeader(code)
 }
