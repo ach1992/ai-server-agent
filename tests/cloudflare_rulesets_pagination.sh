@@ -13,6 +13,7 @@ trap 'rm -rf "$TMP"' EXIT
 CALL_LOG="$TMP/calls.log"
 fail(){ echo "FAIL: $*" >&2; exit 1; }
 ORIG_CF_GET_OPTIONAL="$(declare -f cf_get_optional)"
+ORIG_CF_GET_RULE="$(declare -f cf_get_rule)"
 ORIG_CF_RESOLVE_EXACT_ZONE_RULESET="$(declare -f cf_resolve_exact_zone_ruleset)"
 
 # Historical filename retained for CI compatibility. Production discovery now
@@ -318,6 +319,8 @@ for bad in \
   '{"success":true,"result":{"id":"","kind":"zone","phase":"http_request_origin","rules":[]}}' \
   '{"success":true,"result":{"id":"r1","kind":"root","phase":"http_request_origin","rules":[]}}' \
   '{"success":true,"result":{"id":"r1","kind":"zone","phase":"http_config_settings","rules":[]}}' \
+  '{"success":true,"result":{"id":"r1","kind":"zone","phase":"http_request_origin","version":123,"rules":[]}}' \
+  '{"success":true,"result":{"id":"r1","kind":"zone","phase":"http_request_origin","version":"","rules":[]}}' \
   '{"success":true,"result":{"id":"r1","kind":"zone","phase":"http_request_origin","rules":{}}}' \
   '{"success":true,"result":{"id":"r1","kind":"zone","phase":"http_request_origin","rules":[null]}}' \
   '{"success":true,"result":{"id":"r1","kind":"zone","phase":"http_request_origin","rules":[{"ref":"x"}]}}' \
@@ -344,6 +347,8 @@ for malformed in \
   '{"success":true,"result":{}}' \
   '{"success":true,"result":{"id":"wrong-set","kind":"zone","rules":[]}}' \
   '{"success":true,"result":{"id":"ruleset1","kind":"root","rules":[]}}' \
+  '{"success":true,"result":{"id":"ruleset1","kind":"zone","version":123,"rules":[]}}' \
+  '{"success":true,"result":{"id":"ruleset1","kind":"zone","version":"","rules":[]}}' \
   '{"success":true,"result":{"id":"ruleset1","kind":"zone"}}' \
   '{"success":true,"result":{"id":"ruleset1","kind":"zone","rules":{}}}' \
   '{"success":true,"result":{"id":"ruleset1","kind":"zone","rules":[null]}}' \
@@ -369,6 +374,32 @@ for empty in \
 done
 cf_get_optional(){ printf '%s' '{"success":true,"result":{"id":"ruleset1","kind":"zone","rules":[{"id":"target","ref":null}]}}'; }
 [ "$(jq -r '.id' <<<"$(cf_get_rule zone1 ruleset1 target)")" = target ] || fail 'valid exact Rule lookup failed'
+
+# When the caller knows the phase, exact Rule reads must remain bound to it.
+# A contradictory exact-current phase must fail before cleanup can delete a Rule.
+phase_bound_rule='{"id":"target","ref":"phase-bound","description":"phase-bound","expression":"true","action":"route","action_parameters":{"origin":{"port":3210}},"enabled":true}'
+phase_bound_fp="$(cf_rule_fingerprint <<<"$phase_bound_rule")"
+cf_get_optional(){ printf '%s' '{"success":true,"result":{"id":"ruleset1","kind":"zone","phase":"http_config_settings","version":"1","rules":[{"id":"target","ref":"phase-bound","description":"phase-bound","expression":"true","action":"route","action_parameters":{"origin":{"port":3210}},"enabled":true}]}}'; }
+set +e
+cf_get_rule zone1 ruleset1 target http_request_origin >/dev/null 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail 'wrong-phase exact-current Rule lookup was accepted'
+
+DELETE_PHASE_LOG="$TMP/delete-phase.log"
+: > "$DELETE_PHASE_LOG"
+cf_delete_owned(){ printf '%s\n' "$1" >> "$DELETE_PHASE_LOG"; return 0; }
+set +e
+cf_delete_rule_if_expected zone1 ruleset1 target "$phase_bound_fp" http_request_origin >/dev/null 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] && test ! -s "$DELETE_PHASE_LOG" || fail 'recorded cleanup ignored contradictory Ruleset phase'
+set +e
+cf_delete_pending_rule_if_expected zone1 ruleset1 target "$(cf_rule_intent_fingerprint <<<"$phase_bound_rule")" http_request_origin >/dev/null 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] && test ! -s "$DELETE_PHASE_LOG" || fail 'pending cleanup ignored contradictory Ruleset phase'
+eval "$ORIG_CF_GET_RULE"
 
 # Cleanup/recovery exact Rule reads must use the same retained-empty resolver.
 # If the Ruleset is authoritatively empty, a previously recorded target is
@@ -471,11 +502,11 @@ cf_api(){
   esac
 }
 cf_resolve_exact_zone_ruleset(){
-  case "$TEST_MODE:$2" in
-    create:origin-set)
+  case "$TEST_MODE:$2:${3:-}" in
+    create:origin-set:http_request_origin)
       jq -nc --argjson before "$origin_before" --argjson rule "$expected_origin" --argjson after "$origin_after" '{id:"origin-set",kind:"zone",phase:"http_request_origin",version:"1",rules:[$before,$rule,$after]}'
       ;;
-    create:ssl-set)
+    create:ssl-set:http_config_settings)
       jq -nc --argjson before "$ssl_before" --argjson rule "$expected_ssl" --argjson after "$ssl_after" '{id:"ssl-set",kind:"zone",phase:"http_config_settings",version:"1",rules:[$before,$rule,$after]}'
       ;;
     *) return 2 ;;
@@ -507,9 +538,9 @@ owned_ssl="$(jq -nc --arg ref "$ssl_ref" '{id:"owned-ssl",ref:$ref,description:"
 MUTATION_LOG="$TMP/rule-contract-mutations.log"
 cf_get_phase_entrypoint(){ case "$2:$TEST_MODE" in http_request_origin:external) jq -nc --argjson r "$manual_origin" '{id:"origin-set",kind:"zone",phase:"http_request_origin",rules:[$r]}' ;; http_request_origin:owned) jq -nc --argjson a "$manual_origin" --argjson b "$owned_origin" '{id:"origin-set",kind:"zone",phase:"http_request_origin",rules:[$a,$b]}' ;; http_config_settings:external) jq -nc --argjson r "$manual_ssl" '{id:"ssl-set",kind:"zone",phase:"http_config_settings",rules:[$r]}' ;; http_config_settings:owned) jq -nc --argjson a "$manual_ssl" --argjson b "$owned_ssl" '{id:"ssl-set",kind:"zone",phase:"http_config_settings",rules:[$a,$b]}' ;; *) return 2 ;; esac; }
 cf_resolve_exact_zone_ruleset(){
-  case "$TEST_MODE:$2" in
-    owned:origin-set) jq -nc --argjson a "$manual_origin" --argjson b "$owned_origin" '{id:"origin-set",kind:"zone",phase:"http_request_origin",rules:[$a,$b]}' ;;
-    owned:ssl-set) jq -nc --argjson a "$manual_ssl" --argjson b "$owned_ssl" '{id:"ssl-set",kind:"zone",phase:"http_config_settings",rules:[$a,$b]}' ;;
+  case "$TEST_MODE:$2:${3:-}" in
+    owned:origin-set:http_request_origin) jq -nc --argjson a "$manual_origin" --argjson b "$owned_origin" '{id:"origin-set",kind:"zone",phase:"http_request_origin",rules:[$a,$b]}' ;;
+    owned:ssl-set:http_config_settings) jq -nc --argjson a "$manual_ssl" --argjson b "$owned_ssl" '{id:"ssl-set",kind:"zone",phase:"http_config_settings",rules:[$a,$b]}' ;;
     *) return 2 ;;
   esac
 }
