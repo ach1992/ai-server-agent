@@ -115,6 +115,7 @@ Before entering a token, the manager prints the required scope. The token should
 - `Zone > SSL and Certificates > Edit`
 - `Zone > Origin Rules > Edit`
 - `Zone > Config Rules > Edit`
+- `Account > Account Rulesets > Read`
 
 The manager creates/reconciles only the selected hostname's resources:
 
