@@ -232,7 +232,7 @@ eval "$ORIG_CF_GET_ORIGIN_CERT"
 marker_drift_rule="$(jq -nc '{id:"marker-drift-rule",ref:"external-ref",description:"AI Server Agent origin port txn:abcdef0123456789abcdef0123456789",expression:"http.host eq \"mcp.example.com\"",action:"route",action_parameters:{origin:{port:3210}},enabled:true}')"
 CF_PENDING_KIND=origin-rule-create; CF_PENDING_ZONE=zone1; CF_PENDING_HOST=mcp.example.com; CF_PENDING_VALUE=ai_server_agent_test; CF_PENDING_PHASE=http_request_origin; CF_PENDING_MARKER=abcdef0123456789abcdef0123456789; CF_PENDING_FINGERPRINT="$pending_rule_fp"
 cf_get_phase_entrypoint(){ jq -nc --argjson rule "$marker_drift_rule" '{id:"shared-set",kind:"zone",phase:"http_request_origin",rules:[$rule]}' ; }
-cf_get_optional(){ case "$1" in '/zones/zone1/rulesets/shared-set') jq -nc --argjson rule "$marker_drift_rule" '{success:true,result:{rules:[$rule]}}' ;; *) return 2 ;; esac; }
+cf_get_optional(){ case "$1" in '/zones/zone1/rulesets/shared-set') jq -nc --argjson rule "$marker_drift_rule" '{success:true,result:{id:"shared-set",kind:"zone",phase:"http_request_origin",rules:[$rule]}}' ;; *) return 2 ;; esac; }
 : > "$DELETE_LOG"
 cf_delete_owned(){ printf '%s\n' "$1" >> "$DELETE_LOG"; return 0; }
 if cf_recover_pending_write; then echo 'marker-only drift was treated as pending-rule absence' >&2; exit 1; fi
@@ -345,12 +345,12 @@ test ! -s "$DELETE_LOG"
 
 expected_rule='{"id":"rule-owned","ref":"ai_server_agent_test","description":"AI Server Agent origin port txn:0123456789abcdef","expression":"http.host eq \"mcp.example.com\"","action":"route","action_parameters":{"origin":{"port":3210}},"enabled":true}'
 expected_rule_fp="$(cf_rule_fingerprint <<<"$expected_rule")"
-cf_get_optional(){ jq -nc --argjson rule "$expected_rule" '{success:true,result:{rules:[$rule]}}'; }
+cf_get_optional(){ jq -nc --argjson rule "$expected_rule" '{success:true,result:{id:"ruleset-owned",kind:"zone",phase:"http_request_origin",rules:[$rule]}}'; }
 : > "$DELETE_LOG"
 cf_delete_rule_if_expected zone1 ruleset-owned rule-owned "$expected_rule_fp"
 grep -Fxq '/zones/zone1/rulesets/ruleset-owned/rules/rule-owned' "$DELETE_LOG"
 mutated_rule='{"id":"rule-owned","ref":"ai_server_agent_test","description":"external concurrent change","expression":"http.host eq \"mcp.example.com\"","action":"route","action_parameters":{"origin":{"port":9999}},"enabled":true}'
-cf_get_optional(){ jq -nc --argjson rule "$mutated_rule" '{success:true,result:{rules:[$rule]}}'; }
+cf_get_optional(){ jq -nc --argjson rule "$mutated_rule" '{success:true,result:{id:"ruleset-owned",kind:"zone",phase:"http_request_origin",rules:[$rule]}}'; }
 : > "$DELETE_LOG"
 if cf_delete_rule_if_expected zone1 ruleset-owned rule-owned "$expected_rule_fp"; then echo 'drifted rule was deleted' >&2; exit 1; fi
 test ! -s "$DELETE_LOG"
