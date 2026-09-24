@@ -123,6 +123,66 @@ live_empty="$(cf_get_phase_entrypoint zone1 http_request_origin)" || fail 'live 
 [ "$(jq -r '.version' <<<"$live_empty")" = 6 ] || fail 'live retained-empty Ruleset version changed'
 [ "$(jq -r '.rules|type' <<<"$live_empty")" = array ] && [ "$(jq -r '.rules|length' <<<"$live_empty")" -eq 0 ] || fail 'live retained-empty Ruleset was not normalized to rules:[]'
 
+# The phase response may omit version as well as rules. The exact current read
+# must then supply the version used for the authoritative version-specific check.
+cf_get_optional(){
+  case "$1" in
+    "/zones/zone1/rulesets/phases/http_request_origin/entrypoint")
+      printf '%s' '{"success":true,"result":{"id":"phase-no-version","kind":"zone","phase":"http_request_origin"}}'
+      ;;
+    "/zones/zone1/rulesets/phase-no-version")
+      printf '%s' '{"success":true,"result":{"id":"phase-no-version","kind":"zone","phase":"http_request_origin","version":"12"}}'
+      ;;
+    "/zones/zone1/rulesets/phase-no-version/versions/12")
+      printf '%s' '{"success":true,"result":{"id":"phase-no-version","kind":"zone","phase":"http_request_origin","version":"12"}}'
+      ;;
+    *) return 2 ;;
+  esac
+}
+phase_no_version="$(cf_get_phase_entrypoint zone1 http_request_origin)" || fail 'exact current Ruleset version could not resolve phase response without version'
+[ "$(jq -r '.version' <<<"$phase_no_version")" = 12 ] || fail 'exact current Ruleset version was not preserved'
+[ "$(jq -r '.rules|length' <<<"$phase_no_version")" -eq 0 ] || fail 'phase response without version was not normalized safely'
+
+# Both supported phases use the same resolver contract.
+cf_get_optional(){
+  case "$1" in
+    "/zones/zone1/rulesets/phases/http_config_settings/entrypoint")
+      printf '%s' '{"success":true,"result":{"id":"live-empty-config","kind":"zone","phase":"http_config_settings","version":"4"}}'
+      ;;
+    "/zones/zone1/rulesets/live-empty-config")
+      printf '%s' '{"success":true,"result":{"id":"live-empty-config","kind":"zone","phase":"http_config_settings","version":"4"}}'
+      ;;
+    "/zones/zone1/rulesets/live-empty-config/versions/4")
+      printf '%s' '{"success":true,"result":{"id":"live-empty-config","kind":"zone","phase":"http_config_settings","version":"4"}}'
+      ;;
+    *) return 2 ;;
+  esac
+}
+live_empty_config="$(cf_get_phase_entrypoint zone1 http_config_settings)" || fail 'live retained-empty Configuration Ruleset was not normalized'
+[ "$(jq -r '.rules|length' <<<"$live_empty_config")" -eq 0 ] || fail 'live retained-empty Configuration Ruleset was not empty'
+
+# A concurrent version change between phase and exact-current reads is not
+# guessed around; fail closed and let a fresh transaction retry from a new read.
+cf_get_optional(){
+  case "$1" in
+    "/zones/zone1/rulesets/phases/http_request_origin/entrypoint")
+      printf '%s' '{"success":true,"result":{"id":"concurrent-origin","kind":"zone","phase":"http_request_origin","version":"8"}}'
+      ;;
+    "/zones/zone1/rulesets/concurrent-origin")
+      printf '%s' '{"success":true,"result":{"id":"concurrent-origin","kind":"zone","phase":"http_request_origin","version":"9"}}'
+      ;;
+    *) return 2 ;;
+  esac
+}
+set +e
+err="$(cf_get_phase_entrypoint zone1 http_request_origin 2>&1 >/dev/null)"
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail 'concurrent phase/exact version drift was accepted'
+grep -Fq 'stage=exact-current' <<<"$err" || fail 'concurrent version drift diagnostic omitted exact-current stage'
+grep -Fq 'ruleset=concurrent-origin' <<<"$err" || fail 'concurrent version drift diagnostic omitted Ruleset ID'
+grep -Fq 'version=8' <<<"$err" || fail 'concurrent version drift diagnostic omitted expected version'
+
 # If the exact current response omits rules but the matching current-version
 # response still contains rules, preserve those rules instead of assuming empty.
 cf_get_optional(){
@@ -309,6 +369,28 @@ for empty in \
 done
 cf_get_optional(){ printf '%s' '{"success":true,"result":{"id":"ruleset1","kind":"zone","rules":[{"id":"target","ref":null}]}}'; }
 [ "$(jq -r '.id' <<<"$(cf_get_rule zone1 ruleset1 target)")" = target ] || fail 'valid exact Rule lookup failed'
+
+# Cleanup/recovery exact Rule reads must use the same retained-empty resolver.
+# If the Ruleset is authoritatively empty, a previously recorded target is
+# safely reported absent rather than turning provider representation drift into
+# a cleanup failure.
+cf_get_optional(){
+  case "$1" in
+    "/zones/zone1/rulesets/ruleset1")
+      printf '%s' '{"success":true,"result":{"id":"ruleset1","kind":"zone","phase":"http_request_origin","version":"6"}}'
+      ;;
+    "/zones/zone1/rulesets/ruleset1/versions/6")
+      printf '%s' '{"success":true,"result":{"id":"ruleset1","kind":"zone","phase":"http_request_origin","version":"6"}}'
+      ;;
+    *) return 2 ;;
+  esac
+}
+set +e
+cf_get_rule zone1 ruleset1 target >/dev/null 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 3 ] || fail "retained-empty exact Rule lookup did not report target absence: $rc"
+
 eval "$ORIG_CF_GET_OPTIONAL"
 
 curl(){ printf '%s\n403' '{"success":false,"errors":[{"code":9109,"message":"permission denied"}]}' ; }
