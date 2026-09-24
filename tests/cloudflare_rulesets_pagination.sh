@@ -87,6 +87,21 @@ empty_origin="$(cf_get_phase_entrypoint zone1 http_request_origin)" || fail 'pha
 
 cf_get_optional(){
   case "$1" in
+    "/zones/zone1/rulesets/phases/http_config_settings/entrypoint")
+      printf '%s' '{"success":true,"result":{"id":"empty-config","kind":"zone","phase":"http_config_settings"}}'
+      ;;
+    "/zones/zone1/rulesets/empty-config")
+      printf '%s' '{"success":true,"result":{"id":"empty-config","kind":"zone","phase":"http_config_settings","rules":null}}'
+      ;;
+    *) return 2 ;;
+  esac
+}
+empty_config="$(cf_get_phase_entrypoint zone1 http_config_settings)" || fail 'retained empty Configuration Ruleset was not normalized'
+[ "$(jq -r '.id' <<<"$empty_config")" = empty-config ] || fail 'empty Configuration Ruleset identity changed during normalization'
+[ "$(jq -r '.rules|type' <<<"$empty_config")" = array ] && [ "$(jq -r '.rules|length' <<<"$empty_config")" -eq 0 ] || fail 'empty Configuration Ruleset was not normalized to rules:[]'
+
+cf_get_optional(){
+  case "$1" in
     "/zones/zone1/rulesets/phases/http_request_origin/entrypoint")
       printf '%s' '{"success":true,"result":{"id":"empty-origin","kind":"zone","phase":"http_request_origin"}}'
       ;;
@@ -152,6 +167,7 @@ for malformed in \
   '{"success":true,"result":{}}' \
   '{"success":true,"result":{"id":"wrong-set","kind":"zone","rules":[]}}' \
   '{"success":true,"result":{"id":"ruleset1","kind":"root","rules":[]}}' \
+  '{"success":true,"result":{"id":"ruleset1","kind":"zone"}}' \
   '{"success":true,"result":{"id":"ruleset1","kind":"zone","rules":{}}}' \
   '{"success":true,"result":{"id":"ruleset1","kind":"zone","rules":[null]}}' \
   '{"success":true,"result":{"id":"ruleset1","kind":"zone","rules":[{"id":null}]}}' \
@@ -166,7 +182,6 @@ done
 
 for empty in \
   '{"success":true,"result":{"id":"ruleset1","kind":"zone","rules":null}}' \
-  '{"success":true,"result":{"id":"ruleset1","kind":"zone"}}' \
   '{"success":true,"result":{"id":"ruleset1","kind":"zone","rules":[]}}'; do
   cf_get_optional(){ printf '%s' "$empty"; }
   set +e
