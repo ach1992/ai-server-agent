@@ -259,7 +259,8 @@ print_cf_token_guidance(){
   cat <<EOF_GUIDANCE
 
 Cloudflare API token requirements for $host:
-  Resource scope: Include -> Specific zone -> the zone containing this hostname
+  Zone resource: Include -> Specific zone -> the zone containing this hostname
+  Account resource: Include -> Specific account -> the account owning that zone
   Permissions:
     Zone > Zone > Read
     Zone > DNS > Edit
