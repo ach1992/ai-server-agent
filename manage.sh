@@ -266,6 +266,7 @@ Cloudflare API token requirements for $host:
     Zone > SSL and Certificates > Edit
     Zone > Origin Rules > Edit
     Zone > Config Rules > Edit
+    Account > Account Rulesets > Read
 
 Create or edit the token in Cloudflare, then enter it only in the hidden terminal prompt below.
 Do not paste the token into ChatGPT, chat, logs, tickets, screenshots, or source control.
@@ -347,31 +348,68 @@ cf_get_optional(){
   printf '%s' "$body"
 }
 
+cf_normalize_zone_ruleset(){
+  local payload="$1" ruleset_id="$2" phase="${3:-}"
+  jq -ce --arg ruleset_id "$ruleset_id" --arg phase "$phase" '
+    .result
+    | select(
+        type=="object" and
+        (.id|type)=="string" and .id==$ruleset_id and
+        .kind=="zone" and
+        ($phase=="" or .phase==$phase) and
+        (
+          ((has("rules")|not) or .rules==null) or
+          (
+            (.rules|type)=="array" and
+            (([.rules[].id] | length) == ([.rules[].id] | unique | length)) and
+            all(.rules[];
+              type=="object" and
+              (.id|type)=="string" and (.id|length)>0 and
+              ((has("ref")|not) or .ref==null or ((.ref|type)=="string" and (.ref|length)>0)) and
+              ((has("description")|not) or .description==null or (.description|type)=="string")
+            )
+          )
+        )
+      )
+    | if ((has("rules")|not) or .rules==null) then . + {rules:[]} else . end
+  ' <<<"$payload"
+}
+
 cf_get_phase_entrypoint(){
-  local zone_id="$1" phase="$2" res rc result
+  local zone_id="$1" phase="$2" res rc result ruleset_id rules_type exact
   [ -n "$zone_id" ] || return 2
   case "$phase" in
     http_request_origin|http_config_settings) ;;
     *) return 2 ;;
   esac
   if res="$(cf_get_optional "/zones/$zone_id/rulesets/phases/$phase/entrypoint")"; then
-    result="$(jq -ce --arg phase "$phase" '
+    ruleset_id="$(jq -er --arg phase "$phase" '
       .result
       | select(
           type=="object" and
           (.id|type)=="string" and (.id|length)>0 and
           .kind=="zone" and
-          .phase==$phase and
-          (.rules|type)=="array" and
-          (([.rules[].id] | length) == ([.rules[].id] | unique | length)) and
-          all(.rules[];
-            type=="object" and
-            (.id|type)=="string" and (.id|length)>0 and
-            ((has("ref")|not) or .ref==null or ((.ref|type)=="string" and (.ref|length)>0)) and
-            ((has("description")|not) or .description==null or (.description|type)=="string")
-          )
+          .phase==$phase
         )
+      | .id
     ' <<<"$res")" || return 2
+    rules_type="$(jq -r 'if (.result|has("rules")) then (.result.rules|type) else "missing" end' <<<"$res")" || return 2
+    case "$rules_type" in
+      array)
+        result="$(cf_normalize_zone_ruleset "$res" "$ruleset_id" "$phase")" || return 2
+        ;;
+      null|missing)
+        if exact="$(cf_get_optional "/zones/$zone_id/rulesets/$ruleset_id")"; then
+          result="$(cf_normalize_zone_ruleset "$exact" "$ruleset_id" "$phase")" || return 2
+        else
+          rc=$?
+          return 2
+        fi
+        ;;
+      *)
+        return 2
+        ;;
+    esac
     printf '%s\n' "$result"
     return 0
   else
@@ -412,24 +450,17 @@ cf_get_dns_record(){
 }
 
 cf_get_rule(){
-  local zone_id="$1" ruleset_id="$2" rule_id="$3" res rc count
+  local zone_id="$1" ruleset_id="$2" rule_id="$3" res rc count ruleset
   if res="$(cf_get_optional "/zones/$zone_id/rulesets/$ruleset_id")"; then
     :
   else
     rc=$?; [ "$rc" -eq 3 ] && return 3; return 2
   fi
-  if ! jq -e '
-    (.result|type)=="object" and
-    (.result.rules|type)=="array" and
-    all(.result.rules[]; type=="object" and (.id|type)=="string" and (.id|length)>0) and
-    (([.result.rules[].id] | length) == ([.result.rules[].id] | unique | length))
-  ' >/dev/null 2>&1 <<<"$res"; then
-    return 2
-  fi
-  count="$(jq --arg id "$rule_id" '[.result.rules[] | select(.id==$id)] | length' <<<"$res")"
+  ruleset="$(cf_normalize_zone_ruleset "$res" "$ruleset_id")" || return 2
+  count="$(jq --arg id "$rule_id" '[.rules[] | select(.id==$id)] | length' <<<"$ruleset")"
   [ "$count" -eq 0 ] && return 3
   [ "$count" -eq 1 ] || return 2
-  jq -c --arg id "$rule_id" '.result.rules[] | select(.id==$id)' <<<"$res"
+  jq -c --arg id "$rule_id" '.rules[] | select(.id==$id)' <<<"$ruleset"
 }
 
 cf_get_origin_cert(){
