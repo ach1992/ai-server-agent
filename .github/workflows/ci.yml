@@ -341,21 +341,36 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        version: ["11", "12", "13"]
+        include:
+          - version: "11"
+            maintained: false
+          - version: "12"
+            maintained: true
+          - version: "13"
+            maintained: true
     steps:
       - uses: actions/checkout@v4
       - name: Verify supported Debian host contract
+        env:
+          DEBIAN_MAINTAINED: ${{ matrix.maintained }}
         run: |
           docker run --rm \
+            -e DEBIAN_MAINTAINED \
             -v "$GITHUB_WORKSPACE:/repo:ro" \
             "debian:${{ matrix.version }}" \
             bash -lc '
               set -Eeuo pipefail
-              apt-get update -qq
-              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
-                ca-certificates curl jq openssl tar xz-utils util-linux systemd >/dev/null
               cd /repo
-              AI_SERVER_AGENT_VERSION=v0.1.7 bash install.sh --check
+              if [ "$DEBIAN_MAINTAINED" = true ]; then
+                apt-get update -qq
+                DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+                  ca-certificates curl jq openssl tar xz-utils util-linux systemd >/dev/null
+                AI_SERVER_AGENT_VERSION=v0.1.7 bash install.sh --check
+              else
+                test "$(. /etc/os-release; printf %s "$ID")" = debian
+                test "$(. /etc/os-release; printf %s "$VERSION_ID")" = 11
+                bash install.sh --check-platform debian 11 "$(uname -m)"
+              fi
               bash tests/platform_compatibility.sh
             '
 

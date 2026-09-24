@@ -9,7 +9,7 @@ The project is intentionally a **development/test-server control plane**, not a 
 The current `main` branch and next stable release target support:
 
 - **Ubuntu 22.04 or newer**
-- **Debian 11 or newer**
+- **Debian 11 or newer** (Debian 11 application compatibility is retained, but upstream Debian LTS ended on 2026-08-31; use Debian 12+ for an officially security-maintained base unless you have an ELTS arrangement)
 - **amd64/x86_64 and arm64/aarch64**
 - systemd
 - a dedicated development/test server where you are comfortable granting an AI-controlled MCP endpoint the documented capabilities

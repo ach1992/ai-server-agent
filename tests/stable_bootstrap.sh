@@ -112,7 +112,7 @@ test ! -e "$PATH_ATTACK_MARKER"
 make_fixture true false false
 ROOT_BIN="$FIXTURE/root-bin"
 mkdir -p "$ROOT_BIN"
-for cmd in bash sha256sum mktemp jq awk chmod rm cp; do
+for cmd in bash curl sha256sum mktemp jq awk chmod rm cp; do
   ln -s "$(command -v "$cmd")" "$ROOT_BIN/$cmd"
 done
 PATH="$ROOT_BIN" bash "$BOOTSTRAP" > "$FIXTURE/out"
