@@ -968,11 +968,11 @@ cf_reconcile_origin_rule(){
       log "Cloudflare diagnostic: Origin rule create response matched rule $CF_RESULT_ORIGIN_RULE_ID in ruleset $ruleset_id."
     fi
   fi
-  ruleset="$(cf_api GET "/zones/$zone_id/rulesets/$ruleset_id")" || die "Could not verify Cloudflare Origin Rule."
+  ruleset="$(cf_resolve_exact_zone_ruleset "$zone_id" "$ruleset_id")" || die "Could not verify Cloudflare Origin Rule from a trustworthy Ruleset response. See the Cloudflare Rulesets diagnostic above."
   if [ -n "$CF_PENDING_MARKER" ]; then
-    rule="$(jq -c --arg ref "$rule_ref" --arg marker "$CF_PENDING_MARKER" '.result.rules[]? | select(.ref==$ref and ((.description // "") | endswith(" txn:"+$marker)))' <<<"$ruleset" | head -n1)"
+    rule="$(jq -c --arg ref "$rule_ref" --arg marker "$CF_PENDING_MARKER" '.rules[]? | select(.ref==$ref and ((.description // "") | endswith(" txn:"+$marker)))' <<<"$ruleset" | head -n1)"
   else
-    rule="$(jq -c --arg id "$CF_RESULT_ORIGIN_RULE_ID" --arg ref "$rule_ref" '.result.rules[]? | select(.id==$id and .ref==$ref)' <<<"$ruleset" | head -n1)"
+    rule="$(jq -c --arg id "$CF_RESULT_ORIGIN_RULE_ID" --arg ref "$rule_ref" '.rules[]? | select(.id==$id and .ref==$ref)' <<<"$ruleset" | head -n1)"
   fi
   [ -n "$rule" ] || die "Cloudflare Origin Rule was not reconciled cleanly."
   verify_id="$(jq -r '.id // empty' <<<"$rule")"
@@ -1065,11 +1065,11 @@ cf_reconcile_ssl_config_rule(){
       log "Cloudflare diagnostic: Configuration rule create response matched rule $CF_RESULT_SSL_RULE_ID in ruleset $ruleset_id."
     fi
   fi
-  ruleset="$(cf_api GET "/zones/$zone_id/rulesets/$ruleset_id")" || die "Could not verify Cloudflare strict SSL Configuration Rule."
+  ruleset="$(cf_resolve_exact_zone_ruleset "$zone_id" "$ruleset_id")" || die "Could not verify Cloudflare strict SSL Configuration Rule from a trustworthy Ruleset response. See the Cloudflare Rulesets diagnostic above."
   if [ -n "$CF_PENDING_MARKER" ]; then
-    rule="$(jq -c --arg ref "$rule_ref" --arg marker "$CF_PENDING_MARKER" '.result.rules[]? | select(.ref==$ref and .action=="set_config" and .action_parameters.ssl=="strict" and ((.description // "") | endswith(" txn:"+$marker)))' <<<"$ruleset" | head -n1)"
+    rule="$(jq -c --arg ref "$rule_ref" --arg marker "$CF_PENDING_MARKER" '.rules[]? | select(.ref==$ref and .action=="set_config" and .action_parameters.ssl=="strict" and ((.description // "") | endswith(" txn:"+$marker)))' <<<"$ruleset" | head -n1)"
   else
-    rule="$(jq -c --arg id "$CF_RESULT_SSL_RULE_ID" --arg ref "$rule_ref" '.result.rules[]? | select(.id==$id and .ref==$ref and .action=="set_config" and .action_parameters.ssl=="strict")' <<<"$ruleset" | head -n1)"
+    rule="$(jq -c --arg id "$CF_RESULT_SSL_RULE_ID" --arg ref "$rule_ref" '.rules[]? | select(.id==$id and .ref==$ref and .action=="set_config" and .action_parameters.ssl=="strict")' <<<"$ruleset" | head -n1)"
   fi
   [ -n "$rule" ] || die "Cloudflare strict SSL Configuration Rule was not reconciled cleanly."
   verify_id="$(jq -r '.id // empty' <<<"$rule")"
