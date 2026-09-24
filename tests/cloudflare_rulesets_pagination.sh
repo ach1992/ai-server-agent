@@ -13,6 +13,7 @@ trap 'rm -rf "$TMP"' EXIT
 CALL_LOG="$TMP/calls.log"
 fail(){ echo "FAIL: $*" >&2; exit 1; }
 ORIG_CF_GET_OPTIONAL="$(declare -f cf_get_optional)"
+ORIG_CF_RESOLVE_EXACT_ZONE_RULESET="$(declare -f cf_resolve_exact_zone_ruleset)"
 
 # Historical filename retained for CI compatibility. Production discovery now
 # uses exact phase entrypoints and must not depend on zone-wide list pagination.
@@ -387,6 +388,17 @@ cf_api(){
     *) fail "unexpected create-response API call: $TEST_MODE $method $path" ;;
   esac
 }
+cf_resolve_exact_zone_ruleset(){
+  case "$TEST_MODE:$2" in
+    create:origin-set)
+      jq -nc --argjson before "$origin_before" --argjson rule "$expected_origin" --argjson after "$origin_after" '{id:"origin-set",kind:"zone",phase:"http_request_origin",version:"1",rules:[$before,$rule,$after]}'
+      ;;
+    create:ssl-set)
+      jq -nc --argjson before "$ssl_before" --argjson rule "$expected_ssl" --argjson after "$ssl_after" '{id:"ssl-set",kind:"zone",phase:"http_config_settings",version:"1",rules:[$before,$rule,$after]}'
+      ;;
+    *) return 2 ;;
+  esac
+}
 TEST_MODE=create
 cf_reconcile_origin_rule zone1 mcp.example.com 3210 '' '' '' >/dev/null
 [ "$CF_RESULT_ORIGIN_RULESET_ID" = origin-set ] && [ "$CF_RESULT_ORIGIN_RULE_ID" = origin-new ] && [ "$CF_RESULT_ORIGIN_ACTION" = created ] && [ "$CF_RESULT_ORIGIN_FINGERPRINT" = "$expected_origin_fp" ] || fail 'Origin updated-Ruleset response did not select/fingerprint the exact created Rule'
@@ -412,6 +424,13 @@ manual_ssl="$(jq -nc '{id:"manual-ssl",ref:"manual-ssl",description:"manual ssl"
 owned_ssl="$(jq -nc --arg ref "$ssl_ref" '{id:"owned-ssl",ref:$ref,description:"AI Server Agent strict SSL txn:33333333333333333333333333333333",expression:"http.host eq \"mcp.example.com\"",action:"set_config",action_parameters:{ssl:"strict"},enabled:true}')"
 MUTATION_LOG="$TMP/rule-contract-mutations.log"
 cf_get_phase_entrypoint(){ case "$2:$TEST_MODE" in http_request_origin:external) jq -nc --argjson r "$manual_origin" '{id:"origin-set",kind:"zone",phase:"http_request_origin",rules:[$r]}' ;; http_request_origin:owned) jq -nc --argjson a "$manual_origin" --argjson b "$owned_origin" '{id:"origin-set",kind:"zone",phase:"http_request_origin",rules:[$a,$b]}' ;; http_config_settings:external) jq -nc --argjson r "$manual_ssl" '{id:"ssl-set",kind:"zone",phase:"http_config_settings",rules:[$r]}' ;; http_config_settings:owned) jq -nc --argjson a "$manual_ssl" --argjson b "$owned_ssl" '{id:"ssl-set",kind:"zone",phase:"http_config_settings",rules:[$a,$b]}' ;; *) return 2 ;; esac; }
+cf_resolve_exact_zone_ruleset(){
+  case "$TEST_MODE:$2" in
+    owned:origin-set) jq -nc --argjson a "$manual_origin" --argjson b "$owned_origin" '{id:"origin-set",kind:"zone",phase:"http_request_origin",rules:[$a,$b]}' ;;
+    owned:ssl-set) jq -nc --argjson a "$manual_ssl" --argjson b "$owned_ssl" '{id:"ssl-set",kind:"zone",phase:"http_config_settings",rules:[$a,$b]}' ;;
+    *) return 2 ;;
+  esac
+}
 cf_set_pending_write(){ printf 'pending %s\n' "$*" >> "$MUTATION_LOG"; return 99; }
 cf_api(){ local method="$1" path="$2"; if [ "$TEST_MODE" = owned ] && [ "$method" = GET ]; then case "$path" in /zones/zone1/rulesets/origin-set) jq -nc --argjson a "$manual_origin" --argjson b "$owned_origin" '{success:true,result:{rules:[$a,$b]}}'; return ;; /zones/zone1/rulesets/ssl-set) jq -nc --argjson a "$manual_ssl" --argjson b "$owned_ssl" '{success:true,result:{rules:[$a,$b]}}'; return ;; esac; fi; printf '%s %s\n' "$method" "$path" >> "$MUTATION_LOG"; return 99; }
 TEST_MODE=external; : > "$MUTATION_LOG"; CF_PENDING_MARKER=""; set +e; out="$(cf_reconcile_origin_rule zone1 mcp.example.com 3210 '' '' '' 2>&1)"; rc=$?; set -e; [ "$rc" -ne 0 ] && grep -Fq 'equivalent external Origin Rule(s)' <<<"$out" && test ! -s "$MUTATION_LOG" || fail 'external Origin equivalent did not fail closed before mutation'
@@ -429,6 +448,8 @@ set +e; out="$(cf_reconcile_origin_rule zone1 mcp.example.com 3210 origin-set mi
 TEST_MODE=external; : > "$MUTATION_LOG"; CF_PENDING_MARKER=""
 set +e; out="$(cf_reconcile_ssl_config_rule zone1 mcp.example.com ssl-set missing-ssl '' 2>&1)"; rc=$?; set -e
 [ "$rc" -ne 0 ] && grep -Fq 'recorded Agent-owned Configuration Rule is absent' <<<"$out" && test ! -s "$MUTATION_LOG" || fail 'stale Configuration ownership recreated around an external equivalent'
+
+eval "$ORIG_CF_RESOLVE_EXACT_ZONE_RULESET"
 
 # A create response with the right marker/ref but mutated semantics is
 # not confirmation of the durable pre-POST intent.
