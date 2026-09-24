@@ -108,13 +108,14 @@ sudo ai-server-agent-manage
 
 The recommended direct-public path uses Cloudflare for the selected MCP hostname only. It does not change the zone-wide SSL mode.
 
-Before entering a token, the manager prints the required scope. The token should be restricted to the intended zone and needs the current guided-flow permissions:
+Before entering a token, the manager prints the required scope. Restrict zone permissions to the intended zone. Because the current Cloudflare phase-entrypoint read requires an accepted account Rulesets permission in the live guided flow, restrict that account resource to the account that owns the selected zone. The token needs these permissions:
 
 - `Zone > Zone > Read`
 - `Zone > DNS > Edit`
 - `Zone > SSL and Certificates > Edit`
 - `Zone > Origin Rules > Edit`
 - `Zone > Config Rules > Edit`
+- `Account > Account Rulesets > Read`
 
 The manager creates/reconciles only the selected hostname's resources:
 
