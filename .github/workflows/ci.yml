@@ -335,6 +335,30 @@ jobs:
           retention-days: 7
 
 
+  debian-compatibility:
+    name: Debian ${{ matrix.version }} stable compatibility
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        version: ["11", "12", "13"]
+    steps:
+      - uses: actions/checkout@v4
+      - name: Verify supported Debian host contract
+        run: |
+          docker run --rm \
+            -v "$GITHUB_WORKSPACE:/repo:ro" \
+            "debian:${{ matrix.version }}" \
+            bash -lc '
+              set -Eeuo pipefail
+              apt-get update -qq
+              DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
+                ca-certificates curl jq openssl tar xz-utils util-linux systemd >/dev/null
+              cd /repo
+              AI_SERVER_AGENT_VERSION=v0.1.7 bash install.sh --check
+              bash tests/platform_compatibility.sh
+            '
+
   arm64-lifecycle:
     runs-on: ubuntu-24.04-arm
     steps:

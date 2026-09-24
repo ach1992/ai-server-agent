@@ -27,12 +27,12 @@ require_supported_prerequisite_host(){
 }
 
 run_privileged(){
-  if [ "$(id -u)" -eq 0 ]; then
-    "$@"
+  if command -v sudo >/dev/null 2>&1; then
+    sudo "$@"
     return
   fi
-  command -v sudo >/dev/null 2>&1 || die "sudo is required for privileged installation when not running as root."
-  sudo "$@"
+  [ "$(/usr/bin/id -u)" -eq 0 ] || die "sudo is required for privileged installation when not running as root."
+  "$@"
 }
 
 case "$#" in
