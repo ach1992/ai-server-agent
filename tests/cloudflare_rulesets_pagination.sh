@@ -51,6 +51,75 @@ set -e
 [ "$rc" -eq 2 ] || fail 'unsupported internal phase input was not rejected'
 [ "$(wc -l < "$CALL_LOG")" -eq "$before" ] || fail 'unsupported phase input reached Cloudflare'
 
+# Cloudflare can retain an existing phase entrypoint after its last Rule is
+# deleted. Live provider behavior represents that valid empty state by omitting
+# rules from the phase read and returning rules:null from the exact Ruleset read.
+# Resolve that ambiguity with the exact Ruleset identity before treating it as
+# an empty collection.
+cf_get_optional(){
+  case "$1" in
+    "/zones/zone1/rulesets/phases/http_request_origin/entrypoint")
+      printf '%s' '{"success":true,"result":{"id":"empty-origin","kind":"zone","phase":"http_request_origin","version":"6"}}'
+      ;;
+    "/zones/zone1/rulesets/empty-origin")
+      printf '%s' '{"success":true,"result":{"id":"empty-origin","kind":"zone","phase":"http_request_origin","version":"6","rules":null}}'
+      ;;
+    *) return 2 ;;
+  esac
+}
+empty_origin="$(cf_get_phase_entrypoint zone1 http_request_origin)" || fail 'omitted phase rules with exact rules:null were not normalized'
+[ "$(jq -r '.id' <<<"$empty_origin")" = empty-origin ] || fail 'empty Origin Ruleset identity changed during normalization'
+[ "$(jq -r '.rules|type' <<<"$empty_origin")" = array ] && [ "$(jq -r '.rules|length' <<<"$empty_origin")" -eq 0 ] || fail 'empty Origin Ruleset was not normalized to rules:[]'
+
+cf_get_optional(){
+  case "$1" in
+    "/zones/zone1/rulesets/phases/http_request_origin/entrypoint")
+      printf '%s' '{"success":true,"result":{"id":"empty-origin","kind":"zone","phase":"http_request_origin","rules":null}}'
+      ;;
+    "/zones/zone1/rulesets/empty-origin")
+      printf '%s' '{"success":true,"result":{"id":"empty-origin","kind":"zone","phase":"http_request_origin","rules":[]}}'
+      ;;
+    *) return 2 ;;
+  esac
+}
+empty_origin="$(cf_get_phase_entrypoint zone1 http_request_origin)" || fail 'phase rules:null with exact rules:[] was not normalized'
+[ "$(jq -r '.rules|length' <<<"$empty_origin")" -eq 0 ] || fail 'exact empty Ruleset did not remain empty'
+
+cf_get_optional(){
+  case "$1" in
+    "/zones/zone1/rulesets/phases/http_request_origin/entrypoint")
+      printf '%s' '{"success":true,"result":{"id":"empty-origin","kind":"zone","phase":"http_request_origin"}}'
+      ;;
+    "/zones/zone1/rulesets/empty-origin")
+      printf '%s' '{"success":true,"result":{"id":"wrong-id","kind":"zone","phase":"http_request_origin","rules":null}}'
+      ;;
+    *) return 2 ;;
+  esac
+}
+set +e
+cf_get_phase_entrypoint zone1 http_request_origin >/dev/null 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail 'mismatched exact Ruleset identity was accepted as empty'
+
+cf_get_optional(){
+  case "$1" in
+    "/zones/zone1/rulesets/phases/http_request_origin/entrypoint")
+      printf '%s' '{"success":true,"result":{"id":"empty-origin","kind":"zone","phase":"http_request_origin"}}'
+      ;;
+    "/zones/zone1/rulesets/empty-origin")
+      return 3
+      ;;
+    *) return 2 ;;
+  esac
+}
+set +e
+cf_get_phase_entrypoint zone1 http_request_origin >/dev/null 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail 'contradictory phase/exact Ruleset state was treated as authoritative absence'
+eval "$ORIG_CF_GET_OPTIONAL"
+
 # Entrypoint identity and the Rules used for ownership/absence decisions must be
 # structurally safe. A malformed Rule must never be silently treated as absent.
 for bad in \
@@ -81,11 +150,12 @@ cf_get_phase_entrypoint zone1 http_request_origin >/dev/null || fail 'valid opti
 for malformed in \
   '{"success":true,"result":null}' \
   '{"success":true,"result":{}}' \
-  '{"success":true,"result":{"rules":null}}' \
-  '{"success":true,"result":{"rules":{}}}' \
-  '{"success":true,"result":{"rules":[null]}}' \
-  '{"success":true,"result":{"rules":[{"id":null}]}}' \
-  '{"success":true,"result":{"rules":[{"id":"target"},{"id":"target"}]}}'; do
+  '{"success":true,"result":{"id":"wrong-set","kind":"zone","rules":[]}}' \
+  '{"success":true,"result":{"id":"ruleset1","kind":"root","rules":[]}}' \
+  '{"success":true,"result":{"id":"ruleset1","kind":"zone","rules":{}}}' \
+  '{"success":true,"result":{"id":"ruleset1","kind":"zone","rules":[null]}}' \
+  '{"success":true,"result":{"id":"ruleset1","kind":"zone","rules":[{"id":null}]}}' \
+  '{"success":true,"result":{"id":"ruleset1","kind":"zone","rules":[{"id":"target"},{"id":"target"}]}}'; do
   cf_get_optional(){ printf '%s' "$malformed"; }
   set +e
   cf_get_rule zone1 ruleset1 target >/dev/null 2>&1
@@ -93,13 +163,19 @@ for malformed in \
   set -e
   [ "$rc" -eq 2 ] || fail "malformed exact Ruleset response became absence: $malformed (rc=$rc)"
 done
-cf_get_optional(){ printf '%s' '{"success":true,"result":{"rules":[]}}'; }
-set +e
-cf_get_rule zone1 ruleset1 target >/dev/null 2>&1
-rc=$?
-set -e
-[ "$rc" -eq 3 ] || fail "valid empty Ruleset did not report target absence: $rc"
-cf_get_optional(){ printf '%s' '{"success":true,"result":{"rules":[{"id":"target","ref":null}]}}'; }
+
+for empty in \
+  '{"success":true,"result":{"id":"ruleset1","kind":"zone","rules":null}}' \
+  '{"success":true,"result":{"id":"ruleset1","kind":"zone"}}' \
+  '{"success":true,"result":{"id":"ruleset1","kind":"zone","rules":[]}}'; do
+  cf_get_optional(){ printf '%s' "$empty"; }
+  set +e
+  cf_get_rule zone1 ruleset1 target >/dev/null 2>&1
+  rc=$?
+  set -e
+  [ "$rc" -eq 3 ] || fail "valid empty exact Ruleset did not report target absence: $empty (rc=$rc)"
+done
+cf_get_optional(){ printf '%s' '{"success":true,"result":{"id":"ruleset1","kind":"zone","rules":[{"id":"target","ref":null}]}}'; }
 [ "$(jq -r '.id' <<<"$(cf_get_rule zone1 ruleset1 target)")" = target ] || fail 'valid exact Rule lookup failed'
 eval "$ORIG_CF_GET_OPTIONAL"
 
