@@ -2,7 +2,7 @@
 
 ## 1. Supported release target
 
-Current `main` targets the next stable release for **Ubuntu 22.04+ and Debian 11+ on amd64/x86_64 and arm64/aarch64**, on dedicated development/test servers with systemd. The published immutable `v0.1.6` release remains limited to Ubuntu 22.04 LTS amd64 until a newer release supersedes it.
+The supported stable release target is **Ubuntu 22.04+ and Debian 11+ on amd64/x86_64 and arm64/aarch64**, on dedicated development/test servers with systemd; current `main` follows the same platform policy. The identity of the latest immutable release is intentionally not hard-coded in this architecture document; GitHub Releases is authoritative, with README carrying the supported stable install command.
 
 Platform compatibility is intentionally small and explicit: `install.sh` owns runtime distro/version validation and architecture normalization; the standalone stable bootstrap mirrors only the minimum distro policy needed before it can safely install `jq`; `scripts/release-arches.txt` owns the release artifact architecture list; CI asserts those boundaries stay aligned. New supported platforms should extend those policy/list/test boundaries rather than introduce parallel installer or release paths.
 
@@ -166,7 +166,7 @@ Stable and source channels are distinct.
 
 ### Stable bootstrap and first install
 
-The release `install.sh` cannot authenticate itself before it executes, so it is deliberately **not** the stable trust root. Initial stable installation begins with `scripts/install-stable.sh` loaded from a Git tag already bound to a published immutable GitHub Release. The current v0.1 bootstrap source identity is the immutable `v0.1.4` tag.
+The release `install.sh` cannot authenticate itself before it executes, so it is deliberately **not** the stable trust root. Initial stable installation begins with `scripts/install-stable.sh` loaded from a Git tag already bound to a published immutable GitHub Release. The README stable-install command names the immutable release tag used as the bootstrap source; this architecture document intentionally does not pin that current release number.
 
 GitHub immutable releases lock their associated tag against movement/deletion while the release exists, and a deleted immutable release does not permit reuse of the same tag name. The bootstrap source therefore does not depend on preservation of a feature branch or a particular merge strategy.
 
