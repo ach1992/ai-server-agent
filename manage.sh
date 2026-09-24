@@ -358,8 +358,9 @@ cf_normalize_zone_ruleset(){
         (.id|type)=="string" and .id==$ruleset_id and
         .kind=="zone" and
         ($phase=="" or .phase==$phase) and
+        has("rules") and
         (
-          ((has("rules")|not) or .rules==null) or
+          .rules==null or
           (
             (.rules|type)=="array" and
             (([.rules[].id] | length) == ([.rules[].id] | unique | length)) and
@@ -372,7 +373,7 @@ cf_normalize_zone_ruleset(){
           )
         )
       )
-    | if ((has("rules")|not) or .rules==null) then . + {rules:[]} else . end
+    | if .rules==null then . + {rules:[]} else . end
   ' <<<"$payload"
 }
 
