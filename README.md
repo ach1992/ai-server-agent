@@ -6,7 +6,7 @@ The project is intentionally a **development/test-server control plane**, not a 
 
 ## Platform support
 
-The current `main` branch and next stable release target support:
+Stable `v0.1.7` and the current `main` branch support:
 
 - **Ubuntu 22.04 or newer**
 - **Debian 11 or newer** (Debian 11 application compatibility is retained, but upstream Debian LTS ended on 2026-08-31; use Debian 12+ for an officially security-maintained base unless you have an ELTS arrangement)
@@ -16,24 +16,24 @@ The current `main` branch and next stable release target support:
 
 OS support is minimum-version based, while CI keeps explicit compatibility cases for current Ubuntu/Debian releases and native lifecycle coverage on both supported CPU architectures. Stable release architectures are declared in `scripts/release-arches.txt`; installer architecture aliases are normalized at the install boundary so adding a future architecture does not require rewriting release publication logic.
 
-The currently published immutable `v0.1.6` release predates this expanded matrix and remains limited to Ubuntu 22.04 LTS on amd64/x86_64. Until a newer stable release is published, use the `v0.1.6` install command below only on that legacy matrix.
+`v0.1.7` is the first stable release with this expanded platform matrix.
 
 AI Server Agent does not require nginx, Apache, Caddy, Docker, PHP, a database, Node.js, Python, `cloudflared`, or a hosting panel as core dependencies, and it does not need to take over ports 80/443.
 
 ## Install the latest stable release
 
-Stable installation starts with a small bootstrap loaded from an **immutable published release tag**, separate from the release `install.sh` asset it authenticates. The current v0.1 bootstrap trust anchor is the immutable `v0.1.6` release tag. GitHub locks the associated tag when an immutable release is published, so this path does not depend on a feature branch or merge strategy.
+Stable installation starts with a small bootstrap loaded from an **immutable published release tag**, separate from the release `install.sh` asset it authenticates. The current v0.1 bootstrap trust anchor is the immutable `v0.1.7` release tag. GitHub locks the associated tag when an immutable release is published, so this path does not depend on a feature branch or merge strategy.
 
-`v0.1.6` is published as an immutable release. Install the latest stable release with:
+`v0.1.7` is published as an immutable release. Install the latest stable release with:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.6/scripts/install-stable.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.7/scripts/install-stable.sh | bash
 ```
 
-For exact `v0.1.6` installation through the same immutable bootstrap:
+For exact `v0.1.7` installation through the same immutable bootstrap:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.6/scripts/install-stable.sh | bash -s -- v0.1.6
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.7/scripts/install-stable.sh | bash -s -- v0.1.7
 ```
 
 Do **not** use `releases/latest/download/install.sh | sudo bash` as the stable trust path: that executes release-supplied code as root before the same asset can be authenticated.
