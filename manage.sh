@@ -365,7 +365,9 @@ cf_validate_zone_ruleset_identity(){
         type=="object" and
         (.id|type)=="string" and .id==$ruleset_id and
         .kind=="zone" and
+        ((has("phase")|not) or ((.phase|type)=="string" and (.phase|length)>0)) and
         ($phase=="" or ((.phase|type)=="string" and .phase==$phase)) and
+        ((has("version")|not) or ((.version|type)=="string" and (.version|length)>0)) and
         ($version=="" or ((.version|type)=="string" and .version==$version))
       )
   ' <<<"$payload"
@@ -584,8 +586,8 @@ cf_get_dns_record(){
 }
 
 cf_get_rule(){
-  local zone_id="$1" ruleset_id="$2" rule_id="$3" rc count ruleset
-  if ruleset="$(cf_resolve_exact_zone_ruleset "$zone_id" "$ruleset_id")"; then
+  local zone_id="$1" ruleset_id="$2" rule_id="$3" phase="${4:-}" rc count ruleset
+  if ruleset="$(cf_resolve_exact_zone_ruleset "$zone_id" "$ruleset_id" "$phase")"; then
     :
   else
     rc=$?
@@ -621,9 +623,9 @@ cf_delete_dns_if_expected(){
 }
 
 cf_delete_rule_if_expected(){
-  local zone_id="$1" ruleset_id="$2" rule_id="$3" expected="$4" current rc actual
+  local zone_id="$1" ruleset_id="$2" rule_id="$3" expected="$4" phase="${5:-}" current rc actual
   [ -n "$zone_id" ] && [ -n "$ruleset_id" ] && [ -n "$rule_id" ] && [ -n "$expected" ] || return 1
-  if current="$(cf_get_rule "$zone_id" "$ruleset_id" "$rule_id")"; then
+  if current="$(cf_get_rule "$zone_id" "$ruleset_id" "$rule_id" "$phase")"; then
     actual="$(cf_rule_fingerprint <<<"$current")"
   else
     rc=$?; [ "$rc" -eq 3 ] && return 0; return 1
@@ -645,9 +647,9 @@ cf_delete_pending_dns_if_expected(){
 }
 
 cf_delete_pending_rule_if_expected(){
-  local zone_id="$1" ruleset_id="$2" rule_id="$3" expected="$4" current rc actual
+  local zone_id="$1" ruleset_id="$2" rule_id="$3" expected="$4" phase="${5:-}" current rc actual
   [ -n "$zone_id" ] && [ -n "$ruleset_id" ] && [ -n "$rule_id" ] && [ -n "$expected" ] || return 1
-  if current="$(cf_get_rule "$zone_id" "$ruleset_id" "$rule_id")"; then
+  if current="$(cf_get_rule "$zone_id" "$ruleset_id" "$rule_id" "$phase")"; then
     actual="$(cf_rule_intent_fingerprint <<<"$current")"
   else
     rc=$?; [ "$rc" -eq 3 ] && return 0; return 1
@@ -789,7 +791,7 @@ cf_recover_pending_write(){
     origin-rule-create|ssl-rule-create)
       if found="$(cf_find_rule_by_marker "$CF_PENDING_ZONE" "$CF_PENDING_PHASE" "$CF_PENDING_VALUE" "$CF_PENDING_MARKER")"; then
         IFS='|' read -r ruleset_id rule_id <<<"$found"
-        cf_delete_pending_rule_if_expected "$CF_PENDING_ZONE" "$ruleset_id" "$rule_id" "$CF_PENDING_FINGERPRINT" || return 1
+        cf_delete_pending_rule_if_expected "$CF_PENDING_ZONE" "$ruleset_id" "$rule_id" "$CF_PENDING_FINGERPRINT" "$CF_PENDING_PHASE" || return 1
       else
         rc=$?; [ "$rc" -eq 1 ] || return 1
       fi
@@ -802,8 +804,8 @@ cf_recover_pending_write(){
 delete_recorded_cloudflare_resources(){
   local zone_id="$1" dns_id="$2" dns_owned="$3" origin_ruleset="$4" origin_rule="$5" ssl_ruleset="$6" ssl_rule="$7" cert_id="$8" dns_fingerprint="${9:-}" origin_fingerprint="${10:-}" ssl_fingerprint="${11:-}" failed=0
   if [ "$dns_owned" = "true" ] && [ -n "$dns_id" ] && ! cf_delete_dns_if_expected "$zone_id" "$dns_id" "$dns_fingerprint"; then warn "Could not safely delete recorded Agent-owned DNS record $dns_id; ownership representation was preserved for manual resolution."; failed=1; fi
-  if [ -n "$origin_rule" ] && [ -n "$origin_ruleset" ] && ! cf_delete_rule_if_expected "$zone_id" "$origin_ruleset" "$origin_rule" "$origin_fingerprint"; then warn "Could not safely delete recorded Agent-owned Origin Rule $origin_rule; ownership representation was preserved for manual resolution."; failed=1; fi
-  if [ -n "$ssl_rule" ] && [ -n "$ssl_ruleset" ] && ! cf_delete_rule_if_expected "$zone_id" "$ssl_ruleset" "$ssl_rule" "$ssl_fingerprint"; then warn "Could not safely delete recorded Agent-owned Configuration Rule $ssl_rule; ownership representation was preserved for manual resolution."; failed=1; fi
+  if [ -n "$origin_rule" ] && [ -n "$origin_ruleset" ] && ! cf_delete_rule_if_expected "$zone_id" "$origin_ruleset" "$origin_rule" "$origin_fingerprint" http_request_origin; then warn "Could not safely delete recorded Agent-owned Origin Rule $origin_rule; ownership representation was preserved for manual resolution."; failed=1; fi
+  if [ -n "$ssl_rule" ] && [ -n "$ssl_ruleset" ] && ! cf_delete_rule_if_expected "$zone_id" "$ssl_ruleset" "$ssl_rule" "$ssl_fingerprint" http_config_settings; then warn "Could not safely delete recorded Agent-owned Configuration Rule $ssl_rule; ownership representation was preserved for manual resolution."; failed=1; fi
   if [ -n "$cert_id" ] && ! cf_delete_owned "/certificates/$cert_id"; then warn "Could not revoke recorded Origin CA certificate $cert_id."; failed=1; fi
   [ "$failed" -eq 0 ]
 }
@@ -968,7 +970,7 @@ cf_reconcile_origin_rule(){
       log "Cloudflare diagnostic: Origin rule create response matched rule $CF_RESULT_ORIGIN_RULE_ID in ruleset $ruleset_id."
     fi
   fi
-  ruleset="$(cf_resolve_exact_zone_ruleset "$zone_id" "$ruleset_id")" || die "Could not verify Cloudflare Origin Rule from a trustworthy Ruleset response. See the Cloudflare Rulesets diagnostic above."
+  ruleset="$(cf_resolve_exact_zone_ruleset "$zone_id" "$ruleset_id" http_request_origin)" || die "Could not verify Cloudflare Origin Rule from a trustworthy Ruleset response. See the Cloudflare Rulesets diagnostic above."
   if [ -n "$CF_PENDING_MARKER" ]; then
     rule="$(jq -c --arg ref "$rule_ref" --arg marker "$CF_PENDING_MARKER" '.rules[]? | select(.ref==$ref and ((.description // "") | endswith(" txn:"+$marker)))' <<<"$ruleset" | head -n1)"
   else
@@ -1065,7 +1067,7 @@ cf_reconcile_ssl_config_rule(){
       log "Cloudflare diagnostic: Configuration rule create response matched rule $CF_RESULT_SSL_RULE_ID in ruleset $ruleset_id."
     fi
   fi
-  ruleset="$(cf_resolve_exact_zone_ruleset "$zone_id" "$ruleset_id")" || die "Could not verify Cloudflare strict SSL Configuration Rule from a trustworthy Ruleset response. See the Cloudflare Rulesets diagnostic above."
+  ruleset="$(cf_resolve_exact_zone_ruleset "$zone_id" "$ruleset_id" http_config_settings)" || die "Could not verify Cloudflare strict SSL Configuration Rule from a trustworthy Ruleset response. See the Cloudflare Rulesets diagnostic above."
   if [ -n "$CF_PENDING_MARKER" ]; then
     rule="$(jq -c --arg ref "$rule_ref" --arg marker "$CF_PENDING_MARKER" '.rules[]? | select(.ref==$ref and .action=="set_config" and .action_parameters.ssl=="strict" and ((.description // "") | endswith(" txn:"+$marker)))' <<<"$ruleset" | head -n1)"
   else
@@ -1365,10 +1367,10 @@ rollback_new_cf_resources(){
     created) if [ -n "$dns_id" ] && ! cf_delete_dns_if_expected "$zone_id" "$dns_id" "$dns_fingerprint"; then keep_dns_id="$dns_id"; keep_dns_action=created; keep_dns_fingerprint="$dns_fingerprint"; failed=1; fi ;;
   esac
   case "$origin_action" in
-    created) if [ -n "$origin_rule" ] && [ -n "$origin_ruleset" ] && ! cf_delete_rule_if_expected "$zone_id" "$origin_ruleset" "$origin_rule" "$origin_fingerprint"; then keep_origin_ruleset="$origin_ruleset"; keep_origin_rule="$origin_rule"; keep_origin_action=created; keep_origin_fingerprint="$origin_fingerprint"; failed=1; fi ;;
+    created) if [ -n "$origin_rule" ] && [ -n "$origin_ruleset" ] && ! cf_delete_rule_if_expected "$zone_id" "$origin_ruleset" "$origin_rule" "$origin_fingerprint" http_request_origin; then keep_origin_ruleset="$origin_ruleset"; keep_origin_rule="$origin_rule"; keep_origin_action=created; keep_origin_fingerprint="$origin_fingerprint"; failed=1; fi ;;
   esac
   case "$ssl_action" in
-    created) if [ -n "$ssl_rule" ] && [ -n "$ssl_ruleset" ] && ! cf_delete_rule_if_expected "$zone_id" "$ssl_ruleset" "$ssl_rule" "$ssl_fingerprint"; then keep_ssl_ruleset="$ssl_ruleset"; keep_ssl_rule="$ssl_rule"; keep_ssl_action=created; keep_ssl_fingerprint="$ssl_fingerprint"; failed=1; fi ;;
+    created) if [ -n "$ssl_rule" ] && [ -n "$ssl_ruleset" ] && ! cf_delete_rule_if_expected "$zone_id" "$ssl_ruleset" "$ssl_rule" "$ssl_fingerprint" http_config_settings; then keep_ssl_ruleset="$ssl_ruleset"; keep_ssl_rule="$ssl_rule"; keep_ssl_action=created; keep_ssl_fingerprint="$ssl_fingerprint"; failed=1; fi ;;
   esac
   if [ -n "$cert_id" ] && ! cf_delete_owned "/certificates/$cert_id"; then keep_cert_id="$cert_id"; failed=1; fi
   if [ "$failed" -eq 0 ]; then return 0; fi
