@@ -4,7 +4,7 @@ This document describes the validation model that applies to the current v0.1 co
 
 ## 1. Supported platform policy and validation matrix
 
-Current `main` targets the next stable release for:
+The stable platform policy validated by current `main` is:
 
 - Ubuntu 22.04 or newer
 - Debian 11 or newer
@@ -13,7 +13,7 @@ Current `main` targets the next stable release for:
 - systemd
 - dedicated development/test server use
 
-The published immutable `v0.1.6` release predates this expansion and remains Ubuntu 22.04 LTS amd64-only until superseded.
+Release-specific status is not duplicated in this validation model; GitHub Releases is authoritative for the latest immutable stable version, and README carries the current stable install command.
 
 `tests/platform_compatibility.sh` is the deterministic policy contract. It covers Ubuntu 22.04/24.04/26.04, Debian 11/12/13, both supported architecture aliases, rejection of older/unsupported systems, alignment of installer/bootstrap distro minimums, and the release architecture list. CI also uses real Debian 11/12/13 containers. Debian 12/13 install the Agent's minimal host dependencies from their maintained repositories and run the stable host check. Debian 11, whose upstream LTS ended on 2026-08-31, is retained as a legacy application-compatibility contract without making CI or the installer rewrite its package sources. Native lifecycle validation remains proportional: the main CI job exercises Ubuntu 22.04 amd64 deeply, while a dedicated GitHub-hosted arm64 job builds/tests and performs install/systemd/root-boundary validation on Ubuntu 24.04 arm64. The release builder cross-builds and checksums every architecture declared in `scripts/release-arches.txt`.
 
@@ -116,7 +116,7 @@ Go tests exercise root command environment isolation and the persistent-job comm
 
 ### Stable bootstrap
 
-Initial stable installation deliberately separates the bootstrap trust root from the release installer it authenticates. The supported one-line command loads `scripts/install-stable.sh` from a Git tag already bound to a published immutable GitHub Release (`v0.1.4` for the current v0.1 bootstrap), not from a mutable branch, a transient feature commit, or the release asset that is about to be verified. The immutable-release tag is the durable source identity for the bootstrap after publication.
+Initial stable installation deliberately separates the bootstrap trust root from the release installer it authenticates. The supported one-line command loads `scripts/install-stable.sh` from the immutable Git tag named by the current README stable-install command, not from a mutable branch, a transient feature commit, or the release asset that is about to be verified. That immutable-release tag is the durable source identity for the bootstrap after publication.
 
 `tests/stable_bootstrap.sh` guards the documented immutable-tag source and uses a deterministic mocked GitHub HTTP surface plus a fake `sudo` boundary to verify that the bootstrap:
 
