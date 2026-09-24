@@ -90,12 +90,14 @@ jobs:
         run: |
           grep -qF 'read -r -s CF_TOKEN' manage.sh
           grep -qF 'Cloudflare API token (input hidden; not stored)' manage.sh
-          grep -qF 'Resource scope: Include -> Specific zone' manage.sh
+          grep -qF 'Zone resource: Include -> Specific zone' manage.sh
+          grep -qF 'Account resource: Include -> Specific account' manage.sh
           grep -qF 'Zone > Zone > Read' manage.sh
           grep -qF 'Zone > DNS > Edit' manage.sh
           grep -qF 'Zone > SSL and Certificates > Edit' manage.sh
           grep -qF 'Zone > Origin Rules > Edit' manage.sh
           grep -qF 'Zone > Config Rules > Edit' manage.sh
+          grep -qF 'Account > Account Rulesets > Read' manage.sh
           grep -qF 'Do not paste the token into ChatGPT' manage.sh
           grep -qF "cf_api POST '/certificates'" manage.sh
           grep -qF '/dns_records' manage.sh
