@@ -349,43 +349,151 @@ cf_get_optional(){
   printf '%s' "$body"
 }
 
-cf_normalize_zone_ruleset(){
-  local payload="$1" ruleset_id="$2" phase="${3:-}"
-  jq -ce --arg ruleset_id "$ruleset_id" --arg phase "$phase" '
+cf_ruleset_diag(){
+  local phase="${1:-unknown}" stage="${2:-unknown}" ruleset_id="${3:-unknown}" version="${4:-unknown}" message="${5:-Cloudflare Rulesets response could not be trusted.}"
+  [ -n "$phase" ] || phase=unknown
+  [ -n "$ruleset_id" ] || ruleset_id=unknown
+  [ -n "$version" ] || version=unknown
+  warn "Cloudflare Rulesets diagnostic: phase=$phase stage=$stage ruleset=$ruleset_id version=$version: $message"
+}
+
+cf_validate_zone_ruleset_identity(){
+  local payload="$1" ruleset_id="$2" phase="${3:-}" version="${4:-}"
+  jq -ce --arg ruleset_id "$ruleset_id" --arg phase "$phase" --arg version "$version" '
     .result
     | select(
         type=="object" and
         (.id|type)=="string" and .id==$ruleset_id and
         .kind=="zone" and
-        ($phase=="" or .phase==$phase) and
-        has("rules") and
-        (
-          .rules==null or
-          (
-            (.rules|type)=="array" and
-            (([.rules[].id] | length) == ([.rules[].id] | unique | length)) and
-            all(.rules[];
-              type=="object" and
-              (.id|type)=="string" and (.id|length)>0 and
-              ((has("ref")|not) or .ref==null or ((.ref|type)=="string" and (.ref|length)>0)) and
-              ((has("description")|not) or .description==null or (.description|type)=="string")
-            )
-          )
-        )
+        ($phase=="" or ((.phase|type)=="string" and .phase==$phase)) and
+        ($version=="" or ((.version|type)=="string" and .version==$version))
       )
-    | if .rules==null then . + {rules:[]} else . end
   ' <<<"$payload"
 }
 
+cf_normalize_zone_ruleset(){
+  local payload="$1" ruleset_id="$2" phase="${3:-}" version="${4:-}" result
+  result="$(cf_validate_zone_ruleset_identity "$payload" "$ruleset_id" "$phase" "$version")" || return 2
+  jq -ce '
+    select(
+      has("rules") and
+      (
+        .rules==null or
+        (
+          (.rules|type)=="array" and
+          (([.rules[].id] | length) == ([.rules[].id] | unique | length)) and
+          all(.rules[];
+            type=="object" and
+            (.id|type)=="string" and (.id|length)>0 and
+            ((has("ref")|not) or .ref==null or ((.ref|type)=="string" and (.ref|length)>0)) and
+            ((has("description")|not) or .description==null or (.description|type)=="string")
+          )
+        )
+      )
+    )
+    | if .rules==null then . + {rules:[]} else . end
+  ' <<<"$result"
+}
+
+cf_resolve_exact_zone_ruleset(){
+  local zone_id="$1" ruleset_id="$2" phase="${3:-}" expected_version="${4:-}"
+  local exact rc current rules_type current_version current_phase version_payload version_result version_rules_type normalized
+
+  if exact="$(cf_get_optional "/zones/$zone_id/rulesets/$ruleset_id")"; then
+    :
+  else
+    rc=$?
+    if [ "$rc" -eq 3 ]; then return 3; fi
+    cf_ruleset_diag "$phase" exact-current "$ruleset_id" "$expected_version" "Cloudflare API read failed."
+    return 2
+  fi
+
+  if ! current="$(cf_validate_zone_ruleset_identity "$exact" "$ruleset_id" "$phase" "$expected_version")"; then
+    cf_ruleset_diag "$phase" exact-current "$ruleset_id" "$expected_version" "response identity did not match the expected zone Ruleset."
+    return 2
+  fi
+
+  current_version="$(jq -r 'if (.version|type)=="string" then .version else "" end' <<<"$current")"
+  current_phase="$(jq -r 'if (.phase|type)=="string" then .phase else "" end' <<<"$current")"
+  rules_type="$(jq -r 'if has("rules") then (.rules|type) else "missing" end' <<<"$current")" || {
+    cf_ruleset_diag "$phase" exact-current "$ruleset_id" "$current_version" "could not determine the rules representation."
+    return 2
+  }
+
+  case "$rules_type" in
+    array|null)
+      if normalized="$(cf_normalize_zone_ruleset "$exact" "$ruleset_id" "$phase" "$expected_version")"; then
+        printf '%s\n' "$normalized"
+        return 0
+      fi
+      cf_ruleset_diag "$phase" exact-current "$ruleset_id" "$current_version" "rules were present but structurally invalid."
+      return 2
+      ;;
+    missing)
+      [ -n "$current_version" ] || {
+        cf_ruleset_diag "$phase" exact-current "$ruleset_id" unknown "rules were omitted and the current Ruleset version was missing or invalid."
+        return 2
+      }
+      [ -n "$current_phase" ] || {
+        cf_ruleset_diag "$phase" exact-current "$ruleset_id" "$current_version" "rules were omitted and the current Ruleset phase was missing or invalid."
+        return 2
+      }
+      if version_payload="$(cf_get_optional "/zones/$zone_id/rulesets/$ruleset_id/versions/$current_version")"; then
+        :
+      else
+        rc=$?
+        if [ "$rc" -eq 3 ]; then
+          cf_ruleset_diag "$current_phase" current-version "$ruleset_id" "$current_version" "the exact current Ruleset exists but its current version read returned not found."
+        else
+          cf_ruleset_diag "$current_phase" current-version "$ruleset_id" "$current_version" "Cloudflare API read failed."
+        fi
+        return 2
+      fi
+
+      if ! version_result="$(cf_validate_zone_ruleset_identity "$version_payload" "$ruleset_id" "$current_phase" "$current_version")"; then
+        cf_ruleset_diag "$current_phase" current-version "$ruleset_id" "$current_version" "response identity/version did not match the exact current Ruleset."
+        return 2
+      fi
+      version_rules_type="$(jq -r 'if has("rules") then (.rules|type) else "missing" end' <<<"$version_result")" || {
+        cf_ruleset_diag "$current_phase" current-version "$ruleset_id" "$current_version" "could not determine the rules representation."
+        return 2
+      }
+      case "$version_rules_type" in
+        array|null)
+          if normalized="$(cf_normalize_zone_ruleset "$version_payload" "$ruleset_id" "$current_phase" "$current_version")"; then
+            printf '%s\n' "$normalized"
+            return 0
+          fi
+          cf_ruleset_diag "$current_phase" current-version "$ruleset_id" "$current_version" "rules were present but structurally invalid."
+          return 2
+          ;;
+        missing)
+          jq -ce '. + {rules:[]}' <<<"$version_result"
+          return
+          ;;
+        *)
+          cf_ruleset_diag "$current_phase" current-version "$ruleset_id" "$current_version" "rules had unsupported type '$version_rules_type'."
+          return 2
+          ;;
+      esac
+      ;;
+    *)
+      cf_ruleset_diag "$phase" exact-current "$ruleset_id" "$current_version" "rules had unsupported type '$rules_type'."
+      return 2
+      ;;
+  esac
+}
+
 cf_get_phase_entrypoint(){
-  local zone_id="$1" phase="$2" res rc result ruleset_id rules_type exact
+  local zone_id="$1" phase="$2" res rc result ruleset_id rules_type exact phase_identity phase_version
   [ -n "$zone_id" ] || return 2
   case "$phase" in
     http_request_origin|http_config_settings) ;;
     *) return 2 ;;
   esac
+
   if res="$(cf_get_optional "/zones/$zone_id/rulesets/phases/$phase/entrypoint")"; then
-    ruleset_id="$(jq -er --arg phase "$phase" '
+    if ! ruleset_id="$(jq -er --arg phase "$phase" '
       .result
       | select(
           type=="object" and
@@ -394,29 +502,53 @@ cf_get_phase_entrypoint(){
           .phase==$phase
         )
       | .id
-    ' <<<"$res")" || return 2
-    rules_type="$(jq -r 'if (.result|has("rules")) then (.result.rules|type) else "missing" end' <<<"$res")" || return 2
+    ' <<<"$res")"; then
+      cf_ruleset_diag "$phase" phase-entrypoint unknown unknown "response identity was malformed or did not match the requested phase."
+      return 2
+    fi
+
+    if ! phase_identity="$(cf_validate_zone_ruleset_identity "$res" "$ruleset_id" "$phase")"; then
+      cf_ruleset_diag "$phase" phase-entrypoint "$ruleset_id" unknown "response identity did not match the expected zone Ruleset."
+      return 2
+    fi
+    phase_version="$(jq -r 'if (.version|type)=="string" then .version else "" end' <<<"$phase_identity")"
+    rules_type="$(jq -r 'if has("rules") then (.rules|type) else "missing" end' <<<"$phase_identity")" || {
+      cf_ruleset_diag "$phase" phase-entrypoint "$ruleset_id" "$phase_version" "could not determine the rules representation."
+      return 2
+    }
+
     case "$rules_type" in
       array)
-        result="$(cf_normalize_zone_ruleset "$res" "$ruleset_id" "$phase")" || return 2
+        if result="$(cf_normalize_zone_ruleset "$res" "$ruleset_id" "$phase" "$phase_version")"; then
+          :
+        else
+          cf_ruleset_diag "$phase" phase-entrypoint "$ruleset_id" "$phase_version" "rules were present but structurally invalid."
+          return 2
+        fi
         ;;
       null|missing)
-        if exact="$(cf_get_optional "/zones/$zone_id/rulesets/$ruleset_id")"; then
-          result="$(cf_normalize_zone_ruleset "$exact" "$ruleset_id" "$phase")" || return 2
+        if result="$(cf_resolve_exact_zone_ruleset "$zone_id" "$ruleset_id" "$phase" "$phase_version")"; then
+          :
         else
           rc=$?
+          if [ "$rc" -eq 3 ]; then
+            cf_ruleset_diag "$phase" exact-current "$ruleset_id" "$phase_version" "phase entrypoint exists but the exact current Ruleset returned not found."
+          fi
           return 2
         fi
         ;;
       *)
+        cf_ruleset_diag "$phase" phase-entrypoint "$ruleset_id" "$phase_version" "rules had unsupported type '$rules_type'."
         return 2
         ;;
     esac
+
     printf '%s\n' "$result"
     return 0
   else
     rc=$?
     [ "$rc" -eq 3 ] && return 3
+    cf_ruleset_diag "$phase" phase-entrypoint unknown unknown "Cloudflare API read failed."
     return 2
   fi
 }
@@ -452,13 +584,14 @@ cf_get_dns_record(){
 }
 
 cf_get_rule(){
-  local zone_id="$1" ruleset_id="$2" rule_id="$3" res rc count ruleset
-  if res="$(cf_get_optional "/zones/$zone_id/rulesets/$ruleset_id")"; then
+  local zone_id="$1" ruleset_id="$2" rule_id="$3" rc count ruleset
+  if ruleset="$(cf_resolve_exact_zone_ruleset "$zone_id" "$ruleset_id")"; then
     :
   else
-    rc=$?; [ "$rc" -eq 3 ] && return 3; return 2
+    rc=$?
+    [ "$rc" -eq 3 ] && return 3
+    return 2
   fi
-  ruleset="$(cf_normalize_zone_ruleset "$res" "$ruleset_id")" || return 2
   count="$(jq --arg id "$rule_id" '[.rules[] | select(.id==$id)] | length' <<<"$ruleset")"
   [ "$count" -eq 0 ] && return 3
   [ "$count" -eq 1 ] || return 2
@@ -763,7 +896,7 @@ cf_reconcile_origin_rule(){
     ruleset="$(jq -cn --argjson result "$phase_entry" '{success:true,result:$result}')"
   else
     rc=$?
-    [ "$rc" -eq 3 ] || die "Cloudflare Origin Rules entrypoint lookup failed."
+    [ "$rc" -eq 3 ] || die "Cloudflare Origin Rules reconciliation could not obtain a trustworthy phase Ruleset. See the Cloudflare Rulesets diagnostic above; no Rule mutation was attempted."
     ruleset_id=""
   fi
   if [ -z "$ruleset_id" ]; then
@@ -860,7 +993,7 @@ cf_reconcile_ssl_config_rule(){
     ruleset="$(jq -cn --argjson result "$phase_entry" '{success:true,result:$result}')"
   else
     rc=$?
-    [ "$rc" -eq 3 ] || die "Cloudflare Configuration Rules entrypoint lookup failed."
+    [ "$rc" -eq 3 ] || die "Cloudflare Configuration Rules reconciliation could not obtain a trustworthy phase Ruleset. See the Cloudflare Rulesets diagnostic above; no Rule mutation was attempted."
     ruleset_id=""
   fi
   if [ -z "$ruleset_id" ]; then
