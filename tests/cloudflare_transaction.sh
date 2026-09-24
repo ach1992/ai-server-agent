@@ -319,9 +319,9 @@ ssl_ref="ai_server_agent_ssl_$(printf '%s' mcp.example.com | sha256sum | cut -c1
 ssl_rule_json="$(jq -nc --arg ref "$ssl_ref" '{id:"ssl-rule-owned",ref:$ref,description:"AI Server Agent strict SSL",expression:"http.host eq \"mcp.example.com\"",action:"set_config",action_parameters:{ssl:"strict"},enabled:true}')"
 ssl_fp="$(cf_rule_fingerprint <<<"$ssl_rule_json")"
 cf_get_phase_entrypoint(){ jq -nc --argjson rule "$ssl_rule_json" '{id:"ssl-set-owned",kind:"zone",phase:"http_config_settings",rules:[$rule]}' ; }
-cf_api(){
-  case "$2" in
-    '/zones/zone1/rulesets/ssl-set-owned') jq -nc --argjson rule "$ssl_rule_json" '{success:true,result:{rules:[$rule]}}' ;;
+cf_get_optional(){
+  case "$1" in
+    '/zones/zone1/rulesets/ssl-set-owned') jq -nc --argjson rule "$ssl_rule_json" '{success:true,result:{id:"ssl-set-owned",kind:"zone",phase:"http_config_settings",rules:[$rule]}}' ;;
     *) return 2 ;;
   esac
 }

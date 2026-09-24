@@ -349,43 +349,153 @@ cf_get_optional(){
   printf '%s' "$body"
 }
 
-cf_normalize_zone_ruleset(){
-  local payload="$1" ruleset_id="$2" phase="${3:-}"
-  jq -ce --arg ruleset_id "$ruleset_id" --arg phase "$phase" '
+cf_ruleset_diag(){
+  local phase="${1:-unknown}" stage="${2:-unknown}" ruleset_id="${3:-unknown}" version="${4:-unknown}" message="${5:-Cloudflare Rulesets response could not be trusted.}"
+  [ -n "$phase" ] || phase=unknown
+  [ -n "$ruleset_id" ] || ruleset_id=unknown
+  [ -n "$version" ] || version=unknown
+  warn "Cloudflare Rulesets diagnostic: phase=$phase stage=$stage ruleset=$ruleset_id version=$version: $message"
+}
+
+cf_validate_zone_ruleset_identity(){
+  local payload="$1" ruleset_id="$2" phase="${3:-}" version="${4:-}"
+  jq -ce --arg ruleset_id "$ruleset_id" --arg phase "$phase" --arg version "$version" '
     .result
     | select(
         type=="object" and
         (.id|type)=="string" and .id==$ruleset_id and
         .kind=="zone" and
-        ($phase=="" or .phase==$phase) and
-        has("rules") and
-        (
-          .rules==null or
-          (
-            (.rules|type)=="array" and
-            (([.rules[].id] | length) == ([.rules[].id] | unique | length)) and
-            all(.rules[];
-              type=="object" and
-              (.id|type)=="string" and (.id|length)>0 and
-              ((has("ref")|not) or .ref==null or ((.ref|type)=="string" and (.ref|length)>0)) and
-              ((has("description")|not) or .description==null or (.description|type)=="string")
-            )
-          )
-        )
+        ((has("phase")|not) or ((.phase|type)=="string" and (.phase|length)>0)) and
+        ($phase=="" or ((.phase|type)=="string" and .phase==$phase)) and
+        ((has("version")|not) or ((.version|type)=="string" and (.version|length)>0)) and
+        ($version=="" or ((.version|type)=="string" and .version==$version))
       )
-    | if .rules==null then . + {rules:[]} else . end
   ' <<<"$payload"
 }
 
+cf_normalize_zone_ruleset(){
+  local payload="$1" ruleset_id="$2" phase="${3:-}" version="${4:-}" result
+  result="$(cf_validate_zone_ruleset_identity "$payload" "$ruleset_id" "$phase" "$version")" || return 2
+  jq -ce '
+    select(
+      has("rules") and
+      (
+        .rules==null or
+        (
+          (.rules|type)=="array" and
+          (([.rules[].id] | length) == ([.rules[].id] | unique | length)) and
+          all(.rules[];
+            type=="object" and
+            (.id|type)=="string" and (.id|length)>0 and
+            ((has("ref")|not) or .ref==null or ((.ref|type)=="string" and (.ref|length)>0)) and
+            ((has("description")|not) or .description==null or (.description|type)=="string")
+          )
+        )
+      )
+    )
+    | if .rules==null then . + {rules:[]} else . end
+  ' <<<"$result"
+}
+
+cf_resolve_exact_zone_ruleset(){
+  local zone_id="$1" ruleset_id="$2" phase="${3:-}" expected_version="${4:-}"
+  local exact rc current rules_type current_version current_phase version_payload version_result version_rules_type normalized
+
+  if exact="$(cf_get_optional "/zones/$zone_id/rulesets/$ruleset_id")"; then
+    :
+  else
+    rc=$?
+    if [ "$rc" -eq 3 ]; then return 3; fi
+    cf_ruleset_diag "$phase" exact-current "$ruleset_id" "$expected_version" "Cloudflare API read failed."
+    return 2
+  fi
+
+  if ! current="$(cf_validate_zone_ruleset_identity "$exact" "$ruleset_id" "$phase" "$expected_version")"; then
+    cf_ruleset_diag "$phase" exact-current "$ruleset_id" "$expected_version" "response identity did not match the expected zone Ruleset."
+    return 2
+  fi
+
+  current_version="$(jq -r 'if (.version|type)=="string" then .version else "" end' <<<"$current")"
+  current_phase="$(jq -r 'if (.phase|type)=="string" then .phase else "" end' <<<"$current")"
+  rules_type="$(jq -r 'if has("rules") then (.rules|type) else "missing" end' <<<"$current")" || {
+    cf_ruleset_diag "$phase" exact-current "$ruleset_id" "$current_version" "could not determine the rules representation."
+    return 2
+  }
+
+  case "$rules_type" in
+    array|null)
+      if normalized="$(cf_normalize_zone_ruleset "$exact" "$ruleset_id" "$phase" "$expected_version")"; then
+        printf '%s\n' "$normalized"
+        return 0
+      fi
+      cf_ruleset_diag "$phase" exact-current "$ruleset_id" "$current_version" "rules were present but structurally invalid."
+      return 2
+      ;;
+    missing)
+      [ -n "$current_version" ] || {
+        cf_ruleset_diag "$phase" exact-current "$ruleset_id" unknown "rules were omitted and the current Ruleset version was missing or invalid."
+        return 2
+      }
+      [ -n "$current_phase" ] || {
+        cf_ruleset_diag "$phase" exact-current "$ruleset_id" "$current_version" "rules were omitted and the current Ruleset phase was missing or invalid."
+        return 2
+      }
+      if version_payload="$(cf_get_optional "/zones/$zone_id/rulesets/$ruleset_id/versions/$current_version")"; then
+        :
+      else
+        rc=$?
+        if [ "$rc" -eq 3 ]; then
+          cf_ruleset_diag "$current_phase" current-version "$ruleset_id" "$current_version" "the exact current Ruleset exists but its current version read returned not found."
+        else
+          cf_ruleset_diag "$current_phase" current-version "$ruleset_id" "$current_version" "Cloudflare API read failed."
+        fi
+        return 2
+      fi
+
+      if ! version_result="$(cf_validate_zone_ruleset_identity "$version_payload" "$ruleset_id" "$current_phase" "$current_version")"; then
+        cf_ruleset_diag "$current_phase" current-version "$ruleset_id" "$current_version" "response identity/version did not match the exact current Ruleset."
+        return 2
+      fi
+      version_rules_type="$(jq -r 'if has("rules") then (.rules|type) else "missing" end' <<<"$version_result")" || {
+        cf_ruleset_diag "$current_phase" current-version "$ruleset_id" "$current_version" "could not determine the rules representation."
+        return 2
+      }
+      case "$version_rules_type" in
+        array|null)
+          if normalized="$(cf_normalize_zone_ruleset "$version_payload" "$ruleset_id" "$current_phase" "$current_version")"; then
+            printf '%s\n' "$normalized"
+            return 0
+          fi
+          cf_ruleset_diag "$current_phase" current-version "$ruleset_id" "$current_version" "rules were present but structurally invalid."
+          return 2
+          ;;
+        missing)
+          jq -ce '. + {rules:[]}' <<<"$version_result"
+          return
+          ;;
+        *)
+          cf_ruleset_diag "$current_phase" current-version "$ruleset_id" "$current_version" "rules had unsupported type '$version_rules_type'."
+          return 2
+          ;;
+      esac
+      ;;
+    *)
+      cf_ruleset_diag "$phase" exact-current "$ruleset_id" "$current_version" "rules had unsupported type '$rules_type'."
+      return 2
+      ;;
+  esac
+}
+
 cf_get_phase_entrypoint(){
-  local zone_id="$1" phase="$2" res rc result ruleset_id rules_type exact
+  local zone_id="$1" phase="$2" res rc result ruleset_id rules_type exact phase_identity phase_version
   [ -n "$zone_id" ] || return 2
   case "$phase" in
     http_request_origin|http_config_settings) ;;
     *) return 2 ;;
   esac
+
   if res="$(cf_get_optional "/zones/$zone_id/rulesets/phases/$phase/entrypoint")"; then
-    ruleset_id="$(jq -er --arg phase "$phase" '
+    if ! ruleset_id="$(jq -er --arg phase "$phase" '
       .result
       | select(
           type=="object" and
@@ -394,29 +504,53 @@ cf_get_phase_entrypoint(){
           .phase==$phase
         )
       | .id
-    ' <<<"$res")" || return 2
-    rules_type="$(jq -r 'if (.result|has("rules")) then (.result.rules|type) else "missing" end' <<<"$res")" || return 2
+    ' <<<"$res")"; then
+      cf_ruleset_diag "$phase" phase-entrypoint unknown unknown "response identity was malformed or did not match the requested phase."
+      return 2
+    fi
+
+    if ! phase_identity="$(cf_validate_zone_ruleset_identity "$res" "$ruleset_id" "$phase")"; then
+      cf_ruleset_diag "$phase" phase-entrypoint "$ruleset_id" unknown "response identity did not match the expected zone Ruleset."
+      return 2
+    fi
+    phase_version="$(jq -r 'if (.version|type)=="string" then .version else "" end' <<<"$phase_identity")"
+    rules_type="$(jq -r 'if has("rules") then (.rules|type) else "missing" end' <<<"$phase_identity")" || {
+      cf_ruleset_diag "$phase" phase-entrypoint "$ruleset_id" "$phase_version" "could not determine the rules representation."
+      return 2
+    }
+
     case "$rules_type" in
       array)
-        result="$(cf_normalize_zone_ruleset "$res" "$ruleset_id" "$phase")" || return 2
+        if result="$(cf_normalize_zone_ruleset "$res" "$ruleset_id" "$phase" "$phase_version")"; then
+          :
+        else
+          cf_ruleset_diag "$phase" phase-entrypoint "$ruleset_id" "$phase_version" "rules were present but structurally invalid."
+          return 2
+        fi
         ;;
       null|missing)
-        if exact="$(cf_get_optional "/zones/$zone_id/rulesets/$ruleset_id")"; then
-          result="$(cf_normalize_zone_ruleset "$exact" "$ruleset_id" "$phase")" || return 2
+        if result="$(cf_resolve_exact_zone_ruleset "$zone_id" "$ruleset_id" "$phase" "$phase_version")"; then
+          :
         else
           rc=$?
+          if [ "$rc" -eq 3 ]; then
+            cf_ruleset_diag "$phase" exact-current "$ruleset_id" "$phase_version" "phase entrypoint exists but the exact current Ruleset returned not found."
+          fi
           return 2
         fi
         ;;
       *)
+        cf_ruleset_diag "$phase" phase-entrypoint "$ruleset_id" "$phase_version" "rules had unsupported type '$rules_type'."
         return 2
         ;;
     esac
+
     printf '%s\n' "$result"
     return 0
   else
     rc=$?
     [ "$rc" -eq 3 ] && return 3
+    cf_ruleset_diag "$phase" phase-entrypoint unknown unknown "Cloudflare API read failed."
     return 2
   fi
 }
@@ -452,13 +586,14 @@ cf_get_dns_record(){
 }
 
 cf_get_rule(){
-  local zone_id="$1" ruleset_id="$2" rule_id="$3" res rc count ruleset
-  if res="$(cf_get_optional "/zones/$zone_id/rulesets/$ruleset_id")"; then
+  local zone_id="$1" ruleset_id="$2" rule_id="$3" phase="${4:-}" rc count ruleset
+  if ruleset="$(cf_resolve_exact_zone_ruleset "$zone_id" "$ruleset_id" "$phase")"; then
     :
   else
-    rc=$?; [ "$rc" -eq 3 ] && return 3; return 2
+    rc=$?
+    [ "$rc" -eq 3 ] && return 3
+    return 2
   fi
-  ruleset="$(cf_normalize_zone_ruleset "$res" "$ruleset_id")" || return 2
   count="$(jq --arg id "$rule_id" '[.rules[] | select(.id==$id)] | length' <<<"$ruleset")"
   [ "$count" -eq 0 ] && return 3
   [ "$count" -eq 1 ] || return 2
@@ -488,9 +623,9 @@ cf_delete_dns_if_expected(){
 }
 
 cf_delete_rule_if_expected(){
-  local zone_id="$1" ruleset_id="$2" rule_id="$3" expected="$4" current rc actual
+  local zone_id="$1" ruleset_id="$2" rule_id="$3" expected="$4" phase="${5:-}" current rc actual
   [ -n "$zone_id" ] && [ -n "$ruleset_id" ] && [ -n "$rule_id" ] && [ -n "$expected" ] || return 1
-  if current="$(cf_get_rule "$zone_id" "$ruleset_id" "$rule_id")"; then
+  if current="$(cf_get_rule "$zone_id" "$ruleset_id" "$rule_id" "$phase")"; then
     actual="$(cf_rule_fingerprint <<<"$current")"
   else
     rc=$?; [ "$rc" -eq 3 ] && return 0; return 1
@@ -512,9 +647,9 @@ cf_delete_pending_dns_if_expected(){
 }
 
 cf_delete_pending_rule_if_expected(){
-  local zone_id="$1" ruleset_id="$2" rule_id="$3" expected="$4" current rc actual
+  local zone_id="$1" ruleset_id="$2" rule_id="$3" expected="$4" phase="${5:-}" current rc actual
   [ -n "$zone_id" ] && [ -n "$ruleset_id" ] && [ -n "$rule_id" ] && [ -n "$expected" ] || return 1
-  if current="$(cf_get_rule "$zone_id" "$ruleset_id" "$rule_id")"; then
+  if current="$(cf_get_rule "$zone_id" "$ruleset_id" "$rule_id" "$phase")"; then
     actual="$(cf_rule_intent_fingerprint <<<"$current")"
   else
     rc=$?; [ "$rc" -eq 3 ] && return 0; return 1
@@ -656,7 +791,7 @@ cf_recover_pending_write(){
     origin-rule-create|ssl-rule-create)
       if found="$(cf_find_rule_by_marker "$CF_PENDING_ZONE" "$CF_PENDING_PHASE" "$CF_PENDING_VALUE" "$CF_PENDING_MARKER")"; then
         IFS='|' read -r ruleset_id rule_id <<<"$found"
-        cf_delete_pending_rule_if_expected "$CF_PENDING_ZONE" "$ruleset_id" "$rule_id" "$CF_PENDING_FINGERPRINT" || return 1
+        cf_delete_pending_rule_if_expected "$CF_PENDING_ZONE" "$ruleset_id" "$rule_id" "$CF_PENDING_FINGERPRINT" "$CF_PENDING_PHASE" || return 1
       else
         rc=$?; [ "$rc" -eq 1 ] || return 1
       fi
@@ -669,8 +804,8 @@ cf_recover_pending_write(){
 delete_recorded_cloudflare_resources(){
   local zone_id="$1" dns_id="$2" dns_owned="$3" origin_ruleset="$4" origin_rule="$5" ssl_ruleset="$6" ssl_rule="$7" cert_id="$8" dns_fingerprint="${9:-}" origin_fingerprint="${10:-}" ssl_fingerprint="${11:-}" failed=0
   if [ "$dns_owned" = "true" ] && [ -n "$dns_id" ] && ! cf_delete_dns_if_expected "$zone_id" "$dns_id" "$dns_fingerprint"; then warn "Could not safely delete recorded Agent-owned DNS record $dns_id; ownership representation was preserved for manual resolution."; failed=1; fi
-  if [ -n "$origin_rule" ] && [ -n "$origin_ruleset" ] && ! cf_delete_rule_if_expected "$zone_id" "$origin_ruleset" "$origin_rule" "$origin_fingerprint"; then warn "Could not safely delete recorded Agent-owned Origin Rule $origin_rule; ownership representation was preserved for manual resolution."; failed=1; fi
-  if [ -n "$ssl_rule" ] && [ -n "$ssl_ruleset" ] && ! cf_delete_rule_if_expected "$zone_id" "$ssl_ruleset" "$ssl_rule" "$ssl_fingerprint"; then warn "Could not safely delete recorded Agent-owned Configuration Rule $ssl_rule; ownership representation was preserved for manual resolution."; failed=1; fi
+  if [ -n "$origin_rule" ] && [ -n "$origin_ruleset" ] && ! cf_delete_rule_if_expected "$zone_id" "$origin_ruleset" "$origin_rule" "$origin_fingerprint" http_request_origin; then warn "Could not safely delete recorded Agent-owned Origin Rule $origin_rule; ownership representation was preserved for manual resolution."; failed=1; fi
+  if [ -n "$ssl_rule" ] && [ -n "$ssl_ruleset" ] && ! cf_delete_rule_if_expected "$zone_id" "$ssl_ruleset" "$ssl_rule" "$ssl_fingerprint" http_config_settings; then warn "Could not safely delete recorded Agent-owned Configuration Rule $ssl_rule; ownership representation was preserved for manual resolution."; failed=1; fi
   if [ -n "$cert_id" ] && ! cf_delete_owned "/certificates/$cert_id"; then warn "Could not revoke recorded Origin CA certificate $cert_id."; failed=1; fi
   [ "$failed" -eq 0 ]
 }
@@ -763,7 +898,7 @@ cf_reconcile_origin_rule(){
     ruleset="$(jq -cn --argjson result "$phase_entry" '{success:true,result:$result}')"
   else
     rc=$?
-    [ "$rc" -eq 3 ] || die "Cloudflare Origin Rules entrypoint lookup failed."
+    [ "$rc" -eq 3 ] || die "Cloudflare Origin Rules reconciliation could not obtain a trustworthy phase Ruleset. See the Cloudflare Rulesets diagnostic above; no Rule mutation was attempted."
     ruleset_id=""
   fi
   if [ -z "$ruleset_id" ]; then
@@ -835,11 +970,11 @@ cf_reconcile_origin_rule(){
       log "Cloudflare diagnostic: Origin rule create response matched rule $CF_RESULT_ORIGIN_RULE_ID in ruleset $ruleset_id."
     fi
   fi
-  ruleset="$(cf_api GET "/zones/$zone_id/rulesets/$ruleset_id")" || die "Could not verify Cloudflare Origin Rule."
+  ruleset="$(cf_resolve_exact_zone_ruleset "$zone_id" "$ruleset_id" http_request_origin)" || die "Could not verify Cloudflare Origin Rule from a trustworthy Ruleset response. See the Cloudflare Rulesets diagnostic above."
   if [ -n "$CF_PENDING_MARKER" ]; then
-    rule="$(jq -c --arg ref "$rule_ref" --arg marker "$CF_PENDING_MARKER" '.result.rules[]? | select(.ref==$ref and ((.description // "") | endswith(" txn:"+$marker)))' <<<"$ruleset" | head -n1)"
+    rule="$(jq -c --arg ref "$rule_ref" --arg marker "$CF_PENDING_MARKER" '.rules[]? | select(.ref==$ref and ((.description // "") | endswith(" txn:"+$marker)))' <<<"$ruleset" | head -n1)"
   else
-    rule="$(jq -c --arg id "$CF_RESULT_ORIGIN_RULE_ID" --arg ref "$rule_ref" '.result.rules[]? | select(.id==$id and .ref==$ref)' <<<"$ruleset" | head -n1)"
+    rule="$(jq -c --arg id "$CF_RESULT_ORIGIN_RULE_ID" --arg ref "$rule_ref" '.rules[]? | select(.id==$id and .ref==$ref)' <<<"$ruleset" | head -n1)"
   fi
   [ -n "$rule" ] || die "Cloudflare Origin Rule was not reconciled cleanly."
   verify_id="$(jq -r '.id // empty' <<<"$rule")"
@@ -860,7 +995,7 @@ cf_reconcile_ssl_config_rule(){
     ruleset="$(jq -cn --argjson result "$phase_entry" '{success:true,result:$result}')"
   else
     rc=$?
-    [ "$rc" -eq 3 ] || die "Cloudflare Configuration Rules entrypoint lookup failed."
+    [ "$rc" -eq 3 ] || die "Cloudflare Configuration Rules reconciliation could not obtain a trustworthy phase Ruleset. See the Cloudflare Rulesets diagnostic above; no Rule mutation was attempted."
     ruleset_id=""
   fi
   if [ -z "$ruleset_id" ]; then
@@ -932,11 +1067,11 @@ cf_reconcile_ssl_config_rule(){
       log "Cloudflare diagnostic: Configuration rule create response matched rule $CF_RESULT_SSL_RULE_ID in ruleset $ruleset_id."
     fi
   fi
-  ruleset="$(cf_api GET "/zones/$zone_id/rulesets/$ruleset_id")" || die "Could not verify Cloudflare strict SSL Configuration Rule."
+  ruleset="$(cf_resolve_exact_zone_ruleset "$zone_id" "$ruleset_id" http_config_settings)" || die "Could not verify Cloudflare strict SSL Configuration Rule from a trustworthy Ruleset response. See the Cloudflare Rulesets diagnostic above."
   if [ -n "$CF_PENDING_MARKER" ]; then
-    rule="$(jq -c --arg ref "$rule_ref" --arg marker "$CF_PENDING_MARKER" '.result.rules[]? | select(.ref==$ref and .action=="set_config" and .action_parameters.ssl=="strict" and ((.description // "") | endswith(" txn:"+$marker)))' <<<"$ruleset" | head -n1)"
+    rule="$(jq -c --arg ref "$rule_ref" --arg marker "$CF_PENDING_MARKER" '.rules[]? | select(.ref==$ref and .action=="set_config" and .action_parameters.ssl=="strict" and ((.description // "") | endswith(" txn:"+$marker)))' <<<"$ruleset" | head -n1)"
   else
-    rule="$(jq -c --arg id "$CF_RESULT_SSL_RULE_ID" --arg ref "$rule_ref" '.result.rules[]? | select(.id==$id and .ref==$ref and .action=="set_config" and .action_parameters.ssl=="strict")' <<<"$ruleset" | head -n1)"
+    rule="$(jq -c --arg id "$CF_RESULT_SSL_RULE_ID" --arg ref "$rule_ref" '.rules[]? | select(.id==$id and .ref==$ref and .action=="set_config" and .action_parameters.ssl=="strict")' <<<"$ruleset" | head -n1)"
   fi
   [ -n "$rule" ] || die "Cloudflare strict SSL Configuration Rule was not reconciled cleanly."
   verify_id="$(jq -r '.id // empty' <<<"$rule")"
@@ -1232,10 +1367,10 @@ rollback_new_cf_resources(){
     created) if [ -n "$dns_id" ] && ! cf_delete_dns_if_expected "$zone_id" "$dns_id" "$dns_fingerprint"; then keep_dns_id="$dns_id"; keep_dns_action=created; keep_dns_fingerprint="$dns_fingerprint"; failed=1; fi ;;
   esac
   case "$origin_action" in
-    created) if [ -n "$origin_rule" ] && [ -n "$origin_ruleset" ] && ! cf_delete_rule_if_expected "$zone_id" "$origin_ruleset" "$origin_rule" "$origin_fingerprint"; then keep_origin_ruleset="$origin_ruleset"; keep_origin_rule="$origin_rule"; keep_origin_action=created; keep_origin_fingerprint="$origin_fingerprint"; failed=1; fi ;;
+    created) if [ -n "$origin_rule" ] && [ -n "$origin_ruleset" ] && ! cf_delete_rule_if_expected "$zone_id" "$origin_ruleset" "$origin_rule" "$origin_fingerprint" http_request_origin; then keep_origin_ruleset="$origin_ruleset"; keep_origin_rule="$origin_rule"; keep_origin_action=created; keep_origin_fingerprint="$origin_fingerprint"; failed=1; fi ;;
   esac
   case "$ssl_action" in
-    created) if [ -n "$ssl_rule" ] && [ -n "$ssl_ruleset" ] && ! cf_delete_rule_if_expected "$zone_id" "$ssl_ruleset" "$ssl_rule" "$ssl_fingerprint"; then keep_ssl_ruleset="$ssl_ruleset"; keep_ssl_rule="$ssl_rule"; keep_ssl_action=created; keep_ssl_fingerprint="$ssl_fingerprint"; failed=1; fi ;;
+    created) if [ -n "$ssl_rule" ] && [ -n "$ssl_ruleset" ] && ! cf_delete_rule_if_expected "$zone_id" "$ssl_ruleset" "$ssl_rule" "$ssl_fingerprint" http_config_settings; then keep_ssl_ruleset="$ssl_ruleset"; keep_ssl_rule="$ssl_rule"; keep_ssl_action=created; keep_ssl_fingerprint="$ssl_fingerprint"; failed=1; fi ;;
   esac
   if [ -n "$cert_id" ] && ! cf_delete_owned "/certificates/$cert_id"; then keep_cert_id="$cert_id"; failed=1; fi
   if [ "$failed" -eq 0 ]; then return 0; fi

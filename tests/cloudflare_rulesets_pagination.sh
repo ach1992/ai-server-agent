@@ -13,6 +13,8 @@ trap 'rm -rf "$TMP"' EXIT
 CALL_LOG="$TMP/calls.log"
 fail(){ echo "FAIL: $*" >&2; exit 1; }
 ORIG_CF_GET_OPTIONAL="$(declare -f cf_get_optional)"
+ORIG_CF_GET_RULE="$(declare -f cf_get_rule)"
+ORIG_CF_RESOLVE_EXACT_ZONE_RULESET="$(declare -f cf_resolve_exact_zone_ruleset)"
 
 # Historical filename retained for CI compatibility. Production discovery now
 # uses exact phase entrypoints and must not depend on zone-wide list pagination.
@@ -52,9 +54,9 @@ set -e
 [ "$(wc -l < "$CALL_LOG")" -eq "$before" ] || fail 'unsupported phase input reached Cloudflare'
 
 # Cloudflare can retain an existing phase entrypoint after its last Rule is
-# deleted. Live provider behavior represents that valid empty state by omitting
-# rules from the phase read and returning rules:null from the exact Ruleset read.
-# Resolve that ambiguity with the exact Ruleset identity before treating it as
+# deleted. Live provider behavior can omit rules from both the phase read and
+# the exact current Ruleset read. Resolve that ambiguity through exact current
+# identity plus the authoritative current-version read before treating it as
 # an empty collection.
 cf_get_optional(){
   case "$1" in
@@ -100,6 +102,182 @@ empty_config="$(cf_get_phase_entrypoint zone1 http_config_settings)" || fail 're
 [ "$(jq -r '.id' <<<"$empty_config")" = empty-config ] || fail 'empty Configuration Ruleset identity changed during normalization'
 [ "$(jq -r '.rules|type' <<<"$empty_config")" = array ] && [ "$(jq -r '.rules|length' <<<"$empty_config")" -eq 0 ] || fail 'empty Configuration Ruleset was not normalized to rules:[]'
 
+# Exact live provider shape: phase read and exact current Ruleset both omit
+# rules for retained empty version 6. A matching current-version read that also
+# omits rules is authoritative enough to normalize the retained empty state.
+cf_get_optional(){
+  case "$1" in
+    "/zones/zone1/rulesets/phases/http_request_origin/entrypoint")
+      printf '%s' '{"success":true,"result":{"id":"live-empty-origin","kind":"zone","phase":"http_request_origin","version":"6"}}'
+      ;;
+    "/zones/zone1/rulesets/live-empty-origin")
+      printf '%s' '{"success":true,"result":{"id":"live-empty-origin","kind":"zone","phase":"http_request_origin","version":"6"}}'
+      ;;
+    "/zones/zone1/rulesets/live-empty-origin/versions/6")
+      printf '%s' '{"success":true,"result":{"id":"live-empty-origin","kind":"zone","phase":"http_request_origin","version":"6"}}'
+      ;;
+    *) return 2 ;;
+  esac
+}
+live_empty="$(cf_get_phase_entrypoint zone1 http_request_origin)" || fail 'live retained-empty missing-rules representation was not normalized'
+[ "$(jq -r '.id' <<<"$live_empty")" = live-empty-origin ] || fail 'live retained-empty Ruleset identity changed'
+[ "$(jq -r '.version' <<<"$live_empty")" = 6 ] || fail 'live retained-empty Ruleset version changed'
+[ "$(jq -r '.rules|type' <<<"$live_empty")" = array ] && [ "$(jq -r '.rules|length' <<<"$live_empty")" -eq 0 ] || fail 'live retained-empty Ruleset was not normalized to rules:[]'
+
+# The phase response may omit version as well as rules. The exact current read
+# must then supply the version used for the authoritative version-specific check.
+cf_get_optional(){
+  case "$1" in
+    "/zones/zone1/rulesets/phases/http_request_origin/entrypoint")
+      printf '%s' '{"success":true,"result":{"id":"phase-no-version","kind":"zone","phase":"http_request_origin"}}'
+      ;;
+    "/zones/zone1/rulesets/phase-no-version")
+      printf '%s' '{"success":true,"result":{"id":"phase-no-version","kind":"zone","phase":"http_request_origin","version":"12"}}'
+      ;;
+    "/zones/zone1/rulesets/phase-no-version/versions/12")
+      printf '%s' '{"success":true,"result":{"id":"phase-no-version","kind":"zone","phase":"http_request_origin","version":"12"}}'
+      ;;
+    *) return 2 ;;
+  esac
+}
+phase_no_version="$(cf_get_phase_entrypoint zone1 http_request_origin)" || fail 'exact current Ruleset version could not resolve phase response without version'
+[ "$(jq -r '.version' <<<"$phase_no_version")" = 12 ] || fail 'exact current Ruleset version was not preserved'
+[ "$(jq -r '.rules|length' <<<"$phase_no_version")" -eq 0 ] || fail 'phase response without version was not normalized safely'
+
+# Both supported phases use the same resolver contract.
+cf_get_optional(){
+  case "$1" in
+    "/zones/zone1/rulesets/phases/http_config_settings/entrypoint")
+      printf '%s' '{"success":true,"result":{"id":"live-empty-config","kind":"zone","phase":"http_config_settings","version":"4"}}'
+      ;;
+    "/zones/zone1/rulesets/live-empty-config")
+      printf '%s' '{"success":true,"result":{"id":"live-empty-config","kind":"zone","phase":"http_config_settings","version":"4"}}'
+      ;;
+    "/zones/zone1/rulesets/live-empty-config/versions/4")
+      printf '%s' '{"success":true,"result":{"id":"live-empty-config","kind":"zone","phase":"http_config_settings","version":"4"}}'
+      ;;
+    *) return 2 ;;
+  esac
+}
+live_empty_config="$(cf_get_phase_entrypoint zone1 http_config_settings)" || fail 'live retained-empty Configuration Ruleset was not normalized'
+[ "$(jq -r '.rules|length' <<<"$live_empty_config")" -eq 0 ] || fail 'live retained-empty Configuration Ruleset was not empty'
+
+# A concurrent version change between phase and exact-current reads is not
+# guessed around; fail closed and let a fresh transaction retry from a new read.
+cf_get_optional(){
+  case "$1" in
+    "/zones/zone1/rulesets/phases/http_request_origin/entrypoint")
+      printf '%s' '{"success":true,"result":{"id":"concurrent-origin","kind":"zone","phase":"http_request_origin","version":"8"}}'
+      ;;
+    "/zones/zone1/rulesets/concurrent-origin")
+      printf '%s' '{"success":true,"result":{"id":"concurrent-origin","kind":"zone","phase":"http_request_origin","version":"9"}}'
+      ;;
+    *) return 2 ;;
+  esac
+}
+set +e
+err="$(cf_get_phase_entrypoint zone1 http_request_origin 2>&1 >/dev/null)"
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail 'concurrent phase/exact version drift was accepted'
+grep -Fq 'stage=exact-current' <<<"$err" || fail 'concurrent version drift diagnostic omitted exact-current stage'
+grep -Fq 'ruleset=concurrent-origin' <<<"$err" || fail 'concurrent version drift diagnostic omitted Ruleset ID'
+grep -Fq 'version=8' <<<"$err" || fail 'concurrent version drift diagnostic omitted expected version'
+
+# If the exact current response omits rules but the matching current-version
+# response still contains rules, preserve those rules instead of assuming empty.
+cf_get_optional(){
+  case "$1" in
+    "/zones/zone1/rulesets/phases/http_request_origin/entrypoint")
+      printf '%s' '{"success":true,"result":{"id":"version-backed-origin","kind":"zone","phase":"http_request_origin","version":"7"}}'
+      ;;
+    "/zones/zone1/rulesets/version-backed-origin")
+      printf '%s' '{"success":true,"result":{"id":"version-backed-origin","kind":"zone","phase":"http_request_origin","version":"7"}}'
+      ;;
+    "/zones/zone1/rulesets/version-backed-origin/versions/7")
+      printf '%s' '{"success":true,"result":{"id":"version-backed-origin","kind":"zone","phase":"http_request_origin","version":"7","rules":[{"id":"still-present","ref":"manual"}]}}'
+      ;;
+    *) return 2 ;;
+  esac
+}
+version_backed="$(cf_get_phase_entrypoint zone1 http_request_origin)" || fail 'matching current-version rules were not recovered'
+[ "$(jq -r '.rules|length' <<<"$version_backed")" -eq 1 ] || fail 'current-version rules were discarded'
+[ "$(jq -r '.rules[0].id' <<<"$version_backed")" = still-present ] || fail 'wrong current-version rule was returned'
+
+# A version-specific response must match the exact current identity/version.
+cf_get_optional(){
+  case "$1" in
+    "/zones/zone1/rulesets/phases/http_request_origin/entrypoint")
+      printf '%s' '{"success":true,"result":{"id":"version-mismatch-origin","kind":"zone","phase":"http_request_origin","version":"8"}}'
+      ;;
+    "/zones/zone1/rulesets/version-mismatch-origin")
+      printf '%s' '{"success":true,"result":{"id":"version-mismatch-origin","kind":"zone","phase":"http_request_origin","version":"8"}}'
+      ;;
+    "/zones/zone1/rulesets/version-mismatch-origin/versions/8")
+      printf '%s' '{"success":true,"result":{"id":"version-mismatch-origin","kind":"zone","phase":"http_request_origin","version":"9","rules":[]}}'
+      ;;
+    *) return 2 ;;
+  esac
+}
+set +e
+err="$(cf_get_phase_entrypoint zone1 http_request_origin 2>&1 >/dev/null)"
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail 'mismatched current-version identity was accepted'
+grep -Fq 'stage=current-version' <<<"$err" || fail 'current-version mismatch diagnostic did not identify the failing stage'
+grep -Fq 'ruleset=version-mismatch-origin' <<<"$err" || fail 'current-version mismatch diagnostic omitted the Ruleset ID'
+grep -Fq 'version=8' <<<"$err" || fail 'current-version mismatch diagnostic omitted the expected version'
+
+# Wrong-type rules on the current-version fallback remain malformed/fail-closed.
+cf_get_optional(){
+  case "$1" in
+    "/zones/zone1/rulesets/phases/http_request_origin/entrypoint")
+      printf '%s' '{"success":true,"result":{"id":"bad-version-rules","kind":"zone","phase":"http_request_origin","version":"10"}}'
+      ;;
+    "/zones/zone1/rulesets/bad-version-rules")
+      printf '%s' '{"success":true,"result":{"id":"bad-version-rules","kind":"zone","phase":"http_request_origin","version":"10"}}'
+      ;;
+    "/zones/zone1/rulesets/bad-version-rules/versions/10")
+      printf '%s' '{"success":true,"result":{"id":"bad-version-rules","kind":"zone","phase":"http_request_origin","version":"10","rules":{}}}'
+      ;;
+    *) return 2 ;;
+  esac
+}
+set +e
+err="$(cf_get_phase_entrypoint zone1 http_request_origin 2>&1 >/dev/null)"
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail 'wrong-type current-version rules were accepted'
+grep -Fq "rules had unsupported type 'object'" <<<"$err" || fail 'wrong-type current-version diagnostic was not actionable'
+
+# Provider/API failure on the current-version fallback remains fail-closed and
+# adds stage context without exposing credential material.
+CF_TOKEN='Bearer test'
+cf_get_optional(){
+  case "$1" in
+    "/zones/zone1/rulesets/phases/http_request_origin/entrypoint")
+      printf '%s' '{"success":true,"result":{"id":"version-api-fail","kind":"zone","phase":"http_request_origin","version":"11"}}'
+      ;;
+    "/zones/zone1/rulesets/version-api-fail")
+      printf '%s' '{"success":true,"result":{"id":"version-api-fail","kind":"zone","phase":"http_request_origin","version":"11"}}'
+      ;;
+    "/zones/zone1/rulesets/version-api-fail/versions/11")
+      printf '%s\n' 'Cloudflare API error 9109: permission denied' >&2
+      return 2
+      ;;
+    *) return 2 ;;
+  esac
+}
+set +e
+err="$(cf_get_phase_entrypoint zone1 http_request_origin 2>&1 >/dev/null)"
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail 'current-version API failure was treated as absence/success'
+grep -Fq 'stage=current-version' <<<"$err" || fail 'current-version API failure diagnostic omitted stage context'
+grep -Fq 'Cloudflare API error 9109: permission denied' <<<"$err" || fail 'underlying current-version provider error was hidden'
+if grep -Fq 'Bearer test' <<<"$err"; then fail 'Cloudflare token leaked into current-version diagnostics'; fi
+CF_TOKEN=test
+
 cf_get_optional(){
   case "$1" in
     "/zones/zone1/rulesets/phases/http_request_origin/entrypoint")
@@ -141,6 +319,8 @@ for bad in \
   '{"success":true,"result":{"id":"","kind":"zone","phase":"http_request_origin","rules":[]}}' \
   '{"success":true,"result":{"id":"r1","kind":"root","phase":"http_request_origin","rules":[]}}' \
   '{"success":true,"result":{"id":"r1","kind":"zone","phase":"http_config_settings","rules":[]}}' \
+  '{"success":true,"result":{"id":"r1","kind":"zone","phase":"http_request_origin","version":123,"rules":[]}}' \
+  '{"success":true,"result":{"id":"r1","kind":"zone","phase":"http_request_origin","version":"","rules":[]}}' \
   '{"success":true,"result":{"id":"r1","kind":"zone","phase":"http_request_origin","rules":{}}}' \
   '{"success":true,"result":{"id":"r1","kind":"zone","phase":"http_request_origin","rules":[null]}}' \
   '{"success":true,"result":{"id":"r1","kind":"zone","phase":"http_request_origin","rules":[{"ref":"x"}]}}' \
@@ -167,6 +347,8 @@ for malformed in \
   '{"success":true,"result":{}}' \
   '{"success":true,"result":{"id":"wrong-set","kind":"zone","rules":[]}}' \
   '{"success":true,"result":{"id":"ruleset1","kind":"root","rules":[]}}' \
+  '{"success":true,"result":{"id":"ruleset1","kind":"zone","version":123,"rules":[]}}' \
+  '{"success":true,"result":{"id":"ruleset1","kind":"zone","version":"","rules":[]}}' \
   '{"success":true,"result":{"id":"ruleset1","kind":"zone"}}' \
   '{"success":true,"result":{"id":"ruleset1","kind":"zone","rules":{}}}' \
   '{"success":true,"result":{"id":"ruleset1","kind":"zone","rules":[null]}}' \
@@ -192,6 +374,54 @@ for empty in \
 done
 cf_get_optional(){ printf '%s' '{"success":true,"result":{"id":"ruleset1","kind":"zone","rules":[{"id":"target","ref":null}]}}'; }
 [ "$(jq -r '.id' <<<"$(cf_get_rule zone1 ruleset1 target)")" = target ] || fail 'valid exact Rule lookup failed'
+
+# When the caller knows the phase, exact Rule reads must remain bound to it.
+# A contradictory exact-current phase must fail before cleanup can delete a Rule.
+phase_bound_rule='{"id":"target","ref":"phase-bound","description":"phase-bound","expression":"true","action":"route","action_parameters":{"origin":{"port":3210}},"enabled":true}'
+phase_bound_fp="$(cf_rule_fingerprint <<<"$phase_bound_rule")"
+cf_get_optional(){ printf '%s' '{"success":true,"result":{"id":"ruleset1","kind":"zone","phase":"http_config_settings","version":"1","rules":[{"id":"target","ref":"phase-bound","description":"phase-bound","expression":"true","action":"route","action_parameters":{"origin":{"port":3210}},"enabled":true}]}}'; }
+set +e
+cf_get_rule zone1 ruleset1 target http_request_origin >/dev/null 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 2 ] || fail 'wrong-phase exact-current Rule lookup was accepted'
+
+DELETE_PHASE_LOG="$TMP/delete-phase.log"
+: > "$DELETE_PHASE_LOG"
+cf_delete_owned(){ printf '%s\n' "$1" >> "$DELETE_PHASE_LOG"; return 0; }
+set +e
+cf_delete_rule_if_expected zone1 ruleset1 target "$phase_bound_fp" http_request_origin >/dev/null 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] && test ! -s "$DELETE_PHASE_LOG" || fail 'recorded cleanup ignored contradictory Ruleset phase'
+set +e
+cf_delete_pending_rule_if_expected zone1 ruleset1 target "$(cf_rule_intent_fingerprint <<<"$phase_bound_rule")" http_request_origin >/dev/null 2>&1
+rc=$?
+set -e
+[ "$rc" -ne 0 ] && test ! -s "$DELETE_PHASE_LOG" || fail 'pending cleanup ignored contradictory Ruleset phase'
+eval "$ORIG_CF_GET_RULE"
+
+# Cleanup/recovery exact Rule reads must use the same retained-empty resolver.
+# If the Ruleset is authoritatively empty, a previously recorded target is
+# safely reported absent rather than turning provider representation drift into
+# a cleanup failure.
+cf_get_optional(){
+  case "$1" in
+    "/zones/zone1/rulesets/ruleset1")
+      printf '%s' '{"success":true,"result":{"id":"ruleset1","kind":"zone","phase":"http_request_origin","version":"6"}}'
+      ;;
+    "/zones/zone1/rulesets/ruleset1/versions/6")
+      printf '%s' '{"success":true,"result":{"id":"ruleset1","kind":"zone","phase":"http_request_origin","version":"6"}}'
+      ;;
+    *) return 2 ;;
+  esac
+}
+set +e
+cf_get_rule zone1 ruleset1 target >/dev/null 2>&1
+rc=$?
+set -e
+[ "$rc" -eq 3 ] || fail "retained-empty exact Rule lookup did not report target absence: $rc"
+
 eval "$ORIG_CF_GET_OPTIONAL"
 
 curl(){ printf '%s\n403' '{"success":false,"errors":[{"code":9109,"message":"permission denied"}]}' ; }
@@ -271,6 +501,17 @@ cf_api(){
     *) fail "unexpected create-response API call: $TEST_MODE $method $path" ;;
   esac
 }
+cf_resolve_exact_zone_ruleset(){
+  case "$TEST_MODE:$2:${3:-}" in
+    create:origin-set:http_request_origin)
+      jq -nc --argjson before "$origin_before" --argjson rule "$expected_origin" --argjson after "$origin_after" '{id:"origin-set",kind:"zone",phase:"http_request_origin",version:"1",rules:[$before,$rule,$after]}'
+      ;;
+    create:ssl-set:http_config_settings)
+      jq -nc --argjson before "$ssl_before" --argjson rule "$expected_ssl" --argjson after "$ssl_after" '{id:"ssl-set",kind:"zone",phase:"http_config_settings",version:"1",rules:[$before,$rule,$after]}'
+      ;;
+    *) return 2 ;;
+  esac
+}
 TEST_MODE=create
 cf_reconcile_origin_rule zone1 mcp.example.com 3210 '' '' '' >/dev/null
 [ "$CF_RESULT_ORIGIN_RULESET_ID" = origin-set ] && [ "$CF_RESULT_ORIGIN_RULE_ID" = origin-new ] && [ "$CF_RESULT_ORIGIN_ACTION" = created ] && [ "$CF_RESULT_ORIGIN_FINGERPRINT" = "$expected_origin_fp" ] || fail 'Origin updated-Ruleset response did not select/fingerprint the exact created Rule'
@@ -296,6 +537,13 @@ manual_ssl="$(jq -nc '{id:"manual-ssl",ref:"manual-ssl",description:"manual ssl"
 owned_ssl="$(jq -nc --arg ref "$ssl_ref" '{id:"owned-ssl",ref:$ref,description:"AI Server Agent strict SSL txn:33333333333333333333333333333333",expression:"http.host eq \"mcp.example.com\"",action:"set_config",action_parameters:{ssl:"strict"},enabled:true}')"
 MUTATION_LOG="$TMP/rule-contract-mutations.log"
 cf_get_phase_entrypoint(){ case "$2:$TEST_MODE" in http_request_origin:external) jq -nc --argjson r "$manual_origin" '{id:"origin-set",kind:"zone",phase:"http_request_origin",rules:[$r]}' ;; http_request_origin:owned) jq -nc --argjson a "$manual_origin" --argjson b "$owned_origin" '{id:"origin-set",kind:"zone",phase:"http_request_origin",rules:[$a,$b]}' ;; http_config_settings:external) jq -nc --argjson r "$manual_ssl" '{id:"ssl-set",kind:"zone",phase:"http_config_settings",rules:[$r]}' ;; http_config_settings:owned) jq -nc --argjson a "$manual_ssl" --argjson b "$owned_ssl" '{id:"ssl-set",kind:"zone",phase:"http_config_settings",rules:[$a,$b]}' ;; *) return 2 ;; esac; }
+cf_resolve_exact_zone_ruleset(){
+  case "$TEST_MODE:$2:${3:-}" in
+    owned:origin-set:http_request_origin) jq -nc --argjson a "$manual_origin" --argjson b "$owned_origin" '{id:"origin-set",kind:"zone",phase:"http_request_origin",rules:[$a,$b]}' ;;
+    owned:ssl-set:http_config_settings) jq -nc --argjson a "$manual_ssl" --argjson b "$owned_ssl" '{id:"ssl-set",kind:"zone",phase:"http_config_settings",rules:[$a,$b]}' ;;
+    *) return 2 ;;
+  esac
+}
 cf_set_pending_write(){ printf 'pending %s\n' "$*" >> "$MUTATION_LOG"; return 99; }
 cf_api(){ local method="$1" path="$2"; if [ "$TEST_MODE" = owned ] && [ "$method" = GET ]; then case "$path" in /zones/zone1/rulesets/origin-set) jq -nc --argjson a "$manual_origin" --argjson b "$owned_origin" '{success:true,result:{rules:[$a,$b]}}'; return ;; /zones/zone1/rulesets/ssl-set) jq -nc --argjson a "$manual_ssl" --argjson b "$owned_ssl" '{success:true,result:{rules:[$a,$b]}}'; return ;; esac; fi; printf '%s %s\n' "$method" "$path" >> "$MUTATION_LOG"; return 99; }
 TEST_MODE=external; : > "$MUTATION_LOG"; CF_PENDING_MARKER=""; set +e; out="$(cf_reconcile_origin_rule zone1 mcp.example.com 3210 '' '' '' 2>&1)"; rc=$?; set -e; [ "$rc" -ne 0 ] && grep -Fq 'equivalent external Origin Rule(s)' <<<"$out" && test ! -s "$MUTATION_LOG" || fail 'external Origin equivalent did not fail closed before mutation'
@@ -313,6 +561,8 @@ set +e; out="$(cf_reconcile_origin_rule zone1 mcp.example.com 3210 origin-set mi
 TEST_MODE=external; : > "$MUTATION_LOG"; CF_PENDING_MARKER=""
 set +e; out="$(cf_reconcile_ssl_config_rule zone1 mcp.example.com ssl-set missing-ssl '' 2>&1)"; rc=$?; set -e
 [ "$rc" -ne 0 ] && grep -Fq 'recorded Agent-owned Configuration Rule is absent' <<<"$out" && test ! -s "$MUTATION_LOG" || fail 'stale Configuration ownership recreated around an external equivalent'
+
+eval "$ORIG_CF_RESOLVE_EXACT_ZONE_RULESET"
 
 # A create response with the right marker/ref but mutated semantics is
 # not confirmation of the durable pre-POST intent.
