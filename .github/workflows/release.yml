@@ -95,13 +95,17 @@ jobs:
         run: |
           set -Eeuo pipefail
           version="${RELEASE_TAG#v}"
-          archive="dist/ai-server-agent_${version}_linux_amd64.tar.gz"
-          test -f "$archive"
+          mapfile -t arches < <(grep -Ev '^[[:space:]]*(#|$)' scripts/release-arches.txt)
+          test "${#arches[@]}" -gt 0
           test -f dist/SHA256SUMS
           test -f dist/install.sh
-          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq 3
-          test "$(wc -l < dist/SHA256SUMS)" -eq 1
-          grep -qF "  ai-server-agent_${version}_linux_amd64.tar.gz" dist/SHA256SUMS
+          test "$(find dist -maxdepth 1 -type f | wc -l)" -eq "$((${#arches[@]} + 2))"
+          test "$(wc -l < dist/SHA256SUMS)" -eq "${#arches[@]}"
+          for arch in "${arches[@]}"; do
+            archive="dist/ai-server-agent_${version}_linux_${arch}.tar.gz"
+            test -f "$archive"
+            grep -qF "  ai-server-agent_${version}_linux_${arch}.tar.gz" dist/SHA256SUMS
+          done
           test "$(sed -n '1p' dist/install.sh)" = '#!/usr/bin/env bash'
           test "$(sed -n '2p' dist/install.sh)" = "export AI_SERVER_AGENT_VERSION=$RELEASE_TAG"
           test "$(sed -n '3p' dist/install.sh)" = "export AI_SERVER_AGENT_REF=$RELEASE_TAG"
@@ -134,8 +138,13 @@ jobs:
           test "$(jq -r '.object.type' <<<"$remote_tag_json")" = commit
           test "$(jq -r '.object.sha' <<<"$remote_tag_json")" = "$RELEASE_SHA"
           version="${RELEASE_TAG#v}"
+          mapfile -t arches < <(grep -Ev '^[[:space:]]*(#|$)' scripts/release-arches.txt)
+          assets=()
+          for arch in "${arches[@]}"; do
+            assets+=("dist/ai-server-agent_${version}_linux_${arch}.tar.gz")
+          done
           gh release create "$RELEASE_TAG" \
-            "dist/ai-server-agent_${version}_linux_amd64.tar.gz" \
+            "${assets[@]}" \
             dist/SHA256SUMS \
             dist/install.sh \
             --repo "$GITHUB_REPOSITORY" \
@@ -169,6 +178,9 @@ jobs:
             exit 1
           fi
           version="${RELEASE_TAG#v}"
-          gh release verify-asset "$RELEASE_TAG" "dist/ai-server-agent_${version}_linux_amd64.tar.gz" --repo "$GITHUB_REPOSITORY"
+          mapfile -t arches < <(grep -Ev '^[[:space:]]*(#|$)' scripts/release-arches.txt)
+          for arch in "${arches[@]}"; do
+            gh release verify-asset "$RELEASE_TAG" "dist/ai-server-agent_${version}_linux_${arch}.tar.gz" --repo "$GITHUB_REPOSITORY"
+          done
           gh release verify-asset "$RELEASE_TAG" dist/SHA256SUMS --repo "$GITHUB_REPOSITORY"
           gh release verify-asset "$RELEASE_TAG" dist/install.sh --repo "$GITHUB_REPOSITORY"

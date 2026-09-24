@@ -46,7 +46,39 @@ log(){ printf '[ai-server-agent] %s\n' "$*"; }
 warn(){ printf '[ai-server-agent] WARNING: %s\n' "$*" >&2; }
 die(){ printf '[ai-server-agent] ERROR: %s\n' "$*" >&2; exit 1; }
 need_root(){ [ "$(id -u)" -eq 0 ] || die "Run this installer as root (for example: sudo bash install.sh)."; }
-version_ge(){ dpkg --compare-versions "$1" ge "$2"; }
+UBUNTU_MIN_VERSION=22.04
+DEBIAN_MIN_VERSION=11
+
+version_ge(){ /usr/bin/dpkg --compare-versions "$1" ge "$2"; }
+
+normalize_arch(){
+  case "$1" in
+    x86_64|amd64) printf 'amd64\n' ;;
+    aarch64|arm64) printf 'arm64\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+validate_platform(){
+  local os_id="$1" os_version="$2" arch="$3"
+  case "$arch" in
+    amd64|arm64) ;;
+    *) die "Unsupported architecture: $arch. Supported architectures: amd64/x86_64 and arm64/aarch64." ;;
+  esac
+  case "$os_id" in
+    ubuntu)
+      [ -x /usr/bin/dpkg ] || die "dpkg is required on supported Ubuntu systems."
+      [ -n "$os_version" ] || die "Ubuntu version is unavailable."
+      version_ge "$os_version" "$UBUNTU_MIN_VERSION" || die "Ubuntu $UBUNTU_MIN_VERSION or newer is required"
+      ;;
+    debian)
+      [ -x /usr/bin/dpkg ] || die "dpkg is required on supported Debian systems."
+      [ -n "$os_version" ] || die "Debian version is unavailable."
+      version_ge "$os_version" "$DEBIAN_MIN_VERSION" || die "Debian $DEBIAN_MIN_VERSION or newer is required"
+      ;;
+    *) die "Unsupported OS: ${os_id:-unknown}. Supported systems: Ubuntu $UBUNTU_MIN_VERSION+ and Debian $DEBIAN_MIN_VERSION+." ;;
+  esac
+}
 
 acquire_lifecycle_lock(){
   command -v flock >/dev/null 2>&1 || die "flock is required for privileged lifecycle serialization."
@@ -96,6 +128,14 @@ json_string_value(){
   sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$CONFIG_FILE" | head -n1
 }
 
+if [ "${1:-}" = "--check-platform" ]; then
+  [ "$#" -eq 4 ] || die "Usage: install.sh --check-platform OS_ID VERSION_ID ARCH"
+  CHECK_ARCH="$(normalize_arch "$4")" || die "Unsupported architecture: $4. Supported architectures: amd64/x86_64 and arm64/aarch64."
+  validate_platform "$2" "$3" "$CHECK_ARCH"
+  log "Compatibility check passed: $2 $3, $CHECK_ARCH."
+  exit 0
+fi
+
 case "${1:-}" in
   --check) CHECK_ONLY=1 ;;
   --resolve-ref) RESOLVE_REF_ONLY=1 ;;
@@ -105,18 +145,10 @@ need_root
 # shellcheck disable=SC1091
 . /etc/os-release
 command -v systemctl >/dev/null || die "systemd/systemctl is required"
-case "$(uname -m)" in x86_64) ARCH=amd64; GOARCH=amd64 ;; aarch64|arm64) ARCH=arm64; GOARCH=arm64 ;; *) die "Unsupported architecture: $(uname -m)" ;; esac
-
-if [ "$AGENT_VERSION" = "source" ]; then
-  case "${ID:-}" in
-    ubuntu) version_ge "${VERSION_ID:-0}" "22.04" || die "Ubuntu 22.04 or newer is required" ;;
-    debian) version_ge "${VERSION_ID:-0}" "11" || die "Debian 11 or newer is required" ;;
-    *) die "Unsupported source-install OS: ${ID:-unknown}." ;;
-  esac
-else
-  [ "${ID:-}" = "ubuntu" ] && [ "${VERSION_ID:-}" = "22.04" ] || die "Stable v0.1 supports Ubuntu 22.04 LTS only. Detected: ${PRETTY_NAME:-unknown}."
-  [ "$ARCH" = "amd64" ] || die "Stable v0.1 supports amd64/x86_64 only."
-fi
+RAW_ARCH="$(uname -m)"
+ARCH="$(normalize_arch "$RAW_ARCH")" || die "Unsupported architecture: $RAW_ARCH. Supported architectures: amd64/x86_64 and arm64/aarch64."
+GOARCH="$ARCH"
+validate_platform "${ID:-}" "${VERSION_ID:-}" "$ARCH"
 
 if [ "$AGENT_VERSION" != "source" ] && [ -n "${AI_SERVER_AGENT_BINARY:-}" ]; then
   die "AI_SERVER_AGENT_BINARY is disabled for stable releases. Stable installs must use the release archive verified by SHA256SUMS."

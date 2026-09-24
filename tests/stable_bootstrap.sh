@@ -110,6 +110,20 @@ test -s "$EXEC_MARKER"
 test ! -e "$PATH_ATTACK_MARKER"
 
 make_fixture true false false
+ROOT_BIN="$FIXTURE/root-bin"
+mkdir -p "$ROOT_BIN"
+for cmd in bash curl sha256sum mktemp jq awk chmod rm cp; do
+  ln -s "$(command -v "$cmd")" "$ROOT_BIN/$cmd"
+done
+PATH="$ROOT_BIN" bash "$BOOTSTRAP" > "$FIXTURE/out"
+grep -qF 'Verified immutable stable installer v0.1.2 before privileged staging.' "$FIXTURE/out"
+grep -qF 'Privileged staging re-verified the authenticated installer bytes.' "$FIXTURE/out"
+test -s "$DOWNLOAD_MARKER"
+test -s "$EXEC_MARKER"
+test ! -e "$SUDO_MARKER"
+test ! -e "$PATH_ATTACK_MARKER"
+
+make_fixture true false false
 bash "$BOOTSTRAP" v0.1.2 > "$FIXTURE/out"
 test -s "$SUDO_MARKER"
 test -s "$EXEC_MARKER"

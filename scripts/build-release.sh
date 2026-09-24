@@ -8,6 +8,13 @@ TAG="v$VERSION"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 DEV_VERSION="$(sed -n 's/.*const version = "\([0-9][0-9.]*-dev\)".*/\1/p' "$ROOT/internal/mcp/server.go" | head -n1)"
 DIST="$ROOT/dist"
+ARCH_FILE="$ROOT/scripts/release-arches.txt"
+mapfile -t RELEASE_ARCHES < <(grep -Ev '^[[:space:]]*(#|$)' "$ARCH_FILE")
+[ "${#RELEASE_ARCHES[@]}" -gt 0 ] || { echo "release architecture list is empty: $ARCH_FILE" >&2; exit 1; }
+for arch in "${RELEASE_ARCHES[@]}"; do
+  [[ "$arch" =~ ^[a-z0-9]+$ ]] || { echo "invalid release architecture: $arch" >&2; exit 1; }
+done
+[ "$(printf '%s\n' "${RELEASE_ARCHES[@]}" | sort -u | wc -l)" -eq "${#RELEASE_ARCHES[@]}" ] || { echo "duplicate release architecture" >&2; exit 1; }
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 SRC="$TMP/src"
@@ -21,16 +28,17 @@ grep -qF "const version = \"$VERSION\"" "$SRC/internal/mcp/server.go"
 
 rm -rf "$DIST"
 mkdir -p "$DIST"
-ARCH=amd64
-OUT="$DIST/ai-server-agent_${VERSION}_linux_${ARCH}"
-mkdir -p "$OUT"
-(
-  cd "$SRC"
-  CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath -ldflags='-s -w' -o "$OUT/ai-server-agent" ./cmd/ai-server-agent
-)
-cp "$ROOT/README.md" "$ROOT/LICENSE" "$ROOT/manage.sh" "$ROOT/update.sh" "$ROOT/uninstall.sh" "$OUT/"
-tar -C "$DIST" -czf "$DIST/ai-server-agent_${VERSION}_linux_${ARCH}.tar.gz" "$(basename "$OUT")"
-rm -rf "$OUT"
+for ARCH in "${RELEASE_ARCHES[@]}"; do
+  OUT="$DIST/ai-server-agent_${VERSION}_linux_${ARCH}"
+  mkdir -p "$OUT"
+  (
+    cd "$SRC"
+    CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath -ldflags='-s -w' -o "$OUT/ai-server-agent" ./cmd/ai-server-agent
+  )
+  cp "$ROOT/README.md" "$ROOT/LICENSE" "$ROOT/manage.sh" "$ROOT/update.sh" "$ROOT/uninstall.sh" "$OUT/"
+  tar -C "$DIST" -czf "$DIST/ai-server-agent_${VERSION}_linux_${ARCH}.tar.gz" "$(basename "$OUT")"
+  rm -rf "$OUT"
+done
 
 # The public install.sh release asset is pinned to this exact stable tag. The
 # embedded installer still verifies the release archive against SHA256SUMS.
@@ -44,5 +52,8 @@ chmod 0755 "$DIST/install.sh"
 
 (
   cd "$DIST"
-  sha256sum "ai-server-agent_${VERSION}_linux_${ARCH}.tar.gz" > SHA256SUMS
+  : > SHA256SUMS
+  for ARCH in "${RELEASE_ARCHES[@]}"; do
+    sha256sum "ai-server-agent_${VERSION}_linux_${ARCH}.tar.gz" >> SHA256SUMS
+  done
 )

@@ -4,7 +4,7 @@
 
 AI Server Agent is a Go MCP control plane for dedicated development/test servers. The public MCP endpoint is bearer-authenticated, the agent process is unprivileged, and privileged host operations are delegated to a root executor behind explicit policy/approval guardrails.
 
-Stable v0.1 releases support **Ubuntu 22.04 LTS on amd64/x86_64 only**. `install.sh` also has a broader source-install compatibility path for Ubuntu 22.04+ and Debian 11+ on amd64/arm64; that is development/source compatibility, not a stable-release support claim.
+Current `main` targets **Ubuntu 22.04+ and Debian 11+ on amd64/x86_64 and arm64/aarch64** for the next stable release. The published immutable `v0.1.6` release remains Ubuntu 22.04 LTS amd64-only until superseded. Keep distro minimums aligned between the standalone stable bootstrap and installer, keep stable release architectures in `scripts/release-arches.txt`, and extend compatibility tests when platform support changes rather than scattering new platform conditionals across release workflows.
 
 ## Non-negotiable behavior
 

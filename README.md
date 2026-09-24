@@ -4,16 +4,19 @@ AI Server Agent turns a dedicated Linux development/test server into a bearer-au
 
 The project is intentionally a **development/test-server control plane**, not a general hosting panel. It gives ChatGPT enough capability to work on a dedicated Linux host while keeping the Agent's own control plane, credentials, connectivity, and destructive operations behind explicit boundaries.
 
-## Stable v0.1 support
+## Platform support
 
-Stable v0.1 releases support:
+The current `main` branch and next stable release target support:
 
-- **Ubuntu 22.04 LTS**
-- **amd64/x86_64**
+- **Ubuntu 22.04 or newer**
+- **Debian 11 or newer** (Debian 11 application compatibility is retained, but upstream Debian LTS ended on 2026-08-31; use Debian 12+ for an officially security-maintained base unless you have an ELTS arrangement)
+- **amd64/x86_64 and arm64/aarch64**
 - systemd
 - a dedicated development/test server where you are comfortable granting an AI-controlled MCP endpoint the documented capabilities
 
-The source installer has a broader development compatibility path for Ubuntu 22.04+ and Debian 11+ on amd64/arm64. That is not a stable-release support promise.
+OS support is minimum-version based, while CI keeps explicit compatibility cases for current Ubuntu/Debian releases and native lifecycle coverage on both supported CPU architectures. Stable release architectures are declared in `scripts/release-arches.txt`; installer architecture aliases are normalized at the install boundary so adding a future architecture does not require rewriting release publication logic.
+
+The currently published immutable `v0.1.6` release predates this expanded matrix and remains limited to Ubuntu 22.04 LTS on amd64/x86_64. Until a newer stable release is published, use the `v0.1.6` install command below only on that legacy matrix.
 
 AI Server Agent does not require nginx, Apache, Caddy, Docker, PHP, a database, Node.js, Python, `cloudflared`, or a hosting panel as core dependencies, and it does not need to take over ports 80/443.
 
