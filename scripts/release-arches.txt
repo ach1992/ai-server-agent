@@ -1,0 +1,3 @@
+# Stable Linux release architectures, one GOARCH/artifact suffix per line.
+amd64
+arm64

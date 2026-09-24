@@ -2,18 +2,22 @@
 
 This document describes the validation model that applies to the current v0.1 codebase. It is not a historical release log.
 
-## 1. Supported stable test target
+## 1. Supported platform policy and validation matrix
 
-Stable v0.1 release support is intentionally narrow:
+Current `main` targets the next stable release for:
 
-- Ubuntu 22.04 LTS
+- Ubuntu 22.04 or newer
+- Debian 11 or newer
 - amd64/x86_64
+- arm64/aarch64
 - systemd
 - dedicated development/test server use
 
-CI and release artifacts must not imply stable support for Debian, Ubuntu 24.04, arm64, or other platforms merely because the source installer can run on a broader development/source matrix.
+The published immutable `v0.1.6` release predates this expansion and remains Ubuntu 22.04 LTS amd64-only until superseded.
 
-The source-install compatibility path currently accepts Ubuntu 22.04+ and Debian 11+ on amd64/arm64. That path is useful for development, but it is not the stable v0.1 release matrix.
+`tests/platform_compatibility.sh` is the deterministic policy contract. It covers Ubuntu 22.04/24.04/26.04, Debian 11/12/13, both supported architecture aliases, rejection of older/unsupported systems, alignment of installer/bootstrap distro minimums, and the release architecture list. Native lifecycle validation remains proportional: the main CI job exercises Ubuntu 22.04 amd64 deeply, while a dedicated GitHub-hosted arm64 job builds/tests and performs install/systemd/root-boundary validation on Ubuntu 24.04 arm64. The release builder cross-builds and checksums every architecture declared in `scripts/release-arches.txt`.
+
+Adding a platform is not a reason to duplicate the full security suite across every matrix cell. Extend the policy/list and focused compatibility evidence, then add native lifecycle coverage where a materially distinct runtime behavior requires it.
 
 ## 2. Validation layers
 
@@ -36,9 +40,9 @@ These cover Go unit/behavior tests, race detection and the production binary bui
 
 CI validates the established installer, updater, uninstaller, management, release-builder and security-test paths. `tests/stable_bootstrap.sh` also syntax-checks the stable bootstrap before exercising it behaviorally.
 
-### Ubuntu 22.04 lifecycle integration
+### Native lifecycle integration
 
-The main CI workflow performs a real privileged lifecycle on an Ubuntu 22.04 amd64 GitHub runner:
+The main CI workflow performs a real privileged lifecycle on an Ubuntu 22.04 amd64 GitHub runner, and the dedicated arm64 job performs native build/install/systemd/root-boundary validation on an Ubuntu 24.04 arm64 GitHub runner. The deep amd64 lifecycle covers:
 
 1. install a locally built Agent binary;
 2. verify both systemd services are active;
@@ -134,7 +138,7 @@ The security workflow builds the candidate release assets and verifies:
 - `install.sh` is generated with the expected version/ref at the release-scoped header;
 - stable binary override is rejected;
 - corrupted archive bytes are rejected by `SHA256SUMS` verification;
-- stable v0.1 artifacts remain amd64-only.
+- the release builder emits and checksum-verifies every architecture declared in `scripts/release-arches.txt`, currently amd64 and arm64.
 
 The release-scoped installer is not its own trust root; the stable bootstrap or already-installed trusted updater authenticates its bytes before execution.
 
@@ -207,7 +211,7 @@ bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh scr
 bash tests/stable_bootstrap.sh
 ```
 
-For privileged/cloudflare/root-boundary changes, run the applicable security tests on a disposable supported Ubuntu 22.04 environment when practical. Never point test fixtures at the live Cloudflare zone or a production VPS.
+For privileged/cloudflare/root-boundary changes, run the applicable security tests on a disposable supported environment matching the affected platform when practical. Ubuntu 22.04 amd64 remains the reference High Assurance environment; architecture-specific behavior also receives native arm64 lifecycle coverage. Never point test fixtures at the live Cloudflare zone or a production VPS.
 
 ## 9. Candidate review and release validation
 

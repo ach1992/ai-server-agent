@@ -28,7 +28,7 @@ jobs:
       - name: Build static binary
         run: CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
       - name: Shell syntax
-        run: bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh scripts/install-stable.sh tests/stable_bootstrap.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh tests/cloudflare_rulesets_pagination.sh tests/root_trust_boundary.sh tests/root_trust_migration.sh
+        run: bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh scripts/install-stable.sh tests/*.sh
       - name: Root shell execution boundary
         run: |
           if grep -nE 'exec.Command\("/bin/bash", "-lc"|"/bin/bash", "-lc", shell|--setenv=HOME=' internal/executor/executor.go; then
@@ -39,6 +39,8 @@ jobs:
           grep -qF '"/usr/bin/env", "-i"' internal/executor/executor.go
       - name: Installer compatibility check
         run: sudo bash install.sh --check
+      - name: Supported platform policy
+        run: bash tests/platform_compatibility.sh
       - name: Guided installer and management contract
         run: |
           grep -qF 'MANAGE_BIN="/usr/local/sbin/ai-server-agent-manage"' install.sh
@@ -222,30 +224,30 @@ jobs:
           rm -rf dist
           bash scripts/build-release.sh "$RELEASE_VERSION"
           version="${RELEASE_VERSION#v}"
-          archive="dist/ai-server-agent_${version}_linux_amd64.tar.gz"
-          test -f "$archive"
-          test -f dist/SHA256SUMS
+          mapfile -t arches < <(grep -Ev '^[[:space:]]*(#|$)' scripts/release-arches.txt)
+          test "${#arches[@]}" -gt 0
+          test "$(find dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq "${#arches[@]}"
+          test "$(wc -l < dist/SHA256SUMS)" -eq "${#arches[@]}"
           test -x dist/install.sh
-          test "$(find dist -maxdepth 1 -type f -name '*.tar.gz' | wc -l)" -eq 1
-          test "$(wc -l < dist/SHA256SUMS)" -eq 1
-          grep -qF "  ai-server-agent_${version}_linux_amd64.tar.gz" dist/SHA256SUMS
+          for arch in "${arches[@]}"; do
+            archive="dist/ai-server-agent_${version}_linux_${arch}.tar.gz"
+            root="ai-server-agent_${version}_linux_${arch}"
+            test -f "$archive"
+            grep -qF "  ai-server-agent_${version}_linux_${arch}.tar.gz" dist/SHA256SUMS
+            tar -tzf "$archive" | grep -qF "$root/ai-server-agent"
+            tar -tzf "$archive" | grep -qF "$root/manage.sh"
+            tar -tzf "$archive" | grep -qF "$root/update.sh"
+            tar -tzf "$archive" | grep -qF "$root/uninstall.sh"
+            tar -tzf "$archive" | grep -qF "$root/README.md"
+            tar -tzf "$archive" | grep -qF "$root/LICENSE"
+          done
           grep -qF "export AI_SERVER_AGENT_VERSION=$RELEASE_VERSION" dist/install.sh
           grep -qF "export AI_SERVER_AGENT_REF=$RELEASE_VERSION" dist/install.sh
           grep -qF 'curl -fsSL "$url/$asset"' dist/install.sh
           grep -qF 'curl -fsSL "$url/SHA256SUMS"' dist/install.sh
           grep -qF 'sha256sum -c -' dist/install.sh
-          if find dist -maxdepth 1 -name '*arm64*' -print -quit | grep -q .; then
-            echo 'v0.1 must not produce unvalidated arm64 artifacts' >&2
-            exit 1
-          fi
           (cd dist && sha256sum -c SHA256SUMS)
           sudo bash dist/install.sh --check
-          tar -tzf "$archive" | grep -qF "ai-server-agent_${version}_linux_amd64/ai-server-agent"
-          tar -tzf "$archive" | grep -qF "ai-server-agent_${version}_linux_amd64/manage.sh"
-          tar -tzf "$archive" | grep -qF "ai-server-agent_${version}_linux_amd64/update.sh"
-          tar -tzf "$archive" | grep -qF "ai-server-agent_${version}_linux_amd64/uninstall.sh"
-          tar -tzf "$archive" | grep -qF "ai-server-agent_${version}_linux_amd64/README.md"
-          tar -tzf "$archive" | grep -qF "ai-server-agent_${version}_linux_amd64/LICENSE"
           git diff --exit-code -- internal/mcp/server.go
       - name: Ubuntu 22.04 amd64 lifecycle validation
         run: |
@@ -331,3 +333,30 @@ jobs:
           path: dist/
           if-no-files-found: error
           retention-days: 7
+
+
+  arm64-lifecycle:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - name: Native arm64 build and tests
+        run: |
+          test "$(uname -m)" = 'aarch64'
+          go test ./...
+          CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
+          bash tests/platform_compatibility.sh
+          sudo bash install.sh --check
+      - name: Native arm64 lifecycle validation
+        run: |
+          sudo env AI_SERVER_AGENT_BINARY=/tmp/ai-server-agent AI_SERVER_AGENT_NONINTERACTIVE=1 bash install.sh
+          sudo systemctl is-active --quiet ai-server-agent.service
+          sudo systemctl is-active --quiet ai-server-agent-executor.service
+          sudo jq -e '.channel == "source" and .version == "source"' /etc/ai-server-agent/control/install-state.json >/dev/null
+          sudo bash tests/root_trust_boundary.sh
+      - name: Cleanup arm64 test installation
+        if: always()
+        run: sudo env AI_SERVER_AGENT_YES=1 bash uninstall.sh --purge || true

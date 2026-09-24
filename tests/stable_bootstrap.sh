@@ -110,6 +110,29 @@ test -s "$EXEC_MARKER"
 test ! -e "$PATH_ATTACK_MARKER"
 
 make_fixture true false false
+/usr/bin/sudo env \
+  PATH="$PATH" \
+  FIXTURE_INSTALLER="$FIXTURE_INSTALLER" \
+  EXEC_MARKER="$EXEC_MARKER" \
+  DOWNLOAD_MARKER="$DOWNLOAD_MARKER" \
+  SUDO_MARKER="$SUDO_MARKER" \
+  ATTACK_MARKER="$ATTACK_MARKER" \
+  PATH_ATTACK_MARKER="$PATH_ATTACK_MARKER" \
+  MALICIOUS_INSTALLER="$MALICIOUS_INSTALLER" \
+  INSTALLER_DIGEST="$INSTALLER_DIGEST" \
+  INSTALLER_URL="$INSTALLER_URL" \
+  IMMUTABLE="$IMMUTABLE" \
+  POISON_BIN="$POISON_BIN" \
+  RACE_SOURCE_REPLACEMENT=false \
+  bash "$BOOTSTRAP" > "$FIXTURE/out"
+grep -qF 'Verified immutable stable installer v0.1.2 before privileged staging.' "$FIXTURE/out"
+grep -qF 'Privileged staging re-verified the authenticated installer bytes.' "$FIXTURE/out"
+test -s "$DOWNLOAD_MARKER"
+test -s "$EXEC_MARKER"
+test ! -e "$SUDO_MARKER"
+test ! -e "$PATH_ATTACK_MARKER"
+
+make_fixture true false false
 bash "$BOOTSTRAP" v0.1.2 > "$FIXTURE/out"
 test -s "$SUDO_MARKER"
 test -s "$EXEC_MARKER"

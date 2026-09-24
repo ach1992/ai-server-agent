@@ -2,9 +2,9 @@
 
 ## 1. Supported release target
 
-Stable v0.1 releases target **Ubuntu 22.04 LTS amd64/x86_64 on dedicated development/test servers**.
+Current `main` targets the next stable release for **Ubuntu 22.04+ and Debian 11+ on amd64/x86_64 and arm64/aarch64**, on dedicated development/test servers with systemd. The published immutable `v0.1.6` release remains limited to Ubuntu 22.04 LTS amd64 until a newer release supersedes it.
 
-The source installer also accepts Ubuntu 22.04+ and Debian 11+ on amd64/arm64 for development/source use. That broader path is not a stable-release support promise.
+Platform compatibility is intentionally small and explicit: `install.sh` owns runtime distro/version validation and architecture normalization; the standalone stable bootstrap mirrors only the minimum distro policy needed before it can safely install `jq`; `scripts/release-arches.txt` owns the release artifact architecture list; CI asserts those boundaries stay aligned. New supported platforms should extend those policy/list/test boundaries rather than introduce parallel installer or release paths.
 
 The control plane intentionally coexists with normal server software. It does not require or own nginx, Apache, Caddy, Docker, PHP, databases, Node.js, Python, `cloudflared`, or ports 80/443.
 
@@ -187,7 +187,7 @@ The release-scoped `install.sh` is generated with its version/ref pinned to the 
 
 A direct `releases/.../install.sh | sudo bash` command is intentionally not a supported stable trust path because it would execute the asset before authenticating that same asset. A mutable branch is likewise not an acceptable stable bootstrap source.
 
-Stable v0.1 artifacts are amd64-only.
+Stable release architectures are enumerated in `scripts/release-arches.txt`; the current target publishes both amd64 and arm64 archives under the same checksum manifest.
 
 ### Stable update
 

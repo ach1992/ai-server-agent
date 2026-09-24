@@ -8,6 +8,33 @@ VERSION="${1:-}"
 log(){ printf '[ai-server-agent] %s\n' "$*"; }
 die(){ printf '[ai-server-agent] ERROR: %s\n' "$*" >&2; exit 1; }
 
+UBUNTU_MIN_VERSION=22.04
+DEBIAN_MIN_VERSION=11
+
+version_ge(){ /usr/bin/dpkg --compare-versions "$1" ge "$2"; }
+
+require_supported_prerequisite_host(){
+  [ -r /etc/os-release ] || die "jq is required and /etc/os-release is unavailable for prerequisite installation."
+  # shellcheck disable=SC1091
+  . /etc/os-release
+  [ -x /usr/bin/dpkg ] || die "jq is required and dpkg is unavailable for supported-host validation."
+  case "${ID:-}" in
+    ubuntu) version_ge "${VERSION_ID:-0}" "$UBUNTU_MIN_VERSION" || die "jq is required. Ubuntu $UBUNTU_MIN_VERSION or newer is required." ;;
+    debian) version_ge "${VERSION_ID:-0}" "$DEBIAN_MIN_VERSION" || die "jq is required. Debian $DEBIAN_MIN_VERSION or newer is required." ;;
+    *) die "jq is required. Automatic prerequisite installation is supported on Ubuntu $UBUNTU_MIN_VERSION+ and Debian $DEBIAN_MIN_VERSION+." ;;
+  esac
+  [ -x /usr/bin/apt-get ] || die "apt-get is required to install bootstrap prerequisites on supported systems."
+}
+
+run_privileged(){
+  if [ "$(id -u)" -eq 0 ]; then
+    "$@"
+    return
+  fi
+  command -v sudo >/dev/null 2>&1 || die "sudo is required for privileged installation when not running as root."
+  sudo "$@"
+}
+
 case "$#" in
   0|1) ;;
   *) die "Usage: install-stable.sh [vMAJOR.MINOR.PATCH]" ;;
@@ -16,17 +43,14 @@ if [ -n "$VERSION" ] && ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   die "Stable version must look like v0.1.2."
 fi
 
-for cmd in curl sha256sum mktemp sudo; do
+for cmd in curl sha256sum mktemp; do
   command -v "$cmd" >/dev/null 2>&1 || die "$cmd is required for the verified stable bootstrap."
 done
 if ! command -v jq >/dev/null 2>&1; then
-  [ -r /etc/os-release ] || die "jq is required and /etc/os-release is unavailable for prerequisite installation."
-  # shellcheck disable=SC1091
-  . /etc/os-release
-  [ "${ID:-}" = ubuntu ] && [ "${VERSION_ID:-}" = 22.04 ] || die "jq is required. Install jq before running this bootstrap on this system."
-  log "Installing the jq prerequisite from Ubuntu repositories."
-  sudo apt-get update -qq
-  sudo apt-get install -y -qq ca-certificates jq >/dev/null
+  require_supported_prerequisite_host
+  log "Installing the jq prerequisite from the supported system repositories."
+  run_privileged /usr/bin/env DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get update -qq
+  run_privileged /usr/bin/env DEBIAN_FRONTEND=noninteractive /usr/bin/apt-get install -y -qq ca-certificates jq >/dev/null
   command -v jq >/dev/null 2>&1 || die "jq installation did not provide the jq command."
 fi
 
@@ -72,7 +96,7 @@ actual_digest="sha256:$(sha256sum "$tmp/install.sh" | awk '{print $1}')"
 chmod 0500 "$tmp/install.sh"
 
 log "Verified immutable stable installer $VERSION before privileged staging."
-sudo /bin/bash --noprofile --norc -s -- "$tmp/install.sh" "$installer_digest" <<'ROOT_INSTALL'
+run_privileged /bin/bash --noprofile --norc -s -- "$tmp/install.sh" "$installer_digest" <<'ROOT_INSTALL'
 set -Eeuo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
