@@ -6,7 +6,7 @@ The project is intentionally a **development/test-server control plane**, not a 
 
 ## Platform support
 
-Stable `v0.1.8` and the current `main` branch support:
+Stable `v0.1.9` and the current `main` branch support:
 
 - **Ubuntu 22.04 or newer**
 - **Debian 11 or newer** (Debian 11 application compatibility is retained, but upstream Debian LTS ended on 2026-08-31; use Debian 12+ for an officially security-maintained base unless you have an ELTS arrangement)
@@ -22,18 +22,18 @@ AI Server Agent does not require nginx, Apache, Caddy, Docker, PHP, a database, 
 
 ## Install the latest stable release
 
-Stable installation starts with a small bootstrap loaded from an **immutable published release tag**, separate from the release `install.sh` asset it authenticates. The current v0.1 bootstrap trust anchor is the immutable `v0.1.8` release tag. GitHub locks the associated tag when an immutable release is published, so this path does not depend on a feature branch or merge strategy.
+Stable installation starts with a small bootstrap loaded from an **immutable published release tag**, separate from the release `install.sh` asset it authenticates. The current v0.1 bootstrap trust anchor is the immutable `v0.1.9` release tag. GitHub locks the associated tag when an immutable release is published, so this path does not depend on a feature branch or merge strategy.
 
-`v0.1.8` is published as an immutable release. Install the latest stable release with:
+`v0.1.9` is published as an immutable release. Install the latest stable release with:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.8/scripts/install-stable.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.9/scripts/install-stable.sh | bash
 ```
 
-For exact `v0.1.8` installation through the same immutable bootstrap:
+For exact `v0.1.9` installation through the same immutable bootstrap:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.8/scripts/install-stable.sh | bash -s -- v0.1.8
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.9/scripts/install-stable.sh | bash -s -- v0.1.9
 ```
 
 Do **not** use `releases/latest/download/install.sh | sudo bash` as the stable trust path: that executes release-supplied code as root before the same asset can be authenticated.
