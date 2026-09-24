@@ -9,7 +9,7 @@ concurrency:
 permissions:
   contents: read
 env:
-  RELEASE_VERSION: v0.1.8
+  RELEASE_VERSION: v0.1.9
 jobs:
   test:
     runs-on: ubuntu-22.04
@@ -367,7 +367,7 @@ jobs:
                 apt-get update -qq
                 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq \
                   ca-certificates curl jq openssl tar xz-utils util-linux systemd >/dev/null
-                AI_SERVER_AGENT_VERSION=v0.1.8 bash install.sh --check
+                AI_SERVER_AGENT_VERSION=v0.1.9 bash install.sh --check
               else
                 test "$(. /etc/os-release; printf %s "$ID")" = debian
                 test "$(. /etc/os-release; printf %s "$VERSION_ID")" = 11
