@@ -9,9 +9,26 @@ concurrency:
 permissions:
   contents: read
 jobs:
+  change-scope:
+    name: Security change scope
+    runs-on: ubuntu-22.04
+    outputs:
+      runtime_changed: ${{ steps.scope.outputs.runtime_changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Classify changed paths
+        id: scope
+        run: bash scripts/ci-change-scope.sh >> "$GITHUB_OUTPUT"
+
   cloudflare-transaction:
+    needs: change-scope
+    if: ${{ always() && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed == 'true') }}
     runs-on: ubuntu-22.04
     steps:
+      - name: Require successful change classification
+        run: test "${{ needs.change-scope.result }}" = success
       - uses: actions/checkout@v4
       - name: Shell syntax
         run: bash -n manage.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh
@@ -25,8 +42,12 @@ jobs:
         run: sudo env PATH="$PATH" go test ./internal/executor -run TestRootCommandAndJobIgnoreWorkerStartupFiles -count=1
 
   root-trust-boundary:
+    needs: change-scope
+    if: ${{ always() && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed == 'true') }}
     runs-on: ubuntu-22.04
     steps:
+      - name: Require successful change classification
+        run: test "${{ needs.change-scope.result }}" = success
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
@@ -46,8 +67,12 @@ jobs:
         run: sudo env AI_SERVER_AGENT_YES=1 bash uninstall.sh --purge || true
 
   stable-provenance:
+    needs: change-scope
+    if: ${{ always() && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed == 'true') }}
     runs-on: ubuntu-22.04
     steps:
+      - name: Require successful change classification
+        run: test "${{ needs.change-scope.result }}" = success
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
@@ -113,8 +138,12 @@ jobs:
           sudo test ! -e /usr/local/bin/ai-server-agent
 
   stable-update-trust:
+    needs: change-scope
+    if: ${{ always() && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed == 'true') }}
     runs-on: ubuntu-22.04
     steps:
+      - name: Require successful change classification
+        run: test "${{ needs.change-scope.result }}" = success
       - uses: actions/checkout@v4
       - name: Stable plan does not require unpublished release
         run: |
