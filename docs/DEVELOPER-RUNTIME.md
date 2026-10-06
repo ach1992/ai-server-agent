@@ -2,7 +2,7 @@
 
 > Status: **accepted target architecture; not yet fully shipped**.
 >
-> Current runtime behavior is documented by `README.md` and the current implementation. This document defines the accepted Developer Runtime target delivered by the relevant workstreams tracked under Issues #54-#66 after the Phase A owner gate; optional/deferred workstreams in that range are explicitly non-blocking below.
+> Current runtime behavior is documented by `README.md` and the current implementation. This document defines the accepted Developer Runtime target delivered by the relevant workstreams tracked under Issues #54-#66. Phase A architecture/documentation is integrated and its execution boundary was owner-accepted on 2026-10-07; optional/deferred workstreams in that range are explicitly non-blocking below.
 
 ## 1. Outcome
 
@@ -361,9 +361,9 @@ Uncommitted local work is not durable project truth. The workflow should create 
 
 ## 17. Implementation sequencing
 
-Phase A documentation integrates first and receives the owner execution-boundary gate before runtime activation.
+Phase A documentation is integrated and the owner execution-boundary gate was accepted on 2026-10-07. Runtime work now follows the current dependency contracts and value-first sequencing in Issue #52 rather than waiting on another Phase A gate.
 
-Then activate bounded dependency-aware slices rather than everything at once:
+Activate bounded dependency-aware slices rather than everything at once:
 
 - repository/worktree identity/lifecycle;
 - worker-safe workspace editing and text/structural search;

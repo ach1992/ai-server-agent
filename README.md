@@ -180,7 +180,7 @@ sudo ai-server-agent-manage chatgpt-setup
 
 The manager prints the MCP URL and the protected bearer-auth setup guidance. The Authorization value is stored on the server and is revealed only after explicit terminal confirmation.
 
-ChatGPT full MCP/custom-app support is an evolving client-side feature. For Business workspaces, the flow is controlled by workspace admins/owners through Developer mode and the custom-app UI on ChatGPT web. UI ordering, labels, connection screens and confirmation behavior can change independently of the Agent, so use the current OpenAI product guidance at connection time rather than treating a historical screenshot or screen sequence as a protocol contract.
+ChatGPT full MCP/custom-app support is an evolving client-side feature. For managed workspaces, creation and administration currently use the available Plugins/custom-MCP surfaces and workspace controls; exact labels and navigation can change independently of the Agent. Use the current OpenAI product guidance and live UI at connection time rather than treating a historical `Developer mode`, `Apps -> Create`, screenshot, or menu sequence as a protocol contract.
 
 See [docs/CONNECT_CHATGPT.md](docs/CONNECT_CHATGPT.md) for connection topologies and the validation checklist. When that document's client-side UI wording differs from the current ChatGPT product, current OpenAI guidance and the live UI are authoritative for the client-side steps; the Agent-side endpoint/auth/tool contract remains the durable part documented here.
 
@@ -242,7 +242,7 @@ The MCP file tools are content/path based; they are **not a generic automatic sy
 
 ### Persistent jobs
 
-Use `start_job` for commands that should continue if ChatGPT disconnects or the MCP request ends. The Agent uses transient systemd units and stores bounded job output/status under Agent state. Non-root jobs run as `aiworker`; root jobs go through the same approval policy before starting.
+Use `start_job` for commands that should continue if ChatGPT disconnects or the MCP request ends. The Agent uses transient systemd units and stores job metadata/output under Agent state; `job_output` reads are chunk-bounded, while bounded underlying log growth/retention is part of the accepted #42 hardening work and is not yet a shipped guarantee. Non-root jobs run as `aiworker`; root jobs go through the same approval policy before starting.
 
 ### Browser capability
 

@@ -2,10 +2,9 @@
 
 This is the **ChatGPT/OpenAI client-specific integration guide**, not the Agent core architecture. The Agent's MCP/executor/policy/lifecycle core is client/vendor neutral; support for another client gets its own current compatibility evidence rather than inheriting ChatGPT assumptions.
 
-AI Server Agent supports two connection topologies while keeping bearer authentication enabled:
+AI Server Agent currently ships built-in lifecycle/setup support for a remote public HTTPS MCP endpoint while keeping bearer authentication enabled. Its bearer-authenticated loopback MCP endpoint can also be carried through OpenAI Secure MCP Tunnel when that tunnel is provisioned and operated separately with the official OpenAI tooling.
 
-1. a remote public HTTPS MCP endpoint;
-2. a private/local MCP endpoint carried through OpenAI Secure MCP Tunnel.
+The Agent does **not** yet ship first-class Tunnel installation, service lifecycle, menu integration, status/repair, or credential management. That Agent-managed topology remains parked in Issue #35 until separately reactivated and implemented.
 
 ChatGPT's custom-MCP/plugin UI, workspace controls and permission labels evolve independently from AI Server Agent. Do **not** treat a historical menu path, a "Developer mode" label, or the legacy Apps page as a durable protocol requirement.
 
@@ -66,9 +65,9 @@ For the current ChatGPT web flow:
 1. open the **Plugins** surface (for example the Plugins entry/directory available in the current ChatGPT UI);
 2. choose the current **Create custom MCP server** action (or the equivalent current label);
 3. choose the connection type:
-   - **Server URL** for the Agent's public HTTPS MCP endpoint; or
-   - **Tunnel** when using OpenAI Secure MCP Tunnel for a private/local Agent;
-4. provide the endpoint/tunnel identity shown by the supported Agent/OpenAI setup flow;
+   - **Server URL** for the Agent's built-in public HTTPS MCP endpoint; or
+   - **Tunnel** only when an OpenAI Secure MCP Tunnel has already been provisioned separately with the official OpenAI tooling;
+4. provide the public Agent endpoint, or the externally provisioned Tunnel identity, using the current OpenAI flow;
 5. configure authentication using the protected Agent bearer credential only in the trusted ChatGPT connection UI; never paste that credential into chat, Issues, docs, screenshots or source control;
 6. let ChatGPT discover/validate the MCP tools using the current UI and review the exposed read/write/action surface;
 7. create/save the custom MCP configuration and verify it is available to the intended test/admin context;
@@ -87,9 +86,9 @@ Use a normal supported ChatGPT conversation for full-MCP validation. Whether spe
 
 The default Agent installation is bearer-authenticated and loopback-only at `127.0.0.1:3210`.
 
-ChatGPT does not connect directly to a local/private MCP server. For a private network, on-premises server or development machine, use OpenAI Secure MCP Tunnel according to the current OpenAI instructions instead of exposing the loopback listener directly to the internet.
+ChatGPT does not connect directly to a local/private MCP server. An operator may use OpenAI Secure MCP Tunnel according to the current OpenAI instructions to carry that local endpoint without exposing it directly to the internet. Today this is an **external integration**, not an Agent-managed connection mode: `ai-server-agent-manage` does not install/manage the Tunnel runtime, its service, Tunnel credentials, or Tunnel status/repair lifecycle. First-class Agent-managed Tunnel support is tracked by parked Issue #35.
 
-The Agent's local MCP endpoint remains bearer-authenticated. Use the protected Authorization value from the server only where the trusted tunnel/client setup requires it.
+The Agent's local MCP endpoint remains bearer-authenticated. Use the protected Authorization value from the server only where the trusted tunnel/client setup requires it, and follow current OpenAI guidance for protected header/secret handling.
 
 ## End-to-end validation
 
