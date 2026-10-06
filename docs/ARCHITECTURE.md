@@ -19,6 +19,8 @@ Ordinary shell work runs as `aiworker` in `/srv/ai-workspace`. Root shell work i
 
 The arbitrary root-shell capability is intentionally broad. Pattern/path policy and `approval_required` are defense-in-depth guardrails for recognized risky operations; they are **not** a complete sandbox or proof that every destructive/equivalent shell expression can be classified from command text. Any external principal/client granted root-shell authority must therefore be treated as root-capable. Structured privileged operations may narrow common workflows in the future, but they do not redefine the trust boundary of the escape hatch.
 
+The current MCP `read_file` and `write_file` surfaces also execute through the privileged root executor. `read_file` is broad root-readable host-file authority, and `write_file` is broad root-file mutation that can create root-equivalent effects. Protected Agent-resource approval checks are additional guardrails, not a complete sensitive-file sandbox. Any integration/permission layer must represent that authority honestly rather than treating “read-only” as low privilege or file write as a non-root shortcut.
+
 The public MCP surface uses bearer authentication. Direct public mode also requires native TLS. The bearer-authenticated MCP control plane is one authorization domain: root and worker jobs are different execution modes, not different external principals.
 
 ### AI-client / vendor boundary
