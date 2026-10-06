@@ -13,6 +13,7 @@ The supported stable platform policy is **Ubuntu 22.04+ and Debian 11+ on amd64/
 - Keep the Agent core AI-client/vendor neutral: ChatGPT/OpenAI-specific setup, credentials, tunnels and UI behavior belong at explicit integration boundaries and must not become executor/policy/lifecycle/security assumptions. MCP is the current primary common protocol, not an OpenAI-only contract.
 - Preserve the intentional root executor capability and its approval guardrails.
 - Treat arbitrary root shell as genuinely root-capable: pattern/path approval checks are defense-in-depth, not a complete sandbox or exhaustive shell-effect classifier. Do not weaken this truth in tool descriptions, Gateway integration, review, or future permission UX.
+- Treat current `read_file` / `write_file` as privileged root-host-file capabilities: read can expose root-readable secrets and write can produce root-equivalent effects. Approval/path heuristics are additive guardrails, not a general sensitive-file sandbox.
 - Do not add nginx, Apache, Caddy, `cloudflared`, Docker, Node.js, Python, PHP, databases, or hosting panels as core dependencies.
 - Do not make the core control plane own ports 80/443.
 - Cloudflare automation is hostname-scoped and must not mutate whole-zone SSL mode.

@@ -197,8 +197,8 @@ Once a supported MCP client is connected, the Agent exposes a compact tool surfa
 | `run_root_command` | run Bash as root, subject to executor policy/approval guardrails |
 | `start_job` | start a persistent transient-systemd background job that survives MCP/client disconnects |
 | `job_status` / `job_output` / `job_stop` | inspect, read output from, or stop a persistent Agent job |
-| `read_file` | read a host file through the privileged executor; protected Agent state requires approval |
-| `write_file` | write complete host-file content; protected Agent state requires approval |
+| `read_file` | read a host file through the privileged root executor; this is broad root-readable file authority, and protected Agent state may additionally require approval |
+| `write_file` | write complete host-file content through the privileged root executor; this is root-capable host mutation, and protected Agent state may additionally require approval |
 | `browser_setup` | install the optional private Node.js + Playwright + Chromium runtime and required shared libraries |
 | `browser_run` | run Playwright JavaScript in server-side headless Chromium using a persistent browser profile |
 
@@ -233,6 +233,8 @@ The executor separately protects Agent names/paths/socket/listen address and kno
 ### File I/O and downloads
 
 `read_file` and `write_file` operate on host paths through the Agent. Ordinary project files can also be created/read through `run_command` as `aiworker` inside `/srv/ai-workspace`.
+
+These MCP file tools are intentionally privileged host-file operations, not an unprivileged workspace filesystem. A caller allowed to use `read_file` may reach root-readable sensitive files; `write_file` can produce root-equivalent host changes. Agent protected-resource approval is defense-in-depth and does not classify every sensitive path on the host.
 
 The host can download project dependencies or public files through ordinary command-line tools such as `curl` when the project needs them. Agent credentials/config/state remain protected and must not be copied into chat, source control or public logs.
 
