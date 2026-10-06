@@ -10,6 +10,7 @@ The supported stable platform policy is **Ubuntu 22.04+ and Debian 11+ on amd64/
 
 - Preserve `/srv/ai-workspace` and the `aiworker` account during purge.
 - Preserve bearer authentication and native TLS for direct public mode.
+- Keep the Agent core AI-client/vendor neutral: ChatGPT/OpenAI-specific setup, credentials, tunnels and UI behavior belong at explicit integration boundaries and must not become executor/policy/lifecycle/security assumptions. MCP is the current primary common protocol, not an OpenAI-only contract.
 - Preserve the intentional root executor capability and its approval guardrails.
 - Do not add nginx, Apache, Caddy, `cloudflared`, Docker, Node.js, Python, PHP, databases, or hosting panels as core dependencies.
 - Do not make the core control plane own ports 80/443.
