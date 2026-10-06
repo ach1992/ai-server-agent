@@ -1,8 +1,8 @@
 # AI Server Agent
 
-AI Server Agent turns a dedicated Linux development/test server into a bearer-authenticated MCP endpoint for ChatGPT. Ordinary commands run as an unprivileged worker; host-level actions go through a separate root executor with policy and approval guardrails.
+AI Server Agent turns a dedicated Linux development/test server into a bearer-authenticated MCP control endpoint. ChatGPT is the current first validated/documented AI client integration; the Agent core and MCP capability/security model are intentionally AI-client/vendor neutral. Ordinary commands run as an unprivileged worker; host-level actions go through a separate root executor with policy and approval guardrails.
 
-The project is intentionally a **development/test-server control plane**, not a general hosting panel. It gives ChatGPT enough capability to work on a dedicated Linux host while keeping the Agent's own control plane, credentials, connectivity, and destructive operations behind explicit boundaries.
+The project is intentionally a **development/test-server control plane**, not a general hosting panel. It gives an authorized MCP client enough capability to work on a dedicated Linux host while keeping the Agent's own control plane, credentials, connectivity, and destructive operations behind explicit boundaries.
 
 ## Platform support
 
@@ -162,6 +162,14 @@ sudo ai-server-agent-manage configure-manual-tls
 
 The manager validates the certificate hostname and key pairing before switching the Agent to public mode. Public mode requires native TLS; plaintext public binding is not the supported direct-public model.
 
+## Client and vendor neutrality
+
+MCP is the current primary common client boundary; it is not OpenAI-specific. ChatGPT is the current supported/validated client path and keeps dedicated setup documentation below.
+
+Future AI/MCP clients may be supported through bounded client-specific integration/authentication paths, but they must reuse the same Agent tools, executor, policy, approval and lifecycle semantics. A provider-specific UI, credential, tunnel or confirmation mechanism must not become a core safety dependency.
+
+Support for another commercial AI client is claimed only after its current protocol/auth/tool behavior has been verified and accepted; this architecture does not imply universal compatibility.
+
 ## ChatGPT setup
 
 After public setup succeeds:
@@ -180,14 +188,14 @@ The public endpoint remains bearer-authenticated. Treat the bearer credential as
 
 ## MCP capability surface
 
-Once ChatGPT is connected, the Agent exposes a compact tool surface designed for real server work:
+Once a supported MCP client is connected, the Agent exposes a compact tool surface designed for real server work:
 
 | Tool | Purpose |
 | --- | --- |
 | `agent_environment` | read the current self-preservation manifest before host-wide changes |
 | `run_command` | run ordinary Bash as `aiworker` in `/srv/ai-workspace` |
 | `run_root_command` | run Bash as root, subject to executor policy/approval guardrails |
-| `start_job` | start a persistent transient-systemd background job that survives MCP/ChatGPT disconnects |
+| `start_job` | start a persistent transient-systemd background job that survives MCP/client disconnects |
 | `job_status` / `job_output` / `job_stop` | inspect, read output from, or stop a persistent Agent job |
 | `read_file` | read a host file through the privileged executor; protected Agent state requires approval |
 | `write_file` | write complete host-file content; protected Agent state requires approval |
@@ -200,13 +208,13 @@ Use `run_command` for normal development work, builds, tests, Git, project packa
 
 `/srv/ai-workspace` is persistent. Connected models are instructed to inspect and reuse existing repositories, worktrees and task environments before creating duplicates, prefer `git worktree` when another checkout of the same repository is appropriate, and never treat dirty, untracked, ambiguous or unknown workspace state as safe to delete.
 
-Use `run_root_command` only when host-level privilege is genuinely required. Normal root commands can execute directly, but commands that reference protected Agent resources, can interrupt connectivity/control-plane services, or match destructive-operation policy return `approval_required` first. ChatGPT should explain the exact risk and retry with `approval=true` only after explicit user confirmation.
+Use `run_root_command` only when host-level privilege is genuinely required. Normal root commands can execute directly, but commands that reference protected Agent resources, can interrupt connectivity/control-plane services, or match destructive-operation policy return `approval_required` first. The connected client/model should explain the exact risk and retry with `approval=true` only after explicit user confirmation.
 
 This is a safety guardrail, not a claim that arbitrary root shell access is mathematically incapable of causing damage. Root remains powerful; the design combines AI-visible self-preservation instructions, server-enforced approval policy, minimal/sanitized root execution environment, audit logging and explicit human gates for known high-risk categories.
 
 ### Self-preservation manifest
 
-Before host-wide package, service, firewall, network, disk, user, web-stack or control-panel changes, ChatGPT is instructed to call `agent_environment` and preserve the critical resources it reports.
+Before host-wide package, service, firewall, network, disk, user, web-stack or control-panel changes, connected clients/models are instructed to call `agent_environment` and preserve the critical resources it reports.
 
 The manifest identifies, among other things:
 
@@ -327,7 +335,7 @@ Key boundaries:
 - direct public mode requires native TLS;
 - ordinary commands run as `aiworker`;
 - root commands are intentional capabilities evaluated by executor policy/approval guardrails;
-- ChatGPT is instructed to inspect the current `agent_environment` manifest before host-wide changes;
+- connected MCP clients/models are instructed to inspect the current `agent_environment` manifest before host-wide changes;
 - protected Agent resources and known connection-risk/destructive root command patterns require explicit approval before execution;
 - root shell execution uses `/root` HOME/CWD, a minimal explicit environment and shell startup-file suppression;
 - root-consumed control state is stored under root-controlled directories and validated before use;
@@ -419,6 +427,8 @@ For future work, use the repository as a graph of authoritative sources rather t
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — trust boundaries and implementation architecture;
 - **[docs/TESTING.md](docs/TESTING.md)** — validation model, behavioral coverage and known limits;
 - **[docs/CONNECT_CHATGPT.md](docs/CONNECT_CHATGPT.md)** — ChatGPT connection topologies and client-side validation guidance; current OpenAI UI/docs override stale UI wording;
+- **Issue #37** — durable AI-client/vendor-neutral core invariant; client-specific support remains bounded and evidence-driven;
+- **Issue #47** — planned MCP Gateway integration with independent credentials and preserved direct-client operation;
 - **GitHub Issues** — authoritative place for unresolved actionable work; do not create speculative backlog merely for ceremony;
 - **Pull requests and commit history** — implementation/review/integration evidence;
 - **GitHub Releases and attestations** — immutable stable-delivery identities and provenance;
