@@ -19,6 +19,34 @@ Ordinary shell work runs as `aiworker` in `/srv/ai-workspace`. Root shell work i
 
 The public MCP surface uses bearer authentication. Direct public mode also requires native TLS. The bearer-authenticated MCP control plane is one authorization domain: root and worker jobs are different execution modes, not different external principals.
 
+### AI-client / vendor boundary
+
+The Agent core is **AI-client and AI-vendor neutral**.
+
+Its durable responsibilities are server capabilities, execution policy, approval enforcement, workspace/files/jobs/browser behavior, lifecycle, audit/security and MCP tool semantics. None of those may depend on ChatGPT/OpenAI UI behavior, product plans, confirmation UX or a provider-specific safety layer.
+
+MCP is the current primary common external protocol; it is not an OpenAI-specific protocol. ChatGPT is the current first validated/documented client path. A future supported AI/MCP client must reuse the same core capabilities and server-side safety rather than forking executor/policy logic.
+
+Keep these dimensions separate:
+
+```text
+AI client/profile integration
+        |
+protocol/authentication adapter
+        |
+MCP (current primary surface)
+        |
+AI Server Agent core
+        |
+executor / policy / jobs / files / browser / lifecycle
+```
+
+Provider-specific setup/authentication/connectivity remains at explicit integration boundaries. For example, `docs/CONNECT_CHATGPT.md` and any OpenAI-specific tunnel mode are ChatGPT/OpenAI integration surfaces, not core architecture.
+
+Do not add a speculative provider/plugin framework. A new client/provider is admitted only after current protocol/auth/tool/approval/network behavior is verified and bounded. Passing ChatGPT acceptance proves the ChatGPT integration, not universal compatibility.
+
+The Agent must not require OpenAI credentials for core operation. Provider-specific credentials/state, if introduced later, remain isolated from core state and from other providers.
+
 ### Root command environment
 
 Root commands must not inherit worker-controlled ambient shell state. The executor uses:
@@ -33,7 +61,7 @@ Worker commands retain `/srv/ai-workspace` as HOME/CWD.
 
 ### Persistent jobs
 
-Persistent jobs run as transient systemd units and survive MCP/ChatGPT reconnects. Job metadata lives under the root-controlled state container `/var/lib/ai-server-agent/jobs`.
+Persistent jobs run as transient systemd units and survive MCP/client reconnects. Job metadata lives under the root-controlled state container `/var/lib/ai-server-agent/jobs`.
 
 Job log/status files are created with exclusive, no-follow semantics. Reads reject symlinks, non-regular files, unexpected owners, and world-writable files. Root-owned versus `aiworker`-owned job files record execution provenance and protect filesystem replacement; they are not a separate bearer-auth authorization partition.
 

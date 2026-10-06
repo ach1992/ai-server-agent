@@ -191,7 +191,7 @@ A green CI/High Assurance result does not by itself prove:
 
 - live Cloudflare API permissions or behavior on a real user zone;
 - real public DNS/TLS propagation;
-- ChatGPT Business tool discovery and end-to-end MCP use;
+- ChatGPT Business tool discovery and end-to-end MCP use (this proves the current ChatGPT integration only, not universal AI-client compatibility);
 - an actual persistent job through a real transient `systemd-run` unit;
 - current repository Rulesets bypass configuration;
 - future release immutability settings before publication;
