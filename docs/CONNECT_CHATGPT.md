@@ -7,12 +7,16 @@ AI Server Agent supports two connection topologies while keeping bearer authenti
 1. a remote public HTTPS MCP endpoint;
 2. a private/local MCP endpoint carried through OpenAI Secure MCP Tunnel.
 
-ChatGPT full MCP/developer-mode functionality, including write/modify actions, is currently rolling out in beta for Business, Enterprise and Edu workspaces on ChatGPT web. UI labels, permissions and confirmation behavior can change, so treat current OpenAI documentation as authoritative for the ChatGPT-side workflow rather than treating this file as a permanent UI contract.
+ChatGPT's custom-MCP/plugin UI, workspace controls and permission labels evolve independently from AI Server Agent. Do **not** treat a historical menu path, a "Developer mode" label, or the legacy Apps page as a durable protocol requirement.
 
-Current OpenAI guidance:
+Use the current official OpenAI guidance at connection time:
 
-- Developer mode and MCP apps: <https://help.openai.com/en/articles/12584461>
-- Apps in ChatGPT: <https://help.openai.com/en/articles/11487775-connectors-in>
+- Create custom MCP server: <https://developers.openai.com/api/docs/guides/custom-mcp-server>
+- Secure MCP Tunnel: <https://developers.openai.com/api/docs/guides/secure-mcp-tunnels>
+- Plugins in ChatGPT and Codex: <https://help.openai.com/en/articles/20001256-plugins-in-chatgpt>
+- Admin controls for plugins and apps: <https://help.openai.com/en/articles/11509118-admin-controls-security-and-compliance-for-plugins-and-apps>
+
+Current OpenAI surfaces use **Plugins** as the primary discovery/management path. Some managed workspaces may still expose complementary or legacy **Apps** controls. Plan/workspace permissions and UI names can change; the Agent contract is the MCP endpoint + authentication/tool behavior, not a specific ChatGPT navigation sequence.
 
 ## Direct remote MCP
 
@@ -53,25 +57,31 @@ sudo ai-server-agent-manage chatgpt-setup
 
 The protected Authorization value is revealed only after explicit confirmation in the terminal. Do not paste it into chat, issue comments, documentation, screenshots, shell history or source control. Provide it only to the trusted ChatGPT app-connection UI when configuring the MCP app.
 
-## Create and test the custom MCP app in ChatGPT Business
+## Create and test the custom MCP server/plugin in ChatGPT
 
-For the current Business workspace flow on ChatGPT web:
+Use an eligible ChatGPT workspace/account with permission to create or configure custom MCP servers. Exact roles and workspace controls are client-side policy and must be checked against the current official OpenAI guidance above.
 
-1. use an **Admin/Owner** account; Business members cannot enable developer mode or deploy a custom MCP app;
-2. enable Developer mode from the current workspace/user settings flow. OpenAI currently exposes it under **Workspace Settings → Permissions & Roles → Connected Data** and also when creating a custom app from **Workspace Settings → Apps → Create**;
-3. open **Workspace Settings → Apps → Create**;
-4. provide the remote MCP endpoint shown by `ai-server-agent-manage chatgpt-setup`, for example `https://mcp.example.com/mcp`;
-5. choose the authentication mechanism offered by the current UI and provide the protected Agent bearer credential only in that trusted connection UI;
-6. click **Scan Tools** and wait for the scan to complete;
-7. create the app and verify it appears as a draft;
-8. open a new normal ChatGPT conversation, select the draft app from the tools/app picker or refer to it in the prompt, and exercise the discovered Agent tools;
-9. publish only after end-to-end validation. Business publishing is an Admin/Owner action through the workspace Apps controls.
+For the current ChatGPT web flow:
 
-For Business, current OpenAI behavior does not allow updating a published custom app's tools/metadata in place; recreate and republish if the published app definition must change. Treat this as a client/workspace behavior, not an Agent protocol guarantee.
+1. open the **Plugins** surface (for example the Plugins entry/directory available in the current ChatGPT UI);
+2. choose the current **Create custom MCP server** action (or the equivalent current label);
+3. choose the connection type:
+   - **Server URL** for the Agent's public HTTPS MCP endpoint; or
+   - **Tunnel** when using OpenAI Secure MCP Tunnel for a private/local Agent;
+4. provide the endpoint/tunnel identity shown by the supported Agent/OpenAI setup flow;
+5. configure authentication using the protected Agent bearer credential only in the trusted ChatGPT connection UI; never paste that credential into chat, Issues, docs, screenshots or source control;
+6. let ChatGPT discover/validate the MCP tools using the current UI and review the exposed read/write/action surface;
+7. create/save the custom MCP configuration and verify it is available to the intended test/admin context;
+8. exercise the Agent from a normal supported ChatGPT conversation using the current plugin/tool picker or invocation path;
+9. publish/enable it for broader workspace use only after end-to-end validation and the current workspace-admin review requirements are satisfied.
 
-ChatGPT app permissions control when the client asks before using app actions. Write/modify operations can require confirmation based on permissions and context, and especially risky actions can be blocked rather than presented for approval. Do not weaken Agent bearer authentication, tool safety metadata or server-side root guardrails to work around a ChatGPT-side confirmation/block.
+Managed workspaces may expose plugin administration under **Admin/Workspace settings → Plugins**, while the underlying app/custom-MCP configuration may also remain visible through complementary or legacy **Apps** controls. Do not fail setup merely because an older `Apps → Create` or `Developer mode` label is absent; follow the current official product surface instead.
 
-For this project's full-MCP validation, use a normal ChatGPT web conversation. Current OpenAI guidance says agent mode does not use custom apps, while deep research can use custom apps only for read/fetch actions.
+If the Agent tool schema changes after publication, follow the current ChatGPT refresh/update/recreate behavior documented by OpenAI. Do not assume that a historical in-place-update limitation or menu sequence is permanent.
+
+ChatGPT-side action permissions and confirmations are separate from Agent-side authorization. Client permissions may require confirmation or deny an action, but they must never be used as a reason to weaken Agent bearer authentication, tool safety metadata, root/file authority truth, or server-side policy/approval guardrails.
+
+Use a normal supported ChatGPT conversation for full-MCP validation. Whether specialized ChatGPT modes can invoke custom MCP/plugin actions is client behavior and should be re-validated against current OpenAI documentation when release acceptance depends on it.
 
 ## Private MCP with Secure MCP Tunnel
 
