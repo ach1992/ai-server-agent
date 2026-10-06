@@ -73,7 +73,7 @@ Job log/status files are created with exclusive, no-follow semantics. Reads reje
 
 ### Accepted Gateway-compatible execution/data boundary
 
-Before AI Server Agent can claim stable MCP Gateway compatibility, the owner-activated minimum slices in Issues #41 and #42 must be integrated.
+Before AI Server Agent can claim stable MCP Gateway compatibility, the owner-activated minimum slices in Issues #41 and #42 must be integrated. The rules below are the accepted target boundary for that compatibility claim; they are not a statement that current `main` already implements every bound. README/current source remain authoritative for shipped behavior until those slices integrate.
 
 The durable execution/data rules are:
 
