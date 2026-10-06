@@ -259,6 +259,54 @@ Preserve an internal extension seam so a future **real** second execution contex
 
 Agent-managed capability tooling and repository-owned dependencies remain separate ownership classes.
 
+### Managed external tooling
+
+When a first-class Agent capability needs an external tool such as tmux, gopls, Delve, ast-grep or Playwright:
+
+- first detect/reuse a compatible repository/host-provided tool when that preserves the accepted contract;
+- when the Agent manages installation, use an explicit supported source and record decision-relevant tool identity/version;
+- pin versions when compatibility/reproducibility requires it and verify integrity/provenance where the upstream distribution supports it;
+- check supported OS/architecture before activation;
+- give Agent-managed installs explicit update and cleanup ownership;
+- account for license/notice/redistribution obligations when binaries or packages are bundled/redistributed;
+- never make an unverified floating `curl | root-shell` installer the durable managed-tool contract;
+- keep capability-tool versions out of product repositories unless the repository itself owns that dependency.
+
+Do not build a generic tool-manager framework in advance. Share acquisition/version/provenance mechanics only after concrete managed tools demonstrate stable repeated behavior worth extracting.
+
+### Capability discovery
+
+A fresh AI client should be able to learn which optional Developer Runtime capabilities are available without repeated blind trial-and-error.
+
+Prefer extending existing Agent environment/status surfaces instead of creating a heavyweight capability registry. Expose only bounded decision-relevant facts such as:
+
+- capability available/unavailable;
+- relevant tool/adapter version;
+- setup required/degraded/ready state;
+- supported mode/capability summary when needed for tool selection.
+
+Capability discovery is descriptive; availability never grants authority.
+
+### Environment and secret propagation
+
+Developer subprocesses receive only the environment appropriate to their execution identity/workspace.
+
+- root/control-plane bearer credentials and protected Agent secrets are not ambient worker/terminal/LSP/DAP/browser environment;
+- project/runtime secrets, when legitimately required, use an explicit protected mechanism rather than being written into Git, ordinary audit records, or tool results;
+- worker HOME/config/cache remains separate from project worktrees;
+- secret values are not returned merely to make environment status discoverable.
+
+### Generated evidence and artifacts
+
+Browser traces/screenshots, debug logs/output, profiles, test artifacts and similar generated evidence are runtime artifacts unless intentionally promoted into project truth.
+
+- store them outside project worktrees by default;
+- use protected permissions appropriate to their potentially sensitive content;
+- bound size/retention and cleanup ownership;
+- retrieve large/binary artifacts through a bounded artifact/file path rather than embedding unbounded base64/text in MCP responses;
+- do not copy raw artifacts into audit logs;
+- a local artifact path is runtime identity, not durable GitHub project identity.
+
 ## 13. Optional and deferred capabilities
 
 Not Core-v1 requirements:
