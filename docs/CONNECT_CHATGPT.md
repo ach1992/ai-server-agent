@@ -1,5 +1,7 @@
 # Connect ChatGPT
 
+This is the **ChatGPT/OpenAI client-specific integration guide**, not the Agent core architecture. The Agent's MCP/executor/policy/lifecycle core is client/vendor neutral; support for another client gets its own current compatibility evidence rather than inheriting ChatGPT assumptions.
+
 AI Server Agent supports two connection topologies while keeping bearer authentication enabled:
 
 1. a remote public HTTPS MCP endpoint;
