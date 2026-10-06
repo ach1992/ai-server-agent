@@ -31,6 +31,7 @@ func TestAuthenticationConfigurationIsFailClosed(t *testing.T) {
 		name   string
 		mutate func(*Config)
 	}{
+		{name: "empty auth mode", mutate: func(c *Config) { c.AuthMode = "" }},
 		{name: "no auth mode", mutate: func(c *Config) { c.AuthMode = "none" }},
 		{name: "unknown auth mode", mutate: func(c *Config) { c.AuthMode = "unexpected" }},
 		{name: "missing bearer token path", mutate: func(c *Config) { c.BearerTokenFile = "" }},

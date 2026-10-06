@@ -158,6 +158,21 @@ func TestBearerAuthRejectsMissingToken(t *testing.T) {
 	}
 }
 
+func TestBearerAuthRejectsInvalidToken(t *testing.T) {
+	cfg := testConfig(t, "bearer")
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	r := httptest.NewRequest(http.MethodPost, cfg.MCPPath, nil)
+	r.Header.Set("Authorization", "Bearer wrong-token")
+	w := httptest.NewRecorder()
+	s.Handler().ServeHTTP(w, r)
+	if w.Code != http.StatusUnauthorized {
+		t.Fatalf("got %d, want %d", w.Code, http.StatusUnauthorized)
+	}
+}
+
 func TestBearerAuthAcceptsValidToken(t *testing.T) {
 	cfg := testConfig(t, "bearer")
 	s, err := New(cfg)
