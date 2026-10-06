@@ -33,6 +33,10 @@ type Server struct {
 }
 
 func NewServer(cfg config.Config, token string) (*Server, error) {
+	token = strings.TrimSpace(token)
+	if token == "" {
+		return nil, errors.New("executor token is empty")
+	}
 	u, err := user.Lookup(cfg.WorkerUser)
 	if err != nil {
 		return nil, fmt.Errorf("lookup worker user: %w", err)
@@ -40,7 +44,7 @@ func NewServer(cfg config.Config, token string) (*Server, error) {
 	uid64, _ := strconv.ParseUint(u.Uid, 10, 32)
 	gid64, _ := strconv.ParseUint(u.Gid, 10, 32)
 	protected := []string{"ai-server-agent", "/usr/local/bin/ai-server-agent", "/etc/ai-server-agent", cfg.StateDir, cfg.LogDir, cfg.ExecutorSocket, cfg.ListenAddress}
-	return &Server{cfg: cfg, token: strings.TrimSpace(token), guard: policy.New(protected), audit: audit.New(filepath.Join(cfg.LogDir, "audit.jsonl")), workerUID: uint32(uid64), workerGID: uint32(gid64)}, nil
+	return &Server{cfg: cfg, token: token, guard: policy.New(protected), audit: audit.New(filepath.Join(cfg.LogDir, "audit.jsonl")), workerUID: uint32(uid64), workerGID: uint32(gid64)}, nil
 }
 
 func (s *Server) Serve() error {

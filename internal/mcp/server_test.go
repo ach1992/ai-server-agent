@@ -34,8 +34,24 @@ func testConfig(t *testing.T, authMode string) config.Config {
 	return c
 }
 
+type bearerRoundTripper struct {
+	base  http.RoundTripper
+	token string
+}
+
+func (t bearerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
+	clone := req.Clone(req.Context())
+	clone.Header = req.Header.Clone()
+	clone.Header.Set("Authorization", "Bearer "+t.token)
+	base := t.base
+	if base == nil {
+		base = http.DefaultTransport
+	}
+	return base.RoundTrip(clone)
+}
+
 func TestOfficialSDKCanDiscoverTools(t *testing.T) {
-	cfg := testConfig(t, "none")
+	cfg := testConfig(t, "bearer")
 	s, err := New(cfg)
 	if err != nil {
 		t.Fatal(err)
@@ -44,8 +60,10 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 	defer ts.Close()
 
 	ctx := context.Background()
+	httpClient := ts.Client()
+	httpClient.Transport = bearerRoundTripper{base: httpClient.Transport, token: "mcp-token"}
 	client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "ai-server-agent-test", Version: "v0"}, nil)
-	session, err := client.Connect(ctx, &mcpsdk.StreamableClientTransport{Endpoint: ts.URL + cfg.MCPPath}, nil)
+	session, err := client.Connect(ctx, &mcpsdk.StreamableClientTransport{Endpoint: ts.URL + cfg.MCPPath, HTTPClient: httpClient}, nil)
 	if err != nil {
 		t.Fatalf("connect: %v", err)
 	}
@@ -96,6 +114,33 @@ func TestInstructionsDescribePersistentWorkspace(t *testing.T) {
 		if !strings.Contains(got, want) {
 			t.Fatalf("instructions missing %q", want)
 		}
+	}
+}
+
+func TestNewRejectsUnsupportedAuthMode(t *testing.T) {
+	cfg := testConfig(t, "none")
+	if _, err := New(cfg); err == nil || !strings.Contains(err.Error(), "bearer authentication is required") {
+		t.Fatalf("New() error = %v, want unsupported auth mode rejection", err)
+	}
+}
+
+func TestNewRejectsEmptyBearerToken(t *testing.T) {
+	cfg := testConfig(t, "bearer")
+	if err := os.WriteFile(cfg.BearerTokenFile, []byte(" \n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(cfg); err == nil || !strings.Contains(err.Error(), "MCP bearer token is empty") {
+		t.Fatalf("New() error = %v, want empty bearer-token rejection", err)
+	}
+}
+
+func TestNewRejectsEmptyExecutorToken(t *testing.T) {
+	cfg := testConfig(t, "bearer")
+	if err := os.WriteFile(cfg.ExecutorToken, []byte("\n\t"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := New(cfg); err == nil || !strings.Contains(err.Error(), "executor token is empty") {
+		t.Fatalf("New() error = %v, want empty executor-token rejection", err)
 	}
 }
 

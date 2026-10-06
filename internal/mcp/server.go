@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"os"
@@ -67,24 +68,31 @@ type BrowserRunInput struct {
 }
 
 func New(cfg config.Config) (*Server, error) {
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("validate config: %w", err)
+	}
 	et, err := os.ReadFile(cfg.ExecutorToken)
 	if err != nil {
 		return nil, fmt.Errorf("read executor token: %w", err)
 	}
-	bt := ""
-	if cfg.AuthMode == "bearer" {
-		b, err := os.ReadFile(cfg.BearerTokenFile)
-		if err != nil {
-			return nil, fmt.Errorf("read MCP bearer token: %w", err)
-		}
-		bt = strings.TrimSpace(string(b))
+	executorToken := strings.TrimSpace(string(et))
+	if executorToken == "" {
+		return nil, errors.New("executor token is empty")
+	}
+	b, err := os.ReadFile(cfg.BearerTokenFile)
+	if err != nil {
+		return nil, fmt.Errorf("read MCP bearer token: %w", err)
+	}
+	bearerToken := strings.TrimSpace(string(b))
+	if bearerToken == "" {
+		return nil, errors.New("MCP bearer token is empty")
 	}
 
 	s := &Server{
 		cfg:           cfg,
-		executorToken: strings.TrimSpace(string(et)),
-		bearerToken:   bt,
-		browser:       browser.New(cfg, strings.TrimSpace(string(et))),
+		executorToken: executorToken,
+		bearerToken:   bearerToken,
+		browser:       browser.New(cfg, executorToken),
 	}
 	s.mcp = mcpsdk.NewServer(
 		&mcpsdk.Implementation{Name: "ai-server-agent", Version: version},
@@ -240,10 +248,6 @@ func (s *Server) registerTools() {
 
 func (s *Server) auth(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if s.cfg.AuthMode == "none" {
-			next.ServeHTTP(w, r)
-			return
-		}
 		const prefix = "Bearer "
 		h := r.Header.Get("Authorization")
 		if !strings.HasPrefix(h, prefix) {

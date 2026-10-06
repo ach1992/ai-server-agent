@@ -258,3 +258,10 @@ func TestRootJobInvocationSanitizesEnvironment(t *testing.T) {
 		t.Fatal("startJob still contains login-shell or inherited-HOME behavior")
 	}
 }
+
+func TestNewServerRejectsEmptyTokenBeforeWorkerLookup(t *testing.T) {
+	cfg := config.Default()
+	if _, err := NewServer(cfg, " \n\t"); err == nil || !strings.Contains(err.Error(), "executor token is empty") {
+		t.Fatalf("NewServer() error = %v, want empty-token rejection", err)
+	}
+}
