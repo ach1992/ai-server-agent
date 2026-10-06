@@ -384,8 +384,8 @@ Typical non-destructive development checks:
 ```bash
 test -z "$(gofmt -l .)"
 go vet ./...
-go test -race ./...
-bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh scripts/install-stable.sh tests/*.sh
+go test -race -vet=off ./...
+bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh scripts/install-stable.sh scripts/ci-change-scope.sh tests/*.sh
 ```
 
 Cloudflare, privileged lifecycle and release-provenance changes also have dedicated High Assurance Security coverage.
@@ -430,7 +430,7 @@ For future work, use the repository as a graph of authoritative sources rather t
 - **[docs/DEVELOPER-RUNTIME.md](docs/DEVELOPER-RUNTIME.md)** — accepted target AI-native Developer Runtime architecture; clearly target-state documentation, not a claim that every capability is already shipped;
 - **[docs/TESTING.md](docs/TESTING.md)** — validation model, behavioral coverage and known limits;
 - **[docs/CONNECT_CHATGPT.md](docs/CONNECT_CHATGPT.md)** — ChatGPT connection topologies and client-side validation guidance; current OpenAI UI/docs override stale UI wording;
-- **Issue #37** — durable AI-client/vendor-neutral core invariant; client-specific support remains bounded and evidence-driven;
+- **Issue #37** — historical decision record for the AI-client/vendor-neutral invariant now owned by `AGENTS.md` and `docs/ARCHITECTURE.md`;
 - **Issue #47** — planned MCP Gateway integration with independent credentials and preserved direct-client operation;
 - **GitHub Issues** — authoritative place for unresolved actionable work; do not create speculative backlog merely for ceremony;
 - **Pull requests and commit history** — implementation/review/integration evidence;
