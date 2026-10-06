@@ -17,6 +17,8 @@ AI Server Agent is split into two long-running services:
 
 Ordinary shell work runs as `aiworker` in `/srv/ai-workspace`. Root shell work is explicit and uses the same policy/approval evaluation before execution.
 
+The arbitrary root-shell capability is intentionally broad. Pattern/path policy and `approval_required` are defense-in-depth guardrails for recognized risky operations; they are **not** a complete sandbox or proof that every destructive/equivalent shell expression can be classified from command text. Any external principal/client granted root-shell authority must therefore be treated as root-capable. Structured privileged operations may narrow common workflows in the future, but they do not redefine the trust boundary of the escape hatch.
+
 The public MCP surface uses bearer authentication. Direct public mode also requires native TLS. The bearer-authenticated MCP control plane is one authorization domain: root and worker jobs are different execution modes, not different external principals.
 
 ### AI-client / vendor boundary
