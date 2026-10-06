@@ -65,6 +65,29 @@ Persistent jobs run as transient systemd units and survive MCP/client reconnects
 
 Job log/status files are created with exclusive, no-follow semantics. Reads reject symlinks, non-regular files, unexpected owners, and world-writable files. Root-owned versus `aiworker`-owned job files record execution provenance and protect filesystem replacement; they are not a separate bearer-auth authorization partition.
 
+### Accepted Gateway-compatible execution/data boundary
+
+Before AI Server Agent can claim stable MCP Gateway compatibility, the owner-activated minimum slices in Issues #41 and #42 must be integrated.
+
+The durable execution/data rules are:
+
+- ordinary synchronous commands remain low-overhead bounded request/response operations;
+- command/browser output is bounded while it is produced, with explicit truncation/encoding/timing metadata rather than unbounded buffering followed by silent clipping;
+- expected long/high-output work uses persistent jobs plus ranged `job_output`, not ever-larger synchronous timeouts;
+- file reads are ranged/bounded and binary-safe; ordinary complete-file writes are bounded, atomic where filesystem semantics allow, and symlink-safe;
+- persistent job count and underlying log growth are bounded while offset/continuation semantics remain reliable;
+- browser input/runtime/output is bounded and one hung run cannot hold the browser path forever;
+- transport timeout/disconnect is not treated as proof that a mutating host command stopped;
+- structured machine results are the integration contract; large payloads are not duplicated in full merely to provide both text and structured representations.
+
+The durable local audit rules are:
+
+- external principal + request/operation/job/approval correlation is non-secret and structured;
+- raw arbitrary shell command text is not persisted by default as the audit source of truth;
+- audit storage is locally bounded/rotated and remains usable without a mandatory telemetry service.
+
+These are host-protection and integration-contract requirements, not a move toward a distributed scheduler, generic file-transfer service, mandatory Redis/queue, container runtime, or fleet controller.
+
 ## 3. Filesystem trust model
 
 Important paths:

@@ -51,6 +51,7 @@ See `docs/ARCHITECTURE.md` for trust boundaries and `docs/TESTING.md` for the cu
 ## Change discipline
 
 - Make the smallest coherent root-cause change; avoid unrelated cleanup.
+- When changing command/file/job/browser execution, do not add or preserve avoidable unbounded buffering, whole-file reads for bounded APIs, silent truncation, lossy binary/text conversion, or ever-growing logs as a convenience. Keep ordinary work low-overhead, use explicit bounded metadata, and route expected long/high-output work through persistent jobs.
 - Prefer deleting superseded machinery over layering another workaround when guarantees are preserved.
 - Keep docs aligned with current behavior, not historical remediation.
 - Do not edit published release identities.
