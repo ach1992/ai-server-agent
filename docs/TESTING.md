@@ -241,3 +241,59 @@ Any lifecycle validation involving uninstall/purge must continue to prove:
 - `aiworker` and its group are preserved;
 - safe uninstall preserves Agent configuration/state needed for reinstall/repair;
 - purge removes Agent-owned config/state/log/runtime and `aiagent` without silently deleting Cloudflare resources.
+
+## 11. Developer Runtime target validation
+
+The detailed target capability architecture is `docs/DEVELOPER-RUNTIME.md`.
+
+> This section defines acceptance for the accepted target architecture. It does **not** claim current `main` already ships these capabilities.
+
+Developer Runtime validation should prove the common high-value development loop rather than synthetic parity with a complete human IDE.
+
+Representative integrated path:
+
+```text
+recover exact repository/worktree
+-> text / structural / semantic inspection
+-> safe edit/refactor
+-> build/test/job
+-> interactive PTY when needed
+-> DAP debug when runtime state matters
+-> Playwright browser/E2E validation when user-facing behavior matters
+-> diff / commit / push
+-> recover again from GitHub evidence
+```
+
+### Value evidence
+
+For each Layer-1 surface, prove the reason it was promoted above direct CLI use:
+
+- repository/worktree identity prevents wrong-checkout ambiguity;
+- safe editing detects stale/concurrent mutation and reports partial outcomes honestly;
+- structural search proves at least one real AST-pattern query that regex/text search cannot express robustly and LSP does not naturally own;
+- LSP proves semantic diagnostics/navigation/reference value;
+- PTY proves persistent interactive prompt/TUI/control-key behavior;
+- DAP proves breakpoint/stack/scope/variable debugging through the Go + Delve reference path;
+- Browser proves compact Playwright-backed UI/E2E inspection and keeps one browser runtime/profile ownership model.
+
+Do not add a test matrix or managed dependency for a deferred capability merely to claim completeness.
+
+### Failure and recovery
+
+Exercise as applicable:
+
+- wrong/stale workspace identity;
+- concurrent file change during structured edit;
+- structural/LSP result bounding;
+- LSP/DAP crash and restart;
+- stateful-session stale ID/principal mismatch;
+- PTY output flood, reconnect, resize and long-lived soak;
+- browser hang/output/artifact bounds;
+- Agent/executor restart;
+- full development-server loss with GitHub-only recovery.
+
+### Performance/complexity guard
+
+Measure representative workflow latency, remote/tool-call count, idle/active process footprint and recovery friction where useful. Do not introduce caches, daemons, alternate backends or infrastructure solely from theoretical performance concerns; escalate only from measured or repeatedly observed need.
+
+Optional code-server, managed Incus, Ctags, alternate terminal backends and generic provider/tool-manager frameworks are not Core-v1 acceptance requirements unless their contracts are explicitly reactivated from new evidence.

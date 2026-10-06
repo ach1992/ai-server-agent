@@ -427,6 +427,7 @@ For future work, use the repository as a graph of authoritative sources rather t
 - **README.md** — supported installation, operation, capabilities and safety overview;
 - **[AGENTS.md](AGENTS.md)** — stable engineering invariants, development rules and validation expectations for coding agents/contributors;
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — trust boundaries and implementation architecture;
+- **[docs/DEVELOPER-RUNTIME.md](docs/DEVELOPER-RUNTIME.md)** — accepted target AI-native Developer Runtime architecture; clearly target-state documentation, not a claim that every capability is already shipped;
 - **[docs/TESTING.md](docs/TESTING.md)** — validation model, behavioral coverage and known limits;
 - **[docs/CONNECT_CHATGPT.md](docs/CONNECT_CHATGPT.md)** — ChatGPT connection topologies and client-side validation guidance; current OpenAI UI/docs override stale UI wording;
 - **Issue #37** — durable AI-client/vendor-neutral core invariant; client-specific support remains bounded and evidence-driven;
