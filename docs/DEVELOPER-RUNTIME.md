@@ -2,7 +2,7 @@
 
 > Status: **accepted target architecture; not yet fully shipped**.
 >
-> Current runtime behavior is documented by `README.md` and the current implementation. This document defines the accepted Developer Runtime target that implementation Issues #54-#66 will deliver after the Phase A owner gate.
+> Current runtime behavior is documented by `README.md` and the current implementation. This document defines the accepted Developer Runtime target delivered by the relevant workstreams tracked under Issues #54-#66 after the Phase A owner gate; optional/deferred workstreams in that range are explicitly non-blocking below.
 
 ## 1. Outcome
 
