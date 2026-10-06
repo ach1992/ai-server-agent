@@ -20,6 +20,7 @@ The supported stable platform policy is **Ubuntu 22.04+ and Debian 11+ on amd64/
 - Never persist Cloudflare API tokens or other user secrets in repository files, logs, managed state, or test fixtures.
 - Stable install/update paths must resolve to immutable published releases and must never silently fall back to `main`.
 - Initial stable installation must authenticate release `install.sh` bytes before privileged execution. The supported one-line path loads `scripts/install-stable.sh` from a published immutable release tag; do not restore a direct `releases/.../install.sh | sudo bash` path or a mutable branch bootstrap.
+- Keep external GitHub Actions references pinned to verified full-length commit SHAs; a nearby version comment may document the intended upstream major. Verify a replacement SHA belongs to the expected upstream action repository before updating it.
 
 ## Privileged lifecycle
 

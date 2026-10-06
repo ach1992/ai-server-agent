@@ -17,7 +17,7 @@ jobs:
     outputs:
       runtime_changed: ${{ steps.scope.outputs.runtime_changed }}
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
       - name: Validate change-scope classifier
@@ -35,8 +35,8 @@ jobs:
     steps:
       - name: Require successful change classification
         run: test "${{ needs.change-scope.result }}" = success
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.26.x'
           cache: false
@@ -50,6 +50,19 @@ jobs:
         run: CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
       - name: Shell syntax
         run: bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh scripts/install-stable.sh scripts/ci-change-scope.sh tests/*.sh
+      - name: GitHub Actions immutable pinning contract
+        run: |
+          bad=0
+          while IFS= read -r ref; do
+            if [[ "$ref" == ./* ]]; then
+              continue
+            fi
+            if [[ ! "$ref" =~ @[0-9a-f]{40}$ ]]; then
+              echo "GitHub Action is not pinned to a full commit SHA: $ref" >&2
+              bad=1
+            fi
+          done < <(sed -nE 's/^[[:space:]]*- uses:[[:space:]]+([^[:space:]#]+).*/\1/p' .github/workflows/*.yml)
+          test "$bad" -eq 0
       - name: Root shell execution boundary
         run: |
           if grep -nE 'exec.Command\("/bin/bash", "-lc"|"/bin/bash", "-lc", shell|--setenv=HOME=' internal/executor/executor.go; then
@@ -350,7 +363,7 @@ jobs:
           sudo test -e /srv/ai-workspace/lifecycle-workspace-sentinel
       - name: Upload release candidate artifacts
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ai-server-agent-${{ env.RELEASE_VERSION }}-${{ github.sha }}
           path: dist/
@@ -364,8 +377,8 @@ jobs:
     if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.change-scope.result == 'success' && needs.change-scope.outputs.runtime_changed == 'false' }}
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.26.x'
           cache: false
@@ -376,7 +389,7 @@ jobs:
           (cd dist && sha256sum -c SHA256SUMS)
           sudo bash dist/install.sh --check
       - name: Upload release candidate artifacts
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: ai-server-agent-${{ env.RELEASE_VERSION }}-${{ github.sha }}
           path: dist/
@@ -401,7 +414,7 @@ jobs:
     steps:
       - name: Require successful change classification
         run: test "${{ needs.change-scope.result }}" = success
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         if: needs.change-scope.outputs.runtime_changed != 'false'
       - name: Verify supported Debian host contract
         if: needs.change-scope.outputs.runtime_changed != 'false'
@@ -435,8 +448,8 @@ jobs:
     steps:
       - name: Require successful change classification
         run: test "${{ needs.change-scope.result }}" = success
-      - uses: actions/checkout@v4
-      - uses: actions/setup-go@v5
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
         with:
           go-version: '1.26.x'
           cache: false
