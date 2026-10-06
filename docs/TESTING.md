@@ -30,7 +30,7 @@ CI runs:
 ```bash
 test -z "$(gofmt -l .)"
 go vet ./...
-go test -race ./...
+go test -race -vet=off ./...
 CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
 ```
 
@@ -39,6 +39,8 @@ These cover Go unit/behavior tests, race detection and the production binary bui
 ### Shell syntax
 
 CI validates the established installer, updater, uninstaller, management, release-builder and security-test paths. `tests/stable_bootstrap.sh` also syntax-checks the stable bootstrap before exercising it behaviorally.
+
+CI change scope is fail-closed and path-aware. Changes limited to `README.md`, `AGENTS.md`, `SECURITY.md`, `LICENSE`, `.gitignore`, or `docs/**` do not re-run runtime/OS/security suites that cannot validate those files. The always-run change-scope job validates the exact base-to-head diff with `git diff --check`; required non-matrix jobs are conditionally skipped (GitHub reports a skipped job as successful), while the Debian matrix keeps lightweight per-matrix checks present and skips only its expensive host validation. Any classifier failure forces the required validation jobs to fail rather than silently skip. Runtime, test, script, workflow, dependency or other unrecognized paths fail safe to the full suite. A docs-only `main` push still builds and uploads the exact-SHA release candidate artifact because the release workflow promotes CI-produced artifacts for the selected main SHA.
 
 ### Native lifecycle integration
 
@@ -206,8 +208,8 @@ On a compatible development host, a useful pre-push sequence is:
 ```bash
 test -z "$(gofmt -l .)"
 go vet ./...
-go test -race ./...
-bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh scripts/install-stable.sh tests/*.sh
+go test -race -vet=off ./...
+bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh scripts/install-stable.sh scripts/ci-change-scope.sh tests/*.sh
 bash tests/stable_bootstrap.sh
 ```
 

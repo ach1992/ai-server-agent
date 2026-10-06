@@ -11,9 +11,30 @@ permissions:
 env:
   RELEASE_VERSION: v0.1.9
 jobs:
+  change-scope:
+    name: CI change scope
+    runs-on: ubuntu-22.04
+    outputs:
+      runtime_changed: ${{ steps.scope.outputs.runtime_changed }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate change-scope classifier
+        run: |
+          bash -n scripts/ci-change-scope.sh tests/ci_change_scope.sh
+          bash tests/ci_change_scope.sh
+      - name: Classify changed paths
+        id: scope
+        run: bash scripts/ci-change-scope.sh >> "$GITHUB_OUTPUT"
+
   test:
+    needs: change-scope
+    if: ${{ always() && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed == 'true') }}
     runs-on: ubuntu-22.04
     steps:
+      - name: Require successful change classification
+        run: test "${{ needs.change-scope.result }}" = success
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
@@ -24,11 +45,11 @@ jobs:
       - name: Vet
         run: go vet ./...
       - name: Unit tests
-        run: go test -race ./...
+        run: go test -race -vet=off ./...
       - name: Build static binary
         run: CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
       - name: Shell syntax
-        run: bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh scripts/install-stable.sh tests/*.sh
+        run: bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh scripts/install-stable.sh scripts/ci-change-scope.sh tests/*.sh
       - name: Root shell execution boundary
         run: |
           if grep -nE 'exec.Command\("/bin/bash", "-lc"|"/bin/bash", "-lc", shell|--setenv=HOME=' internal/executor/executor.go; then
@@ -337,7 +358,34 @@ jobs:
           retention-days: 7
 
 
+  docs-main-release-artifact:
+    name: Docs-only main release artifact
+    needs: change-scope
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.change-scope.result == 'success' && needs.change-scope.outputs.runtime_changed != 'true' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - name: Build exact-SHA release candidate artifact
+        run: |
+          rm -rf dist
+          bash scripts/build-release.sh "$RELEASE_VERSION"
+          (cd dist && sha256sum -c SHA256SUMS)
+          sudo bash dist/install.sh --check
+      - name: Upload release candidate artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: ai-server-agent-${{ env.RELEASE_VERSION }}-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
   debian-compatibility:
+    needs: change-scope
+    if: ${{ always() }}
     name: Debian ${{ matrix.version }} stable compatibility
     runs-on: ubuntu-24.04
     strategy:
@@ -351,8 +399,12 @@ jobs:
           - version: "13"
             maintained: true
     steps:
+      - name: Require successful change classification
+        run: test "${{ needs.change-scope.result }}" = success
       - uses: actions/checkout@v4
+        if: needs.change-scope.outputs.runtime_changed == 'true'
       - name: Verify supported Debian host contract
+        if: needs.change-scope.outputs.runtime_changed == 'true'
         env:
           DEBIAN_MAINTAINED: ${{ matrix.maintained }}
         run: |
@@ -377,8 +429,12 @@ jobs:
             '
 
   arm64-lifecycle:
+    needs: change-scope
+    if: ${{ always() && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed == 'true') }}
     runs-on: ubuntu-24.04-arm
     steps:
+      - name: Require successful change classification
+        run: test "${{ needs.change-scope.result }}" = success
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
