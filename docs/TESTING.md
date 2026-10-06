@@ -244,6 +244,8 @@ Any lifecycle validation involving uninstall/purge must continue to prove:
 
 ## 11. Developer Runtime target validation
 
+The detailed target capability architecture is `docs/DEVELOPER-RUNTIME.md`.
+
 > This section defines acceptance for the accepted target architecture. It does **not** claim current `main` already ships these capabilities.
 
 Developer Runtime validation should prove the common high-value development loop rather than synthetic parity with a complete human IDE.
