@@ -61,7 +61,9 @@ Root commands must not inherit worker-controlled ambient shell state. The execut
 - `/bin/bash --noprofile --norc -c`;
 - no inherited `BASH_ENV` or `ENV`.
 
-Worker commands retain `/srv/ai-workspace` as HOME/CWD.
+Worker commands currently retain `/srv/ai-workspace` as HOME/CWD.
+
+**Target Developer Runtime changes this separation:** project worktrees remain under the workspace root, while worker HOME/config/cache state moves to Agent-managed locations outside project worktrees. This is accepted target architecture, not a statement that the current runtime already implements the split. See `docs/DEVELOPER-RUNTIME.md`.
 
 ### Persistent jobs
 
@@ -288,3 +290,20 @@ Purge removes Agent-owned config/state/log/runtime and the `aiagent` identity, b
 - `aiworker` and its group.
 
 Cloudflare resources are not silently deleted by purge. Recorded Cloudflare resources must be cleaned through the ownership-aware Cloudflare cleanup path when desired.
+
+## 10. Accepted Developer Runtime target architecture
+
+`docs/DEVELOPER-RUNTIME.md` is the canonical owner of the accepted **target** AI-native Developer Runtime architecture.
+
+The target is deliberately value-first:
+
+- common, high-impact development workflows receive first-class structured capabilities;
+- uncommon work remains possible through mature Linux/CLI/root/PTY escape hatches;
+- future-proofing preserves cheap extension seams instead of pre-building hypothetical providers/backends;
+- complexity must create observable workflow/correctness/reliability value.
+
+Core target capabilities include repository/worktree identity, safe worker editing, text + ast-grep structural search, LSP, persistent worker/root PTY, DAP and Playwright-backed browser/E2E validation.
+
+This architecture document remains authoritative for overall host/process/trust/lifecycle boundaries. `docs/DEVELOPER-RUNTIME.md` owns the detailed development-capability composition and Layer-1/Layer-2/deferred boundary.
+
+Until the implementation work lands, README/current source remain authoritative for which capabilities are actually shipped. Do not infer runtime availability merely from target-architecture documentation.
