@@ -42,8 +42,8 @@ Typical local checks on a compatible development host:
 ```bash
 test -z "$(gofmt -l .)"
 go vet ./...
-go test -race ./...
-bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh scripts/install-stable.sh tests/*.sh
+go test -race -vet=off ./...
+bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh scripts/install-stable.sh scripts/ci-change-scope.sh tests/*.sh
 ```
 
 High-risk changes to privileged execution, Cloudflare recovery, installer/updater trust, or release provenance require the corresponding High Assurance Security coverage. Static/grep contracts are secondary guardrails; do not treat them as substitutes for behavioral tests of the production path.
