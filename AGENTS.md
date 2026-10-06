@@ -61,3 +61,23 @@ See `docs/ARCHITECTURE.md` for trust boundaries and `docs/TESTING.md` for the cu
 - Do not use independent HIGH_ASSURANCE review as iterative lint while a candidate is still moving. Complete the accepted implementation and behavioral validation, freeze an exact candidate, then use independent review as an integration/release gate when required. A review finding that changes the candidate invalidates that review identity; fix the root cause, revalidate, and refreeze before another independent gate review.
 - Do not request, enable, or use GitHub Copilot pull-request review as project review evidence, including for independent HIGH_ASSURANCE review. Historical Copilot review results may explain past findings only; they do not satisfy a current review gate.
 - When review independent from the Master is required, the Master must prepare a ready-to-paste `INDEPENDENT REVIEW CHAT` prompt following the `github-project-orchestrator` review handoff. The user relays that prompt to a separate fresh reviewer context, person, or review tool; the returned review must identify the exact candidate SHA, state `APPROVE` or `CHANGES_REQUIRED`, and provide evidence-backed findings for Master reconciliation.
+
+## Developer Runtime value-first rules
+
+When working on Issues #52-#66, read `docs/DEVELOPER-RUNTIME.md` before designing or implementing a new capability.
+
+The governing optimization is **maximum practical AI-development leverage per unit of total complexity**.
+
+- Do not wrap a mature CLI merely to increase MCP tool count.
+- Promote a capability to first-class only when structured integration materially improves recurring correctness, state, reliability, semantic fidelity or AI efficiency.
+- Preserve general worker/root shell and PTY escape hatches for uncommon work instead of implementing dedicated APIs for every tool.
+- Keep Git CLI as the ordinary Git operation path; first-class repository logic owns identity/worktree/lifecycle correctness.
+- Keep the code-inspection ladder distinct: text search -> structural ast-grep search -> LSP semantics.
+- Keep one structured mutation path: LSP WorkspaceEdit and structural rewrite plans apply through the safe workspace edit/precondition layer.
+- DAP and Playwright-backed Browser are Core-v1 capabilities, but their public surfaces stay focused on common high-value workflows rather than protocol/API completeness.
+- Keep #66 consumer-driven and internal; do not grow it into a public generic process/provider framework.
+- Keep project worktrees separate from worker HOME/config/cache, runtime/session state, generated artifacts and audit/log state.
+- Do not implement Ctags, managed Incus, multiple terminal backends, generic tool managers/environment-provider frameworks, custom indexes or similar deferred capabilities without new evidence satisfying their promotion rule.
+- Keep README truthful about shipped behavior; target architecture belongs in `docs/DEVELOPER-RUNTIME.md` until implementation is real.
+
+For a proposed abstraction or dependency, ask: **what existing complexity or recurring failure does this remove, and is that payoff larger than its permanent maintenance/test/compatibility cost?**
