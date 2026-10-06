@@ -24,7 +24,7 @@ jobs:
 
   cloudflare-transaction:
     needs: change-scope
-    if: ${{ always() && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed == 'true') }}
+    if: ${{ always() && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed != 'false') }}
     runs-on: ubuntu-22.04
     steps:
       - name: Require successful change classification
@@ -43,7 +43,7 @@ jobs:
 
   root-trust-boundary:
     needs: change-scope
-    if: ${{ always() && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed == 'true') }}
+    if: ${{ always() && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed != 'false') }}
     runs-on: ubuntu-22.04
     steps:
       - name: Require successful change classification
@@ -68,7 +68,7 @@ jobs:
 
   stable-provenance:
     needs: change-scope
-    if: ${{ always() && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed == 'true') }}
+    if: ${{ always() && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed != 'false') }}
     runs-on: ubuntu-22.04
     steps:
       - name: Require successful change classification
@@ -139,7 +139,7 @@ jobs:
 
   stable-update-trust:
     needs: change-scope
-    if: ${{ always() && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed == 'true') }}
+    if: ${{ always() && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed != 'false') }}
     runs-on: ubuntu-22.04
     steps:
       - name: Require successful change classification

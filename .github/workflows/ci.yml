@@ -30,7 +30,7 @@ jobs:
 
   test:
     needs: change-scope
-    if: ${{ always() && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed == 'true') }}
+    if: ${{ always() && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed != 'false') }}
     runs-on: ubuntu-22.04
     steps:
       - name: Require successful change classification
@@ -361,7 +361,7 @@ jobs:
   docs-main-release-artifact:
     name: Docs-only main release artifact
     needs: change-scope
-    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.change-scope.result == 'success' && needs.change-scope.outputs.runtime_changed != 'true' }}
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.change-scope.result == 'success' && needs.change-scope.outputs.runtime_changed == 'false' }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@v4
@@ -402,9 +402,9 @@ jobs:
       - name: Require successful change classification
         run: test "${{ needs.change-scope.result }}" = success
       - uses: actions/checkout@v4
-        if: needs.change-scope.outputs.runtime_changed == 'true'
+        if: needs.change-scope.outputs.runtime_changed != 'false'
       - name: Verify supported Debian host contract
-        if: needs.change-scope.outputs.runtime_changed == 'true'
+        if: needs.change-scope.outputs.runtime_changed != 'false'
         env:
           DEBIAN_MAINTAINED: ${{ matrix.maintained }}
         run: |
@@ -430,7 +430,7 @@ jobs:
 
   arm64-lifecycle:
     needs: change-scope
-    if: ${{ always() && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed == 'true') }}
+    if: ${{ always() && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed != 'false') }}
     runs-on: ubuntu-24.04-arm
     steps:
       - name: Require successful change classification
