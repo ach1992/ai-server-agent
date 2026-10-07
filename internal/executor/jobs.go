@@ -228,6 +228,10 @@ func (s *Server) resumeClaimedJob(req Request, jobsDir, claimPath string, claim 
 			JobID:            claim.JobID,
 			IdempotentReplay: true,
 		}
+	case "claimed", "launching":
+		// Reconciled below.
+	default:
+		return jobStateError("job_state_unavailable", fmt.Errorf("unsupported job claim state %q", claim.State))
 	}
 
 	evidence, err := jobHasExecutionEvidence(paths, claim.JobID)
@@ -241,20 +245,39 @@ func (s *Server) resumeClaimedJob(req Request, jobsDir, claimPath string, claim 
 		}
 		return Response{OK: true, JobID: claim.JobID, Status: "accepted", IdempotentReplay: true}
 	}
-	if _, err := os.Lstat(paths.command); err != nil {
-		if os.IsNotExist(err) {
+
+	if claim.State == "claimed" {
+		// The durable claim is written before any launch attempt. If the
+		// executor crashed while preparing the protected handoff, no unit could
+		// have been launched yet. Rebuild that handoff from the retried,
+		// fingerprint-matched request instead of leaving a permanent claim.
+		cleanupJobPaths(paths)
+		if err := s.prepareJobFiles(paths, req); err != nil {
 			claim.State = "failed"
 			_ = updateJobClaim(claimPath, claim)
-			return Response{
-				Error:            "persistent-job launch state was interrupted before execution could be proven; use a new operation_id to retry",
-				ReasonCode:       "unknown_completion",
-				ErrorCode:        "unknown_completion",
-				ErrorClass:       "state",
-				JobID:            claim.JobID,
-				IdempotentReplay: true,
-			}
+			return jobStateError("job_prepare_failed", err)
 		}
-		return jobStateError("job_state_unavailable", err)
+		claim.State = "launching"
+		if err := updateJobClaim(claimPath, claim); err != nil {
+			cleanupJobPaths(paths)
+			return jobStateError("job_state_unavailable", err)
+		}
+	} else {
+		if _, err := os.Lstat(paths.command); err != nil {
+			if os.IsNotExist(err) {
+				claim.State = "failed"
+				_ = updateJobClaim(claimPath, claim)
+				return Response{
+					Error:            "persistent-job launch state was interrupted after launch became possible; completion cannot be proven; use a new operation_id to retry",
+					ReasonCode:       "unknown_completion",
+					ErrorCode:        "unknown_completion",
+					ErrorClass:       "state",
+					JobID:            claim.JobID,
+					IdempotentReplay: true,
+				}
+			}
+			return jobStateError("job_state_unavailable", err)
+		}
 	}
 
 	resp := s.launchPreparedJob(req, paths, claim.JobID)
