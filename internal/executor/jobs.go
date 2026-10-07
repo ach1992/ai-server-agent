@@ -27,6 +27,8 @@ import (
 const (
 	maxActivePersistentJobs   = 4
 	maxCompletedJobArtifacts  = 32
+	maxFailedJobClaims         = maxCompletedJobArtifacts
+	maxIdempotencyClaims       = 2*maxCompletedJobArtifacts + maxActivePersistentJobs
 	maxJobLogBytes      int64 = 8 << 20
 	jobLogHeaderSize           = 32
 	maxOperationIDBytes        = 128
@@ -104,6 +106,23 @@ func (s *Server) startJobBounded(req Request) Response {
 			return jobStateError("job_state_unavailable", err)
 		} else if found {
 			return s.resumeClaimedJob(req, jobsDir, claimPath, claim, fingerprint)
+		}
+		if err := cleanupFailedJobClaims(claimsDir); err != nil {
+			return jobStateError("job_state_unavailable", err)
+		}
+		claimCount, err := countJobClaims(claimsDir)
+		if err != nil {
+			return jobStateError("job_state_unavailable", err)
+		}
+		if claimCount >= maxIdempotencyClaims {
+			return Response{
+				Error:      "persistent-job idempotency state is at capacity; reconcile existing operation_ids before creating another",
+				ReasonCode: "resource_limit",
+				ErrorCode:  "resource_limit",
+				ErrorClass: "resource",
+				Retryable:  true,
+				Status:     "busy",
+			}
 		}
 	}
 
@@ -669,6 +688,60 @@ func (s *Server) cleanupCompletedJobArtifacts(jobsDir, claimsDir string) error {
 			if err := removeClaimsForJob(claimsDir, old.id); err != nil {
 				return err
 			}
+		}
+	}
+	return nil
+}
+
+func countJobClaims(claimsDir string) (int, error) {
+	entries, err := os.ReadDir(claimsDir)
+	if err != nil {
+		return 0, err
+	}
+	count := 0
+	for _, entry := range entries {
+		if !entry.IsDir() && strings.HasSuffix(entry.Name(), ".json") {
+			count++
+		}
+	}
+	return count, nil
+}
+
+func cleanupFailedJobClaims(claimsDir string) error {
+	entries, err := os.ReadDir(claimsDir)
+	if err != nil {
+		return err
+	}
+	type failedClaim struct {
+		path    string
+		modTime time.Time
+	}
+	failed := []failedClaim{}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(claimsDir, entry.Name())
+		claim, found, err := readJobClaim(path)
+		if err != nil {
+			return err
+		}
+		if !found || claim.State != "failed" {
+			continue
+		}
+		info, err := entry.Info()
+		if err != nil {
+			return err
+		}
+		failed = append(failed, failedClaim{path: path, modTime: info.ModTime()})
+	}
+	sort.Slice(failed, func(i, j int) bool { return failed[i].modTime.After(failed[j].modTime) })
+	if len(failed) <= maxFailedJobClaims {
+		return nil
+	}
+	for _, old := range failed[maxFailedJobClaims:] {
+		if err := os.Remove(old.path); err != nil && !os.IsNotExist(err) {
+			return err
 		}
 	}
 	return nil
