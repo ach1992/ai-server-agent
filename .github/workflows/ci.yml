@@ -65,11 +65,13 @@ jobs:
           test "$bad" -eq 0
       - name: Root shell execution boundary
         run: |
-          if grep -nE 'exec.Command\("/bin/bash", "-lc"|"/bin/bash", "-lc", shell|--setenv=HOME=' internal/executor/executor.go; then
+          if grep -nE 'exec.Command\("/bin/bash", "-lc"|"/bin/bash", "-lc", shell|--setenv=HOME=' internal/executor/executor.go internal/executor/foundation.go; then
             echo 'executor must not use login shells or inherited workspace HOME for privileged execution' >&2
             exit 1
           fi
-          grep -qF 'exec.Command("/bin/bash", "--noprofile", "--norc", "-c", command)' internal/executor/executor.go
+          grep -qF 'exec.CommandContext(ctx, "/bin/bash", "--noprofile", "--norc", "-c", command)' internal/executor/foundation.go
+          grep -qF 'Setpgid: true' internal/executor/foundation.go
+          grep -qF 'syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)' internal/executor/foundation.go
           grep -qF '"/usr/bin/env", "-i"' internal/executor/executor.go
       - name: Installer compatibility check
         run: sudo bash install.sh --check
