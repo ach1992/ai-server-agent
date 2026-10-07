@@ -184,7 +184,7 @@ func TestRootCommandIgnoresWorkerStartupFiles(t *testing.T) {
 	benignRootCommand := "test ! -e " + shellQuote(ambientName) + " && printf safe"
 
 	s := &Server{
-		cfg: config.Config{WorkspaceDir: workspace, WorkerUser: "root"},
+		cfg:       config.Config{WorkspaceDir: workspace, WorkerUser: "root"},
 		guard:     policy.New(nil),
 		audit:     audit.New(filepath.Join(t.TempDir(), "audit.jsonl")),
 		workerUID: 0,

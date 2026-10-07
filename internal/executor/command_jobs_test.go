@@ -51,8 +51,6 @@ func TestBoundedOutputCollectorUsesBase64ForBinary(t *testing.T) {
 	}
 }
 
-
-
 func TestBoundedOutputCollectorDoesNotEmitBrokenUTF8Boundary(t *testing.T) {
 	w := newBoundedOutputCollector(6)
 	raw := []byte("A€BC€D")
@@ -313,7 +311,7 @@ func TestPersistentJobCapacityFailsWithoutQueue(t *testing.T) {
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 
 	s := &Server{
-		cfg: config.Config{StateDir: state, WorkspaceDir: t.TempDir(), WorkerUser: "aiworker"},
+		cfg:       config.Config{StateDir: state, WorkspaceDir: t.TempDir(), WorkerUser: "aiworker"},
 		token:     "test-executor-token",
 		guard:     policy.New(nil),
 		audit:     audit.New(filepath.Join(t.TempDir(), "audit.jsonl")),
@@ -325,7 +323,6 @@ func TestPersistentJobCapacityFailsWithoutQueue(t *testing.T) {
 		t.Fatalf("capacity response = %+v", resp)
 	}
 }
-
 
 func TestPersistentJobClaimRecoversBeforeLaunch(t *testing.T) {
 	state := t.TempDir()
@@ -372,7 +369,7 @@ func TestPersistentJobClaimRecoversBeforeLaunch(t *testing.T) {
 		JobID:       "123456789",
 		Fingerprint: server.jobFingerprint(req),
 		State:       "claimed",
-		CreatedAt:   "2026-10-07T00:00:00Z",
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
 	}
 	claimPath := filepath.Join(claims, operationClaimName(req.OperationID))
 	if err := createJobClaim(claimPath, claim); err != nil {
@@ -399,7 +396,6 @@ func TestPersistentJobClaimRecoversBeforeLaunch(t *testing.T) {
 	}
 }
 
-
 func TestPersistentJobIdempotencyStateIsBounded(t *testing.T) {
 	state := t.TempDir()
 	jobs := filepath.Join(state, "jobs")
@@ -417,7 +413,7 @@ func TestPersistentJobIdempotencyStateIsBounded(t *testing.T) {
 			JobID:       fmt.Sprintf("%d", 100000+i),
 			Fingerprint: strings.Repeat("a", 64),
 			State:       "claimed",
-			CreatedAt:   "2026-10-07T00:00:00Z",
+			CreatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
 		}
 		if err := createJobClaim(filepath.Join(claims, operationClaimName(operationID)), claim); err != nil {
 			t.Fatal(err)
@@ -425,7 +421,7 @@ func TestPersistentJobIdempotencyStateIsBounded(t *testing.T) {
 	}
 
 	server := &Server{
-		cfg: config.Config{StateDir: state, WorkspaceDir: t.TempDir(), WorkerUser: "aiworker"},
+		cfg:       config.Config{StateDir: state, WorkspaceDir: t.TempDir(), WorkerUser: "aiworker"},
 		token:     "test-executor-token",
 		guard:     policy.New(nil),
 		audit:     audit.New(filepath.Join(t.TempDir(), "audit.jsonl")),
@@ -437,7 +433,6 @@ func TestPersistentJobIdempotencyStateIsBounded(t *testing.T) {
 		t.Fatalf("idempotency capacity response = %+v", resp)
 	}
 }
-
 
 func TestJobStatusReturnsStructuredExitCode(t *testing.T) {
 	state := t.TempDir()
@@ -458,7 +453,6 @@ func TestJobStatusReturnsStructuredExitCode(t *testing.T) {
 		t.Fatalf("completed job output metadata = %+v", resp)
 	}
 }
-
 
 func TestStartJobWithoutCallerOperationIDStillGetsRecoveryClaim(t *testing.T) {
 	state := t.TempDir()
@@ -482,7 +476,7 @@ func TestStartJobWithoutCallerOperationIDStillGetsRecoveryClaim(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := &Server{
-		cfg: config.Config{StateDir: state, WorkspaceDir: t.TempDir(), WorkerUser: current.Username},
+		cfg:       config.Config{StateDir: state, WorkspaceDir: t.TempDir(), WorkerUser: current.Username},
 		token:     "test-executor-token",
 		guard:     policy.New(nil),
 		audit:     audit.New(filepath.Join(t.TempDir(), "audit.jsonl")),

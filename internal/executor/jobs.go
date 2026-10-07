@@ -25,17 +25,17 @@ import (
 )
 
 const (
-	maxActivePersistentJobs   = 4
-	maxCompletedJobArtifacts  = 32
-	maxFailedJobClaims         = maxCompletedJobArtifacts
-	maxPersistentJobClaims       = 2*maxCompletedJobArtifacts + maxActivePersistentJobs
-	maxJobLogBytes      int64 = 8 << 20
-	jobLogHeaderSize           = 32
-	maxOperationIDBytes        = 128
-	systemdOutputLimit         = 64 << 10
-	jobRunnerFailureExit       = 125
-	jobStateOverheadBytes int64 = 64 << 20
-	jobStateSafetyReserveBytes = int64(maxPersistentJobClaims)*maxJobLogBytes + jobStateOverheadBytes
+	maxActivePersistentJobs          = 4
+	maxCompletedJobArtifacts         = 32
+	maxFailedJobClaims               = maxCompletedJobArtifacts
+	maxPersistentJobClaims           = 2*maxCompletedJobArtifacts + maxActivePersistentJobs
+	maxJobLogBytes             int64 = 8 << 20
+	jobLogHeaderSize                 = 32
+	maxOperationIDBytes              = 128
+	systemdOutputLimit               = 64 << 10
+	jobRunnerFailureExit             = 125
+	jobStateOverheadBytes      int64 = 64 << 20
+	jobStateSafetyReserveBytes       = int64(maxPersistentJobClaims)*maxJobLogBytes + jobStateOverheadBytes
 )
 
 var jobLogMagic = [8]byte{'A', 'I', 'S', 'A', 'J', 'L', '0', '1'}
