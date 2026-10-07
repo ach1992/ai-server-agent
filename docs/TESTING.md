@@ -36,7 +36,7 @@ CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
 
 These cover Go unit/behavior tests, race detection and the production binary build.
 
-The executor-foundation tests specifically exercise separate non-queueing worker/root capacity, structured resource-limit results, bounded timeout selection, process-group cancellation, peer-close context cancellation, and both sides of the private executor response-frame limit. These tests complement, rather than replace, the privileged lifecycle/security jobs.
+The executor-foundation tests specifically exercise separate non-queueing worker/root capacity, structured resource-limit results, bounded timeout selection, graceful TERM/KILL process-group cancellation, same-process-group background cleanup, peer-close context cancellation, and both sides of the private executor response-frame limit. These tests complement, rather than replace, the privileged lifecycle/security jobs.
 
 ### Shell syntax
 
