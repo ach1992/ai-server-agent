@@ -639,11 +639,13 @@ func (s *Server) cleanupCompletedJobArtifacts(jobsDir, claimsDir string) error {
 		completed = append(completed, completedJobArtifact{id: id, modTime: fi.ModTime()})
 	}
 	sort.Slice(completed, func(i, j int) bool { return completed[i].modTime.After(completed[j].modTime) })
-	for _, old := range completed[maxInt(0, maxCompletedJobArtifacts):] {
-		paths := jobPathsFor(jobsDir, old.id)
-		cleanupJobPaths(paths)
-		if err := removeClaimsForJob(claimsDir, old.id); err != nil {
-			return err
+	if len(completed) > maxCompletedJobArtifacts {
+		for _, old := range completed[maxCompletedJobArtifacts:] {
+			paths := jobPathsFor(jobsDir, old.id)
+			cleanupJobPaths(paths)
+			if err := removeClaimsForJob(claimsDir, old.id); err != nil {
+				return err
+			}
 		}
 	}
 	return nil
@@ -670,13 +672,6 @@ func removeClaimsForJob(claimsDir, jobID string) error {
 		}
 	}
 	return nil
-}
-
-func maxInt(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }
 
 func jobStateError(code string, err error) Response {
