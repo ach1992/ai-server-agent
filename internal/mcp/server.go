@@ -39,9 +39,10 @@ type RootRunInput struct {
 	Approval bool   `json:"approval,omitempty" jsonschema:"Set true only after explicit user approval when a previous call returned approval_required"`
 }
 type StartJobInput struct {
-	Command  string `json:"command" jsonschema:"Command to run as a persistent background job"`
-	Root     bool   `json:"root,omitempty" jsonschema:"Run as root instead of aiworker"`
-	Approval bool   `json:"approval,omitempty" jsonschema:"Set true only after explicit user approval when a previous call returned approval_required"`
+	Command     string `json:"command" jsonschema:"Command to run as a persistent background job"`
+	Root        bool   `json:"root,omitempty" jsonschema:"Run as root instead of aiworker"`
+	Approval    bool   `json:"approval,omitempty" jsonschema:"Set true only after explicit user approval when a previous call returned approval_required"`
+	OperationID string `json:"operation_id,omitempty" jsonschema:"Optional caller-generated idempotency key; retry the same material request with the same key after a lost response"`
 }
 type JobInput struct {
 	JobID string `json:"job_id" jsonschema:"Persistent job id"`
@@ -127,11 +128,19 @@ func textResult(text string, isError bool) *mcpsdk.CallToolResult {
 }
 
 func responseResult(resp executor.Response) (*mcpsdk.CallToolResult, any, error) {
-	b, err := json.MarshalIndent(resp, "", "  ")
-	if err != nil {
-		return nil, nil, err
+	const maxTextFallbackOutputBytes = 32 << 10
+	if len(resp.Output) <= maxTextFallbackOutputBytes {
+		b, err := json.MarshalIndent(resp, "", "  ")
+		if err != nil {
+			return nil, nil, err
+		}
+		return textResult(string(b), !resp.OK), resp, nil
 	}
-	return textResult(string(b), !resp.OK), nil, nil
+	summary := fmt.Sprintf(
+		"ok=%t status=%q error_code=%q exit_code=%d bytes_returned=%d truncated=%t; output omitted from text fallback, use structuredContent",
+		resp.OK, resp.Status, resp.ErrorCode, resp.ExitCode, resp.BytesReturned, resp.Truncated,
+	)
+	return textResult(summary, !resp.OK), resp, nil
 }
 
 func (s *Server) registerTools() {
@@ -173,10 +182,10 @@ func (s *Server) registerTools() {
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "start_job",
-		Description: "Start a persistent background Bash command using a transient systemd unit. The job and its output continue if ChatGPT disconnects or the MCP service restarts.",
+		Description: "Start a persistent background Bash command using a transient systemd unit. The job and bounded retained output continue if ChatGPT disconnects or the MCP service restarts. Supply operation_id when a lost response may be retried so the same material request returns the same job handle instead of starting a duplicate.",
 		Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input StartJobInput) (*mcpsdk.CallToolResult, any, error) {
-		resp, err := executor.ClientCall(s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "start_job", Command: input.Command, Root: input.Root, Approval: input.Approval})
+		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "start_job", Command: input.Command, Root: input.Root, Approval: input.Approval, OperationID: input.OperationID})
 		if err != nil {
 			return textResult(err.Error(), true), nil, nil
 		}
@@ -185,7 +194,7 @@ func (s *Server) registerTools() {
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "job_status", Description: "Read the current state and exit status of a persistent job.", Annotations: annotations(true, false, true, false)},
 		func(ctx context.Context, req *mcpsdk.CallToolRequest, input JobInput) (*mcpsdk.CallToolResult, any, error) {
-			resp, err := executor.ClientCall(s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "job_status", JobID: input.JobID})
+			resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "job_status", JobID: input.JobID})
 			if err != nil {
 				return textResult(err.Error(), true), nil, nil
 			}
@@ -194,7 +203,7 @@ func (s *Server) registerTools() {
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "job_output", Description: "Read a chunk of persistent job stdout/stderr without requiring the original MCP connection to remain open.", Annotations: annotations(true, false, true, false)},
 		func(ctx context.Context, req *mcpsdk.CallToolRequest, input JobOutputInput) (*mcpsdk.CallToolResult, any, error) {
-			resp, err := executor.ClientCall(s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "job_output", JobID: input.JobID, Offset: input.Offset, Limit: input.Limit})
+			resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "job_output", JobID: input.JobID, Offset: input.Offset, Limit: input.Limit})
 			if err != nil {
 				return textResult(err.Error(), true), nil, nil
 			}
@@ -203,7 +212,7 @@ func (s *Server) registerTools() {
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "job_stop", Description: "Stop a persistent background job.", Annotations: annotations(false, true, true, false)},
 		func(ctx context.Context, req *mcpsdk.CallToolRequest, input JobInput) (*mcpsdk.CallToolResult, any, error) {
-			resp, err := executor.ClientCall(s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "job_stop", JobID: input.JobID})
+			resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "job_stop", JobID: input.JobID})
 			if err != nil {
 				return textResult(err.Error(), true), nil, nil
 			}
