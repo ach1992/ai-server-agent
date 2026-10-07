@@ -69,13 +69,14 @@ func TestRequestRunTimeoutIsBounded(t *testing.T) {
 	}
 }
 
-func TestShellContextCancellationKillsProcessGroup(t *testing.T) {
+func TestShellContextCancellationTerminatesProcessGroup(t *testing.T) {
 	dir := t.TempDir()
-	marker := filepath.Join(dir, "escaped-child")
+	termMarker := filepath.Join(dir, "term-seen")
+	leakMarker := filepath.Join(dir, "escaped-child")
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
-	command := "(sleep 0.8; printf leaked > " + shellQuote(marker) + ") & wait"
+	command := "trap 'printf term > " + shellQuote(termMarker) + "' TERM; while :; do sleep 0.2; done; printf leaked > " + shellQuote(leakMarker)
 	cmd := newShellCommandContext(ctx, command, dir, dir)
 	if err := cmd.Run(); err == nil {
 		t.Fatal("canceled command unexpectedly succeeded")
@@ -83,9 +84,32 @@ func TestShellContextCancellationKillsProcessGroup(t *testing.T) {
 	if !errors.Is(ctx.Err(), context.DeadlineExceeded) {
 		t.Fatalf("context error = %v, want deadline exceeded", ctx.Err())
 	}
+	if _, err := os.Stat(termMarker); err != nil {
+		t.Fatalf("process group did not observe graceful TERM before fallback: %v", err)
+	}
+	if _, err := os.Stat(leakMarker); !os.IsNotExist(err) {
+		t.Fatalf("background work escaped process-group cancellation; stat err=%v", err)
+	}
+}
+
+func TestTerminateProcessGroupCleansBackgroundChildAfterShellExit(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "background-child")
+	command := "(sleep 0.8; printf leaked > " + shellQuote(marker) + ") >/dev/null 2>&1 &"
+	cmd := newShellCommandContext(context.Background(), command, dir, dir)
+	if err := cmd.Run(); err != nil {
+		t.Fatalf("shell command failed before cleanup: %v", err)
+	}
+	lingering, err := terminateProcessGroup(cmd.Process.Pid)
+	if err != nil {
+		t.Fatalf("terminateProcessGroup: %v", err)
+	}
+	if !lingering {
+		t.Fatal("expected same-process-group background child to remain after shell exit")
+	}
 	time.Sleep(850 * time.Millisecond)
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
-		t.Fatalf("background child escaped process-group cancellation; stat err=%v", err)
+		t.Fatalf("same-process-group background child survived cleanup; stat err=%v", err)
 	}
 }
 
