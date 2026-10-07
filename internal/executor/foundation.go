@@ -1,7 +1,6 @@
 package executor
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,6 +10,7 @@ import (
 	"os"
 	"os/exec"
 	"runtime"
+	"strings"
 	"syscall"
 	"time"
 
@@ -157,7 +157,8 @@ func terminateProcessGroup(pgid int) (bool, error) {
 }
 
 func newShellCommandContext(ctx context.Context, command, home, dir string) *exec.Cmd {
-	cmd := exec.CommandContext(ctx, "/bin/bash", "--noprofile", "--norc", "-c", command)
+	cmd := exec.CommandContext(ctx, "/bin/bash", "--noprofile", "--norc", "-s")
+	cmd.Stdin = strings.NewReader(command)
 	cmd.Dir = dir
 	cmd.Env = sanitizedCommandEnv(home)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -208,31 +209,41 @@ func runCapacityResponse(root bool) Response {
 	return Response{
 		Error:      mode + " command execution capacity is busy",
 		ReasonCode: "resource_limit",
+		ErrorCode:  "resource_limit",
+		ErrorClass: "resource",
 		Retryable:  true,
 		Status:     "busy",
 	}
 }
 
 func (s *Server) runContext(parent context.Context, req Request) Response {
+	started := time.Now()
+	if bad := commandInputError(req.Command); bad != nil {
+		bad.DurationMS = time.Since(started).Milliseconds()
+		return *bad
+	}
+
 	ctx, cancel := context.WithTimeout(parent, requestRunTimeout(req))
 	defer cancel()
 
 	cmd, dec := s.commandContext(ctx, req)
 	if !dec.Allowed {
-		return Response{Error: dec.Reason}
+		return Response{Error: dec.Reason, ReasonCode: "policy_denied", ErrorCode: "policy_denied", ErrorClass: "policy", DurationMS: time.Since(started).Milliseconds()}
 	}
 	if dec.RequiresApproval && !req.Approval {
-		return Response{Error: "approval_required", Approval: dec}
+		return Response{Error: "approval_required", ReasonCode: "approval_required", ErrorCode: "approval_required", ErrorClass: "approval", Approval: dec, DurationMS: time.Since(started).Milliseconds()}
 	}
 	release, ok := s.runs.acquire(req.Root)
 	if !ok {
-		return runCapacityResponse(req.Root)
+		resp := runCapacityResponse(req.Root)
+		resp.DurationMS = time.Since(started).Milliseconds()
+		return resp
 	}
 	defer release()
 
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
+	out := newBoundedOutputCollector(maxSyncOutputBytes)
+	cmd.Stdout = out
+	cmd.Stderr = out
 	err := cmd.Run()
 	lingeringGroup := false
 	var cleanupErr error
@@ -250,29 +261,40 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 
 	errorText := errString(err)
 	reasonCode := ""
+	errorClass := ""
+	timedOut := false
 	switch ctx.Err() {
 	case context.DeadlineExceeded:
 		errorText = "command timed out"
 		reasonCode = "timeout"
+		errorClass = "timeout"
+		timedOut = true
 	case context.Canceled:
 		errorText = "command canceled"
 		reasonCode = "canceled"
+		errorClass = "canceled"
 	default:
 		if errors.Is(err, exec.ErrWaitDelay) {
 			errorText = "command left background work after the shell exited; completion cannot be proven; use start_job or a managed service"
 			reasonCode = "unknown_completion"
+			errorClass = "process"
 		} else if lingeringGroup {
 			errorText = "synchronous command left background work; remaining process-group members were stopped; use start_job or a managed service"
 			reasonCode = "background_process"
+			errorClass = "process"
 			if err == nil {
 				err = errors.New(errorText)
 				code = 1
 			}
+		} else if err != nil {
+			reasonCode = "command_failed"
+			errorClass = "process"
 		}
 	}
 	if cleanupErr != nil {
 		errorText = "command process-group termination could not be proven: " + cleanupErr.Error()
 		reasonCode = "unknown_completion"
+		errorClass = "process"
 		if err == nil {
 			err = cleanupErr
 			code = 1
@@ -282,19 +304,22 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 	_ = s.audit.Write(audit.Entry{
 		Action:  "run",
 		Mode:    map[bool]string{true: "root", false: "worker"}[req.Root],
-		Command: req.Command,
 		Success: err == nil,
 		Detail:  dec.Category,
 	})
-	return Response{
+	resp := Response{
 		OK:         err == nil,
 		Error:      errorText,
 		ReasonCode: reasonCode,
-		Output:     limit(out.String(), 4<<20),
+		ErrorCode:  reasonCode,
+		ErrorClass: errorClass,
 		ExitCode:   code,
+		DurationMS: time.Since(started).Milliseconds(),
+		TimedOut:   timedOut,
 	}
+	applyOutputResult(&resp, out.Result())
+	return resp
 }
-
 func encodeExecutorResponse(resp Response) []byte {
 	payload, err := json.Marshal(resp)
 	if err == nil && len(payload)+1 <= maxExecutorResponseBytes {
