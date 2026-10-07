@@ -409,7 +409,7 @@ func TestPersistentJobIdempotencyStateIsBounded(t *testing.T) {
 	if err := os.Mkdir(claims, 0700); err != nil {
 		t.Fatal(err)
 	}
-	for i := 0; i < maxIdempotencyClaims; i++ {
+	for i := 0; i < maxPersistentJobClaims; i++ {
 		operationID := fmt.Sprintf("claim-%d", i)
 		claim := jobClaim{
 			Version:     1,
