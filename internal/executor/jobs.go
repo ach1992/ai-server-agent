@@ -28,14 +28,14 @@ const (
 	maxActivePersistentJobs   = 4
 	maxCompletedJobArtifacts  = 32
 	maxFailedJobClaims         = maxCompletedJobArtifacts
-	maxIdempotencyClaims       = 2*maxCompletedJobArtifacts + maxActivePersistentJobs
+	maxPersistentJobClaims       = 2*maxCompletedJobArtifacts + maxActivePersistentJobs
 	maxJobLogBytes      int64 = 8 << 20
 	jobLogHeaderSize           = 32
 	maxOperationIDBytes        = 128
 	systemdOutputLimit         = 64 << 10
 	jobRunnerFailureExit       = 125
 	jobStateOverheadBytes int64 = 64 << 20
-	jobStateSafetyReserveBytes = int64(maxActivePersistentJobs+maxCompletedJobArtifacts)*maxJobLogBytes + jobStateOverheadBytes
+	jobStateSafetyReserveBytes = int64(maxPersistentJobClaims)*maxJobLogBytes + jobStateOverheadBytes
 )
 
 var jobLogMagic = [8]byte{'A', 'I', 'S', 'A', 'J', 'L', '0', '1'}
@@ -121,9 +121,9 @@ func (s *Server) startJobBounded(req Request) Response {
 		if err != nil {
 			return jobStateError("job_state_unavailable", err)
 		}
-		if claimCount >= maxIdempotencyClaims {
+		if claimCount >= maxPersistentJobClaims {
 			return Response{
-				Error:      "persistent-job idempotency state is at capacity; reconcile existing operation_ids before creating another",
+				Error:      "persistent-job recovery state is at capacity; reconcile retained jobs/operation_ids before creating another",
 				ReasonCode: "resource_limit",
 				ErrorCode:  "resource_limit",
 				ErrorClass: "resource",
