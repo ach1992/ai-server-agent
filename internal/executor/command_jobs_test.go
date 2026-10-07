@@ -8,6 +8,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ach1992/ai-server-agent/internal/audit"
 	"github.com/ach1992/ai-server-agent/internal/config"
@@ -455,5 +456,111 @@ func TestJobStatusReturnsStructuredExitCode(t *testing.T) {
 	}
 	if resp.Output != "7" || resp.OutputEncoding != "utf-8" || resp.BytesReturned != 1 {
 		t.Fatalf("completed job output metadata = %+v", resp)
+	}
+}
+
+
+func TestStartJobWithoutCallerOperationIDStillGetsRecoveryClaim(t *testing.T) {
+	state := t.TempDir()
+	jobs := filepath.Join(state, "jobs")
+	if err := os.Mkdir(jobs, 0711); err != nil {
+		t.Fatal(err)
+	}
+	fakeBin := t.TempDir()
+	systemctl := filepath.Join(fakeBin, "systemctl")
+	systemctlScript := "#!/bin/sh\ncase \"$1\" in\n  list-units) exit 0 ;;\n  show) printf 'not-found\\n'; exit 0 ;;\n  *) exit 64 ;;\nesac\n"
+	if err := os.WriteFile(systemctl, []byte(systemctlScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+	systemdRun := filepath.Join(fakeBin, "systemd-run")
+	if err := os.WriteFile(systemdRun, []byte("#!/bin/sh\nprintf 'accepted\\n'\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+	current, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{
+		cfg: config.Config{StateDir: state, WorkspaceDir: t.TempDir(), WorkerUser: current.Username},
+		token:     "test-executor-token",
+		guard:     policy.New(nil),
+		audit:     audit.New(filepath.Join(t.TempDir(), "audit.jsonl")),
+		workerUID: uint32(os.Geteuid()),
+		workerGID: uint32(os.Getegid()),
+	}
+	resp := server.startJobBounded(Request{Command: "printf safe"})
+	if !resp.OK || resp.JobID == "" {
+		t.Fatalf("start response = %+v", resp)
+	}
+	claims, err := os.ReadDir(filepath.Join(jobs, "claims"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(claims) != 1 {
+		t.Fatalf("claim count = %d, want 1", len(claims))
+	}
+	claim, found, err := readJobClaim(filepath.Join(jobs, "claims", claims[0].Name()))
+	if err != nil || !found {
+		t.Fatalf("read recovery claim: found=%v err=%v", found, err)
+	}
+	if claim.JobID != resp.JobID || claim.State != "started" {
+		t.Fatalf("recovery claim = %+v, response=%+v", claim, resp)
+	}
+}
+
+func TestStalePrelaunchClaimRetiresProtectedHandoff(t *testing.T) {
+	state := t.TempDir()
+	jobs := filepath.Join(state, "jobs")
+	claims := filepath.Join(jobs, "claims")
+	if err := os.Mkdir(jobs, 0711); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(claims, 0700); err != nil {
+		t.Fatal(err)
+	}
+	fakeBin := t.TempDir()
+	systemctl := filepath.Join(fakeBin, "systemctl")
+	if err := os.WriteFile(systemctl, []byte("#!/bin/sh\nif [ \"$1\" = show ]; then printf 'not-found\\n'; exit 0; fi\nexit 64\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+
+	id := "987654321"
+	paths := jobPathsFor(jobs, id)
+	if err := os.WriteFile(paths.command, []byte("printf secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{paths.log, paths.status, paths.started} {
+		if err := os.WriteFile(path, nil, 0640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	claimPath := filepath.Join(claims, operationClaimName("stale-operation"))
+	created := time.Now().Add(-2 * executorConnectionTimeout)
+	claim := jobClaim{
+		Version:     1,
+		JobID:       id,
+		Fingerprint: strings.Repeat("b", 64),
+		State:       "launching",
+		CreatedAt:   created.UTC().Format(time.RFC3339Nano),
+	}
+	if err := createJobClaim(claimPath, claim); err != nil {
+		t.Fatal(err)
+	}
+
+	server := &Server{}
+	if err := server.cleanupStalePrelaunchClaims(jobs, claims, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Stat(paths.command); !os.IsNotExist(err) {
+		t.Fatalf("stale protected command handoff still exists; stat err=%v", err)
+	}
+	got, found, err := readJobClaim(claimPath)
+	if err != nil || !found {
+		t.Fatalf("read stale claim: found=%v err=%v", found, err)
+	}
+	if got.State != "failed" {
+		t.Fatalf("stale claim state = %q, want failed", got.State)
 	}
 }
