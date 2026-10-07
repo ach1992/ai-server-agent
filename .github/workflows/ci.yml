@@ -46,6 +46,12 @@ jobs:
           if [ -n "$unformatted" ]; then
             echo "gofmt required for:" >&2
             printf '%s\n' "$unformatted" >&2
+            echo "gofmt diff:" >&2
+            while IFS= read -r file; do
+              gofmt -d "$file" >&2
+            done <<EOF
+$unformatted
+EOF
             exit 1
           fi
       - name: Vet
