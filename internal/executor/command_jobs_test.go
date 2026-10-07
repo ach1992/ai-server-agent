@@ -563,6 +563,7 @@ func TestPersistentJobClaimRecoversBeforeLaunch(t *testing.T) {
 }
 
 func TestPersistentJobReplayPreservesUnknownTerminalState(t *testing.T) {
+	useInactiveSystemctl(t)
 	state := t.TempDir()
 	jobs := filepath.Join(state, "jobs")
 	claims := filepath.Join(jobs, "claims")
@@ -603,6 +604,7 @@ func TestPersistentJobReplayPreservesUnknownTerminalState(t *testing.T) {
 }
 
 func TestPersistentJobReplayReportsCompletedStatus(t *testing.T) {
+	useInactiveSystemctl(t)
 	state := t.TempDir()
 	jobs := filepath.Join(state, "jobs")
 	claims := filepath.Join(jobs, "claims")
@@ -955,6 +957,7 @@ func TestJobStatusReconcilesAcceptedJobBeforeRunnerStart(t *testing.T) {
 }
 
 func TestJobStatusReportsUnknownCompletionMarker(t *testing.T) {
+	useInactiveSystemctl(t)
 	state := t.TempDir()
 	jobs := filepath.Join(state, "jobs")
 	if err := os.Mkdir(jobs, 0711); err != nil {
@@ -972,6 +975,7 @@ func TestJobStatusReportsUnknownCompletionMarker(t *testing.T) {
 }
 
 func TestJobStatusReturnsStructuredExitCode(t *testing.T) {
+	useInactiveSystemctl(t)
 	state := t.TempDir()
 	jobs := filepath.Join(state, "jobs")
 	if err := os.Mkdir(jobs, 0711); err != nil {

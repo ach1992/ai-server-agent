@@ -92,6 +92,9 @@ jobs:
           grep -qF '"/usr/bin/env", "-i"' internal/executor/jobs.go
           grep -qF 'runnerPath, "job-runner"' internal/executor/jobs.go
           grep -qF 'jobStateSafetyReserveBytes' internal/executor/jobs.go
+          grep -qF 'lifecycleManagementLockPath' internal/executor/jobs.go
+          grep -qF 'syscall.LOCK_SH|syscall.LOCK_NB' internal/executor/jobs.go
+          grep -qF 'removeTerminalCommandHandoff' internal/executor/jobs.go
           grep -qF 'OperationID string' internal/executor/protocol.go
       - name: Installer compatibility check
         run: sudo bash install.sh --check
@@ -324,6 +327,26 @@ jobs:
           sudo install -d -m 0750 -o root -g aiagent /opt/ai-server-agent
           sudo touch /opt/ai-server-agent/lifecycle-runtime-sentinel
           sudo -u aiworker touch /srv/ai-workspace/lifecycle-workspace-sentinel
+
+          sudo rm -f /tmp/ai-server-agent-shared-lifecycle-ready
+          sudo bash -c 'exec 8>>/run/lock/ai-server-agent/management.lock; flock -s 8; touch /tmp/ai-server-agent-shared-lifecycle-ready; sleep 5' &
+          lifecycle_holder=$!
+          for _ in {1..20}; do
+            if sudo test -e /tmp/ai-server-agent-shared-lifecycle-ready; then
+              break
+            fi
+            sleep 0.25
+          done
+          sudo test -e /tmp/ai-server-agent-shared-lifecycle-ready
+          if sudo env AI_SERVER_AGENT_YES=1 bash uninstall.sh >/tmp/uninstall-shared-lock.out 2>&1; then
+            echo 'uninstall must not overlap a persistent-job admission/launch shared lifecycle lock' >&2
+            exit 1
+          fi
+          grep -qF 'Another AI Server Agent management operation is already active' /tmp/uninstall-shared-lock.out
+          wait "$lifecycle_holder"
+          sudo rm -f /tmp/ai-server-agent-shared-lifecycle-ready
+          sudo systemctl is-active --quiet ai-server-agent.service
+          sudo systemctl is-active --quiet ai-server-agent-executor.service
 
           sudo systemd-run --unit ai-job-ci-uninstall-guard --collect /bin/sleep 120
           sudo systemctl is-active --quiet ai-job-ci-uninstall-guard.service

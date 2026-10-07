@@ -36,7 +36,7 @@ CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
 
 These cover Go unit/behavior tests, race detection and the production binary build.
 
-The executor-foundation tests specifically exercise separate non-queueing worker/root capacity, structured resource-limit results, bounded timeout selection, graceful TERM/KILL process-group cancellation, same-process-group background cleanup, peer-close context cancellation, and both sides of the private executor response-frame limit. The command/jobs tests additionally cover production-time head/tail output bounding, binary-safe base64 results, physical persistent-log bounds with logical retention offsets, protected command-file consumption, idempotent retry/conflict behavior, raw-command absence from Agent-created systemd argv/audit/idempotency claims, and fail-fast persistent-job capacity, replay admission enforcement, interrupted-job reconciliation, and bounded terminal-artifact retention. These tests complement, rather than replace, the privileged lifecycle/security jobs.
+The executor-foundation tests specifically exercise separate non-queueing worker/root capacity, structured resource-limit results, bounded timeout selection, graceful TERM/KILL process-group cancellation, same-process-group background cleanup, peer-close context cancellation, and both sides of the private executor response-frame limit. The command/jobs tests additionally cover production-time head/tail output bounding, binary-safe base64 results, physical persistent-log bounds with logical retention offsets, protected command-file consumption, idempotent retry/conflict behavior, raw-command absence from Agent-created systemd argv/audit/idempotency claims, and fail-fast persistent-job capacity, replay admission enforcement, interrupted-job reconciliation, and bounded terminal-artifact retention. Recovery regressions specifically cover failed `systemd-run` with a loaded-but-inactive unit, authoritative active-unit state dominating worker-writable numeric/unknown status markers, command-handoff retirement across runner setup/validation failures, surfaced terminal-cleanup errors, and shared lifecycle-lock exclusion held through persistent-job launch. These tests complement, rather than replace, the privileged lifecycle/security jobs.
 
 ### Shell syntax
 
@@ -52,11 +52,12 @@ The main CI workflow performs a real privileged lifecycle on an Ubuntu 22.04 amd
 2. verify both systemd services are active;
 3. verify the installed management/update paths;
 4. execute root trust-boundary tests;
-5. create a real transient `ai-job-*.service` guard fixture and prove safe uninstall refuses while it is active without stopping that work;
-6. stop the fixture, then safe-uninstall and verify preserved Agent data/users/workspace;
-7. reinstall;
-8. purge and verify Agent-owned config/state/log/runtime and `aiagent` are removed;
-9. verify `aiworker` and `/srv/ai-workspace` remain.
+5. prove uninstall cannot acquire the exclusive lifecycle lock while a persistent-job-style shared holder exists;
+6. create a real transient `ai-job-*.service` guard fixture and prove safe uninstall refuses while it is active without stopping that work;
+7. stop the fixture, then safe-uninstall and verify preserved Agent data/users/workspace;
+8. reinstall;
+9. purge and verify Agent-owned config/state/log/runtime and `aiagent` are removed;
+10. verify `aiworker` and `/srv/ai-workspace` remain.
 
 A separate first-run test proves that choosing "Configure later" is a successful core installation, not an installer failure.
 

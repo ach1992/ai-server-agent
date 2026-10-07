@@ -25,17 +25,18 @@ import (
 )
 
 const (
-	maxActivePersistentJobs          = 4
-	maxCompletedJobArtifacts         = 32
-	maxFailedJobClaims               = maxCompletedJobArtifacts
-	maxPersistentJobClaims           = 2*maxCompletedJobArtifacts + maxActivePersistentJobs
-	maxJobLogBytes             int64 = 8 << 20
-	jobLogHeaderSize                 = 32
-	maxOperationIDBytes              = 128
-	systemdOutputLimit               = 64 << 10
-	jobRunnerFailureExit             = 125
-	jobStateOverheadBytes      int64 = 64 << 20
-	jobStateSafetyReserveBytes       = int64(maxPersistentJobClaims)*maxJobLogBytes + jobStateOverheadBytes
+	maxActivePersistentJobs           = 4
+	maxCompletedJobArtifacts          = 32
+	maxFailedJobClaims                = maxCompletedJobArtifacts
+	maxPersistentJobClaims            = 2*maxCompletedJobArtifacts + maxActivePersistentJobs
+	maxJobLogBytes              int64 = 8 << 20
+	jobLogHeaderSize                  = 32
+	maxOperationIDBytes               = 128
+	systemdOutputLimit                = 64 << 10
+	jobRunnerFailureExit              = 125
+	jobStateOverheadBytes       int64 = 64 << 20
+	jobStateSafetyReserveBytes        = int64(maxPersistentJobClaims)*maxJobLogBytes + jobStateOverheadBytes
+	lifecycleManagementLockPath       = "/run/lock/ai-server-agent/management.lock"
 )
 
 var jobLogMagic = [8]byte{'A', 'I', 'S', 'A', 'J', 'L', '0', '1'}
@@ -87,6 +88,14 @@ func (s *Server) startJobBounded(req Request) Response {
 	}
 	if err := validateOperationID(req.OperationID); err != nil {
 		return Response{Error: err.Error(), ReasonCode: "invalid_operation_id", ErrorCode: "invalid_operation_id", ErrorClass: "validation"}
+	}
+
+	lifecycleLock, blocked := s.acquirePersistentJobAdmissionLock()
+	if blocked != nil {
+		return *blocked
+	}
+	if lifecycleLock != nil {
+		defer releasePersistentJobAdmissionLock(lifecycleLock)
 	}
 
 	s.jobsMu.Lock()
@@ -238,7 +247,9 @@ func (s *Server) resumeClaimedJob(req Request, jobsDir, claimPath string, claim 
 		if err := s.markJobStatusUnknownIfEmpty(paths.status); err != nil {
 			return jobStateError("job_state_unavailable", err)
 		}
-		_ = os.Remove(paths.command)
+		if err := removeTerminalCommandHandoff(paths.command); err != nil {
+			return jobStateError("job_status_unavailable", err)
+		}
 		resp, _ := s.jobTerminalReplayResponse(paths.status, claim.JobID)
 		resp.IdempotentReplay = true
 		return resp
@@ -274,7 +285,9 @@ func (s *Server) resumeClaimedJob(req Request, jobsDir, claimPath string, claim 
 		if err := s.markJobStatusUnknownIfEmpty(paths.status); err != nil {
 			return jobStateError("job_state_unavailable", err)
 		}
-		_ = os.Remove(paths.command)
+		if err := removeTerminalCommandHandoff(paths.command); err != nil {
+			return jobStateError("job_status_unavailable", err)
+		}
 		resp, _ := s.jobTerminalReplayResponse(paths.status, claim.JobID)
 		resp.IdempotentReplay = true
 		return resp
@@ -377,28 +390,76 @@ func (s *Server) launchPreparedJob(req Request, paths jobPaths, id string) Respo
 	err = cmd.Run()
 	result := out.Result()
 	if err != nil {
-		evidence, evidenceErr := jobHasExecutionEvidence(paths, id)
-		if evidenceErr != nil {
-			return Response{
-				Error:      "systemd-run failed and job state could not be reconciled: " + evidenceErr.Error(),
-				ReasonCode: "unknown_completion",
-				ErrorCode:  "unknown_completion",
-				ErrorClass: "state",
-				JobID:      id,
-			}
-		}
-		if !evidence {
-			_ = os.Remove(paths.command)
-			resp := Response{
-				Error:      "persistent job could not be started: " + err.Error(),
-				ReasonCode: "job_start_failed",
-				ErrorCode:  "job_start_failed",
-				ErrorClass: "process",
-				JobID:      id,
-			}
+		active, activeErr := jobUnitActive(id)
+		if activeErr != nil {
+			resp := unknownJobLaunchResponse(id, "systemd-run failed and authoritative active state could not be determined: "+activeErr.Error())
 			applyOutputResult(&resp, result)
 			return resp
 		}
+		if active {
+			resp := Response{OK: true, JobID: id, Status: "accepted"}
+			applyOutputResult(&resp, result)
+			return resp
+		}
+
+		status, _, statusErr := s.readJobStatusValue(paths.status)
+		if statusErr != nil && !os.IsNotExist(statusErr) {
+			resp := unknownJobLaunchResponse(id, "systemd-run failed and durable job status could not be read: "+statusErr.Error())
+			applyOutputResult(&resp, result)
+			return resp
+		}
+		if status != "" {
+			if cleanupErr := removeTerminalCommandHandoff(paths.command); cleanupErr != nil {
+				resp := unknownJobLaunchResponse(id, "job reached terminal state but command handoff cleanup failed: "+cleanupErr.Error())
+				applyOutputResult(&resp, result)
+				return resp
+			}
+			return terminalJobResponse(status, id)
+		}
+
+		started, startedErr := s.jobStarted(paths.started)
+		if startedErr != nil {
+			resp := unknownJobLaunchResponse(id, "systemd-run failed and durable start state could not be read: "+startedErr.Error())
+			applyOutputResult(&resp, result)
+			return resp
+		}
+		exists, existsErr := jobUnitExists(id)
+		if existsErr != nil {
+			resp := unknownJobLaunchResponse(id, "systemd-run failed and unit load state could not be reconciled: "+existsErr.Error())
+			applyOutputResult(&resp, result)
+			return resp
+		}
+		if started || exists {
+			if markErr := s.markJobStatusUnknownIfEmpty(paths.status); markErr != nil {
+				resp := unknownJobLaunchResponse(id, "systemd-run failed and unknown completion could not be persisted: "+markErr.Error())
+				applyOutputResult(&resp, result)
+				return resp
+			}
+			if cleanupErr := removeTerminalCommandHandoff(paths.command); cleanupErr != nil {
+				resp := unknownJobLaunchResponse(id, "systemd-run failed and terminal command handoff cleanup failed: "+cleanupErr.Error())
+				applyOutputResult(&resp, result)
+				return resp
+			}
+			resp := unknownJobLaunchResponse(id, "systemd-run failed after launch became possible; completion cannot be proven")
+			applyOutputResult(&resp, result)
+			return resp
+		}
+
+		if cleanupErr := removeTerminalCommandHandoff(paths.command); cleanupErr != nil {
+			resp := jobStateError("job_state_unavailable", cleanupErr)
+			resp.JobID = id
+			applyOutputResult(&resp, result)
+			return resp
+		}
+		resp := Response{
+			Error:      "persistent job could not be started: " + err.Error(),
+			ReasonCode: "job_start_failed",
+			ErrorCode:  "job_start_failed",
+			ErrorClass: "process",
+			JobID:      id,
+		}
+		applyOutputResult(&resp, result)
+		return resp
 	}
 
 	resp := Response{OK: true, JobID: id, Status: "accepted"}
@@ -698,21 +759,93 @@ func (s *Server) jobExecutionEvidenceState(paths jobPaths, id string) (bool, boo
 	return true, active, err
 }
 
-func jobHasExecutionEvidence(paths jobPaths, id string) (bool, error) {
-	for _, path := range []string{paths.started, paths.status} {
-		fi, err := os.Lstat(path)
-		if err == nil {
-			if fi.Mode()&os.ModeSymlink != 0 || !fi.Mode().IsRegular() {
-				return false, fmt.Errorf("job evidence path is unsafe: %s", path)
-			}
-			if fi.Size() > 0 {
-				return true, nil
-			}
-		} else if !os.IsNotExist(err) {
-			return false, err
-		}
+func (s *Server) acquirePersistentJobAdmissionLock() (*os.File, *Response) {
+	if s.lifecycleLockPath == "" {
+		return nil, nil
 	}
-	return jobUnitExists(id)
+	if err := trustedDir(filepath.Dir(s.lifecycleLockPath)); err != nil {
+		resp := jobStateError("job_state_unavailable", fmt.Errorf("validate lifecycle lock directory: %w", err))
+		return nil, &resp
+	}
+	f, err := os.OpenFile(s.lifecycleLockPath, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		resp := jobStateError("job_state_unavailable", fmt.Errorf("open lifecycle lock: %w", err))
+		return nil, &resp
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		resp := jobStateError("job_state_unavailable", fmt.Errorf("inspect lifecycle lock: %w", err))
+		return nil, &resp
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !fi.Mode().IsRegular() || !ok || st.Uid != uint32(os.Geteuid()) || fi.Mode().Perm()&0077 != 0 {
+		_ = f.Close()
+		resp := jobStateError("job_state_unavailable", errors.New("lifecycle lock has unsafe ownership or mode"))
+		return nil, &resp
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB); err != nil {
+		_ = f.Close()
+		if errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN) {
+			return nil, &Response{
+				Error:      "persistent job admission is unavailable while lifecycle management is active",
+				ReasonCode: "resource_limit",
+				ErrorCode:  "resource_limit",
+				ErrorClass: "resource",
+				Retryable:  true,
+				Status:     "busy",
+			}
+		}
+		resp := jobStateError("job_state_unavailable", fmt.Errorf("acquire lifecycle admission lock: %w", err))
+		return nil, &resp
+	}
+	return f, nil
+}
+
+func releasePersistentJobAdmissionLock(f *os.File) {
+	if f == nil {
+		return
+	}
+	_ = syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	_ = f.Close()
+}
+
+func unknownJobLaunchResponse(jobID, message string) Response {
+	return Response{
+		Error:      message,
+		ReasonCode: "unknown_completion",
+		ErrorCode:  "unknown_completion",
+		ErrorClass: "state",
+		JobID:      jobID,
+		Status:     "unknown",
+	}
+}
+
+func removeTerminalCommandHandoff(path string) error {
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) {
+		return fmt.Errorf("remove terminal command handoff %s: %w", path, err)
+	}
+	return nil
+}
+
+func terminalJobResponse(status, jobID string) Response {
+	if status == jobStatusUnknown {
+		return unknownJobLaunchResponse(jobID, "persistent job ended without a durable exit status; completion cannot be proven")
+	}
+	code, err := strconv.Atoi(status)
+	if err != nil {
+		return jobStateError("job_status_unavailable", fmt.Errorf("invalid terminal job status for %s", jobID))
+	}
+	return Response{
+		OK:             true,
+		Status:         "completed",
+		Output:         status,
+		OutputEncoding: "utf-8",
+		BytesSeen:      int64(len(status)),
+		BytesReturned:  int64(len(status)),
+		ExitCode:       code,
+		JobID:          jobID,
+	}
 }
 
 func persistentJobAdmissionResponse(jobsDir string) *Response {
@@ -777,6 +910,13 @@ func (s *Server) cleanupCompletedJobArtifacts(jobsDir, claimsDir string) error {
 		if err != nil {
 			return err
 		}
+		active, err := jobUnitActive(id)
+		if err != nil {
+			return err
+		}
+		if active {
+			continue
+		}
 		if status == "" {
 			started, err := s.jobStarted(paths.started)
 			if err != nil {
@@ -792,17 +932,9 @@ func (s *Server) cleanupCompletedJobArtifacts(jobsDir, claimsDir string) error {
 			if !accepted {
 				continue
 			}
-			active, err := jobUnitActive(id)
-			if err != nil {
-				return err
-			}
-			if active {
-				continue
-			}
-			// A started job whose transient unit has disappeared without a
-			// durable numeric status was interrupted (for example by stop or
-			// reboot). Persist an explicit unknown-completion marker so it can
-			// be reported honestly and participate in bounded retention.
+			// A started/accepted job whose transient unit is no longer
+			// active/pending and has no durable numeric status ended with an
+			// unknown completion state. Persist that state before retention.
 			if err := s.markJobStatusUnknownIfEmpty(paths.status); err != nil {
 				return err
 			}
@@ -816,8 +948,8 @@ func (s *Server) cleanupCompletedJobArtifacts(jobsDir, claimsDir string) error {
 				return fmt.Errorf("invalid job status file: %s", paths.status)
 			}
 		}
-		if err := os.Remove(paths.command); err != nil && !os.IsNotExist(err) {
-			return fmt.Errorf("remove terminal command handoff %s: %w", paths.command, err)
+		if err := removeTerminalCommandHandoff(paths.command); err != nil {
+			return err
 		}
 		completed = append(completed, completedJobArtifact{id: id, modTime: modTime})
 	}
@@ -847,27 +979,18 @@ func (s *Server) jobTerminalReplayResponse(statusPath, jobID string) (Response, 
 	if status == "" {
 		return Response{}, false
 	}
-	if status == jobStatusUnknown {
-		return Response{
-			Error:      "persistent job ended without a durable exit status; completion cannot be proven",
-			ReasonCode: "unknown_completion",
-			ErrorCode:  "unknown_completion",
-			ErrorClass: "state",
-			JobID:      jobID,
-			Status:     "unknown",
-		}, true
+	active, err := jobUnitActive(jobID)
+	if err != nil {
+		return jobStateError("job_status_unavailable", err), true
 	}
-	code, _ := strconv.Atoi(status)
-	return Response{
-		OK:             true,
-		Status:         "completed",
-		Output:         status,
-		OutputEncoding: "utf-8",
-		BytesSeen:      int64(len(status)),
-		BytesReturned:  int64(len(status)),
-		ExitCode:       code,
-		JobID:          jobID,
-	}, true
+	if active {
+		return Response{}, false
+	}
+	commandPath := strings.TrimSuffix(statusPath, ".status") + ".cmd"
+	if err := removeTerminalCommandHandoff(commandPath); err != nil {
+		return jobStateError("job_status_unavailable", err), true
+	}
+	return terminalJobResponse(status, jobID), true
 }
 
 func (s *Server) readJobStatusValue(path string) (string, time.Time, error) {
@@ -1206,6 +1329,7 @@ func RunJobHelper(args []string) int {
 
 	logWriter, err := newJobLogWriter(*logPath)
 	if err != nil {
+		_ = retireRunnerCommandHandoff(*commandPath)
 		_ = writeJobStatus(*statusPath, jobRunnerFailureExit)
 		return jobRunnerFailureExit
 	}
@@ -1219,6 +1343,9 @@ func RunJobHelper(args []string) int {
 	}()
 
 	if err := writeJobMarker(*startedPath); err != nil {
+		if cleanupErr := retireRunnerCommandHandoff(*commandPath); cleanupErr != nil {
+			_, _ = logWriter.Write([]byte("\n[agent job runner could not retire protected command handoff after start-marker failure]\n"))
+		}
 		_, _ = logWriter.Write([]byte("\n[agent job runner could not persist start marker]\n"))
 		return exitCode
 	}
@@ -1249,35 +1376,81 @@ func commandExitCode(err error) int {
 	return jobRunnerFailureExit
 }
 
-func readAndRemoveJobCommand(path string) ([]byte, error) {
-	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+func readAndRemoveJobCommand(path string) (command []byte, retErr error) {
+	f, err := os.OpenFile(path, os.O_RDWR|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}
 	validated := false
 	defer func() {
-		_ = f.Close()
 		if validated {
-			_ = os.Remove(path)
+			if err := retireOpenedRunnerCommandHandoff(f, path); retErr == nil && err != nil {
+				retErr = err
+			}
+			return
 		}
+		_ = f.Close()
 	}()
 	fi, err := f.Stat()
 	if err != nil {
 		return nil, err
 	}
 	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !fi.Mode().IsRegular() || !ok || st.Uid != uint32(os.Geteuid()) || fi.Mode().Perm()&0077 != 0 {
-		return nil, errors.New("protected command handoff has unsafe ownership or mode")
+	if !fi.Mode().IsRegular() || !ok || st.Uid != uint32(os.Geteuid()) {
+		return nil, errors.New("protected command handoff has unsafe ownership or type")
+	}
+	if fi.Mode().Perm()&0077 != 0 {
+		validated = true
+		return nil, errors.New("protected command handoff has unsafe mode")
 	}
 	validated = true
-	b, err := io.ReadAll(io.LimitReader(f, maxCommandBytes+1))
+	command, err = io.ReadAll(io.LimitReader(f, maxCommandBytes+1))
 	if err != nil {
 		return nil, err
 	}
-	if len(b) > maxCommandBytes {
+	if len(command) > maxCommandBytes {
 		return nil, errors.New("protected command handoff exceeds command size limit")
 	}
-	return b, nil
+	return command, nil
+}
+
+func retireRunnerCommandHandoff(path string) error {
+	f, err := os.OpenFile(path, os.O_RDWR|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		_ = f.Close()
+		return err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !fi.Mode().IsRegular() || !ok || st.Uid != uint32(os.Geteuid()) || fi.Mode().Perm()&0077 != 0 {
+		_ = f.Close()
+		return errors.New("protected command handoff has unsafe ownership or mode")
+	}
+	return retireOpenedRunnerCommandHandoff(f, path)
+}
+
+func retireOpenedRunnerCommandHandoff(f *os.File, path string) error {
+	if err := f.Truncate(0); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Sync(); err != nil {
+		_ = f.Close()
+		return err
+	}
+	if err := f.Close(); err != nil {
+		return err
+	}
+	if err := os.Remove(path); err != nil && !os.IsNotExist(err) && !errors.Is(err, os.ErrPermission) && !errors.Is(err, syscall.EPERM) {
+		return err
+	}
+	return nil
 }
 
 func writeJobMarker(path string) error {

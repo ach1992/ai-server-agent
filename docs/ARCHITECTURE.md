@@ -144,7 +144,9 @@ The installed `/usr/local/sbin/ai-server-agent-manage` wrapper acquires:
 
 before entering `manage.sh`. Install, update, uninstall and purge use the same root-only lifecycle lock (or inherit its open descriptor when invoked through management). This namespace is outside Agent config/state so purge cannot remove the lock while a concurrent operation is active.
 
-This is the authoritative cross-operation lifecycle lock for privileged state mutation.
+Persistent-job admission participates in the same namespace with a shared lock held from before admission/recovery mutation through the `systemd-run` launch outcome. Destructive lifecycle operations take the exclusive lock, so uninstall/purge cannot pass their active-job check and then race with a newly admitted persistent job. The executor fails closed when the lifecycle lock cannot be validated/acquired safely.
+
+This is the authoritative cross-operation lifecycle lock for privileged state mutation and persistent-job launch exclusion.
 
 ### Cloudflare/internal management lock
 

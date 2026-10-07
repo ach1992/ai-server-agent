@@ -24,14 +24,15 @@ import (
 )
 
 type Server struct {
-	cfg       config.Config
-	token     string
-	guard     *policy.Guard
-	audit     *audit.Logger
-	workerUID uint32
-	workerGID uint32
-	runs      *runLimiter
-	jobsMu    sync.Mutex
+	cfg               config.Config
+	token             string
+	guard             *policy.Guard
+	audit             *audit.Logger
+	workerUID         uint32
+	workerGID         uint32
+	runs              *runLimiter
+	jobsMu            sync.Mutex
+	lifecycleLockPath string
 }
 
 func NewServer(cfg config.Config, token string) (*Server, error) {
@@ -46,7 +47,16 @@ func NewServer(cfg config.Config, token string) (*Server, error) {
 	uid64, _ := strconv.ParseUint(u.Uid, 10, 32)
 	gid64, _ := strconv.ParseUint(u.Gid, 10, 32)
 	protected := []string{"ai-server-agent", "/usr/local/bin/ai-server-agent", "/etc/ai-server-agent", cfg.StateDir, cfg.LogDir, cfg.ExecutorSocket, cfg.ListenAddress}
-	return &Server{cfg: cfg, token: token, guard: policy.New(protected), audit: audit.New(filepath.Join(cfg.LogDir, "audit.jsonl")), workerUID: uint32(uid64), workerGID: uint32(gid64), runs: newRunLimiter()}, nil
+	return &Server{
+		cfg:               cfg,
+		token:             token,
+		guard:             policy.New(protected),
+		audit:             audit.New(filepath.Join(cfg.LogDir, "audit.jsonl")),
+		workerUID:         uint32(uid64),
+		workerGID:         uint32(gid64),
+		runs:              newRunLimiter(),
+		lifecycleLockPath: lifecycleManagementLockPath,
+	}, nil
 }
 
 func (s *Server) Serve() error {
@@ -209,37 +219,12 @@ func (s *Server) jobStatus(req Request) Response {
 	if err != nil {
 		return Response{Error: err.Error(), ReasonCode: "invalid_job_id", ErrorCode: "invalid_job_id", ErrorClass: "validation"}
 	}
-	statusPath := filepath.Join(s.cfg.StateDir, "jobs", id+".status")
-	if status, _, er := s.readJobStatusValue(statusPath); er == nil {
-		if status == jobStatusUnknown {
-			return Response{
-				Error:      "persistent job ended without a durable exit status; completion cannot be proven",
-				ReasonCode: "unknown_completion",
-				ErrorCode:  "unknown_completion",
-				ErrorClass: "state",
-				JobID:      id,
-				Status:     "unknown",
-			}
-		}
-		if status != "" {
-			code, _ := strconv.Atoi(status)
-			return Response{
-				OK:             true,
-				Status:         "completed",
-				Output:         status,
-				OutputEncoding: "utf-8",
-				BytesSeen:      int64(len(status)),
-				BytesReturned:  int64(len(status)),
-				ExitCode:       code,
-				JobID:          id,
-			}
-		}
-	} else if !os.IsNotExist(er) {
-		return jobStateError("job_status_unavailable", er)
-	}
-
 	jobsDir := filepath.Join(s.cfg.StateDir, "jobs")
 	paths := jobPathsFor(jobsDir, id)
+	if terminal, found := s.jobTerminalReplayResponse(paths.status, id); found {
+		return terminal
+	}
+
 	started, err := s.jobStarted(paths.started)
 	if err != nil {
 		return jobStateError("job_status_unavailable", err)
@@ -260,15 +245,11 @@ func (s *Server) jobStatus(req Request) Response {
 			if err := s.markJobStatusUnknownIfEmpty(paths.status); err != nil {
 				return jobStateError("job_status_unavailable", err)
 			}
-			_ = os.Remove(paths.command)
-			return Response{
-				Error:      "persistent job ended without a durable exit status; completion cannot be proven",
-				ReasonCode: "unknown_completion",
-				ErrorCode:  "unknown_completion",
-				ErrorClass: "state",
-				JobID:      id,
-				Status:     "unknown",
+			if err := removeTerminalCommandHandoff(paths.command); err != nil {
+				return jobStateError("job_status_unavailable", err)
 			}
+			terminal, _ := s.jobTerminalReplayResponse(paths.status, id)
+			return terminal
 		}
 	}
 
