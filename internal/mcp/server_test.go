@@ -81,6 +81,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 	foundRoot := false
 	foundBrowser := false
 	foundStartJob := false
+	foundJobStatus := false
 	for _, tool := range res.Tools {
 		switch tool.Name {
 		case "agent_environment":
@@ -115,6 +116,17 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			if !strings.Contains(string(b), `"operation_id"`) {
 				t.Fatalf("start_job input schema missing operation_id: %s", b)
 			}
+		case "job_status":
+			foundJobStatus = true
+			if tool.Annotations == nil || tool.Annotations.ReadOnlyHint {
+				t.Fatal("job_status must not advertise readOnlyHint because interrupted-state reconciliation may persist bounded local recovery state")
+			}
+			if tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint {
+				t.Fatal("job_status reconciliation is non-destructive")
+			}
+			if !tool.Annotations.IdempotentHint {
+				t.Fatal("job_status reconciliation must remain idempotent")
+			}
 		case "browser_run":
 			foundBrowser = true
 			if tool.Annotations == nil || tool.Annotations.DestructiveHint == nil || !*tool.Annotations.DestructiveHint || tool.Annotations.OpenWorldHint == nil || !*tool.Annotations.OpenWorldHint {
@@ -122,8 +134,8 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			}
 		}
 	}
-	if !foundEnvironment || !foundRoot || !foundStartJob || !foundBrowser {
-		t.Fatalf("required tools missing: environment=%v root=%v start_job=%v browser=%v", foundEnvironment, foundRoot, foundStartJob, foundBrowser)
+	if !foundEnvironment || !foundRoot || !foundStartJob || !foundJobStatus || !foundBrowser {
+		t.Fatalf("required tools missing: environment=%v root=%v start_job=%v job_status=%v browser=%v", foundEnvironment, foundRoot, foundStartJob, foundJobStatus, foundBrowser)
 	}
 }
 

@@ -226,7 +226,7 @@ func TestPersistentJobIdempotencyAndCommandPrivacy(t *testing.T) {
 	count := filepath.Join(t.TempDir(), "systemd-run.count")
 
 	systemctl := filepath.Join(fakeBin, "systemctl")
-	systemctlScript := "#!/bin/sh\ncase \"$1\" in\n  list-units) exit 0 ;;\n  show) printf 'not-found\\n'; exit 0 ;;\n  *) exit 64 ;;\nesac\n"
+	systemctlScript := "#!/bin/sh\ncase \"$1\" in\n  list-units) exit 0 ;;\n  show) printf 'loaded\\n'; exit 0 ;;\n  *) exit 64 ;;\nesac\n"
 	if err := os.WriteFile(systemctl, []byte(systemctlScript), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -324,6 +324,172 @@ func TestPersistentJobCapacityFailsWithoutQueue(t *testing.T) {
 	}
 }
 
+func TestPersistentJobDefinitiveLaunchFailureRemovesPreparedArtifacts(t *testing.T) {
+	state := t.TempDir()
+	jobs := filepath.Join(state, "jobs")
+	if err := os.Mkdir(jobs, 0711); err != nil {
+		t.Fatal(err)
+	}
+	fakeBin := t.TempDir()
+	systemctl := filepath.Join(fakeBin, "systemctl")
+	systemctlScript := "#!/bin/sh\ncase \"$1\" in\n  list-units) exit 0 ;;\n  show) printf 'not-found\\n'; exit 0 ;;\n  *) exit 64 ;;\nesac\n"
+	if err := os.WriteFile(systemctl, []byte(systemctlScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+	systemdRun := filepath.Join(fakeBin, "systemd-run")
+	if err := os.WriteFile(systemdRun, []byte("#!/bin/sh\nprintf 'definitive launch failure\\n' >&2\nexit 1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+
+	current, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{
+		cfg:       config.Config{StateDir: state, WorkspaceDir: t.TempDir(), WorkerUser: current.Username},
+		token:     "test-executor-token",
+		guard:     policy.New(nil),
+		audit:     audit.New(filepath.Join(t.TempDir(), "audit.jsonl")),
+		workerUID: uint32(os.Geteuid()),
+		workerGID: uint32(os.Getegid()),
+	}
+	req := Request{Command: "printf never-ran", OperationID: "definitive-launch-failure"}
+	resp := server.startJobBounded(req)
+	if resp.OK || resp.ErrorCode != "job_start_failed" || resp.JobID == "" {
+		t.Fatalf("definitive launch failure = %+v", resp)
+	}
+	paths := jobPathsFor(jobs, resp.JobID)
+	for _, path := range []string{paths.command, paths.log, paths.status, paths.started} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("definitive launch artifact still exists: %s (err=%v)", path, err)
+		}
+	}
+	claim, found, err := readJobClaim(filepath.Join(jobs, "claims", operationClaimName(req.OperationID)))
+	if err != nil || !found {
+		t.Fatalf("read failed launch claim: found=%v err=%v", found, err)
+	}
+	if claim.State != "failed" {
+		t.Fatalf("failed launch claim state = %q, want failed", claim.State)
+	}
+}
+
+func TestPersistentJobUnknownLaunchOutcomeKeepsRecoverableClaim(t *testing.T) {
+	state := t.TempDir()
+	jobs := filepath.Join(state, "jobs")
+	if err := os.Mkdir(jobs, 0711); err != nil {
+		t.Fatal(err)
+	}
+	fakeBin := t.TempDir()
+	systemctl := filepath.Join(fakeBin, "systemctl")
+	systemctlScript := "#!/bin/sh\ncase \"$1\" in\n  list-units) exit 0 ;;\n  show) printf 'systemd state unavailable\\n' >&2; exit 2 ;;\n  *) exit 64 ;;\nesac\n"
+	if err := os.WriteFile(systemctl, []byte(systemctlScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+	systemdRun := filepath.Join(fakeBin, "systemd-run")
+	if err := os.WriteFile(systemdRun, []byte("#!/bin/sh\nprintf 'launch transport failed\\n' >&2\nexit 1\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+
+	current, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{
+		cfg:       config.Config{StateDir: state, WorkspaceDir: t.TempDir(), WorkerUser: current.Username},
+		token:     "test-executor-token",
+		guard:     policy.New(nil),
+		audit:     audit.New(filepath.Join(t.TempDir(), "audit.jsonl")),
+		workerUID: uint32(os.Geteuid()),
+		workerGID: uint32(os.Getegid()),
+	}
+	req := Request{Command: "printf uncertain", OperationID: "unknown-launch"}
+	resp := server.startJobBounded(req)
+	if resp.OK || resp.ErrorCode != "unknown_completion" || resp.JobID == "" {
+		t.Fatalf("unknown launch response = %+v", resp)
+	}
+	claimPath := filepath.Join(jobs, "claims", operationClaimName(req.OperationID))
+	claim, found, err := readJobClaim(claimPath)
+	if err != nil || !found {
+		t.Fatalf("read unknown launch claim: found=%v err=%v", found, err)
+	}
+	if claim.State != "launching" || claim.JobID != resp.JobID {
+		t.Fatalf("unknown launch claim = %+v, response=%+v", claim, resp)
+	}
+	if _, err := os.Stat(filepath.Join(jobs, resp.JobID+".cmd")); err != nil {
+		t.Fatalf("unknown launch must preserve protected handoff for safe reconciliation: %v", err)
+	}
+}
+
+func TestPersistentJobClaimReplayCannotBypassActiveCapacity(t *testing.T) {
+	state := t.TempDir()
+	jobs := filepath.Join(state, "jobs")
+	claims := filepath.Join(jobs, "claims")
+	if err := os.Mkdir(jobs, 0711); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(claims, 0700); err != nil {
+		t.Fatal(err)
+	}
+	fakeBin := t.TempDir()
+	systemctl := filepath.Join(fakeBin, "systemctl")
+	activeLines := strings.Repeat("ai-job-active.service loaded active running test\n", maxActivePersistentJobs)
+	systemctlScript := "#!/bin/sh\ncase \"$1\" in\n  list-units) printf '%s' '" + activeLines + "'; exit 0 ;;\n  show) printf 'not-found\\n'; exit 0 ;;\n  *) exit 64 ;;\nesac\n"
+	if err := os.WriteFile(systemctl, []byte(systemctlScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+	launchMarker := filepath.Join(t.TempDir(), "launched")
+	systemdRun := filepath.Join(fakeBin, "systemd-run")
+	if err := os.WriteFile(systemdRun, []byte("#!/bin/sh\ntouch "+shellQuote(launchMarker)+"\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+
+	current, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{
+		cfg:       config.Config{StateDir: state, WorkspaceDir: t.TempDir(), WorkerUser: current.Username},
+		token:     "test-executor-token",
+		guard:     policy.New(nil),
+		audit:     audit.New(filepath.Join(t.TempDir(), "audit.jsonl")),
+		workerUID: uint32(os.Geteuid()),
+		workerGID: uint32(os.Getegid()),
+	}
+	req := Request{Command: "printf recovered", OperationID: "capacity-replay"}
+	claim := jobClaim{
+		Version:     1,
+		JobID:       "123456788",
+		Fingerprint: server.jobFingerprint(req),
+		State:       "claimed",
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	claimPath := filepath.Join(claims, operationClaimName(req.OperationID))
+	if err := createJobClaim(claimPath, claim); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := server.startJobBounded(req)
+	if resp.OK || resp.ErrorCode != "resource_limit" || resp.Status != "busy" || !resp.Retryable || !resp.IdempotentReplay || resp.JobID != claim.JobID {
+		t.Fatalf("capacity replay response = %+v", resp)
+	}
+	if _, err := os.Stat(launchMarker); !os.IsNotExist(err) {
+		t.Fatalf("capacity-limited replay invoked systemd-run; err=%v", err)
+	}
+	if _, err := os.Stat(filepath.Join(jobs, claim.JobID+".cmd")); !os.IsNotExist(err) {
+		t.Fatalf("claimed replay left a protected handoff while waiting for capacity; err=%v", err)
+	}
+	recovered, found, err := readJobClaim(claimPath)
+	if err != nil || !found {
+		t.Fatalf("read capacity-limited claim: found=%v err=%v", found, err)
+	}
+	if recovered.State != "claimed" {
+		t.Fatalf("capacity-limited claim state = %q, want claimed", recovered.State)
+	}
+}
+
 func TestPersistentJobClaimRecoversBeforeLaunch(t *testing.T) {
 	state := t.TempDir()
 	jobs := filepath.Join(state, "jobs")
@@ -393,6 +559,129 @@ func TestPersistentJobClaimRecoversBeforeLaunch(t *testing.T) {
 	}
 	if string(commandBytes) != req.Command {
 		t.Fatalf("rebuilt command handoff = %q, want %q", commandBytes, req.Command)
+	}
+}
+
+func TestPersistentJobReplayPreservesUnknownTerminalState(t *testing.T) {
+	state := t.TempDir()
+	jobs := filepath.Join(state, "jobs")
+	claims := filepath.Join(jobs, "claims")
+	if err := os.Mkdir(jobs, 0711); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(claims, 0700); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{
+		cfg:       config.Config{StateDir: state},
+		token:     "test-executor-token",
+		guard:     policy.New(nil),
+		audit:     audit.New(filepath.Join(t.TempDir(), "audit.jsonl")),
+		workerUID: uint32(os.Geteuid()),
+		workerGID: uint32(os.Getegid()),
+	}
+	req := Request{Command: "printf maybe", OperationID: "unknown-terminal-replay"}
+	claim := jobClaim{
+		Version:     1,
+		JobID:       "123456787",
+		Fingerprint: server.jobFingerprint(req),
+		State:       "started",
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if err := createJobClaim(filepath.Join(claims, operationClaimName(req.OperationID)), claim); err != nil {
+		t.Fatal(err)
+	}
+	paths := jobPathsFor(jobs, claim.JobID)
+	if err := os.WriteFile(paths.status, []byte(jobStatusUnknown+"\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := server.startJobBounded(req)
+	if resp.OK || resp.ErrorCode != "unknown_completion" || resp.Status != "unknown" || resp.JobID != claim.JobID || !resp.IdempotentReplay {
+		t.Fatalf("unknown terminal replay = %+v", resp)
+	}
+}
+
+func TestPersistentJobReplayReportsCompletedStatus(t *testing.T) {
+	state := t.TempDir()
+	jobs := filepath.Join(state, "jobs")
+	claims := filepath.Join(jobs, "claims")
+	if err := os.Mkdir(jobs, 0711); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(claims, 0700); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{
+		cfg:       config.Config{StateDir: state},
+		token:     "test-executor-token",
+		guard:     policy.New(nil),
+		audit:     audit.New(filepath.Join(t.TempDir(), "audit.jsonl")),
+		workerUID: uint32(os.Geteuid()),
+		workerGID: uint32(os.Getegid()),
+	}
+	req := Request{Command: "exit 7", OperationID: "completed-terminal-replay"}
+	claim := jobClaim{
+		Version:     1,
+		JobID:       "123456786",
+		Fingerprint: server.jobFingerprint(req),
+		State:       "started",
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
+	}
+	if err := createJobClaim(filepath.Join(claims, operationClaimName(req.OperationID)), claim); err != nil {
+		t.Fatal(err)
+	}
+	paths := jobPathsFor(jobs, claim.JobID)
+	if err := os.WriteFile(paths.status, []byte("7\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := server.startJobBounded(req)
+	if !resp.OK || resp.Status != "completed" || resp.ExitCode != 7 || resp.JobID != claim.JobID || !resp.IdempotentReplay {
+		t.Fatalf("completed terminal replay = %+v", resp)
+	}
+}
+
+func TestFailedJobClaimCleanupRemovesPreparedArtifacts(t *testing.T) {
+	state := t.TempDir()
+	jobs := filepath.Join(state, "jobs")
+	claims := filepath.Join(jobs, "claims")
+	if err := os.Mkdir(jobs, 0711); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(claims, 0700); err != nil {
+		t.Fatal(err)
+	}
+	id := "123450001"
+	paths := jobPathsFor(jobs, id)
+	for _, path := range []string{paths.log, paths.status, paths.started} {
+		if err := os.WriteFile(path, nil, 0640); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := os.WriteFile(paths.command, []byte("printf stale-secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	claimPath := filepath.Join(claims, operationClaimName("failed-cleanup"))
+	if err := createJobClaim(claimPath, jobClaim{
+		Version:     1,
+		JobID:       id,
+		Fingerprint: strings.Repeat("e", 64),
+		State:       "failed",
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if err := cleanupFailedJobClaims(jobs, claims); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{paths.command, paths.log, paths.status, paths.started} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("failed-claim artifact still exists: %s (err=%v)", path, err)
+		}
+	}
+	if _, err := os.Stat(claimPath); err != nil {
+		t.Fatalf("bounded failed claim should remain for idempotent replay: %v", err)
 	}
 }
 

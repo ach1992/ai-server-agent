@@ -52,7 +52,9 @@ func (s *Server) cleanupStalePrelaunchClaims(jobsDir, claimsDir string, now time
 			}
 			continue
 		}
-		cleanupJobPaths(paths)
+		if err := removeJobPaths(paths); err != nil {
+			return err
+		}
 		claim.State = "failed"
 		if err := updateJobClaim(path, claim); err != nil {
 			return err

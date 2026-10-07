@@ -116,7 +116,7 @@ func (s *Server) startJobBounded(req Request) Response {
 		} else if found {
 			return s.resumeClaimedJob(req, jobsDir, claimPath, claim, fingerprint)
 		}
-		if err := cleanupFailedJobClaims(claimsDir); err != nil {
+		if err := cleanupFailedJobClaims(jobsDir, claimsDir); err != nil {
 			return jobStateError("job_state_unavailable", err)
 		}
 		claimCount, err := countJobClaims(claimsDir)
@@ -135,33 +135,8 @@ func (s *Server) startJobBounded(req Request) Response {
 		}
 	}
 
-	active, err := activeAgentJobCount()
-	if err != nil {
-		return jobStateError("job_state_unavailable", err)
-	}
-	if active >= maxActivePersistentJobs {
-		return Response{
-			Error:      "persistent job execution capacity is busy",
-			ReasonCode: "resource_limit",
-			ErrorCode:  "resource_limit",
-			ErrorClass: "resource",
-			Retryable:  true,
-			Status:     "busy",
-		}
-	}
-	ok, free, err := jobStateHasReserve(jobsDir)
-	if err != nil {
-		return jobStateError("job_state_unavailable", err)
-	}
-	if !ok {
-		return Response{
-			Error:      fmt.Sprintf("job state filesystem is below the %d-byte safety reserve (%d bytes available)", jobStateSafetyReserveBytes, free),
-			ReasonCode: "resource_limit",
-			ErrorCode:  "resource_limit",
-			ErrorClass: "resource",
-			Retryable:  true,
-			Status:     "disk_pressure",
-		}
+	if blocked := persistentJobAdmissionResponse(jobsDir); blocked != nil {
+		return *blocked
 	}
 
 	id := strconv.FormatInt(time.Now().UnixNano(), 10)
@@ -216,8 +191,11 @@ func (s *Server) startJobBounded(req Request) Response {
 				}
 			}
 		}
-	} else if claimPath != "" {
-		s.failJobClaim(claimPath, &claim)
+	} else if resp.ErrorCode != "unknown_completion" {
+		cleanupJobPaths(paths)
+		if claimPath != "" {
+			s.failJobClaim(claimPath, &claim)
+		}
 	}
 
 	_ = s.audit.Write(audit.Entry{
@@ -243,6 +221,10 @@ func (s *Server) resumeClaimedJob(req Request, jobsDir, claimPath string, claim 
 		return jobStateError("job_state_unavailable", fmt.Errorf("invalid claimed job id: %w", err))
 	}
 	paths := jobPathsFor(jobsDir, claim.JobID)
+	if terminal, found := s.jobTerminalReplayResponse(paths.status, claim.JobID); found {
+		terminal.IdempotentReplay = true
+		return terminal
+	}
 
 	switch claim.State {
 	case "started":
@@ -269,7 +251,9 @@ func (s *Server) resumeClaimedJob(req Request, jobsDir, claimPath string, claim 
 	if evidence {
 		claim.State = "started"
 		if err := updateJobClaim(claimPath, claim); err != nil {
-			return jobStateError("job_state_unavailable", err)
+			resp := jobClaimFinalizeError(claim.JobID, err)
+			resp.IdempotentReplay = true
+			return resp
 		}
 		return Response{OK: true, JobID: claim.JobID, Status: "accepted", IdempotentReplay: true}
 	}
@@ -277,19 +261,9 @@ func (s *Server) resumeClaimedJob(req Request, jobsDir, claimPath string, claim 
 	if claim.State == "claimed" {
 		// The durable claim is written before any launch attempt. If the
 		// executor crashed while preparing the protected handoff, no unit could
-		// have been launched yet. Rebuild that handoff from the retried,
-		// fingerprint-matched request instead of leaving a permanent claim.
+		// have been launched yet. Remove partial handoff state now; rebuilding
+		// happens only after the same resource-admission checks as a new job.
 		cleanupJobPaths(paths)
-		if err := s.prepareJobFiles(paths, req); err != nil {
-			claim.State = "failed"
-			_ = updateJobClaim(claimPath, claim)
-			return jobStateError("job_prepare_failed", err)
-		}
-		claim.State = "launching"
-		if err := updateJobClaim(claimPath, claim); err != nil {
-			cleanupJobPaths(paths)
-			return jobStateError("job_state_unavailable", err)
-		}
 	} else {
 		if _, err := os.Lstat(paths.command); err != nil {
 			if os.IsNotExist(err) {
@@ -308,14 +282,36 @@ func (s *Server) resumeClaimedJob(req Request, jobsDir, claimPath string, claim 
 		}
 	}
 
+	if blocked := persistentJobAdmissionResponse(jobsDir); blocked != nil {
+		blocked.JobID = claim.JobID
+		blocked.IdempotentReplay = true
+		return *blocked
+	}
+
+	if claim.State == "claimed" {
+		if err := s.prepareJobFiles(paths, req); err != nil {
+			claim.State = "failed"
+			_ = updateJobClaim(claimPath, claim)
+			return jobStateError("job_prepare_failed", err)
+		}
+		claim.State = "launching"
+		if err := updateJobClaim(claimPath, claim); err != nil {
+			cleanupJobPaths(paths)
+			return jobStateError("job_state_unavailable", err)
+		}
+	}
+
 	resp := s.launchPreparedJob(req, paths, claim.JobID)
 	resp.IdempotentReplay = true
 	if resp.OK {
 		claim.State = "started"
 		if err := updateJobClaim(claimPath, claim); err != nil {
-			return jobStateError("job_state_unavailable", err)
+			finalize := jobClaimFinalizeError(claim.JobID, err)
+			finalize.IdempotentReplay = true
+			return finalize
 		}
-	} else {
+	} else if resp.ErrorCode != "unknown_completion" {
+		cleanupJobPaths(paths)
 		claim.State = "failed"
 		_ = updateJobClaim(claimPath, claim)
 	}
@@ -361,7 +357,13 @@ func (s *Server) launchPreparedJob(req Request, paths jobPaths, id string) Respo
 	if err != nil {
 		evidence, evidenceErr := jobHasExecutionEvidence(paths, id)
 		if evidenceErr != nil {
-			return jobStateError("unknown_completion", fmt.Errorf("systemd-run failed and job state could not be reconciled: %w", evidenceErr))
+			return Response{
+				Error:      "systemd-run failed and job state could not be reconciled: " + evidenceErr.Error(),
+				ReasonCode: "unknown_completion",
+				ErrorCode:  "unknown_completion",
+				ErrorClass: "state",
+				JobID:      id,
+			}
 		}
 		if !evidence {
 			_ = os.Remove(paths.command)
@@ -450,11 +452,18 @@ func jobPathsFor(jobsDir, id string) jobPaths {
 	}
 }
 
+func removeJobPaths(paths jobPaths) error {
+	var firstErr error
+	for _, path := range []string{paths.command, paths.log, paths.status, paths.started} {
+		if err := os.Remove(path); err != nil && !os.IsNotExist(err) && firstErr == nil {
+			firstErr = fmt.Errorf("remove job artifact %s: %w", path, err)
+		}
+	}
+	return firstErr
+}
+
 func cleanupJobPaths(paths jobPaths) {
-	_ = os.Remove(paths.command)
-	_ = os.Remove(paths.log)
-	_ = os.Remove(paths.status)
-	_ = os.Remove(paths.started)
+	_ = removeJobPaths(paths)
 }
 
 func validateOperationID(id string) error {
@@ -576,6 +585,16 @@ func readJobClaim(path string) (jobClaim, bool, error) {
 	return claim, true, nil
 }
 
+func jobClaimFinalizeError(jobID string, err error) Response {
+	return Response{
+		Error:      "job started but idempotency state could not be finalized: " + err.Error(),
+		ReasonCode: "unknown_completion",
+		ErrorCode:  "unknown_completion",
+		ErrorClass: "state",
+		JobID:      jobID,
+	}
+}
+
 func (s *Server) failJobClaim(path string, claim *jobClaim) {
 	if path == "" || claim == nil {
 		return
@@ -637,6 +656,40 @@ func jobHasExecutionEvidence(paths jobPaths, id string) (bool, error) {
 		}
 	}
 	return jobUnitExists(id)
+}
+
+func persistentJobAdmissionResponse(jobsDir string) *Response {
+	active, err := activeAgentJobCount()
+	if err != nil {
+		resp := jobStateError("job_state_unavailable", err)
+		return &resp
+	}
+	if active >= maxActivePersistentJobs {
+		return &Response{
+			Error:      "persistent job execution capacity is busy",
+			ReasonCode: "resource_limit",
+			ErrorCode:  "resource_limit",
+			ErrorClass: "resource",
+			Retryable:  true,
+			Status:     "busy",
+		}
+	}
+	ok, free, err := jobStateHasReserve(jobsDir)
+	if err != nil {
+		resp := jobStateError("job_state_unavailable", err)
+		return &resp
+	}
+	if !ok {
+		return &Response{
+			Error:      fmt.Sprintf("job state filesystem is below the %d-byte safety reserve (%d bytes available)", jobStateSafetyReserveBytes, free),
+			ReasonCode: "resource_limit",
+			ErrorCode:  "resource_limit",
+			ErrorClass: "resource",
+			Retryable:  true,
+			Status:     "disk_pressure",
+		}
+	}
+	return nil
 }
 
 func jobStateHasReserve(path string) (bool, int64, error) {
@@ -706,20 +759,58 @@ func (s *Server) cleanupCompletedJobArtifacts(jobsDir, claimsDir string) error {
 				return fmt.Errorf("invalid job status file: %s", paths.status)
 			}
 		}
-		_ = os.Remove(paths.command)
+		if err := os.Remove(paths.command); err != nil && !os.IsNotExist(err) {
+			return fmt.Errorf("remove terminal command handoff %s: %w", paths.command, err)
+		}
 		completed = append(completed, completedJobArtifact{id: id, modTime: modTime})
 	}
 	sort.Slice(completed, func(i, j int) bool { return completed[i].modTime.After(completed[j].modTime) })
 	if len(completed) > maxCompletedJobArtifacts {
 		for _, old := range completed[maxCompletedJobArtifacts:] {
 			paths := jobPathsFor(jobsDir, old.id)
-			cleanupJobPaths(paths)
+			if err := removeJobPaths(paths); err != nil {
+				return err
+			}
 			if err := removeClaimsForJob(claimsDir, old.id); err != nil {
 				return err
 			}
 		}
 	}
 	return nil
+}
+
+func (s *Server) jobTerminalReplayResponse(statusPath, jobID string) (Response, bool) {
+	status, _, err := s.readJobStatusValue(statusPath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return Response{}, false
+		}
+		return jobStateError("job_status_unavailable", err), true
+	}
+	if status == "" {
+		return Response{}, false
+	}
+	if status == jobStatusUnknown {
+		return Response{
+			Error:      "persistent job ended without a durable exit status; completion cannot be proven",
+			ReasonCode: "unknown_completion",
+			ErrorCode:  "unknown_completion",
+			ErrorClass: "state",
+			JobID:      jobID,
+			Status:     "unknown",
+		}, true
+	}
+	code, _ := strconv.Atoi(status)
+	return Response{
+		OK:             true,
+		Status:         "completed",
+		Output:         status,
+		OutputEncoding: "utf-8",
+		BytesSeen:      int64(len(status)),
+		BytesReturned:  int64(len(status)),
+		ExitCode:       code,
+		JobID:          jobID,
+	}, true
 }
 
 func (s *Server) readJobStatusValue(path string) (string, time.Time, error) {
@@ -831,7 +922,7 @@ func countJobClaims(claimsDir string) (int, error) {
 	return count, nil
 }
 
-func cleanupFailedJobClaims(claimsDir string) error {
+func cleanupFailedJobClaims(jobsDir, claimsDir string) error {
 	entries, err := os.ReadDir(claimsDir)
 	if err != nil {
 		return err
@@ -852,6 +943,13 @@ func cleanupFailedJobClaims(claimsDir string) error {
 		}
 		if !found || claim.State != "failed" {
 			continue
+		}
+		id, err := safeID(claim.JobID)
+		if err != nil {
+			return fmt.Errorf("invalid failed claim job id: %w", err)
+		}
+		if err := removeJobPaths(jobPathsFor(jobsDir, id)); err != nil {
+			return err
 		}
 		info, err := entry.Info()
 		if err != nil {
