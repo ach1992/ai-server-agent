@@ -49,9 +49,7 @@ jobs:
             echo "gofmt diff:" >&2
             while IFS= read -r file; do
               gofmt -d "$file" >&2
-            done <<EOF
-$unformatted
-EOF
+            done <<< "$unformatted"
             exit 1
           fi
       - name: Vet
