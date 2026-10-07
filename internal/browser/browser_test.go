@@ -200,6 +200,74 @@ func TestBrowserStatusRejectsMissingOrNonExecutableRuntimeExecutable(t *testing.
 	}
 }
 
+func TestBrowserSetupConvergesWhenRuntimeExecutableMissing(t *testing.T) {
+	m := testBrowserManager(t)
+	writeReadyBrowserFixture(t, m)
+	executables, ok := browserRuntimeExecutablePaths(m.engineDir(), desiredRuntimeManifest())
+	if !ok || len(executables) != 3 {
+		t.Fatalf("runtime executable paths = %v, ok=%v", executables, ok)
+	}
+	if err := os.Remove(executables[0]); err != nil {
+		t.Fatal(err)
+	}
+	if status := m.Status(context.Background()); status.Ready {
+		t.Fatalf("runtime with missing Chromium executable unexpectedly ready: %+v", status)
+	}
+
+	m.token = "test-executor-token"
+	socket := filepath.Join(t.TempDir(), "executor.sock")
+	m.cfg.ExecutorSocket = socket
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	requestCh := make(chan executor.Request, 1)
+	serverDone := make(chan error, 1)
+	go func() {
+		conn, err := ln.Accept()
+		if err != nil {
+			serverDone <- err
+			return
+		}
+		defer conn.Close()
+		var req executor.Request
+		if err := json.NewDecoder(conn).Decode(&req); err != nil {
+			serverDone <- err
+			return
+		}
+		requestCh <- req
+		resp := executor.Response{
+			Error:      "setup intentionally not executed by unit-test executor",
+			ReasonCode: "command_failed",
+			ErrorCode:  "command_failed",
+			ErrorClass: "process",
+			ExitCode:   2,
+		}
+		if err := json.NewEncoder(conn).Encode(resp); err != nil {
+			serverDone <- err
+			return
+		}
+		serverDone <- nil
+	}()
+
+	resp, err := m.Setup(context.Background(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if resp.Status == "already_current" {
+		t.Fatalf("setup skipped convergence for runtime with missing executable: %+v", resp)
+	}
+	req := <-requestCh
+	if req.Command == m.cleanupCommand() || !strings.Contains(req.Command, `stage=$(mktemp -d "$parent/.browser-stage.XXXXXX")`) {
+		t.Fatalf("setup did not select convergence command after readiness failed")
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestBrowserStatusRejectsStaleManifest(t *testing.T) {
 	m := testBrowserManager(t)
 	writeReadyBrowserFixture(t, m)
