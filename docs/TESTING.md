@@ -36,7 +36,7 @@ CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
 
 These cover Go unit/behavior tests, race detection and the production binary build.
 
-The executor-foundation tests specifically exercise separate non-queueing worker/root capacity, structured resource-limit results, bounded timeout selection, graceful TERM/KILL process-group cancellation, same-process-group background cleanup, peer-close context cancellation, and both sides of the private executor response-frame limit. These tests complement, rather than replace, the privileged lifecycle/security jobs.
+The executor-foundation tests specifically exercise separate non-queueing worker/root capacity, structured resource-limit results, bounded timeout selection, graceful TERM/KILL process-group cancellation, same-process-group background cleanup, peer-close context cancellation, and both sides of the private executor response-frame limit. The command/jobs tests additionally cover production-time head/tail output bounding, binary-safe base64 results, physical persistent-log bounds with logical retention offsets, protected command-file consumption, idempotent retry/conflict behavior, raw-command absence from Agent-created systemd argv/audit/idempotency claims, and fail-fast persistent-job capacity. These tests complement, rather than replace, the privileged lifecycle/security jobs.
 
 ### Shell syntax
 
@@ -52,10 +52,11 @@ The main CI workflow performs a real privileged lifecycle on an Ubuntu 22.04 amd
 2. verify both systemd services are active;
 3. verify the installed management/update paths;
 4. execute root trust-boundary tests;
-5. safe-uninstall and verify preserved Agent data/users/workspace;
-6. reinstall;
-7. purge and verify Agent-owned config/state/log/runtime and `aiagent` are removed;
-8. verify `aiworker` and `/srv/ai-workspace` remain.
+5. create a real transient `ai-job-*.service` guard fixture and prove safe uninstall refuses while it is active without stopping that work;
+6. stop the fixture, then safe-uninstall and verify preserved Agent data/users/workspace;
+7. reinstall;
+8. purge and verify Agent-owned config/state/log/runtime and `aiagent` are removed;
+9. verify `aiworker` and `/srv/ai-workspace` remain.
 
 A separate first-run test proves that choosing "Configure later" is a successful core installation, not an installer failure.
 
@@ -196,7 +197,7 @@ A green CI/High Assurance result does not by itself prove:
 - live Cloudflare API permissions or behavior on a real user zone;
 - real public DNS/TLS propagation;
 - ChatGPT Business tool discovery and end-to-end MCP use (this proves the current ChatGPT integration only, not universal AI-client compatibility);
-- an actual persistent job through a real transient `systemd-run` unit;
+- an end-to-end `start_job` MCP/executor call through the production fixed runner and a real transient `systemd-run` unit (CI does exercise a real matching transient unit for the uninstall guard, but that is not a substitute for this direct-client path);
 - current repository Rulesets bypass configuration;
 - future release immutability settings before publication;
 - production VPS behavior outside the supported validated target.
