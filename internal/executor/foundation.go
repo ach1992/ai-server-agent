@@ -19,9 +19,9 @@ import (
 )
 
 const (
-	maxExecutorRequestBytes   = 8 << 20
-	maxExecutorResponseBytes  = 8 << 20
-	executorConnectionTimeout = 31 * time.Minute
+	maxExecutorRequestBytes    = 8 << 20
+	maxExecutorResponseBytes   = 8 << 20
+	executorConnectionTimeout  = 31 * time.Minute
 	defaultRunTimeout          = 30 * time.Minute
 	processGroupTerminateGrace = 2 * time.Second
 	maxWorkerRunConcurrency    = 4
