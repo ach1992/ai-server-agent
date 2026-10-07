@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -79,6 +80,8 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 	foundEnvironment := false
 	foundRoot := false
 	foundBrowser := false
+	foundStartJob := false
+	foundJobStatus := false
 	for _, tool := range res.Tools {
 		switch tool.Name {
 		case "agent_environment":
@@ -91,6 +94,39 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			if tool.Annotations == nil || tool.Annotations.DestructiveHint == nil || !*tool.Annotations.DestructiveHint {
 				t.Fatal("run_root_command must advertise destructiveHint")
 			}
+			if tool.OutputSchema == nil {
+				t.Fatal("run_root_command must advertise a typed output schema")
+			}
+			b, err := json.Marshal(tool.OutputSchema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			schema := string(b)
+			for _, field := range []string{"error_code", "error_class", "output", "output_encoding", "bytes_seen", "bytes_returned", "truncated", "omitted_bytes", "duration_ms", "timed_out", "exit_code"} {
+				if !strings.Contains(schema, `"`+field+`"`) {
+					t.Fatalf("run_root_command output schema missing %q: %s", field, schema)
+				}
+			}
+		case "start_job":
+			foundStartJob = true
+			b, err := json.Marshal(tool.InputSchema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(b), `"operation_id"`) {
+				t.Fatalf("start_job input schema missing operation_id: %s", b)
+			}
+		case "job_status":
+			foundJobStatus = true
+			if tool.Annotations == nil || tool.Annotations.ReadOnlyHint {
+				t.Fatal("job_status must not advertise readOnlyHint because interrupted-state reconciliation may persist bounded local recovery state")
+			}
+			if tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint {
+				t.Fatal("job_status reconciliation is non-destructive")
+			}
+			if !tool.Annotations.IdempotentHint {
+				t.Fatal("job_status reconciliation must remain idempotent")
+			}
 		case "browser_run":
 			foundBrowser = true
 			if tool.Annotations == nil || tool.Annotations.DestructiveHint == nil || !*tool.Annotations.DestructiveHint || tool.Annotations.OpenWorldHint == nil || !*tool.Annotations.OpenWorldHint {
@@ -98,8 +134,8 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			}
 		}
 	}
-	if !foundEnvironment || !foundRoot || !foundBrowser {
-		t.Fatalf("required tools missing: environment=%v root=%v browser=%v", foundEnvironment, foundRoot, foundBrowser)
+	if !foundEnvironment || !foundRoot || !foundStartJob || !foundJobStatus || !foundBrowser {
+		t.Fatalf("required tools missing: environment=%v root=%v start_job=%v job_status=%v browser=%v", foundEnvironment, foundRoot, foundStartJob, foundJobStatus, foundBrowser)
 	}
 }
 

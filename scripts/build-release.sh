@@ -35,7 +35,7 @@ for ARCH in "${RELEASE_ARCHES[@]}"; do
     cd "$SRC"
     CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath -ldflags='-s -w' -o "$OUT/ai-server-agent" ./cmd/ai-server-agent
   )
-  cp "$ROOT/README.md" "$ROOT/LICENSE" "$ROOT/manage.sh" "$ROOT/update.sh" "$ROOT/uninstall.sh" "$OUT/"
+  cp "$ROOT/README.md" "$ROOT/LICENSE" "$ROOT/manage.sh" "$ROOT/update.sh" "$ROOT/uninstall.sh" "$ROOT/ensure-lifecycle-lock.sh" "$OUT/"
   tar -C "$DIST" -czf "$DIST/ai-server-agent_${VERSION}_linux_${ARCH}.tar.gz" "$(basename "$OUT")"
   rm -rf "$OUT"
 done

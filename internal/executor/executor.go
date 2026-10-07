@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -23,13 +24,15 @@ import (
 )
 
 type Server struct {
-	cfg       config.Config
-	token     string
-	guard     *policy.Guard
-	audit     *audit.Logger
-	workerUID uint32
-	workerGID uint32
-	runs      *runLimiter
+	cfg               config.Config
+	token             string
+	guard             *policy.Guard
+	audit             *audit.Logger
+	workerUID         uint32
+	workerGID         uint32
+	runs              *runLimiter
+	jobsMu            sync.Mutex
+	lifecycleLockPath string
 }
 
 func NewServer(cfg config.Config, token string) (*Server, error) {
@@ -44,7 +47,16 @@ func NewServer(cfg config.Config, token string) (*Server, error) {
 	uid64, _ := strconv.ParseUint(u.Uid, 10, 32)
 	gid64, _ := strconv.ParseUint(u.Gid, 10, 32)
 	protected := []string{"ai-server-agent", "/usr/local/bin/ai-server-agent", "/etc/ai-server-agent", cfg.StateDir, cfg.LogDir, cfg.ExecutorSocket, cfg.ListenAddress}
-	return &Server{cfg: cfg, token: token, guard: policy.New(protected), audit: audit.New(filepath.Join(cfg.LogDir, "audit.jsonl")), workerUID: uint32(uid64), workerGID: uint32(gid64), runs: newRunLimiter()}, nil
+	return &Server{
+		cfg:               cfg,
+		token:             token,
+		guard:             policy.New(protected),
+		audit:             audit.New(filepath.Join(cfg.LogDir, "audit.jsonl")),
+		workerUID:         uint32(uid64),
+		workerGID:         uint32(gid64),
+		runs:              newRunLimiter(),
+		lifecycleLockPath: lifecycleManagementLockPath,
+	}, nil
 }
 
 func (s *Server) Serve() error {
@@ -200,132 +212,87 @@ func (s *Server) openJobFile(path string) (*os.File, error) {
 }
 
 func (s *Server) startJob(req Request) Response {
-	_, dec := s.command(req)
-	if !dec.Allowed {
-		return Response{Error: dec.Reason}
-	}
-	if dec.RequiresApproval && !req.Approval {
-		return Response{Error: "approval_required", Approval: dec}
-	}
-	id := fmt.Sprintf("%d", time.Now().UnixNano())
-	jobsDir := filepath.Join(s.cfg.StateDir, "jobs")
-	if err := trustedDir(s.cfg.StateDir); err != nil {
-		return Response{Error: err.Error()}
-	}
-	if err := trustedDir(jobsDir); err != nil {
-		return Response{Error: err.Error()}
-	}
-	logPath := filepath.Join(jobsDir, id+".log")
-	statusPath := filepath.Join(jobsDir, id+".status")
-	fileUID, fileGID := uint32(0), uint32(0)
-	if !req.Root {
-		fileUID, fileGID = s.workerUID, s.workerGID
-	}
-	if err := createJobFile(logPath, fileUID, fileGID); err != nil {
-		return Response{Error: "prepare job log: " + err.Error()}
-	}
-	if err := createJobFile(statusPath, fileUID, fileGID); err != nil {
-		_ = os.Remove(logPath)
-		return Response{Error: "prepare job status: " + err.Error()}
-	}
-	unit := "ai-job-" + id
-	shell := fmt.Sprintf("( %s ) >>%s 2>&1; rc=$?; printf '%%s\n' \"$rc\" >%s; exit \"$rc\"", req.Command, shellQuote(logPath), shellQuote(statusPath))
-	home := s.cfg.WorkspaceDir
-	workDir := s.cfg.WorkspaceDir
-	if req.Root {
-		home = "/root"
-		workDir = "/root"
-	}
-	args := []string{"--unit", unit, "--collect", "--property=WorkingDirectory=" + workDir}
-	if !req.Root {
-		args = append(args, "--uid="+s.cfg.WorkerUser)
-	}
-	args = append(args,
-		"/usr/bin/env", "-i",
-		"HOME="+home,
-		"PATH="+safeCommandPath,
-		"LANG=C.UTF-8",
-		"LC_ALL=C.UTF-8",
-		"AI_SERVER_AGENT=1",
-		"/bin/bash", "--noprofile", "--norc", "-c", shell,
-	)
-	out, err := exec.Command("systemd-run", args...).CombinedOutput()
-	_ = s.audit.Write(audit.Entry{Action: "start_job", Mode: map[bool]string{true: "root", false: "worker"}[req.Root], Command: req.Command, Success: err == nil, Detail: string(out)})
-	if err != nil {
-		return Response{Error: err.Error() + ": " + string(out)}
-	}
-	return Response{OK: true, JobID: id, Output: string(out)}
+	return s.startJobBounded(req)
 }
-
 func (s *Server) jobStatus(req Request) Response {
 	id, err := safeID(req.JobID)
 	if err != nil {
-		return Response{Error: err.Error()}
+		return Response{Error: err.Error(), ReasonCode: "invalid_job_id", ErrorCode: "invalid_job_id", ErrorClass: "validation"}
 	}
-	statusPath := filepath.Join(s.cfg.StateDir, "jobs", id+".status")
-	if f, er := s.openJobFile(statusPath); er == nil {
-		b, readErr := io.ReadAll(io.LimitReader(f, 64))
-		_ = f.Close()
-		if readErr != nil {
-			return Response{Error: readErr.Error()}
+	jobsDir := filepath.Join(s.cfg.StateDir, "jobs")
+	paths := jobPathsFor(jobsDir, id)
+	if terminal, found := s.jobTerminalReplayResponse(paths.status, id); found {
+		return terminal
+	}
+
+	started, err := s.jobStarted(paths.started)
+	if err != nil {
+		return jobStateError("job_status_unavailable", err)
+	}
+	accepted := started
+	if !accepted {
+		accepted, err = jobHasStartedClaim(filepath.Join(jobsDir, "claims"), id)
+		if err != nil {
+			return jobStateError("job_status_unavailable", err)
 		}
-		status := strings.TrimSpace(string(b))
-		if status != "" {
-			if _, parseErr := strconv.Atoi(status); parseErr == nil {
-				return Response{OK: true, Status: "completed", Output: status}
+	}
+	if accepted {
+		active, err := jobUnitActive(id)
+		if err != nil {
+			return jobStateError("job_status_unavailable", err)
+		}
+		if !active {
+			if err := s.markJobStatusUnknownIfEmpty(paths.status); err != nil {
+				return jobStateError("job_status_unavailable", err)
 			}
-			return Response{Error: "invalid job status file"}
+			if err := removeTerminalCommandHandoff(paths.command); err != nil {
+				return jobStateError("job_status_unavailable", err)
+			}
+			terminal, _ := s.jobTerminalReplayResponse(paths.status, id)
+			return terminal
 		}
-	} else if !os.IsNotExist(er) {
-		return Response{Error: er.Error()}
 	}
+
 	unit := "ai-job-" + id
-	out, er := exec.Command("systemctl", "show", unit, "--property=ActiveState,SubState,ExecMainStatus,MainPID", "--no-pager").CombinedOutput()
+	out := newBoundedOutputCollector(systemdOutputLimit)
+	cmd := exec.Command("systemctl", "show", unit, "--property=ActiveState,SubState,ExecMainStatus,MainPID", "--no-pager")
+	cmd.Stdout = out
+	cmd.Stderr = out
+	er := cmd.Run()
+	result := out.Result()
 	if er != nil {
-		return Response{Error: er.Error() + ": " + string(out)}
+		resp := Response{Error: er.Error(), ReasonCode: "job_status_unavailable", ErrorCode: "job_status_unavailable", ErrorClass: "state"}
+		applyOutputResult(&resp, result)
+		return resp
 	}
-	return Response{OK: true, Status: string(out)}
+	resp := Response{OK: true, Status: strings.TrimSpace(result.Output)}
+	applyOutputResult(&resp, result)
+	return resp
 }
 func (s *Server) jobStop(req Request) Response {
 	id, err := safeID(req.JobID)
 	if err != nil {
-		return Response{Error: err.Error()}
+		return Response{Error: err.Error(), ReasonCode: "invalid_job_id", ErrorCode: "invalid_job_id", ErrorClass: "validation"}
 	}
-	out, er := exec.Command("systemctl", "stop", "ai-job-"+id).CombinedOutput()
+	out := newBoundedOutputCollector(systemdOutputLimit)
+	cmd := exec.Command("systemctl", "stop", "ai-job-"+id)
+	cmd.Stdout = out
+	cmd.Stderr = out
+	er := cmd.Run()
+	result := out.Result()
 	_ = s.audit.Write(audit.Entry{Action: "job_stop", Success: er == nil, Detail: id})
 	if er != nil {
-		return Response{Error: er.Error() + ": " + string(out)}
+		resp := Response{Error: er.Error(), ReasonCode: "job_stop_failed", ErrorCode: "job_stop_failed", ErrorClass: "process", JobID: id}
+		applyOutputResult(&resp, result)
+		return resp
 	}
-	return Response{OK: true, Output: string(out)}
+	resp := Response{OK: true, JobID: id, Status: "stop_requested"}
+	applyOutputResult(&resp, result)
+	return resp
 }
 func (s *Server) jobOutput(req Request) Response {
-	id, err := safeID(req.JobID)
-	if err != nil {
-		return Response{Error: err.Error()}
-	}
-	path := filepath.Join(s.cfg.StateDir, "jobs", id+".log")
-	f, er := s.openJobFile(path)
-	if er != nil {
-		return Response{Error: er.Error()}
-	}
-	defer f.Close()
-	if req.Offset < 0 {
-		req.Offset = 0
-	}
-	if _, er = f.Seek(req.Offset, 0); er != nil {
-		return Response{Error: er.Error()}
-	}
-	lim := req.Limit
-	if lim <= 0 || lim > 1<<20 {
-		lim = 1 << 20
-	}
-	b, er := io.ReadAll(io.LimitReader(f, int64(lim)))
-	if er != nil {
-		return Response{Error: er.Error()}
-	}
-	return Response{OK: true, Output: string(b), NextOffset: req.Offset + int64(len(b))}
+	return s.jobOutputBounded(req)
 }
-
 func (s *Server) readFile(req Request) Response {
 	dec := s.guard.Evaluate("read "+req.Path, true)
 	if dec.RequiresApproval && !req.Approval {

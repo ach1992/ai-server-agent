@@ -39,7 +39,7 @@ jobs:
       - name: Cloudflare durable commit and malformed-journal recovery
         run: sudo bash tests/cloudflare_phase_recovery.sh
       - name: Privileged shell startup-file isolation
-        run: sudo env PATH="$PATH" go test ./internal/executor -run TestRootCommandAndJobIgnoreWorkerStartupFiles -count=1
+        run: sudo env PATH="$PATH" go test ./internal/executor -run 'TestRootCommandIgnoresWorkerStartupFiles|TestRootJobInvocationSanitizesEnvironment' -count=1
 
   root-trust-boundary:
     needs: change-scope

@@ -39,9 +39,10 @@ type RootRunInput struct {
 	Approval bool   `json:"approval,omitempty" jsonschema:"Set true only after explicit user approval when a previous call returned approval_required"`
 }
 type StartJobInput struct {
-	Command  string `json:"command" jsonschema:"Command to run as a persistent background job"`
-	Root     bool   `json:"root,omitempty" jsonschema:"Run as root instead of aiworker"`
-	Approval bool   `json:"approval,omitempty" jsonschema:"Set true only after explicit user approval when a previous call returned approval_required"`
+	Command     string `json:"command" jsonschema:"Command to run as a persistent background job"`
+	Root        bool   `json:"root,omitempty" jsonschema:"Run as root instead of aiworker"`
+	Approval    bool   `json:"approval,omitempty" jsonschema:"Set true only after explicit user approval when a previous call returned approval_required"`
+	OperationID string `json:"operation_id,omitempty" jsonschema:"Optional caller-generated idempotency key; retry the same material request with the same key after a lost response"`
 }
 type JobInput struct {
 	JobID string `json:"job_id" jsonschema:"Persistent job id"`
@@ -107,7 +108,7 @@ func New(cfg config.Config) (*Server, error) {
 }
 
 func instructions(workspaceDir string) string {
-	return fmt.Sprintf("Dedicated AI-operated test-server control plane. Before host-wide package, firewall, network, service, disk, user, web-stack, or control-panel changes, call agent_environment and preserve all critical components it reports. The workspace at %s is persistent: inspect and reuse existing repositories, worktrees, and task environments before creating duplicates, prefer git worktree when another checkout of the same repository is needed, and never delete dirty, untracked, ambiguous, or unknown workspace state. The control plane intentionally does not own ports 80/443 and does not require nginx, Apache, PHP, MySQL, Docker, Node.js, Python, or aaPanel. Use run_command for ordinary work and run_root_command only when host-level privileges are required. If a tool returns approval_required, explain the exact risk to the user and retry with approval=true only after explicit confirmation. Use start_job for long-running work so it survives MCP/ChatGPT disconnects. Optional interactive terminal workflows may install and use tmux through root shell without making tmux a core dependency.", workspaceDir)
+	return fmt.Sprintf("Dedicated AI-operated test-server control plane. Before host-wide package, firewall, network, service, disk, user, web-stack, or control-panel changes, call agent_environment and preserve all critical components it reports. The workspace at %s is persistent: inspect and reuse existing repositories, worktrees, and task environments before creating duplicates, prefer git worktree when another checkout of the same repository is needed, and never delete dirty, untracked, ambiguous, or unknown workspace state. The control plane intentionally does not own ports 80/443 and does not require nginx, Apache, PHP, MySQL, Docker, Node.js, Python, or aaPanel. Use run_command for ordinary bounded work and run_root_command only when host-level privileges are required. Use start_job from the beginning for installs, large builds/test suites, migrations, crawls, or other work expected to run long or produce substantial output, then continue with job_status/job_output. If a tool returns approval_required, explain the exact risk to the user and retry with approval=true only after explicit confirmation. Persistent jobs survive MCP/ChatGPT disconnects. Optional interactive terminal workflows may install and use tmux through root shell without making tmux a core dependency.", workspaceDir)
 }
 
 func annotations(readOnly, destructive, idempotent, openWorld bool) *mcpsdk.ToolAnnotations {
@@ -126,12 +127,39 @@ func textResult(text string, isError bool) *mcpsdk.CallToolResult {
 	}
 }
 
-func responseResult(resp executor.Response) (*mcpsdk.CallToolResult, any, error) {
+func responseResult(resp executor.Response) (*mcpsdk.CallToolResult, executor.Response, error) {
+	const maxTextFallbackOutputBytes = 32 << 10
+	if len(resp.Output) <= maxTextFallbackOutputBytes {
+		b, err := json.MarshalIndent(resp, "", "  ")
+		if err != nil {
+			return nil, executor.Response{}, err
+		}
+		return textResult(string(b), !resp.OK), resp, nil
+	}
+	summary := fmt.Sprintf(
+		"ok=%t status=%q error_code=%q exit_code=%d bytes_returned=%d truncated=%t; output omitted from text fallback, use structuredContent",
+		resp.OK, resp.Status, resp.ErrorCode, resp.ExitCode, resp.BytesReturned, resp.Truncated,
+	)
+	return textResult(summary, !resp.OK), resp, nil
+}
+
+func legacyResponseResult(resp executor.Response) (*mcpsdk.CallToolResult, any, error) {
 	b, err := json.MarshalIndent(resp, "", "  ")
 	if err != nil {
 		return nil, nil, err
 	}
 	return textResult(string(b), !resp.OK), nil, nil
+}
+
+func executorTransportErrorResult(err error) (*mcpsdk.CallToolResult, executor.Response, error) {
+	resp := executor.Response{
+		Error:      err.Error(),
+		ReasonCode: "executor_transport",
+		ErrorCode:  "executor_transport",
+		ErrorClass: "transport",
+		Retryable:  true,
+	}
+	return textResult(err.Error(), true), resp, nil
 }
 
 func (s *Server) registerTools() {
@@ -151,10 +179,10 @@ func (s *Server) registerTools() {
 		Name:        "run_command",
 		Description: "Run an arbitrary Bash command as the unprivileged aiworker user in the dedicated workspace. Use for normal project work, builds, tests, Git, package managers inside the project, and diagnostics that do not require host privileges. Synchronous execution is bounded to five minutes; use start_job for work expected to run longer or produce high output.",
 		Annotations: annotations(false, false, false, true),
-	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input RunInput) (*mcpsdk.CallToolResult, any, error) {
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input RunInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "run", Command: input.Command, TimeoutMS: int64(synchronousCommandTimeout / time.Millisecond)})
 		if err != nil {
-			return textResult(err.Error(), true), nil, nil
+			return executorTransportErrorResult(err)
 		}
 		return responseResult(resp)
 	})
@@ -163,49 +191,49 @@ func (s *Server) registerTools() {
 		Name:        "run_root_command",
 		Description: "Run an arbitrary Bash command as root. Use for apt packages, services, Docker, aaPanel, networking, system configuration, deployment setup, and tests that genuinely need root. Synchronous execution is bounded to five minutes; use a root persistent job for work expected to run longer or produce high output. Connection-risk and destructive commands return approval_required until the user explicitly confirms and approval=true is supplied.",
 		Annotations: annotations(false, true, false, true),
-	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input RootRunInput) (*mcpsdk.CallToolResult, any, error) {
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input RootRunInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "run", Command: input.Command, Root: true, Approval: input.Approval, TimeoutMS: int64(synchronousCommandTimeout / time.Millisecond)})
 		if err != nil {
-			return textResult(err.Error(), true), nil, nil
+			return executorTransportErrorResult(err)
 		}
 		return responseResult(resp)
 	})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "start_job",
-		Description: "Start a persistent background Bash command using a transient systemd unit. The job and its output continue if ChatGPT disconnects or the MCP service restarts.",
+		Description: "Start a persistent background Bash command using a transient systemd unit. Use for installs, large builds/test suites, migrations, crawls, and other work expected to run long or produce substantial output. The job and bounded retained output continue if ChatGPT disconnects or the MCP service restarts. Supply operation_id when a lost response may be retried so the same material request returns the same job handle instead of starting a duplicate.",
 		Annotations: annotations(false, true, false, true),
-	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input StartJobInput) (*mcpsdk.CallToolResult, any, error) {
-		resp, err := executor.ClientCall(s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "start_job", Command: input.Command, Root: input.Root, Approval: input.Approval})
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input StartJobInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "start_job", Command: input.Command, Root: input.Root, Approval: input.Approval, OperationID: input.OperationID})
 		if err != nil {
-			return textResult(err.Error(), true), nil, nil
+			return executorTransportErrorResult(err)
 		}
 		return responseResult(resp)
 	})
 
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "job_status", Description: "Read the current state and exit status of a persistent job.", Annotations: annotations(true, false, true, false)},
-		func(ctx context.Context, req *mcpsdk.CallToolRequest, input JobInput) (*mcpsdk.CallToolResult, any, error) {
-			resp, err := executor.ClientCall(s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "job_status", JobID: input.JobID})
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "job_status", Description: "Read and reconcile the current state and exit status of a persistent job. Reconciliation may persist an unknown-completion marker and retire a stale protected command handoff after the transient unit is gone.", Annotations: annotations(false, false, true, false)},
+		func(ctx context.Context, req *mcpsdk.CallToolRequest, input JobInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+			resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "job_status", JobID: input.JobID})
 			if err != nil {
-				return textResult(err.Error(), true), nil, nil
+				return executorTransportErrorResult(err)
 			}
 			return responseResult(resp)
 		})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "job_output", Description: "Read a chunk of persistent job stdout/stderr without requiring the original MCP connection to remain open.", Annotations: annotations(true, false, true, false)},
-		func(ctx context.Context, req *mcpsdk.CallToolRequest, input JobOutputInput) (*mcpsdk.CallToolResult, any, error) {
-			resp, err := executor.ClientCall(s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "job_output", JobID: input.JobID, Offset: input.Offset, Limit: input.Limit})
+		func(ctx context.Context, req *mcpsdk.CallToolRequest, input JobOutputInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+			resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "job_output", JobID: input.JobID, Offset: input.Offset, Limit: input.Limit})
 			if err != nil {
-				return textResult(err.Error(), true), nil, nil
+				return executorTransportErrorResult(err)
 			}
 			return responseResult(resp)
 		})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "job_stop", Description: "Stop a persistent background job.", Annotations: annotations(false, true, true, false)},
-		func(ctx context.Context, req *mcpsdk.CallToolRequest, input JobInput) (*mcpsdk.CallToolResult, any, error) {
-			resp, err := executor.ClientCall(s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "job_stop", JobID: input.JobID})
+		func(ctx context.Context, req *mcpsdk.CallToolRequest, input JobInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+			resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "job_stop", JobID: input.JobID})
 			if err != nil {
-				return textResult(err.Error(), true), nil, nil
+				return executorTransportErrorResult(err)
 			}
 			return responseResult(resp)
 		})
@@ -216,7 +244,7 @@ func (s *Server) registerTools() {
 			if err != nil {
 				return textResult(err.Error(), true), nil, nil
 			}
-			return responseResult(resp)
+			return legacyResponseResult(resp)
 		})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "write_file", Description: "Write a complete host file through the privileged executor. Writes to protected agent resources require explicit approval.", Annotations: annotations(false, true, false, false)},
@@ -225,7 +253,7 @@ func (s *Server) registerTools() {
 			if err != nil {
 				return textResult(err.Error(), true), nil, nil
 			}
-			return responseResult(resp)
+			return legacyResponseResult(resp)
 		})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_setup", Description: "Install an optional root-owned Node.js + Playwright + Chromium engine under /opt/ai-server-agent/browser and keep writable browser profile/session data separately under the agent state directory. It does not replace system Node or take over ports 80/443.", Annotations: annotations(false, true, true, true)},
@@ -234,7 +262,7 @@ func (s *Server) registerTools() {
 			if err != nil {
 				return textResult(err.Error(), true), nil, nil
 			}
-			return responseResult(resp)
+			return legacyResponseResult(resp)
 		})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_run", Description: "Run Playwright JavaScript in headless Chromium using a persistent browser profile. Variables browser, context, and page are pre-created; use console.log for observations. Scripts can interact with and modify external web applications, so treat this as an action-capable tool.", Annotations: annotations(false, true, false, true)},
@@ -243,7 +271,7 @@ func (s *Server) registerTools() {
 			if err != nil {
 				return textResult(err.Error(), true), nil, nil
 			}
-			return responseResult(resp)
+			return legacyResponseResult(resp)
 		})
 }
 
