@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 
@@ -127,6 +128,18 @@ func writeReadyBrowserFixture(t *testing.T, m *Manager) {
 			t.Fatal(err)
 		}
 	}
+	executables, ok := browserRuntimeExecutablePaths(engine, desired)
+	if !ok {
+		t.Fatalf("unsupported test platform %q", desired.Platform)
+	}
+	for _, executable := range executables {
+		if err := os.MkdirAll(filepath.Dir(executable), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(executable, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
 }
 
 func TestBrowserStatusVerifiesPinnedRuntime(t *testing.T) {
@@ -141,6 +154,48 @@ func TestBrowserStatusVerifiesPinnedRuntime(t *testing.T) {
 	}
 	if status.ProfileDir != filepath.Join(m.dataDir(), "profile") {
 		t.Fatalf("profile path = %q", status.ProfileDir)
+	}
+}
+
+func TestBrowserStatusRejectsMissingOrNonExecutableRuntimeExecutable(t *testing.T) {
+	for _, tc := range []struct {
+		name            string
+		breakExecutable func(t *testing.T, path string)
+	}{
+		{
+			name: "missing",
+			breakExecutable: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Remove(path); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+		{
+			name: "not-executable",
+			breakExecutable: func(t *testing.T, path string) {
+				t.Helper()
+				if err := os.Chmod(path, 0644); err != nil {
+					t.Fatal(err)
+				}
+			},
+		},
+	} {
+		for executableIndex, executableName := range []string{"chromium", "headless-shell", "ffmpeg"} {
+			t.Run(tc.name+"/"+executableName, func(t *testing.T) {
+				m := testBrowserManager(t)
+				writeReadyBrowserFixture(t, m)
+				executables, ok := browserRuntimeExecutablePaths(m.engineDir(), desiredRuntimeManifest())
+				if !ok || len(executables) != 3 {
+					t.Fatalf("runtime executable paths = %v, ok=%v", executables, ok)
+				}
+				tc.breakExecutable(t, executables[executableIndex])
+				status := m.Status(context.Background())
+				if status.Ready || !strings.Contains(status.Reason, "executable") {
+					t.Fatalf("broken executable status = %+v", status)
+				}
+			})
+		}
 	}
 }
 
@@ -223,6 +278,12 @@ func TestBrowserRunCommandTLSAndHandoffContract(t *testing.T) {
 	}
 	if !strings.Contains(secure, "--disk-cache-size=67108864") || !strings.Contains(secure, "cleanup_cache") {
 		t.Fatalf("disposable cache bound/cleanup missing: %s", secure)
+	}
+	if !strings.Contains(secure, "AI_SERVER_AGENT_BROWSER_PROFILE") ||
+		!strings.Contains(secure, "AI_SERVER_AGENT_BROWSER_DOWNLOADS") ||
+		!strings.Contains(secure, "cd \"$run_tmp\"") ||
+		strings.Contains(secure, "launchPersistentContext('./profile'") {
+		t.Fatalf("per-run cwd/persistent-profile contract missing: %s", secure)
 	}
 
 	exception := m.runCommand(script, true)
@@ -365,6 +426,70 @@ func TestBrowserLifecycleBusyMapsToResourceLimit(t *testing.T) {
 	}
 }
 
+func TestBrowserAlreadyCurrentCleanupHonorsLifecycleLock(t *testing.T) {
+	m := testBrowserManager(t)
+	writeReadyBrowserFixture(t, m)
+
+	lockPath := filepath.Join(t.TempDir(), "management.lock")
+	if err := os.WriteFile(lockPath, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	m.lifecycleLockPath = lockPath
+	m.lifecycleLockStat = fmt.Sprintf("%d:%d:600", os.Geteuid(), os.Getegid())
+
+	parent := filepath.Dir(m.engineDir())
+	stage := filepath.Join(parent, ".browser-stage.active")
+	backup := filepath.Join(parent, ".browser-old.active")
+	tmpArtifact := filepath.Join(m.dataDir(), "tmp", "active")
+	npmCache := filepath.Join(m.engineDir(), ".npm-cache")
+	for _, dir := range []string{stage, backup, tmpArtifact, npmCache} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	lockFile, err := os.OpenFile(lockPath, os.O_RDWR, 0600)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lockFile.Close()
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		t.Fatal(err)
+	}
+
+	runCleanup := func() ([]byte, error) {
+		cmd := exec.Command("/bin/bash", "--noprofile", "--norc", "-s")
+		cmd.Stdin = strings.NewReader(m.cleanupCommand())
+		return cmd.CombinedOutput()
+	}
+
+	out, err := runCleanup()
+	if err == nil {
+		t.Fatalf("cleanup unexpectedly bypassed held lifecycle lock: %s", out)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != browserLifecycleBusyExit {
+		t.Fatalf("held-lock cleanup exit = %v, want %d; output=%s", err, browserLifecycleBusyExit, out)
+	}
+	for _, path := range []string{stage, backup, tmpArtifact, npmCache} {
+		if _, statErr := os.Stat(path); statErr != nil {
+			t.Fatalf("cleanup mutated %s while lifecycle lock was held: %v", path, statErr)
+		}
+	}
+
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := runCleanup(); err != nil {
+		t.Fatalf("cleanup after lifecycle lock release: %v: %s", err, out)
+	}
+	for _, path := range []string{stage, backup, tmpArtifact, npmCache} {
+		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
+			t.Fatalf("cleanup left %s after lock release: %v", path, statErr)
+		}
+	}
+}
+
 func TestBrowserGeneratedCommandsHaveValidShellSyntax(t *testing.T) {
 	m := testBrowserManager(t)
 	setup, err := m.setupCommand()
@@ -395,8 +520,14 @@ func TestBrowserRunCommandUsesEphemeralRunnerAndCleansIt(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	capture := filepath.Join(t.TempDir(), "runner.mjs")
-	fakeNode := "#!/bin/sh\ncp -- \"$1\" \"$CAPTURE\"\n"
+	captureDir := t.TempDir()
+	capture := filepath.Join(captureDir, "runner.mjs")
+	captureCWD := filepath.Join(captureDir, "cwd")
+	profileSentinel := filepath.Join(m.dataDir(), "profile", "sentinel")
+	if err := os.WriteFile(profileSentinel, []byte("durable"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fakeNode := "#!/bin/sh\nprintf '%s\\n' \"$PWD\" > \"$CAPTURE_CWD\"\nprintf 'relative-artifact' > relative-artifact.txt\ncp -- \"$1\" \"$CAPTURE\"\n"
 	if err := os.WriteFile(filepath.Join(m.engineDir(), "node", "bin", "node"), []byte(fakeNode), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -404,7 +535,7 @@ func TestBrowserRunCommandUsesEphemeralRunnerAndCleansIt(t *testing.T) {
 	script := `console.log("ephemeral-marker")`
 	cmd := exec.Command("/bin/bash", "--noprofile", "--norc", "-s")
 	cmd.Stdin = strings.NewReader(m.runCommand(script, false))
-	cmd.Env = append(os.Environ(), "CAPTURE="+capture)
+	cmd.Env = append(os.Environ(), "CAPTURE="+capture, "CAPTURE_CWD="+captureCWD)
 	if out, err := cmd.CombinedOutput(); err != nil {
 		t.Fatalf("run generated browser command: %v: %s", err, out)
 	}
@@ -415,6 +546,17 @@ func TestBrowserRunCommandUsesEphemeralRunnerAndCleansIt(t *testing.T) {
 	text := string(runner)
 	if !strings.Contains(text, script) || !strings.Contains(text, "ignoreHTTPSErrors: false") {
 		t.Fatalf("runner did not carry expected script/TLS default: %s", text)
+	}
+	cwdBytes, err := os.ReadFile(captureCWD)
+	if err != nil {
+		t.Fatal(err)
+	}
+	cwd := strings.TrimSpace(string(cwdBytes))
+	if !strings.HasPrefix(cwd, filepath.Join(m.dataDir(), "tmp", "run.")) {
+		t.Fatalf("browser runner cwd = %q, want per-run temp directory", cwd)
+	}
+	if got, err := os.ReadFile(profileSentinel); err != nil || string(got) != "durable" {
+		t.Fatalf("durable browser profile sentinel = %q err=%v", got, err)
 	}
 	entries, err := os.ReadDir(filepath.Join(m.dataDir(), "tmp"))
 	if err != nil {
@@ -436,7 +578,11 @@ func TestBrowserRunCommandStopsOversizedDisposableData(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	fakeNode := "#!/bin/sh\ntruncate -s 300M \"$(dirname \"$1\")/oversized.bin\"\nexec sleep 5\n"
+	profileSentinel := filepath.Join(m.dataDir(), "profile", "sentinel")
+	if err := os.WriteFile(profileSentinel, []byte("durable"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fakeNode := "#!/bin/sh\ntruncate -s 300M ./relative.bin\nexit 0\n"
 	if err := os.WriteFile(filepath.Join(m.engineDir(), "node", "bin", "node"), []byte(fakeNode), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -460,6 +606,9 @@ func TestBrowserRunCommandStopsOversizedDisposableData(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("browser temp directory was not cleaned after limit: %+v", entries)
+	}
+	if got, readErr := os.ReadFile(profileSentinel); readErr != nil || string(got) != "durable" {
+		t.Fatalf("durable browser profile sentinel after resource limit = %q err=%v", got, readErr)
 	}
 }
 

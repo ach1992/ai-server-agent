@@ -92,11 +92,13 @@ type RunOptions struct {
 // browser profile. Setup and execution share a fail-fast mutex: there is no
 // hidden browser queue, and runtime replacement cannot overlap profile use.
 type Manager struct {
-	cfg        config.Config
-	token      string
-	mu         sync.Mutex
-	enginePath string
-	dataPath   string
+	cfg               config.Config
+	token             string
+	mu                sync.Mutex
+	enginePath        string
+	dataPath          string
+	lifecycleLockPath string
+	lifecycleLockStat string
 }
 
 func New(cfg config.Config, token string) *Manager { return &Manager{cfg: cfg, token: token} }
@@ -113,6 +115,28 @@ func (m *Manager) dataDir() string {
 		return m.dataPath
 	}
 	return filepath.Join(m.cfg.StateDir, "runtime", "browser")
+}
+
+func (m *Manager) lifecycleLock() string {
+	if m.lifecycleLockPath != "" {
+		return m.lifecycleLockPath
+	}
+	return "/run/lock/ai-server-agent/management.lock"
+}
+
+func (m *Manager) lifecycleLockExpectedStat() string {
+	if m.lifecycleLockStat != "" {
+		return m.lifecycleLockStat
+	}
+	return "0:0:600"
+}
+
+func (m *Manager) lifecycleLockPrelude() string {
+	return fmt.Sprintf(`lifecycle_lock=%s
+[ -f "$lifecycle_lock" ] && [ ! -L "$lifecycle_lock" ] && [ "$(stat -c '%%u:%%g:%%a' "$lifecycle_lock")" = %s ] || fail "lifecycle lock is unavailable or unsafe"
+exec 9<>"$lifecycle_lock"
+flock -n 9 || { echo "browser setup resource limit: another Agent lifecycle management operation is active" >&2; exit %d; }`,
+		shellQuote(m.lifecycleLock()), shellQuote(m.lifecycleLockExpectedStat()), browserLifecycleBusyExit)
 }
 
 func desiredRuntimeManifest() RuntimeManifest {
@@ -196,6 +220,30 @@ func normalizeRunTimeout(ms int64) (time.Duration, error) {
 
 func shellQuote(s string) string {
 	return "'" + strings.ReplaceAll(s, "'", "'\"'\"'") + "'"
+}
+
+func browserRuntimeExecutablePaths(engine string, desired RuntimeManifest) ([]string, bool) {
+	var chromiumRel, headlessRel string
+	switch desired.Platform {
+	case "amd64":
+		chromiumRel = filepath.FromSlash("chrome-linux64/chrome")
+		headlessRel = filepath.FromSlash("chrome-headless-shell-linux64/chrome-headless-shell")
+	case "arm64":
+		chromiumRel = filepath.FromSlash("chrome-linux/chrome")
+		headlessRel = filepath.FromSlash("chrome-linux/headless_shell")
+	default:
+		return nil, false
+	}
+	return []string{
+		filepath.Join(engine, "browsers", "chromium-"+desired.ChromiumRevision, chromiumRel),
+		filepath.Join(engine, "browsers", "chromium_headless_shell-"+desired.ChromiumRevision, headlessRel),
+		filepath.Join(engine, "browsers", "ffmpeg-"+desired.FFmpegRevision, "ffmpeg-linux"),
+	}, true
+}
+
+func regularExecutable(path string) bool {
+	fi, err := os.Lstat(path)
+	return err == nil && fi.Mode().IsRegular() && fi.Mode().Perm()&0111 != 0
 }
 
 func (m *Manager) Status(ctx context.Context) RuntimeStatus {
@@ -331,6 +379,17 @@ func (m *Manager) inspectStatus(ctx context.Context, busy bool) RuntimeStatus {
 			return status
 		}
 	}
+	executables, ok := browserRuntimeExecutablePaths(engine, desired)
+	if !ok {
+		status.Reason = "browser runtime platform is unsupported"
+		return status
+	}
+	for _, executable := range executables {
+		if !regularExecutable(executable) {
+			status.Reason = "required browser runtime executable is missing or not executable"
+			return status
+		}
+	}
 	status.Ready = true
 	status.Reason = ""
 	return status
@@ -435,15 +494,17 @@ func (m *Manager) Run(ctx context.Context, opts RunOptions) (executor.Response, 
 
 func (m *Manager) cleanupCommand() string {
 	return fmt.Sprintf(`set -euo pipefail
+fail() { printf 'browser setup: %%s\n' "$*" >&2; exit 2; }
 engine=%s
 parent=$(dirname "$engine")
 data=%s
+%s
 [ -d "$parent" ] && [ ! -L "$parent" ] || { echo "Browser engine parent is unsafe." >&2; exit 2; }
 [ -d "$data" ] && [ ! -L "$data" ] || { echo "Browser data directory is unsafe." >&2; exit 2; }
 find "$parent" -maxdepth 1 -type d \( -name '.browser-stage.*' -o -name '.browser-old.*' \) -exec rm -rf -- {} +
 [ -d "$data/tmp" ] && [ ! -L "$data/tmp" ] || { echo "Browser temp directory is unsafe." >&2; exit 2; }
 find "$data/tmp" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-rm -rf -- "$engine/.npm-cache"`, shellQuote(m.engineDir()), shellQuote(m.dataDir()))
+rm -rf -- "$engine/.npm-cache"`, shellQuote(m.engineDir()), shellQuote(m.dataDir()), m.lifecycleLockPrelude())
 }
 func (m *Manager) setupCommand() (string, error) {
 	desired := desiredRuntimeManifest()
@@ -468,10 +529,7 @@ ffmpeg_revision=%s
 chromium_tree_sha=%s
 headless_tree_sha=%s
 ffmpeg_tree_sha=%s
-lifecycle_lock=/run/lock/ai-server-agent/management.lock
-[ -f "$lifecycle_lock" ] && [ ! -L "$lifecycle_lock" ] && [ "$(stat -c '%%u:%%g:%%a' "$lifecycle_lock")" = "0:0:600" ] || fail "lifecycle lock is unavailable or unsafe"
-exec 9<>"$lifecycle_lock"
-flock -n 9 || { echo "browser setup resource limit: another Agent lifecycle management operation is active" >&2; exit %d; }
+%s
 
 [ ! -L "$parent" ] || fail "engine parent is a symlink"
 install -d -m 0755 -o root -g root "$parent"
@@ -519,8 +577,18 @@ trap cleanup EXIT
 
 arch=$(uname -m)
 case "$arch" in
-  x86_64) node_arch=x64; node_sha=%s ;;
-  aarch64|arm64) node_arch=arm64; node_sha=%s ;;
+  x86_64)
+    node_arch=x64
+    node_sha=%s
+    chromium_exec_rel=chrome-linux64/chrome
+    headless_exec_rel=chrome-headless-shell-linux64/chrome-headless-shell
+    ;;
+  aarch64|arm64)
+    node_arch=arm64
+    node_sha=%s
+    chromium_exec_rel=chrome-linux/chrome
+    headless_exec_rel=chrome-linux/headless_shell
+    ;;
   *) fail "unsupported architecture: $arch" ;;
 esac
 asset="node-$node_version-linux-$node_arch.tar.xz"
@@ -563,6 +631,10 @@ NODE
 [ -f "$stage/browsers/chromium-$chromium_revision/INSTALLATION_COMPLETE" ] || fail "Chromium installation marker missing"
 [ -f "$stage/browsers/chromium_headless_shell-$chromium_revision/INSTALLATION_COMPLETE" ] || fail "Chromium headless-shell marker missing"
 [ -f "$stage/browsers/ffmpeg-$ffmpeg_revision/INSTALLATION_COMPLETE" ] || fail "FFmpeg installation marker missing"
+for executable in   "$stage/browsers/chromium-$chromium_revision/$chromium_exec_rel"   "$stage/browsers/chromium_headless_shell-$chromium_revision/$headless_exec_rel"   "$stage/browsers/ffmpeg-$ffmpeg_revision/ffmpeg-linux"
+do
+  [ -f "$executable" ] && [ ! -L "$executable" ] && [ -x "$executable" ] || fail "browser runtime executable verification failed"
+done
 tree_hash() {
   root=$1
   (
@@ -605,7 +677,7 @@ printf 'browser runtime converged: node=%%s playwright=%%s chromium=%%s/%%s\n' "
 		shellQuote(desired.ChromiumTreeSHA256),
 		shellQuote(desired.HeadlessShellTreeSHA256),
 		shellQuote(desired.FFmpegTreeSHA256),
-		browserLifecycleBusyExit,
+		m.lifecycleLockPrelude(),
 		browserSetupMinFreeBytes/1024,
 		browserDiskPressureExit,
 		shellQuote(browserNodeSHA256X64),
@@ -627,9 +699,9 @@ func (m *Manager) runCommand(script string, ignoreHTTPSErrors bool) string {
 	return fmt.Sprintf(`set -euo pipefail
 engine=%s
 data=%s
+profile="$data/profile"
 ignore_https_errors=%s
 [ -x "$engine/node/bin/node" ] || { echo "Browser runtime is not installed. Call browser_setup first." >&2; exit 2; }
-cd "$data"
 export PLAYWRIGHT_BROWSERS_PATH="$engine/browsers"
 install -d -m 0700 "$data/tmp"
 min_free_kb=%d
@@ -653,7 +725,7 @@ printf '%%s' %s | base64 -d > "$body"
   printf '%%s
 ' "import { chromium } from 'file://$engine/node_modules/playwright/index.mjs';"
   printf '%%s
-' "const context = await chromium.launchPersistentContext('./profile', {headless:true, ignoreHTTPSErrors: $ignore_https_errors, downloadsPath: '$downloads', args:['--disk-cache-size=67108864','--media-cache-size=33554432']});"
+' "const context = await chromium.launchPersistentContext(process.env.AI_SERVER_AGENT_BROWSER_PROFILE, {headless:true, ignoreHTTPSErrors: $ignore_https_errors, downloadsPath: process.env.AI_SERVER_AGENT_BROWSER_DOWNLOADS, args:['--disk-cache-size=67108864','--media-cache-size=33554432']});"
   printf '%%s
 ' "const browser = context.browser();"
   printf '%%s
@@ -667,22 +739,29 @@ printf '%%s' %s | base64 -d > "$body"
 ' "} finally { await context.close(); }"
 } > "$runner"
 
+export AI_SERVER_AGENT_BROWSER_PROFILE="$profile"
+export AI_SERVER_AGENT_BROWSER_DOWNLOADS="$downloads"
+cd "$run_tmp"
 "$engine/node/bin/node" "$runner" &
 node_pid=$!
 limit_reason=""
-while kill -0 "$node_pid" 2>/dev/null; do
+check_limits() {
   free_kb=$(df -Pk "$data" | awk 'NR == 2 {print $4}') || free_kb=""
   used_kb=$(du -sk --apparent-size "$run_tmp" | awk 'NR == 1 {print $1}') || used_kb=""
   if [ -z "$free_kb" ] || [ "$free_kb" -lt "$min_free_kb" ]; then
     limit_reason="state filesystem safety reserve reached"
-    break
+    return
   fi
   if [ -z "$used_kb" ] || [ "$used_kb" -gt "$disposable_limit_kb" ]; then
     limit_reason="disposable browser run data exceeded its bound"
-    break
   fi
+}
+while kill -0 "$node_pid" 2>/dev/null; do
+  check_limits
+  [ -z "$limit_reason" ] || break
   sleep 1
 done
+[ -n "$limit_reason" ] || check_limits
 if [ -n "$limit_reason" ]; then
   printf 'browser resource limit: %%s
 ' "$limit_reason" >&2
