@@ -137,7 +137,7 @@ func rejectPseudoFilesystem(fd int) error {
 		0x73636673, // securityfs
 		0x74726163, // tracefs
 		0xcafe4a11, // bpf
-		0x27e0eb, // cgroup v1
+		0x27e0eb,   // cgroup v1
 		0x63677270, // cgroup v2
 		0x62656570: // configfs
 		return errors.New("file tools do not support kernel/control pseudo-filesystems")
@@ -195,7 +195,7 @@ func (s *Server) readFile(req Request) Response {
 		limit = maxFileReadBytes
 	}
 	if limit < 0 || limit > maxFileReadBytes {
-		return fileError("invalid_limit", "validation", fmt.Errorf("limit must be between 1 and %d bytes", maxFileReadBytes))
+		return fileError("invalid_limit", "validation", fmt.Errorf("limit must be 0 (default) or between 1 and %d bytes", maxFileReadBytes))
 	}
 
 	parent, base, _, err := openFileParent(path)
@@ -217,6 +217,9 @@ func (s *Server) readFile(req Request) Response {
 	}
 
 	dec := s.fileDecision("read", path, effectivePath)
+	if !dec.Allowed {
+		return fileError("policy_denied", "policy", errors.New(dec.Reason))
+	}
 	if dec.RequiresApproval && !req.Approval {
 		return fileApprovalResponse(dec)
 	}
@@ -272,10 +275,11 @@ func (s *Server) readFile(req Request) Response {
 		Truncated:       !eof,
 		OmittedBytes:    omitted,
 		RequestedOffset: req.Offset,
-		NextOffset:      next,
-		FileSize:        before.Size,
+		Offset:          int64Ptr(req.Offset),
+		NextOffset:      int64Ptr(next),
+		FileSize:        int64Ptr(before.Size),
 		FileVersion:     version,
-		EOF:             eof,
+		EOF:             boolPtr(eof),
 	}
 }
 
@@ -355,6 +359,9 @@ func (s *Server) writeFile(req Request) Response {
 	}
 	effectivePath := filepath.Join(resolvedParent, base)
 	dec := s.fileDecision("write", path, effectivePath)
+	if !dec.Allowed {
+		return fileError("policy_denied", "policy", errors.New(dec.Reason))
+	}
 	if dec.RequiresApproval && !req.Approval {
 		return fileApprovalResponse(dec)
 	}
@@ -448,7 +455,7 @@ func (s *Server) writeFile(req Request) Response {
 	if err := unix.Fsync(parentFD); err != nil {
 		resp := fileError("unknown_completion", "state", fmt.Errorf("replacement completed but parent directory sync failed: %w", err))
 		resp.FileVersion = fileVersion(final)
-		resp.FileSize = final.Size
+		resp.FileSize = int64Ptr(final.Size)
 		return resp
 	}
 
@@ -456,7 +463,7 @@ func (s *Server) writeFile(req Request) Response {
 	return Response{
 		OK:          true,
 		Status:      "written",
-		FileSize:    final.Size,
+		FileSize:    int64Ptr(final.Size),
 		FileVersion: fileVersion(final),
 	}
 }

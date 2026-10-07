@@ -44,12 +44,16 @@ type Response struct {
 	Status              string      `json:"status,omitempty"`
 	PID                 int         `json:"pid,omitempty"`
 	RequestedOffset     int64       `json:"requested_offset,omitempty"`
+	Offset              *int64      `json:"offset,omitempty"`
 	AvailableFromOffset int64       `json:"available_from_offset,omitempty"`
-	NextOffset          int64       `json:"next_offset,omitempty"`
+	NextOffset          *int64      `json:"next_offset,omitempty"`
 	CurrentEnd          int64       `json:"current_end,omitempty"`
-	FileSize            int64       `json:"file_size,omitempty"`
+	FileSize            *int64      `json:"file_size,omitempty"`
 	FileVersion         string      `json:"file_version,omitempty"`
-	EOF                 bool        `json:"eof,omitempty"`
+	EOF                 *bool       `json:"eof,omitempty"`
 	RetentionTruncated  bool        `json:"retention_truncated,omitempty"`
 	GeneratedAt         time.Time   `json:"generated_at,omitempty"`
 }
+
+func int64Ptr(v int64) *int64 { return &v }
+func boolPtr(v bool) *bool    { return &v }

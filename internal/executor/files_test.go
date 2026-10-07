@@ -31,15 +31,15 @@ func TestReadFileRangedUTF8AndVersion(t *testing.T) {
 	if !first.OK || first.Output != "abcd" || first.OutputEncoding != "utf-8" {
 		t.Fatalf("first range = %+v", first)
 	}
-	if first.RequestedOffset != 0 || first.NextOffset != 4 || first.FileSize != 10 || first.EOF || !first.Truncated || first.OmittedBytes != 6 {
+	if first.RequestedOffset != 0 || first.Offset == nil || *first.Offset != 0 || first.NextOffset == nil || *first.NextOffset != 4 || first.FileSize == nil || *first.FileSize != 10 || first.EOF == nil || *first.EOF || !first.Truncated || first.OmittedBytes != 6 {
 		t.Fatalf("first metadata = %+v", first)
 	}
 	if first.FileVersion == "" {
 		t.Fatal("missing file version")
 	}
 
-	second := server.readFile(Request{Path: path, Offset: first.NextOffset, Limit: 32, FileVersion: first.FileVersion})
-	if !second.OK || second.Output != "efghij" || second.NextOffset != 10 || !second.EOF || second.Truncated {
+	second := server.readFile(Request{Path: path, Offset: *first.NextOffset, Limit: 32, FileVersion: first.FileVersion})
+	if !second.OK || second.Output != "efghij" || second.NextOffset == nil || *second.NextOffset != 10 || second.EOF == nil || !*second.EOF || second.Truncated {
 		t.Fatalf("second range = %+v", second)
 	}
 	if second.FileVersion != first.FileVersion {
@@ -58,7 +58,7 @@ func TestReadFileBinaryUsesBase64(t *testing.T) {
 	if !resp.OK || resp.OutputEncoding != "base64" || resp.Output != base64.StdEncoding.EncodeToString(raw) {
 		t.Fatalf("binary response = %+v", resp)
 	}
-	if !resp.EOF || resp.BytesReturned != int64(len(raw)) {
+	if resp.EOF == nil || !*resp.EOF || resp.BytesReturned != int64(len(raw)) {
 		t.Fatalf("binary metadata = %+v", resp)
 	}
 }
@@ -128,7 +128,7 @@ func TestReadFileBoundsLargeRegularFile(t *testing.T) {
 		t.Fatal(err)
 	}
 	resp := server.readFile(Request{Path: path})
-	if !resp.OK || resp.BytesReturned != maxFileReadBytes || !resp.Truncated || resp.EOF {
+	if !resp.OK || resp.BytesReturned != maxFileReadBytes || !resp.Truncated || resp.EOF == nil || *resp.EOF {
 		t.Fatalf("large ranged read = %+v", resp)
 	}
 	if len(resp.Output) != maxFileReadBytes {
@@ -143,7 +143,7 @@ func TestWriteFileAtomicReplacementPreservesModeAndReturnsVersion(t *testing.T) 
 		t.Fatal(err)
 	}
 	resp := server.writeFile(Request{Path: path, Content: "new-content"})
-	if !resp.OK || resp.Status != "written" || resp.FileVersion == "" || resp.FileSize != int64(len("new-content")) {
+	if !resp.OK || resp.Status != "written" || resp.FileVersion == "" || resp.FileSize == nil || *resp.FileSize != int64(len("new-content")) {
 		t.Fatalf("write response = %+v", resp)
 	}
 	b, err := os.ReadFile(path)

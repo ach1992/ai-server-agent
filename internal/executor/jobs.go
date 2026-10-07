@@ -1275,10 +1275,11 @@ func (s *Server) jobOutputBounded(req Request) Response {
 		BytesReturned:       int64(len(raw)),
 		JobID:               id,
 		RequestedOffset:     requested,
+		Offset:              int64Ptr(requested),
 		AvailableFromOffset: header.AvailableFrom,
-		NextOffset:          next,
+		NextOffset:          int64Ptr(next),
 		CurrentEnd:          header.CurrentEnd,
-		EOF:                 next >= header.CurrentEnd,
+		EOF:                 boolPtr(next >= header.CurrentEnd),
 		RetentionTruncated:  retentionTruncated,
 	}
 }
@@ -1303,9 +1304,10 @@ func readLegacyJobOutput(f *os.File, size, requested int64, limit int) Response 
 		BytesReturned:       int64(len(raw)),
 		RequestedOffset:     requested,
 		AvailableFromOffset: 0,
-		NextOffset:          next,
+		Offset:              int64Ptr(requested),
+		NextOffset:          int64Ptr(next),
 		CurrentEnd:          size,
-		EOF:                 next >= size,
+		EOF:                 boolPtr(next >= size),
 	}
 }
 

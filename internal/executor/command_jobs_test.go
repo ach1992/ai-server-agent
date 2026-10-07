@@ -110,7 +110,7 @@ func TestBoundedJobLogRetainsLogicalTail(t *testing.T) {
 	if !resp.RetentionTruncated || resp.AvailableFromOffset != 128 || resp.CurrentEnd != maxJobLogBytes+128 {
 		t.Fatalf("unexpected logical retention metadata: %+v", resp)
 	}
-	if resp.NextOffset != 144 || resp.BytesReturned != 16 || resp.Output != strings.Repeat("a", 16) {
+	if resp.NextOffset == nil || *resp.NextOffset != 144 || resp.BytesReturned != 16 || resp.Output != strings.Repeat("a", 16) {
 		t.Fatalf("unexpected bounded range response: %+v", resp)
 	}
 }
