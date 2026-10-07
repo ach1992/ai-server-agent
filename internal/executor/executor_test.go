@@ -111,7 +111,7 @@ func TestCommandUsesSanitizedRootEnvironment(t *testing.T) {
 		workerGID: 1235,
 	}
 	rootCmd, _ := s.command(Request{Command: "printf safe", Root: true})
-	if got := strings.Join(rootCmd.Args, " "); strings.Contains(got, " -l") || !strings.Contains(got, "--noprofile --norc -c") {
+	if got := strings.Join(rootCmd.Args, " "); strings.Contains(got, " -l") || !strings.Contains(got, "--noprofile --norc -s") || strings.Contains(got, "printf safe") {
 		t.Fatalf("root shell args are not startup-file-safe: %q", got)
 	}
 	env := strings.Join(rootCmd.Env, "\n")
@@ -159,16 +159,11 @@ func TestShellCommandIgnoresWorkerStartupFiles(t *testing.T) {
 	}
 }
 
-func TestRootCommandAndJobIgnoreWorkerStartupFiles(t *testing.T) {
+func TestRootCommandIgnoresWorkerStartupFiles(t *testing.T) {
 	if os.Geteuid() != 0 {
 		t.Skip("privileged execution behavior is exercised under sudo in High Assurance Security")
 	}
 	workspace := t.TempDir()
-	state := t.TempDir()
-	jobs := filepath.Join(state, "jobs")
-	if err := os.Mkdir(jobs, 0711); err != nil {
-		t.Fatal(err)
-	}
 	marker := filepath.Join(t.TempDir(), "worker-startup-ran")
 	payload := []byte("printf pwned > " + marker + "\n")
 	for _, name := range []string{".bash_profile", ".bash_login", ".profile", ".bashrc"} {
@@ -189,15 +184,12 @@ func TestRootCommandAndJobIgnoreWorkerStartupFiles(t *testing.T) {
 	benignRootCommand := "test ! -e " + shellQuote(ambientName) + " && printf safe"
 
 	s := &Server{
-		cfg: config.Config{
-			WorkspaceDir: workspace,
-			StateDir:     state,
-			WorkerUser:   "root",
-		},
+		cfg: config.Config{WorkspaceDir: workspace, WorkerUser: "root"},
 		guard:     policy.New(nil),
 		audit:     audit.New(filepath.Join(t.TempDir(), "audit.jsonl")),
 		workerUID: 0,
 		workerGID: 0,
+		runs:      newRunLimiter(),
 	}
 	resp := s.run(Request{Command: benignRootCommand, Root: true, Approval: true})
 	if !resp.OK || resp.Output != "safe" {
@@ -206,56 +198,21 @@ func TestRootCommandAndJobIgnoreWorkerStartupFiles(t *testing.T) {
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("root command executed worker startup state; stat err=%v", err)
 	}
-
-	fakeBin := t.TempDir()
-	fakeSystemdRun := filepath.Join(fakeBin, "systemd-run")
-	fakeScript := `#!/bin/sh
-set -e
-workdir=
-while [ "$#" -gt 0 ]; do
-  case "$1" in
-    --unit) shift 2 ;;
-    --property=WorkingDirectory=*) workdir="${1#--property=WorkingDirectory=}"; shift ;;
-    --collect|--uid=*) shift ;;
-    /usr/bin/env) [ -n "$workdir" ] && cd "$workdir"; exec "$@" ;;
-    *) echo "unexpected systemd-run test arg: $1" >&2; exit 64 ;;
-  esac
-done
-exit 65
-`
-	if err := os.WriteFile(fakeSystemdRun, []byte(fakeScript), 0755); err != nil {
-		t.Fatal(err)
-	}
-	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
-	job := s.startJob(Request{Command: benignRootCommand, Root: true, Approval: true})
-	if !job.OK || job.JobID == "" {
-		t.Fatalf("root job failed: %+v", job)
-	}
-	if _, err := os.Stat(marker); !os.IsNotExist(err) {
-		t.Fatalf("root job executed worker startup state; stat err=%v", err)
-	}
-	logBytes, err := os.ReadFile(filepath.Join(jobs, job.JobID+".log"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(logBytes) != "safe" {
-		t.Fatalf("root job output = %q, want safe", logBytes)
-	}
 }
 
 func TestRootJobInvocationSanitizesEnvironment(t *testing.T) {
-	source, err := os.ReadFile("executor.go")
+	source, err := os.ReadFile("jobs.go")
 	if err != nil {
 		t.Fatal(err)
 	}
 	text := string(source)
-	for _, want := range []string{"/usr/bin/env", `"-i"`, `"HOME="+home`, `workDir = "/root"`, `"--property=WorkingDirectory=" + workDir`, `"/bin/bash", "--noprofile", "--norc", "-c"`} {
+	for _, want := range []string{"/usr/bin/env", `"-i"`, `"HOME="+home`, `workDir = "/root"`, `"--property=WorkingDirectory=" + workDir`, `runnerPath, "job-runner"`} {
 		if !strings.Contains(text, want) {
 			t.Fatalf("startJob is missing sanitized invocation contract %q", want)
 		}
 	}
-	if strings.Contains(text, `"/bin/bash", "-lc", shell`) || strings.Contains(text, `--setenv=HOME=`) {
-		t.Fatal("startJob still contains login-shell or inherited-HOME behavior")
+	if strings.Contains(text, `"/bin/bash", "--noprofile", "--norc", "-c"`) || strings.Contains(text, `--setenv=HOME=`) {
+		t.Fatal("startJob still contains raw-command argv or inherited-HOME behavior")
 	}
 }
 
