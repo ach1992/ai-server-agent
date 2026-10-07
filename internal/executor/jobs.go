@@ -91,7 +91,7 @@ func (s *Server) startJobBounded(req Request) Response {
 	defer s.jobsMu.Unlock()
 
 	if req.OperationID == "" {
-		req.OperationID = "internal-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+		req.OperationID = "@internal-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	}
 
 	jobsDir, claimsDir, err := s.ensureJobState()
