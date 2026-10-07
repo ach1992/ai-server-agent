@@ -211,11 +211,11 @@ func normalizeRunTimeout(ms int64) (time.Duration, error) {
 	if ms == 0 {
 		return defaultBrowserRunTimeout, nil
 	}
-	d := time.Duration(ms) * time.Millisecond
-	if d > maxBrowserRunTimeout {
-		return 0, fmt.Errorf("timeout_ms exceeds browser maximum of %d", maxBrowserRunTimeout/time.Millisecond)
+	maxMS := int64(maxBrowserRunTimeout / time.Millisecond)
+	if ms > maxMS {
+		return 0, fmt.Errorf("timeout_ms exceeds browser maximum of %d", maxMS)
 	}
-	return d, nil
+	return time.Duration(ms) * time.Millisecond, nil
 }
 
 func shellQuote(s string) string {
