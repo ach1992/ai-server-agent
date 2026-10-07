@@ -4,6 +4,8 @@ AI Server Agent turns a dedicated Linux development/test server into a bearer-au
 
 The project is intentionally a **development/test-server control plane**, not a general hosting panel. It gives an authorized MCP client enough capability to work on a dedicated Linux host while keeping the Agent's own control plane, credentials, connectivity, and destructive operations behind explicit boundaries.
 
+The Agent is a standalone product: every supported host capability is available through direct MCP access. MCP Gateway is an optional future upstream integration; its development or availability is not required for Agent installation, operation, capability delivery or standalone release. Future Gateway compatibility is validated separately against the same Agent tools and bounded contracts.
+
 ## Platform support
 
 Stable `v0.1.9` and the current `main` branch support:
@@ -445,7 +447,7 @@ For future work, use the repository as a graph of authoritative sources rather t
 - **[docs/TESTING.md](docs/TESTING.md)** — validation model, behavioral coverage and known limits;
 - **[docs/CONNECT_CHATGPT.md](docs/CONNECT_CHATGPT.md)** — ChatGPT connection topologies and client-side validation guidance; current OpenAI UI/docs override stale UI wording;
 - **Issue #37** — historical decision record for the AI-client/vendor-neutral invariant now owned by `AGENTS.md` and `docs/ARCHITECTURE.md`;
-- **Issue #47** — planned MCP Gateway integration with independent credentials and preserved direct-client operation;
+- **Issue #47** — optional future MCP Gateway integration with independent credentials; its real end-to-end acceptance does not block standalone Agent completion;
 - **GitHub Issues** — authoritative place for unresolved actionable work; do not create speculative backlog merely for ceremony;
 - **Pull requests and commit history** — implementation/review/integration evidence;
 - **GitHub Releases and attestations** — immutable stable-delivery identities and provenance;
