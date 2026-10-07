@@ -65,15 +65,19 @@ jobs:
           test "$bad" -eq 0
       - name: Root shell execution boundary
         run: |
-          if grep -nE 'exec.Command\("/bin/bash", "-lc"|"/bin/bash", "-lc", shell|--setenv=HOME=' internal/executor/executor.go internal/executor/foundation.go; then
+          if grep -nE 'exec.Command\("/bin/bash", "-lc"|"/bin/bash", "-lc", shell|--setenv=HOME=' internal/executor/executor.go internal/executor/foundation.go internal/executor/jobs.go; then
             echo 'executor must not use login shells or inherited workspace HOME for privileged execution' >&2
             exit 1
           fi
-          grep -qF 'exec.CommandContext(ctx, "/bin/bash", "--noprofile", "--norc", "-c", command)' internal/executor/foundation.go
+          grep -qF 'exec.CommandContext(ctx, "/bin/bash", "--noprofile", "--norc", "-s")' internal/executor/foundation.go
+          grep -qF 'cmd.Stdin = strings.NewReader(command)' internal/executor/foundation.go
           grep -qF 'Setpgid: true' internal/executor/foundation.go
           grep -qF 'syscall.Kill(-pgid, syscall.SIGTERM)' internal/executor/foundation.go
           grep -qF 'syscall.Kill(-pgid, syscall.SIGKILL)' internal/executor/foundation.go
-          grep -qF '"/usr/bin/env", "-i"' internal/executor/executor.go
+          grep -qF '"/usr/bin/env", "-i"' internal/executor/jobs.go
+          grep -qF 'runnerPath, "job-runner"' internal/executor/jobs.go
+          grep -qF 'jobStateSafetyReserveBytes' internal/executor/jobs.go
+          grep -qF 'OperationID string' internal/executor/protocol.go
       - name: Installer compatibility check
         run: sudo bash install.sh --check
       - name: Supported platform policy
@@ -120,7 +124,7 @@ jobs:
           grep -qF 'install -d -o root -g root -m 0700 "$CONTROL_DIR"' manage.sh
           grep -qF 'chmod 0600 "$tmp"' manage.sh
           grep -qF 'syscall.O_NOFOLLOW' internal/executor/executor.go
-          grep -qF 'trustedDir(jobsDir)' internal/executor/executor.go
+          grep -qF 'trustedDir(jobsDir)' internal/executor/jobs.go
           grep -qF 'job path is not a regular file' internal/executor/executor.go
           grep -qF 'Refusing symlinked browser data directory' internal/browser/browser.go
       - name: Cloudflare guided setup safety contract
@@ -305,6 +309,16 @@ jobs:
           sudo install -d -m 0750 -o root -g aiagent /opt/ai-server-agent
           sudo touch /opt/ai-server-agent/lifecycle-runtime-sentinel
           sudo -u aiworker touch /srv/ai-workspace/lifecycle-workspace-sentinel
+
+          sudo systemd-run --unit ai-job-ci-uninstall-guard --collect /bin/sleep 120
+          sudo systemctl is-active --quiet ai-job-ci-uninstall-guard.service
+          if sudo env AI_SERVER_AGENT_YES=1 bash uninstall.sh >/tmp/uninstall-active-job.out 2>&1; then
+            echo 'uninstall must refuse while an Agent persistent job is active' >&2
+            exit 1
+          fi
+          grep -qF 'Active AI Server Agent persistent jobs exist' /tmp/uninstall-active-job.out
+          sudo systemctl is-active --quiet ai-job-ci-uninstall-guard.service
+          sudo systemctl stop ai-job-ci-uninstall-guard.service
 
           sudo env AI_SERVER_AGENT_YES=1 bash uninstall.sh
           test ! -e /usr/local/bin/ai-server-agent
