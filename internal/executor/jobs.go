@@ -40,6 +40,8 @@ const (
 
 var jobLogMagic = [8]byte{'A', 'I', 'S', 'A', 'J', 'L', '0', '1'}
 
+const jobStatusUnknown = "unknown"
+
 type jobPaths struct {
 	command string
 	log     string
@@ -660,32 +662,52 @@ func (s *Server) cleanupCompletedJobArtifacts(jobsDir, claimsDir string) error {
 		if _, err := safeID(id); err != nil {
 			continue
 		}
-		statusPath := filepath.Join(jobsDir, entry.Name())
-		f, err := s.openJobFile(statusPath)
+		paths := jobPathsFor(jobsDir, id)
+		status, modTime, err := s.readJobStatusValue(paths.status)
 		if err != nil {
 			return err
 		}
-		b, readErr := io.ReadAll(io.LimitReader(f, 65))
-		fi, statErr := f.Stat()
-		_ = f.Close()
-		if readErr != nil || statErr != nil {
-			if readErr != nil {
-				return readErr
-			}
-			return statErr
-		}
-		status := strings.TrimSpace(string(b))
 		if status == "" {
-			continue
+			started, err := s.jobStarted(paths.started)
+			if err != nil {
+				return err
+			}
+			accepted := started
+			if !accepted {
+				accepted, err = jobHasStartedClaim(claimsDir, id)
+				if err != nil {
+					return err
+				}
+			}
+			if !accepted {
+				continue
+			}
+			exists, err := jobUnitExists(id)
+			if err != nil {
+				return err
+			}
+			if exists {
+				continue
+			}
+			// A started job whose transient unit has disappeared without a
+			// durable numeric status was interrupted (for example by stop or
+			// reboot). Persist an explicit unknown-completion marker so it can
+			// be reported honestly and participate in bounded retention.
+			if err := s.markJobStatusUnknownIfEmpty(paths.status); err != nil {
+				return err
+			}
+			status, modTime, err = s.readJobStatusValue(paths.status)
+			if err != nil {
+				return err
+			}
 		}
-		if len(b) > 64 {
-			return fmt.Errorf("job status file exceeds limit: %s", statusPath)
+		if status != jobStatusUnknown {
+			if _, err := strconv.Atoi(status); err != nil {
+				return fmt.Errorf("invalid job status file: %s", paths.status)
+			}
 		}
-		if _, err := strconv.Atoi(status); err != nil {
-			return fmt.Errorf("invalid job status file: %s", statusPath)
-		}
-		_ = os.Remove(filepath.Join(jobsDir, id+".cmd"))
-		completed = append(completed, completedJobArtifact{id: id, modTime: fi.ModTime()})
+		_ = os.Remove(paths.command)
+		completed = append(completed, completedJobArtifact{id: id, modTime: modTime})
 	}
 	sort.Slice(completed, func(i, j int) bool { return completed[i].modTime.After(completed[j].modTime) })
 	if len(completed) > maxCompletedJobArtifacts {
@@ -698,6 +720,101 @@ func (s *Server) cleanupCompletedJobArtifacts(jobsDir, claimsDir string) error {
 		}
 	}
 	return nil
+}
+
+func (s *Server) readJobStatusValue(path string) (string, time.Time, error) {
+	f, err := s.openJobFile(path)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, 65))
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	if len(b) > 64 {
+		return "", time.Time{}, fmt.Errorf("job status file exceeds limit: %s", path)
+	}
+	fi, err := f.Stat()
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	status := strings.TrimSpace(string(b))
+	if status != "" && status != jobStatusUnknown {
+		if _, err := strconv.Atoi(status); err != nil {
+			return "", time.Time{}, fmt.Errorf("invalid job status file: %s", path)
+		}
+	}
+	return status, fi.ModTime(), nil
+}
+
+func (s *Server) jobStarted(path string) (bool, error) {
+	f, err := s.openJobFile(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	defer f.Close()
+	b, err := io.ReadAll(io.LimitReader(f, 17))
+	if err != nil {
+		return false, err
+	}
+	if len(b) > 16 {
+		return false, fmt.Errorf("job started marker exceeds limit: %s", path)
+	}
+	marker := strings.TrimSpace(string(b))
+	if marker == "" {
+		return false, nil
+	}
+	if marker != "started" {
+		return false, fmt.Errorf("invalid job started marker: %s", path)
+	}
+	return true, nil
+}
+
+func (s *Server) markJobStatusUnknownIfEmpty(path string) error {
+	f, err := os.OpenFile(path, os.O_RDWR|syscall.O_NOFOLLOW, 0)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	fi, err := f.Stat()
+	if err != nil {
+		return err
+	}
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !fi.Mode().IsRegular() || !ok || (st.Uid != 0 && st.Uid != s.workerUID) || fi.Mode().Perm()&0002 != 0 {
+		return fmt.Errorf("job status file has unsafe ownership or mode: %s", path)
+	}
+	b, err := io.ReadAll(io.LimitReader(f, 65))
+	if err != nil {
+		return err
+	}
+	if len(b) > 64 {
+		return fmt.Errorf("job status file exceeds limit: %s", path)
+	}
+	status := strings.TrimSpace(string(b))
+	if status != "" {
+		if status == jobStatusUnknown {
+			return nil
+		}
+		if _, err := strconv.Atoi(status); err != nil {
+			return fmt.Errorf("invalid job status file: %s", path)
+		}
+		return nil
+	}
+	if err := f.Truncate(0); err != nil {
+		return err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
+	if _, err := io.WriteString(f, jobStatusUnknown+"\n"); err != nil {
+		return err
+	}
+	return f.Sync()
 }
 
 func countJobClaims(claimsDir string) (int, error) {
@@ -752,6 +869,29 @@ func cleanupFailedJobClaims(claimsDir string) error {
 		}
 	}
 	return nil
+}
+
+func jobHasStartedClaim(claimsDir, jobID string) (bool, error) {
+	entries, err := os.ReadDir(claimsDir)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return false, nil
+		}
+		return false, err
+	}
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		claim, found, err := readJobClaim(filepath.Join(claimsDir, entry.Name()))
+		if err != nil {
+			return false, err
+		}
+		if found && claim.JobID == jobID && claim.State == "started" {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 func removeClaimsForJob(claimsDir, jobID string) error {

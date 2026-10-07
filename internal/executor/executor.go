@@ -210,33 +210,66 @@ func (s *Server) jobStatus(req Request) Response {
 		return Response{Error: err.Error(), ReasonCode: "invalid_job_id", ErrorCode: "invalid_job_id", ErrorClass: "validation"}
 	}
 	statusPath := filepath.Join(s.cfg.StateDir, "jobs", id+".status")
-	if f, er := s.openJobFile(statusPath); er == nil {
-		b, readErr := io.ReadAll(io.LimitReader(f, 65))
-		_ = f.Close()
-		if readErr != nil {
-			return jobStateError("job_status_unavailable", readErr)
-		}
-		if len(b) > 64 {
-			return Response{Error: "job status file exceeds limit", ReasonCode: "job_status_unavailable", ErrorCode: "job_status_unavailable", ErrorClass: "state"}
-		}
-		status := strings.TrimSpace(string(b))
-		if status != "" {
-			code, parseErr := strconv.Atoi(status)
-			if parseErr == nil {
-				return Response{
-					OK:             true,
-					Status:         "completed",
-					Output:         status,
-					OutputEncoding: "utf-8",
-					BytesSeen:      int64(len(status)),
-					BytesReturned:  int64(len(status)),
-					ExitCode:       code,
-				}
+	if status, _, er := s.readJobStatusValue(statusPath); er == nil {
+		if status == jobStatusUnknown {
+			return Response{
+				Error:      "persistent job ended without a durable exit status; completion cannot be proven",
+				ReasonCode: "unknown_completion",
+				ErrorCode:  "unknown_completion",
+				ErrorClass: "state",
+				JobID:      id,
+				Status:     "unknown",
 			}
-			return Response{Error: "invalid job status file", ReasonCode: "job_status_unavailable", ErrorCode: "job_status_unavailable", ErrorClass: "state"}
+		}
+		if status != "" {
+			code, _ := strconv.Atoi(status)
+			return Response{
+				OK:             true,
+				Status:         "completed",
+				Output:         status,
+				OutputEncoding: "utf-8",
+				BytesSeen:      int64(len(status)),
+				BytesReturned:  int64(len(status)),
+				ExitCode:       code,
+				JobID:          id,
+			}
 		}
 	} else if !os.IsNotExist(er) {
 		return jobStateError("job_status_unavailable", er)
+	}
+
+	jobsDir := filepath.Join(s.cfg.StateDir, "jobs")
+	paths := jobPathsFor(jobsDir, id)
+	started, err := s.jobStarted(paths.started)
+	if err != nil {
+		return jobStateError("job_status_unavailable", err)
+	}
+	accepted := started
+	if !accepted {
+		accepted, err = jobHasStartedClaim(filepath.Join(jobsDir, "claims"), id)
+		if err != nil {
+			return jobStateError("job_status_unavailable", err)
+		}
+	}
+	if accepted {
+		exists, err := jobUnitExists(id)
+		if err != nil {
+			return jobStateError("job_status_unavailable", err)
+		}
+		if !exists {
+			if err := s.markJobStatusUnknownIfEmpty(paths.status); err != nil {
+				return jobStateError("job_status_unavailable", err)
+			}
+			_ = os.Remove(paths.command)
+			return Response{
+				Error:      "persistent job ended without a durable exit status; completion cannot be proven",
+				ReasonCode: "unknown_completion",
+				ErrorCode:  "unknown_completion",
+				ErrorClass: "state",
+				JobID:      id,
+				Status:     "unknown",
+			}
+		}
 	}
 
 	unit := "ai-job-" + id

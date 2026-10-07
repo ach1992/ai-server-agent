@@ -434,6 +434,254 @@ func TestPersistentJobIdempotencyStateIsBounded(t *testing.T) {
 	}
 }
 
+func TestInterruptedPersistentJobsEnterBoundedRetention(t *testing.T) {
+	state := t.TempDir()
+	jobs := filepath.Join(state, "jobs")
+	claims := filepath.Join(jobs, "claims")
+	if err := os.Mkdir(jobs, 0711); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(claims, 0700); err != nil {
+		t.Fatal(err)
+	}
+	fakeBin := t.TempDir()
+	systemctl := filepath.Join(fakeBin, "systemctl")
+	if err := os.WriteFile(systemctl, []byte("#!/bin/sh\nif [ \"$1\" = show ]; then printf 'not-found\\n'; exit 0; fi\nexit 64\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+
+	server := &Server{cfg: config.Config{StateDir: state}, workerUID: uint32(os.Geteuid())}
+	base := time.Now().Add(-time.Duration(maxCompletedJobArtifacts+2) * time.Second)
+	allIDs := make([]string, 0, maxCompletedJobArtifacts+1)
+	for i := 0; i < maxCompletedJobArtifacts+1; i++ {
+		id := fmt.Sprintf("%d", 700000+i)
+		allIDs = append(allIDs, id)
+		paths := jobPathsFor(jobs, id)
+		if err := os.WriteFile(paths.log, nil, 0640); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(paths.status, nil, 0640); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(paths.started, []byte("started\n"), 0640); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(paths.command, []byte("printf interrupted"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		stamp := base.Add(time.Duration(i) * time.Second)
+		if err := os.Chtimes(paths.status, stamp, stamp); err != nil {
+			t.Fatal(err)
+		}
+		claimPath := filepath.Join(claims, operationClaimName("interrupted-"+id))
+		if err := createJobClaim(claimPath, jobClaim{
+			Version:     1,
+			JobID:       id,
+			Fingerprint: strings.Repeat("c", 64),
+			State:       "started",
+			CreatedAt:   stamp.UTC().Format(time.RFC3339Nano),
+		}); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if err := server.cleanupCompletedJobArtifacts(jobs, claims); err != nil {
+		t.Fatal(err)
+	}
+	entries, err := os.ReadDir(jobs)
+	if err != nil {
+		t.Fatal(err)
+	}
+	statusCount := 0
+	for _, entry := range entries {
+		if strings.HasSuffix(entry.Name(), ".status") {
+			statusCount++
+			b, err := os.ReadFile(filepath.Join(jobs, entry.Name()))
+			if err != nil {
+				t.Fatal(err)
+			}
+			if strings.TrimSpace(string(b)) != jobStatusUnknown {
+				t.Fatalf("retained interrupted status %s = %q, want %q", entry.Name(), b, jobStatusUnknown)
+			}
+		}
+	}
+	if statusCount != maxCompletedJobArtifacts {
+		t.Fatalf("retained terminal status files = %d, want %d", statusCount, maxCompletedJobArtifacts)
+	}
+	removedID := ""
+	for _, id := range allIDs {
+		if _, err := os.Stat(filepath.Join(jobs, id+".status")); os.IsNotExist(err) {
+			if removedID != "" {
+				t.Fatalf("more than one terminal job was evicted: %s and %s", removedID, id)
+			}
+			removedID = id
+		}
+	}
+	if removedID == "" {
+		t.Fatal("expected one interrupted terminal job to be evicted")
+	}
+	for _, path := range []string{
+		filepath.Join(jobs, removedID+".cmd"),
+		filepath.Join(jobs, removedID+".log"),
+		filepath.Join(jobs, removedID+".status"),
+		filepath.Join(jobs, removedID+".started"),
+		filepath.Join(claims, operationClaimName("interrupted-"+removedID)),
+	} {
+		if _, err := os.Stat(path); !os.IsNotExist(err) {
+			t.Fatalf("evicted interrupted artifact still exists: %s (err=%v)", path, err)
+		}
+	}
+}
+
+func TestActivePersistentJobIsNotRetiredAsUnknown(t *testing.T) {
+	state := t.TempDir()
+	jobs := filepath.Join(state, "jobs")
+	claims := filepath.Join(jobs, "claims")
+	if err := os.Mkdir(jobs, 0711); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(claims, 0700); err != nil {
+		t.Fatal(err)
+	}
+	fakeBin := t.TempDir()
+	systemctl := filepath.Join(fakeBin, "systemctl")
+	if err := os.WriteFile(systemctl, []byte("#!/bin/sh\nif [ \"$1\" = show ]; then printf 'loaded\\n'; exit 0; fi\nexit 64\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+
+	id := "812345"
+	paths := jobPathsFor(jobs, id)
+	if err := os.WriteFile(paths.log, nil, 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.status, nil, 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.started, []byte("started\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{cfg: config.Config{StateDir: state}, workerUID: uint32(os.Geteuid())}
+	if err := server.cleanupCompletedJobArtifacts(jobs, claims); err != nil {
+		t.Fatal(err)
+	}
+	b, err := os.ReadFile(paths.status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b) != 0 {
+		t.Fatalf("active job status was rewritten: %q", b)
+	}
+}
+
+func TestJobStatusReconcilesInterruptedJobWithoutExitStatus(t *testing.T) {
+	state := t.TempDir()
+	jobs := filepath.Join(state, "jobs")
+	if err := os.Mkdir(jobs, 0711); err != nil {
+		t.Fatal(err)
+	}
+	fakeBin := t.TempDir()
+	systemctl := filepath.Join(fakeBin, "systemctl")
+	if err := os.WriteFile(systemctl, []byte("#!/bin/sh\nif [ \"$1\" = show ]; then printf 'not-found\\n'; exit 0; fi\nexit 64\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+
+	id := "798"
+	paths := jobPathsFor(jobs, id)
+	if err := os.WriteFile(paths.status, nil, 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.started, []byte("started\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{cfg: config.Config{StateDir: state}, workerUID: uint32(os.Geteuid())}
+	resp := server.jobStatus(Request{JobID: id})
+	if resp.OK || resp.ErrorCode != "unknown_completion" || resp.Status != "unknown" || resp.JobID != id {
+		t.Fatalf("reconciled interrupted status = %+v", resp)
+	}
+	b, err := os.ReadFile(paths.status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(b)) != jobStatusUnknown {
+		t.Fatalf("reconciled status marker = %q, want %q", b, jobStatusUnknown)
+	}
+}
+
+func TestJobStatusReconcilesAcceptedJobBeforeRunnerStart(t *testing.T) {
+	state := t.TempDir()
+	jobs := filepath.Join(state, "jobs")
+	claims := filepath.Join(jobs, "claims")
+	if err := os.Mkdir(jobs, 0711); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(claims, 0700); err != nil {
+		t.Fatal(err)
+	}
+	fakeBin := t.TempDir()
+	systemctl := filepath.Join(fakeBin, "systemctl")
+	if err := os.WriteFile(systemctl, []byte("#!/bin/sh\nif [ \"$1\" = show ]; then printf 'not-found\\n'; exit 0; fi\nexit 64\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+
+	id := "797"
+	paths := jobPathsFor(jobs, id)
+	if err := os.WriteFile(paths.status, nil, 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.started, nil, 0640); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(paths.command, []byte("printf secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	claimPath := filepath.Join(claims, operationClaimName("accepted-before-runner"))
+	if err := createJobClaim(claimPath, jobClaim{
+		Version:     1,
+		JobID:       id,
+		Fingerprint: strings.Repeat("d", 64),
+		State:       "started",
+		CreatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
+	}); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{cfg: config.Config{StateDir: state}, workerUID: uint32(os.Geteuid())}
+	resp := server.jobStatus(Request{JobID: id})
+	if resp.OK || resp.ErrorCode != "unknown_completion" || resp.Status != "unknown" || resp.JobID != id {
+		t.Fatalf("accepted-before-runner status = %+v", resp)
+	}
+	if _, err := os.Stat(paths.command); !os.IsNotExist(err) {
+		t.Fatalf("accepted-before-runner command handoff still exists; err=%v", err)
+	}
+	b, err := os.ReadFile(paths.status)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.TrimSpace(string(b)) != jobStatusUnknown {
+		t.Fatalf("accepted-before-runner status marker = %q, want %q", b, jobStatusUnknown)
+	}
+}
+
+func TestJobStatusReportsUnknownCompletionMarker(t *testing.T) {
+	state := t.TempDir()
+	jobs := filepath.Join(state, "jobs")
+	if err := os.Mkdir(jobs, 0711); err != nil {
+		t.Fatal(err)
+	}
+	statusPath := filepath.Join(jobs, "799.status")
+	if err := os.WriteFile(statusPath, []byte(jobStatusUnknown+"\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{cfg: config.Config{StateDir: state}, workerUID: uint32(os.Geteuid())}
+	resp := server.jobStatus(Request{JobID: "799"})
+	if resp.OK || resp.ErrorCode != "unknown_completion" || resp.ReasonCode != "unknown_completion" || resp.Status != "unknown" || resp.JobID != "799" {
+		t.Fatalf("unknown job status = %+v", resp)
+	}
+}
+
 func TestJobStatusReturnsStructuredExitCode(t *testing.T) {
 	state := t.TempDir()
 	jobs := filepath.Join(state, "jobs")
