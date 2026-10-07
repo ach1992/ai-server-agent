@@ -2,6 +2,7 @@ package executor
 
 import (
 	"encoding/base64"
+	"fmt"
 	"os"
 	"os/user"
 	"path/filepath"
@@ -46,6 +47,30 @@ func TestBoundedOutputCollectorUsesBase64ForBinary(t *testing.T) {
 	}
 	if string(decoded) != string(raw) {
 		t.Fatalf("decoded output = %v, want %v", decoded, raw)
+	}
+}
+
+
+
+func TestBoundedOutputCollectorDoesNotEmitBrokenUTF8Boundary(t *testing.T) {
+	w := newBoundedOutputCollector(6)
+	raw := []byte("A€BC€D")
+	if _, err := w.Write(raw); err != nil {
+		t.Fatal(err)
+	}
+	got := w.Result()
+	if !got.Truncated {
+		t.Fatalf("expected truncation: %+v", got)
+	}
+	if got.Encoding != "base64" {
+		t.Fatalf("encoding = %q, want base64 when head/tail split a UTF-8 rune", got.Encoding)
+	}
+	decoded, err := base64.StdEncoding.DecodeString(got.Output)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if int64(len(decoded)) != got.BytesReturned {
+		t.Fatalf("decoded bytes = %d, metadata = %d", len(decoded), got.BytesReturned)
 	}
 }
 
@@ -370,5 +395,44 @@ func TestPersistentJobClaimRecoversBeforeLaunch(t *testing.T) {
 	}
 	if string(commandBytes) != req.Command {
 		t.Fatalf("rebuilt command handoff = %q, want %q", commandBytes, req.Command)
+	}
+}
+
+
+func TestPersistentJobIdempotencyStateIsBounded(t *testing.T) {
+	state := t.TempDir()
+	jobs := filepath.Join(state, "jobs")
+	claims := filepath.Join(jobs, "claims")
+	if err := os.Mkdir(jobs, 0711); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(claims, 0700); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < maxIdempotencyClaims; i++ {
+		operationID := fmt.Sprintf("claim-%d", i)
+		claim := jobClaim{
+			Version:     1,
+			JobID:       fmt.Sprintf("%d", 100000+i),
+			Fingerprint: strings.Repeat("a", 64),
+			State:       "claimed",
+			CreatedAt:   "2026-10-07T00:00:00Z",
+		}
+		if err := createJobClaim(filepath.Join(claims, operationClaimName(operationID)), claim); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	server := &Server{
+		cfg: config.Config{StateDir: state, WorkspaceDir: t.TempDir(), WorkerUser: "aiworker"},
+		token:     "test-executor-token",
+		guard:     policy.New(nil),
+		audit:     audit.New(filepath.Join(t.TempDir(), "audit.jsonl")),
+		workerUID: uint32(os.Geteuid()),
+		workerGID: uint32(os.Getegid()),
+	}
+	resp := server.startJobBounded(Request{Command: "printf safe", OperationID: "new-operation"})
+	if resp.OK || resp.ErrorCode != "resource_limit" || resp.Status != "busy" || !resp.Retryable {
+		t.Fatalf("idempotency capacity response = %+v", resp)
 	}
 }
