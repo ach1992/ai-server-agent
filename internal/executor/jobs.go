@@ -101,6 +101,9 @@ func (s *Server) startJobBounded(req Request) Response {
 	if err := s.cleanupCompletedJobArtifacts(jobsDir, claimsDir); err != nil {
 		return jobStateError("job_state_unavailable", err)
 	}
+	if err := s.cleanupStalePrelaunchClaims(jobsDir, claimsDir, time.Now()); err != nil {
+		return jobStateError("job_state_unavailable", err)
+	}
 
 	fingerprint := s.jobFingerprint(req)
 	var claimPath string
