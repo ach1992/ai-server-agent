@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -426,7 +427,7 @@ func TestBrowserLifecycleBusyMapsToResourceLimit(t *testing.T) {
 	}
 }
 
-func TestBrowserAlreadyCurrentCleanupHonorsLifecycleLock(t *testing.T) {
+func TestBrowserAlreadyCurrentSetupHonorsLifecycleLock(t *testing.T) {
 	m := testBrowserManager(t)
 	writeReadyBrowserFixture(t, m)
 
@@ -436,6 +437,58 @@ func TestBrowserAlreadyCurrentCleanupHonorsLifecycleLock(t *testing.T) {
 	}
 	m.lifecycleLockPath = lockPath
 	m.lifecycleLockStat = fmt.Sprintf("%d:%d:600", os.Geteuid(), os.Getegid())
+	m.token = "test-executor-token"
+
+	socket := filepath.Join(t.TempDir(), "executor.sock")
+	m.cfg.ExecutorSocket = socket
+	ln, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ln.Close()
+
+	serverDone := make(chan error, 1)
+	go func() {
+		for range 2 {
+			conn, err := ln.Accept()
+			if err != nil {
+				serverDone <- err
+				return
+			}
+			var req executor.Request
+			if err := json.NewDecoder(conn).Decode(&req); err != nil {
+				_ = conn.Close()
+				serverDone <- err
+				return
+			}
+			cmd := exec.Command("/bin/bash", "--noprofile", "--norc", "-s")
+			cmd.Stdin = strings.NewReader(req.Command)
+			out, runErr := cmd.CombinedOutput()
+			resp := executor.Response{OK: runErr == nil}
+			if runErr != nil {
+				resp.Error = strings.TrimSpace(string(out))
+				resp.ReasonCode = "command_failed"
+				resp.ErrorCode = "command_failed"
+				resp.ErrorClass = "process"
+				var exitErr *exec.ExitError
+				if errors.As(runErr, &exitErr) {
+					resp.ExitCode = exitErr.ExitCode()
+				} else {
+					resp.ExitCode = -1
+				}
+			}
+			if err := json.NewEncoder(conn).Encode(resp); err != nil {
+				_ = conn.Close()
+				serverDone <- err
+				return
+			}
+			if err := conn.Close(); err != nil {
+				serverDone <- err
+				return
+			}
+		}
+		serverDone <- nil
+	}()
 
 	parent := filepath.Dir(m.engineDir())
 	stage := filepath.Join(parent, ".browser-stage.active")
@@ -457,36 +510,36 @@ func TestBrowserAlreadyCurrentCleanupHonorsLifecycleLock(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	runCleanup := func() ([]byte, error) {
-		cmd := exec.Command("/bin/bash", "--noprofile", "--norc", "-s")
-		cmd.Stdin = strings.NewReader(m.cleanupCommand())
-		return cmd.CombinedOutput()
+	resp, err := m.Setup(context.Background(), true)
+	if err != nil {
+		t.Fatal(err)
 	}
-
-	out, err := runCleanup()
-	if err == nil {
-		t.Fatalf("cleanup unexpectedly bypassed held lifecycle lock: %s", out)
-	}
-	var exitErr *exec.ExitError
-	if !errors.As(err, &exitErr) || exitErr.ExitCode() != browserLifecycleBusyExit {
-		t.Fatalf("held-lock cleanup exit = %v, want %d; output=%s", err, browserLifecycleBusyExit, out)
+	if resp.OK || resp.ErrorCode != "resource_limit" || resp.ErrorClass != "resource" || !resp.Retryable || resp.Status != "busy" {
+		t.Fatalf("already-current setup with held lifecycle lock = %+v", resp)
 	}
 	for _, path := range []string{stage, backup, tmpArtifact, npmCache} {
 		if _, statErr := os.Stat(path); statErr != nil {
-			t.Fatalf("cleanup mutated %s while lifecycle lock was held: %v", path, statErr)
+			t.Fatalf("already-current setup mutated %s while lifecycle lock was held: %v", path, statErr)
 		}
 	}
 
 	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN); err != nil {
 		t.Fatal(err)
 	}
-	if out, err := runCleanup(); err != nil {
-		t.Fatalf("cleanup after lifecycle lock release: %v: %s", err, out)
+	resp, err = m.Setup(context.Background(), true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !resp.OK || resp.Status != "already_current" {
+		t.Fatalf("already-current setup after lifecycle lock release = %+v", resp)
 	}
 	for _, path := range []string{stage, backup, tmpArtifact, npmCache} {
 		if _, statErr := os.Stat(path); !os.IsNotExist(statErr) {
-			t.Fatalf("cleanup left %s after lock release: %v", path, statErr)
+			t.Fatalf("already-current setup left %s after lock release: %v", path, statErr)
 		}
+	}
+	if err := <-serverDone; err != nil {
+		t.Fatal(err)
 	}
 }
 
