@@ -204,7 +204,7 @@ Once a supported MCP client is connected, the Agent exposes a compact tool surfa
 
 ### Ordinary commands and root commands
 
-Use `run_command` for normal development work, builds, tests, Git, project package managers and diagnostics that do not require host privilege. It runs as `aiworker` with `/srv/ai-workspace` as HOME/CWD.
+Use `run_command` for normal development work, builds, tests, Git, project package managers and diagnostics that do not require host privilege. It runs as `aiworker` with `/srv/ai-workspace` as HOME/CWD. Synchronous `run_command` / `run_root_command` calls are limited to five minutes; work expected to run longer or produce high output should use `start_job`. Active synchronous worker and root execution have separate bounded capacity and fail immediately with a structured `busy/resource_limit` result instead of entering a hidden queue.
 
 `/srv/ai-workspace` is persistent. Connected models are instructed to inspect and reuse existing repositories, worktrees and task environments before creating duplicates, prefer `git worktree` when another checkout of the same repository is appropriate, and never treat dirty, untracked, ambiguous or unknown workspace state as safe to delete.
 
