@@ -1,0 +1,10 @@
+{
+  "name": "ai-server-agent-browser-runtime",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Pinned private Playwright runtime for AI Server Agent",
+  "license": "UNLICENSED",
+  "dependencies": {
+    "playwright": "1.61.1"
+  }
+}

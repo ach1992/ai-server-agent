@@ -71,7 +71,9 @@ type BrowserSetupInput struct {
 	Approval bool `json:"approval,omitempty" jsonschema:"Set true to allow downloading the private browser runtime and installing required shared libraries"`
 }
 type BrowserRunInput struct {
-	Script string `json:"script" jsonschema:"JavaScript statements using the pre-created Playwright browser, context, and page variables"`
+	Script            string `json:"script" jsonschema:"JavaScript statements using the pre-created Playwright browser, context, and page variables; maximum 131072 raw bytes"`
+	TimeoutMS         int64  `json:"timeout_ms,omitempty" jsonschema:"Browser execution timeout in milliseconds; default 90000, maximum 300000"`
+	IgnoreHTTPSErrors bool   `json:"ignore_https_errors,omitempty" jsonschema:"Explicit scoped exception for local/self-signed development; default false preserves normal HTTPS certificate validation"`
 }
 
 func New(cfg config.Config) (*Server, error) {
@@ -146,14 +148,6 @@ func responseResult(resp executor.Response) (*mcpsdk.CallToolResult, executor.Re
 		resp.OK, resp.Status, resp.ErrorCode, resp.ExitCode, resp.BytesReturned, resp.Truncated,
 	)
 	return textResult(summary, !resp.OK), resp, nil
-}
-
-func legacyResponseResult(resp executor.Response) (*mcpsdk.CallToolResult, any, error) {
-	b, err := json.MarshalIndent(resp, "", "  ")
-	if err != nil {
-		return nil, nil, err
-	}
-	return textResult(string(b), !resp.OK), nil, nil
 }
 
 func executorTransportErrorResult(err error) (*mcpsdk.CallToolResult, executor.Response, error) {
@@ -261,22 +255,28 @@ func (s *Server) registerTools() {
 			return responseResult(resp)
 		})
 
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_setup", Description: "Install an optional root-owned Node.js + Playwright + Chromium engine under /opt/ai-server-agent/browser and keep writable browser profile/session data separately under the agent state directory. It does not replace system Node or take over ports 80/443.", Annotations: annotations(false, true, true, true)},
-		func(ctx context.Context, req *mcpsdk.CallToolRequest, input BrowserSetupInput) (*mcpsdk.CallToolResult, any, error) {
-			resp, err := s.browser.Setup(input.Approval)
-			if err != nil {
-				return textResult(err.Error(), true), nil, nil
-			}
-			return legacyResponseResult(resp)
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_status", Description: "Inspect bounded non-secret browser runtime readiness and pinned Node/Playwright/Chromium versions. The persistent browser profile is Agent-wide shared state, not per-client or per-user isolation.", Annotations: annotations(true, false, true, false)},
+		func(ctx context.Context, req *mcpsdk.CallToolRequest, input EmptyInput) (*mcpsdk.CallToolResult, browser.RuntimeStatus, error) {
+			status := s.browser.Status(ctx)
+			return textResult(fmt.Sprintf("installed=%t ready=%t busy=%t shared_profile=%t reason=%q", status.Installed, status.Ready, status.Busy, status.SharedProfile, status.Reason), false), status, nil
 		})
 
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_run", Description: "Run Playwright JavaScript in headless Chromium using a persistent browser profile. Variables browser, context, and page are pre-created; use console.log for observations. Scripts can interact with and modify external web applications, so treat this as an action-capable tool.", Annotations: annotations(false, true, false, true)},
-		func(ctx context.Context, req *mcpsdk.CallToolRequest, input BrowserRunInput) (*mcpsdk.CallToolResult, any, error) {
-			resp, err := s.browser.Run(input.Script)
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_setup", Description: "Converge the optional root-owned Node.js + Playwright + Chromium runtime under /opt/ai-server-agent/browser to the Agent-pinned manifest. Setup is bounded and fail-fast one-at-a-time, preserves the durable Agent-wide browser profile, and may install required Chromium OS libraries. It does not replace system Node or take over ports 80/443.", Annotations: annotations(false, true, true, true)},
+		func(ctx context.Context, req *mcpsdk.CallToolRequest, input BrowserSetupInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+			resp, err := s.browser.Setup(ctx, input.Approval)
 			if err != nil {
-				return textResult(err.Error(), true), nil, nil
+				return executorTransportErrorResult(err)
 			}
-			return legacyResponseResult(resp)
+			return responseResult(resp)
+		})
+
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_run", Description: "Run bounded Playwright JavaScript in headless Chromium using the Agent-wide shared persistent browser profile. Variables browser, context, and page are pre-created; use console.log for observations. HTTPS certificate validation is enabled by default; ignore_https_errors is an explicit request-scoped development exception. Browser execution is action-capable and may reuse cookies/local-storage/session state created by other authorized browser callers.", Annotations: annotations(false, true, false, true)},
+		func(ctx context.Context, req *mcpsdk.CallToolRequest, input BrowserRunInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+			resp, err := s.browser.Run(ctx, browser.RunOptions{Script: input.Script, TimeoutMS: input.TimeoutMS, IgnoreHTTPSErrors: input.IgnoreHTTPSErrors})
+			if err != nil {
+				return executorTransportErrorResult(err)
+			}
+			return responseResult(resp)
 		})
 }
 

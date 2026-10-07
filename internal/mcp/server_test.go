@@ -80,6 +80,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 	foundEnvironment := false
 	foundRoot := false
 	foundBrowser := false
+	foundBrowserStatus := false
 	foundStartJob := false
 	foundJobStatus := false
 	foundReadFile := false
@@ -172,15 +173,44 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 					t.Fatalf("write_file input schema missing %q: %s", field, in)
 				}
 			}
+		case "browser_status":
+			foundBrowserStatus = true
+			if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint || !tool.Annotations.IdempotentHint {
+				t.Fatal("browser_status must advertise read-only/idempotent hints")
+			}
+			if !strings.Contains(tool.Description, "shared") {
+				t.Fatalf("browser_status must disclose shared-profile semantics: %q", tool.Description)
+			}
+			out, err := json.Marshal(tool.OutputSchema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"inspection_complete", "installed", "ready", "busy", "shared_profile", "desired", "installed_state"} {
+				if !strings.Contains(string(out), `"`+field+`"`) {
+					t.Fatalf("browser_status output schema missing %q: %s", field, out)
+				}
+			}
 		case "browser_run":
 			foundBrowser = true
 			if tool.Annotations == nil || tool.Annotations.DestructiveHint == nil || !*tool.Annotations.DestructiveHint || tool.Annotations.OpenWorldHint == nil || !*tool.Annotations.OpenWorldHint {
 				t.Fatal("browser_run must advertise destructive/open-world hints")
 			}
+			if !strings.Contains(tool.Description, "HTTPS certificate validation is enabled by default") || !strings.Contains(tool.Description, "shared persistent browser profile") {
+				t.Fatalf("browser_run must disclose TLS/shared-profile semantics: %q", tool.Description)
+			}
+			in, err := json.Marshal(tool.InputSchema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"script", "timeout_ms", "ignore_https_errors"} {
+				if !strings.Contains(string(in), `"`+field+`"`) {
+					t.Fatalf("browser_run input schema missing %q: %s", field, in)
+				}
+			}
 		}
 	}
-	if !foundEnvironment || !foundRoot || !foundStartJob || !foundJobStatus || !foundReadFile || !foundWriteFile || !foundBrowser {
-		t.Fatalf("required tools missing: environment=%v root=%v start_job=%v job_status=%v read_file=%v write_file=%v browser=%v", foundEnvironment, foundRoot, foundStartJob, foundJobStatus, foundReadFile, foundWriteFile, foundBrowser)
+	if !foundEnvironment || !foundRoot || !foundStartJob || !foundJobStatus || !foundReadFile || !foundWriteFile || !foundBrowserStatus || !foundBrowser {
+		t.Fatalf("required tools missing: environment=%v root=%v start_job=%v job_status=%v read_file=%v write_file=%v browser_status=%v browser=%v", foundEnvironment, foundRoot, foundStartJob, foundJobStatus, foundReadFile, foundWriteFile, foundBrowserStatus, foundBrowser)
 	}
 }
 

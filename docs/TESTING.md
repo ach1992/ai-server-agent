@@ -126,6 +126,12 @@ The optimistic existing-target path also has deterministic commit-boundary race 
 
 The implementation resolves parent directories and read targets through stable file descriptors, so the tests assert behavior through the same production helpers rather than a separate mock path. Repository CI/race runs own the broader exact-head evidence; later Issue #42 integrated direct-client/Gateway acceptance remains intentionally separate from this file-path slice.
 
+### Bounded browser path
+
+Go tests cover the browser slice without mutating a live external site or installing host packages. They verify the 128 KiB script bound, 90-second default/five-minute maximum timeout contract, fail-fast browser mutex semantics, setup approval boundary, secure TLS default plus explicit request-scoped exception, temporary-file script handoff, per-run working-directory confinement for ordinary relative artifacts, the 256 MiB disposable-data cap plus state-filesystem reserve, lifecycle-lock exclusion for both full setup and already-current cleanup, disposable cache cleanup contract, exact embedded Playwright lock/integrity pins, architecture-specific browser content-tree digests, and the pinned runtime convergence command, single-backup crash recovery, and fail-closed ambiguous-backup handling.
+
+A synthetic runtime fixture verifies that `browser_status` requires the desired manifest, actual Node version, exact Playwright package version, Playwright Chromium/FFmpeg metadata, expected installation markers, and the architecture-appropriate Chromium/headless-shell/FFmpeg executables as non-symlink regular executable files before reporting ready. MCP discovery tests verify `browser_status`, `timeout_ms`, `ignore_https_errors`, shared-profile disclosure, TLS-default disclosure and typed structured browser output. Exact-head CI owns the race-enabled Go test pass and supported-platform lifecycle matrix. Live browser setup remains an explicit host-package mutation and is not performed merely to satisfy unit review evidence; a later Issue #42 integrated acceptance slice owns end-to-end direct-client/Gateway/browser evidence and numeric tuning.
+
 ## 4. Stable installer and updater trust
 
 ### Stable bootstrap
