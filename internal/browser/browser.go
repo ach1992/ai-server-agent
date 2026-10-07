@@ -445,7 +445,6 @@ find "$parent" -maxdepth 1 -type d \( -name '.browser-stage.*' -o -name '.browse
 find "$data/tmp" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 rm -rf -- "$engine/.npm-cache"`, shellQuote(m.engineDir()), shellQuote(m.dataDir()))
 }
-
 func (m *Manager) setupCommand() (string, error) {
 	desired := desiredRuntimeManifest()
 	manifest, err := json.MarshalIndent(desired, "", "  ")
@@ -479,7 +478,7 @@ install -d -m 0755 -o root -g root "$parent"
 if [ -e "$engine" ] || [ -L "$engine" ]; then
   [ -d "$engine" ] && [ ! -L "$engine" ] || fail "engine path is not a real directory"
 fi
-[ ! -L "$data" ] || fail "browser data directory is a symlink"
+[ ! -L "$data" ] || fail "Refusing symlinked browser data directory: $data"
 [ ! -e "$data" ] || [ -d "$data" ] || fail "browser data path is not a directory"
 install -d -m 0755 -o root -g root "$data"
 for child in profile tmp; do
@@ -492,7 +491,23 @@ min_free_kb=%d
 free_kb=$(df -Pk "$parent" | awk 'NR == 2 {print $4}')
 [ -n "$free_kb" ] && [ "$free_kb" -ge "$min_free_kb" ] || { echo "browser setup resource limit: engine filesystem free space is below safety reserve" >&2; exit %d; }
 find "$data/tmp" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
-find "$parent" -maxdepth 1 -type d \( -name '.browser-stage.*' -o -name '.browser-old.*' \) -exec rm -rf -- {} +
+if [ ! -e "$engine" ]; then
+  old_count=0
+  old_candidate=""
+  while IFS= read -r -d '' old; do
+    old_count=$((old_count + 1))
+    old_candidate="$old"
+  done < <(find "$parent" -maxdepth 1 -type d -name '.browser-old.*' -print0)
+  case "$old_count" in
+    0) ;;
+    1) mv -- "$old_candidate" "$engine" ;;
+    *) fail "multiple browser runtime backups require operator reconciliation" ;;
+  esac
+fi
+find "$parent" -maxdepth 1 -type d -name '.browser-stage.*' -exec rm -rf -- {} +
+if [ -e "$engine" ]; then
+  find "$parent" -maxdepth 1 -type d -name '.browser-old.*' -exec rm -rf -- {} +
+fi
 
 stage=$(mktemp -d "$parent/.browser-stage.XXXXXX")
 backup=""

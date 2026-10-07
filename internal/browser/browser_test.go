@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -459,5 +460,90 @@ func TestBrowserRunCommandStopsOversizedDisposableData(t *testing.T) {
 	}
 	if len(entries) != 0 {
 		t.Fatalf("browser temp directory was not cleaned after limit: %+v", entries)
+	}
+}
+
+func browserSetupRecoveryBlock(t *testing.T, m *Manager) string {
+	t.Helper()
+	command, err := m.setupCommand()
+	if err != nil {
+		t.Fatal(err)
+	}
+	start := strings.Index(command, `if [ ! -e "$engine" ]; then`)
+	endMarker := `stage=$(mktemp -d "$parent/.browser-stage.XXXXXX")`
+	end := strings.Index(command, endMarker)
+	if start < 0 || end < 0 || start >= end {
+		t.Fatalf("setup recovery block not found")
+	}
+	return command[start:end]
+}
+
+func TestBrowserSetupRecoveryRestoresSingleInterruptedBackup(t *testing.T) {
+	m := testBrowserManager(t)
+	parent := filepath.Dir(m.engineDir())
+	if err := os.MkdirAll(parent, 0755); err != nil {
+		t.Fatal(err)
+	}
+	backup := filepath.Join(parent, ".browser-old.single")
+	stage := filepath.Join(parent, ".browser-stage.stale")
+	if err := os.MkdirAll(backup, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(backup, "sentinel"), []byte("known-good"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(stage, 0755); err != nil {
+		t.Fatal(err)
+	}
+
+	script := fmt.Sprintf("set -euo pipefail\nfail(){ printf '%%s\\n' \"$*\" >&2; exit 2; }\nparent=%s\nengine=%s\n%s",
+		shellQuote(parent), shellQuote(m.engineDir()), browserSetupRecoveryBlock(t, m))
+	cmd := exec.Command("/bin/bash", "--noprofile", "--norc", "-s")
+	cmd.Stdin = strings.NewReader(script)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("recover interrupted browser setup: %v: %s", err, out)
+	}
+	got, err := os.ReadFile(filepath.Join(m.engineDir(), "sentinel"))
+	if err != nil || string(got) != "known-good" {
+		t.Fatalf("restored runtime = %q err=%v", got, err)
+	}
+	if _, err := os.Stat(stage); !os.IsNotExist(err) {
+		t.Fatalf("stale stage survived recovery: %v", err)
+	}
+	matches, err := filepath.Glob(filepath.Join(parent, ".browser-old.*"))
+	if err != nil || len(matches) != 0 {
+		t.Fatalf("stale browser backups remain: %v err=%v", matches, err)
+	}
+}
+
+func TestBrowserSetupRecoveryFailsClosedOnAmbiguousBackups(t *testing.T) {
+	m := testBrowserManager(t)
+	parent := filepath.Dir(m.engineDir())
+	if err := os.MkdirAll(parent, 0755); err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{".browser-old.a", ".browser-old.b"} {
+		if err := os.MkdirAll(filepath.Join(parent, name), 0755); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	script := fmt.Sprintf("set -euo pipefail\nfail(){ printf '%%s\\n' \"$*\" >&2; exit 2; }\nparent=%s\nengine=%s\n%s",
+		shellQuote(parent), shellQuote(m.engineDir()), browserSetupRecoveryBlock(t, m))
+	cmd := exec.Command("/bin/bash", "--noprofile", "--norc", "-s")
+	cmd.Stdin = strings.NewReader(script)
+	out, err := cmd.CombinedOutput()
+	if err == nil {
+		t.Fatalf("ambiguous backup recovery unexpectedly succeeded: %s", out)
+	}
+	var exitErr *exec.ExitError
+	if !errors.As(err, &exitErr) || exitErr.ExitCode() != 2 {
+		t.Fatalf("ambiguous backup exit = %v; output=%s", err, out)
+	}
+	if !strings.Contains(string(out), "multiple browser runtime backups require operator reconciliation") {
+		t.Fatalf("ambiguous-backup reason missing: %s", out)
+	}
+	if _, err := os.Stat(m.engineDir()); !os.IsNotExist(err) {
+		t.Fatalf("ambiguous recovery created engine unexpectedly: %v", err)
 	}
 }
