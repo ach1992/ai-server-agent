@@ -63,6 +63,14 @@ Root commands must not inherit worker-controlled ambient shell state. The execut
 
 Worker commands currently retain `/srv/ai-workspace` as HOME/CWD.
 
+### Synchronous executor foundation
+
+Synchronous MCP command calls carry request cancellation into the private executor and use process-group-aware termination, so an expired/disconnected request does not intentionally leave the shell's ordinary child processes running. Direct `run_command` / `run_root_command` calls use a five-minute execution budget. The private executor enforces a 30-minute hard/default ceiling for internal synchronous `run` callers so browser-specific budgets can be tightened separately without permitting unbounded execution.
+
+Worker and root synchronous execution use separate non-queueing capacity guards. Worker capacity is `min(GOMAXPROCS, 4)` with a floor of one; root capacity is one. Saturation returns a structured retryable `busy/resource_limit` result immediately rather than maintaining an implicit queue. The private executor response frame is capped at 8 MiB on both the writer and client-reader boundary; an oversized frame fails closed.
+
+This foundation does **not** yet claim that command stdout/stderr is bounded while it is produced. The existing synchronous collector still accumulates command output before the historical 4 MiB presentation clipping; replacing that collector with bounded production-time capture and explicit truncation metadata belongs to the next #42 command/jobs slice.
+
 **Target Developer Runtime changes this separation:** project worktrees remain under the workspace root, while worker HOME/config/cache state moves to Agent-managed locations outside project worktrees. This is accepted target architecture, not a statement that the current runtime already implements the split. See `docs/DEVELOPER-RUNTIME.md`.
 
 ### Persistent jobs
