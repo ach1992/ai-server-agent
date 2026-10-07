@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"net"
 	"os"
 	"os/exec"
@@ -302,11 +303,37 @@ func TestBrowserRunTimeoutBounds(t *testing.T) {
 	if err != nil || got != 1234*time.Millisecond {
 		t.Fatalf("explicit timeout = %v, %v", got, err)
 	}
-	if _, err := normalizeRunTimeout(-1); err == nil {
-		t.Fatal("negative timeout accepted")
+
+	maxMS := int64(maxBrowserRunTimeout / time.Millisecond)
+	got, err = normalizeRunTimeout(maxMS)
+	if err != nil || got != maxBrowserRunTimeout {
+		t.Fatalf("maximum timeout = %v, %v", got, err)
 	}
-	if _, err := normalizeRunTimeout(int64(maxBrowserRunTimeout/time.Millisecond) + 1); err == nil {
-		t.Fatal("oversized timeout accepted")
+
+	for name, ms := range map[string]int64{
+		"negative":               -1,
+		"one-over-maximum":       maxMS + 1,
+		"max-int64":              math.MaxInt64,
+		"duration-overflow-edge": math.MaxInt64/int64(time.Millisecond) + 1,
+	} {
+		t.Run(name, func(t *testing.T) {
+			if _, err := normalizeRunTimeout(ms); err == nil {
+				t.Fatalf("timeout_ms=%d unexpectedly accepted", ms)
+			}
+		})
+	}
+
+	for _, ms := range []int64{1, 1234, maxMS} {
+		got, err := normalizeRunTimeout(ms)
+		if err != nil {
+			t.Fatalf("timeout_ms=%d rejected: %v", ms, err)
+		}
+		if got <= 0 || got > maxBrowserRunTimeout {
+			t.Fatalf("timeout_ms=%d normalized outside browser bounds: %v", ms, got)
+		}
+		if executorMS := int64(got / time.Millisecond); executorMS <= 0 || executorMS > maxMS {
+			t.Fatalf("timeout_ms=%d produced executor TimeoutMS=%d", ms, executorMS)
+		}
 	}
 }
 
