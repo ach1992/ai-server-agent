@@ -13,6 +13,10 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "job-runner" {
+		os.Exit(executor.RunJobHelper(os.Args[2:]))
+	}
+
 	cfgPath := flag.String("config", "/etc/ai-server-agent/config.json", "config path")
 	flag.Parse()
 	args := flag.Args()
@@ -51,4 +55,8 @@ func main() {
 		fatal("unknown command")
 	}
 }
-func fatal(s string) { fmt.Fprintln(os.Stderr, s); os.Exit(2) }
+
+func fatal(s string) {
+	fmt.Fprintln(os.Stderr, s)
+	os.Exit(2)
+}
