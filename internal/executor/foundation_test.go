@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/ach1992/ai-server-agent/internal/audit"
 	"github.com/ach1992/ai-server-agent/internal/config"
 	"github.com/ach1992/ai-server-agent/internal/policy"
 )
@@ -53,6 +54,23 @@ func TestRunCapacityResponseIsStructured(t *testing.T) {
 	resp := s.runContext(context.Background(), Request{Command: "printf should-not-run"})
 	if resp.OK || resp.Status != "busy" || resp.ReasonCode != "resource_limit" || !resp.Retryable {
 		t.Fatalf("unexpected busy response: %+v", resp)
+	}
+}
+
+func TestRunContextHandlesProcessStartFailure(t *testing.T) {
+	s := &Server{
+		cfg: config.Config{
+			WorkspaceDir: filepath.Join(t.TempDir(), "missing"),
+		},
+		guard:     policy.New(nil),
+		audit:     audit.New(filepath.Join(t.TempDir(), "audit.jsonl")),
+		workerUID: uint32(os.Geteuid()),
+		workerGID: uint32(os.Getegid()),
+		runs:      newRunLimiterWith(1, 1),
+	}
+	resp := s.runContext(context.Background(), Request{Command: "printf unreachable"})
+	if resp.OK || resp.Error == "" {
+		t.Fatalf("process start failure was not returned safely: %+v", resp)
 	}
 }
 
