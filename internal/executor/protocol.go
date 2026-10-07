@@ -22,20 +22,20 @@ type Response struct {
 	OK                  bool        `json:"ok"`
 	Error               string      `json:"error,omitempty"`
 	ReasonCode          string      `json:"reason_code,omitempty"`
-	ErrorCode           string      `json:"error_code,omitempty"`
-	ErrorClass          string      `json:"error_class,omitempty"`
+	ErrorCode           string      `json:"error_code"`
+	ErrorClass          string      `json:"error_class"`
 	Retryable           bool        `json:"retryable,omitempty"`
-	Output              string      `json:"output,omitempty"`
-	OutputEncoding      string      `json:"output_encoding,omitempty"`
-	BytesSeen           int64       `json:"bytes_seen,omitempty"`
-	BytesReturned       int64       `json:"bytes_returned,omitempty"`
-	Truncated           bool        `json:"truncated,omitempty"`
-	OmittedBytes        int64       `json:"omitted_bytes,omitempty"`
+	Output              string      `json:"output"`
+	OutputEncoding      string      `json:"output_encoding"`
+	BytesSeen           int64       `json:"bytes_seen"`
+	BytesReturned       int64       `json:"bytes_returned"`
+	Truncated           bool        `json:"truncated"`
+	OmittedBytes        int64       `json:"omitted_bytes"`
 	HeadBytes           int64       `json:"head_bytes,omitempty"`
 	TailBytes           int64       `json:"tail_bytes,omitempty"`
-	DurationMS          int64       `json:"duration_ms,omitempty"`
-	TimedOut            bool        `json:"timed_out,omitempty"`
-	ExitCode            int         `json:"exit_code,omitempty"`
+	DurationMS          int64       `json:"duration_ms"`
+	TimedOut            bool        `json:"timed_out"`
+	ExitCode            int         `json:"exit_code"`
 	Approval            interface{} `json:"approval,omitempty"`
 	JobID               string      `json:"job_id,omitempty"`
 	IdempotentReplay    bool        `json:"idempotent_replay,omitempty"`
