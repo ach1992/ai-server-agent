@@ -319,6 +319,16 @@ jobs:
           grep -qF 'Active AI Server Agent persistent jobs exist' /tmp/uninstall-active-job.out
           sudo systemctl is-active --quiet ai-job-ci-uninstall-guard.service
           sudo systemctl stop ai-job-ci-uninstall-guard.service
+          for _ in {1..10}; do
+            if ! sudo systemctl is-active --quiet ai-job-ci-uninstall-guard.service; then
+              break
+            fi
+            sleep 1
+          done
+          if sudo systemctl is-active --quiet ai-job-ci-uninstall-guard.service; then
+            echo 'persistent-job uninstall guard fixture did not stop cleanly' >&2
+            exit 1
+          fi
 
           sudo env AI_SERVER_AGENT_YES=1 bash uninstall.sh
           test ! -e /usr/local/bin/ai-server-agent
