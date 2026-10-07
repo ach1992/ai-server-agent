@@ -48,8 +48,11 @@ func (c Config) TLSConfigured() bool {
 }
 
 func (c Config) Validate() error {
-	if c.ListenAddress == "" || c.MCPPath == "" || c.ExecutorSocket == "" || c.StateDir == "" || c.WorkspaceDir == "" {
+	if c.ListenAddress == "" || c.MCPPath == "" || c.ExecutorSocket == "" || c.ExecutorToken == "" || c.BearerTokenFile == "" || c.StateDir == "" || c.WorkspaceDir == "" {
 		return errors.New("config contains empty required values")
+	}
+	if c.AuthMode != "bearer" {
+		return fmt.Errorf("unsupported auth_mode %q: bearer authentication is required", c.AuthMode)
 	}
 	if (c.TLSCertFile == "") != (c.TLSKeyFile == "") {
 		return errors.New("tls_cert_file and tls_key_file must be configured together")

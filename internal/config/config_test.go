@@ -25,3 +25,25 @@ func TestTLSConfigurationRequiresCertificateAndKeyTogether(t *testing.T) {
 		t.Fatal("complete TLS config must report TLS configured")
 	}
 }
+
+func TestAuthenticationConfigurationIsFailClosed(t *testing.T) {
+	tests := []struct {
+		name   string
+		mutate func(*Config)
+	}{
+		{name: "empty auth mode", mutate: func(c *Config) { c.AuthMode = "" }},
+		{name: "no auth mode", mutate: func(c *Config) { c.AuthMode = "none" }},
+		{name: "unknown auth mode", mutate: func(c *Config) { c.AuthMode = "unexpected" }},
+		{name: "missing bearer token path", mutate: func(c *Config) { c.BearerTokenFile = "" }},
+		{name: "missing executor token path", mutate: func(c *Config) { c.ExecutorToken = "" }},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := Default()
+			tt.mutate(&c)
+			if err := c.Validate(); err == nil {
+				t.Fatal("expected invalid authentication configuration to be rejected")
+			}
+		})
+	}
+}
