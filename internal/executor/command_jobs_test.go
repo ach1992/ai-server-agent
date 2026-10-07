@@ -299,3 +299,76 @@ func TestPersistentJobCapacityFailsWithoutQueue(t *testing.T) {
 		t.Fatalf("capacity response = %+v", resp)
 	}
 }
+
+
+func TestPersistentJobClaimRecoversBeforeLaunch(t *testing.T) {
+	state := t.TempDir()
+	jobs := filepath.Join(state, "jobs")
+	claims := filepath.Join(jobs, "claims")
+	if err := os.Mkdir(jobs, 0711); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(claims, 0700); err != nil {
+		t.Fatal(err)
+	}
+
+	fakeBin := t.TempDir()
+	systemctl := filepath.Join(fakeBin, "systemctl")
+	systemctlScript := "#!/bin/sh\ncase \"$1\" in\n  list-units) exit 0 ;;\n  show) printf 'not-found\\n'; exit 0 ;;\n  *) exit 64 ;;\nesac\n"
+	if err := os.WriteFile(systemctl, []byte(systemctlScript), 0755); err != nil {
+		t.Fatal(err)
+	}
+	systemdRun := filepath.Join(fakeBin, "systemd-run")
+	if err := os.WriteFile(systemdRun, []byte("#!/bin/sh\nprintf 'accepted\\n'\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+
+	current, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{
+		cfg: config.Config{
+			StateDir:     state,
+			WorkspaceDir: t.TempDir(),
+			WorkerUser:   current.Username,
+		},
+		token:     "test-executor-token",
+		guard:     policy.New(nil),
+		audit:     audit.New(filepath.Join(t.TempDir(), "audit.jsonl")),
+		workerUID: uint32(os.Geteuid()),
+		workerGID: uint32(os.Getegid()),
+	}
+	req := Request{Command: "printf recovered", OperationID: "claim-crash-window"}
+	claim := jobClaim{
+		Version:     1,
+		JobID:       "123456789",
+		Fingerprint: server.jobFingerprint(req),
+		State:       "claimed",
+		CreatedAt:   "2026-10-07T00:00:00Z",
+	}
+	claimPath := filepath.Join(claims, operationClaimName(req.OperationID))
+	if err := createJobClaim(claimPath, claim); err != nil {
+		t.Fatal(err)
+	}
+
+	resp := server.startJobBounded(req)
+	if !resp.OK || !resp.IdempotentReplay || resp.JobID != claim.JobID {
+		t.Fatalf("claim recovery response = %+v", resp)
+	}
+	recovered, found, err := readJobClaim(claimPath)
+	if err != nil || !found {
+		t.Fatalf("read recovered claim: found=%v err=%v", found, err)
+	}
+	if recovered.State != "started" {
+		t.Fatalf("recovered claim state = %q, want started", recovered.State)
+	}
+	commandBytes, err := os.ReadFile(filepath.Join(jobs, claim.JobID+".cmd"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(commandBytes) != req.Command {
+		t.Fatalf("rebuilt command handoff = %q, want %q", commandBytes, req.Command)
+	}
+}
