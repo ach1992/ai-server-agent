@@ -33,6 +33,16 @@ fi
 
 acquire_lifecycle_lock
 
+if ! active_jobs="$(systemctl list-units --type=service --state=activating,active,deactivating,reloading --no-legend --no-pager 'ai-job-*.service' 2>/dev/null)"; then
+  echo "Unable to determine whether AI Server Agent persistent jobs are active; refusing uninstall." >&2
+  exit 1
+fi
+if [ -n "$(printf '%s\n' "$active_jobs" | sed '/^[[:space:]]*$/d')" ]; then
+  echo "Active AI Server Agent persistent jobs exist; stop them before uninstall or purge to avoid orphaning host work." >&2
+  printf '%s\n' "$active_jobs" >&2
+  exit 1
+fi
+
 systemctl disable --now ai-server-agent.service ai-server-agent-executor.service 2>/dev/null || true
 rm -f /etc/systemd/system/ai-server-agent.service /etc/systemd/system/ai-server-agent-executor.service
 rm -f /usr/local/bin/ai-server-agent /usr/local/sbin/ai-server-agent-manage
