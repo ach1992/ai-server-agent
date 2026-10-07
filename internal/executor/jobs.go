@@ -90,6 +90,10 @@ func (s *Server) startJobBounded(req Request) Response {
 	s.jobsMu.Lock()
 	defer s.jobsMu.Unlock()
 
+	if req.OperationID == "" {
+		req.OperationID = "internal-" + strconv.FormatInt(time.Now().UnixNano(), 10)
+	}
+
 	jobsDir, claimsDir, err := s.ensureJobState()
 	if err != nil {
 		return jobStateError("job_state_unavailable", err)
