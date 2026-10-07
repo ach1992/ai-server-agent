@@ -71,6 +71,11 @@ jobs:
           fi
           grep -qF 'exec.CommandContext(ctx, "/bin/bash", "--noprofile", "--norc", "-s")' internal/executor/foundation.go
           grep -qF 'cmd.Stdin = strings.NewReader(command)' internal/executor/foundation.go
+          grep -qF 'newBoundedOutputCollector(maxSyncOutputBytes)' internal/executor/foundation.go
+          if grep -qF 'bytes.Buffer' internal/executor/foundation.go; then
+            echo 'synchronous command output must not use an unbounded bytes.Buffer' >&2
+            exit 1
+          fi
           grep -qF 'Setpgid: true' internal/executor/foundation.go
           grep -qF 'syscall.Kill(-pgid, syscall.SIGTERM)' internal/executor/foundation.go
           grep -qF 'syscall.Kill(-pgid, syscall.SIGKILL)' internal/executor/foundation.go
@@ -319,14 +324,17 @@ jobs:
           grep -qF 'Active AI Server Agent persistent jobs exist' /tmp/uninstall-active-job.out
           sudo systemctl is-active --quiet ai-job-ci-uninstall-guard.service
           sudo systemctl stop ai-job-ci-uninstall-guard.service
+          guard_units=
           for _ in {1..10}; do
-            if ! sudo systemctl is-active --quiet ai-job-ci-uninstall-guard.service; then
+            guard_units="$(sudo systemctl list-units --type=service --state=activating,active,deactivating,reloading --no-legend --no-pager 'ai-job-*.service' 2>/dev/null || true)"
+            if [ -z "$(printf '%s\n' "$guard_units" | sed '/^[[:space:]]*$/d')" ]; then
               break
             fi
             sleep 1
           done
-          if sudo systemctl is-active --quiet ai-job-ci-uninstall-guard.service; then
-            echo 'persistent-job uninstall guard fixture did not stop cleanly' >&2
+          if [ -n "$(printf '%s\n' "$guard_units" | sed '/^[[:space:]]*$/d')" ]; then
+            echo 'persistent-job uninstall guard fixture did not leave all active lifecycle states cleanly' >&2
+            printf '%s\n' "$guard_units" >&2
             exit 1
           fi
 
