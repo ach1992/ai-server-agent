@@ -436,3 +436,24 @@ func TestPersistentJobIdempotencyStateIsBounded(t *testing.T) {
 		t.Fatalf("idempotency capacity response = %+v", resp)
 	}
 }
+
+
+func TestJobStatusReturnsStructuredExitCode(t *testing.T) {
+	state := t.TempDir()
+	jobs := filepath.Join(state, "jobs")
+	if err := os.Mkdir(jobs, 0711); err != nil {
+		t.Fatal(err)
+	}
+	statusPath := filepath.Join(jobs, "789.status")
+	if err := os.WriteFile(statusPath, []byte("7\n"), 0640); err != nil {
+		t.Fatal(err)
+	}
+	server := &Server{cfg: config.Config{StateDir: state}, workerUID: uint32(os.Geteuid())}
+	resp := server.jobStatus(Request{JobID: "789"})
+	if !resp.OK || resp.Status != "completed" || resp.ExitCode != 7 {
+		t.Fatalf("completed job status = %+v", resp)
+	}
+	if resp.Output != "7" || resp.OutputEncoding != "utf-8" || resp.BytesReturned != 1 {
+		t.Fatalf("completed job output metadata = %+v", resp)
+	}
+}
