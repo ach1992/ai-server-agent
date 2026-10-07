@@ -41,7 +41,7 @@ func (s *Server) cleanupStalePrelaunchClaims(jobsDir, claimsDir string, now time
 			return fmt.Errorf("invalid stale claim job id: %w", err)
 		}
 		paths := jobPathsFor(jobsDir, id)
-		evidence, err := jobHasExecutionEvidence(paths, id)
+		evidence, active, err := s.jobExecutionEvidenceState(paths, id)
 		if err != nil {
 			return err
 		}
@@ -49,6 +49,14 @@ func (s *Server) cleanupStalePrelaunchClaims(jobsDir, claimsDir string, now time
 			claim.State = "started"
 			if err := updateJobClaim(path, claim); err != nil {
 				return err
+			}
+			if !active {
+				if err := s.markJobStatusUnknownIfEmpty(paths.status); err != nil {
+					return err
+				}
+				if err := os.Remove(paths.command); err != nil && !os.IsNotExist(err) {
+					return err
+				}
 			}
 			continue
 		}

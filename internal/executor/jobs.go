@@ -228,7 +228,20 @@ func (s *Server) resumeClaimedJob(req Request, jobsDir, claimPath string, claim 
 
 	switch claim.State {
 	case "started":
-		return Response{OK: true, JobID: claim.JobID, Status: "accepted", IdempotentReplay: true}
+		active, err := jobUnitActive(claim.JobID)
+		if err != nil {
+			return jobStateError("job_state_unavailable", err)
+		}
+		if active {
+			return Response{OK: true, JobID: claim.JobID, Status: "accepted", IdempotentReplay: true}
+		}
+		if err := s.markJobStatusUnknownIfEmpty(paths.status); err != nil {
+			return jobStateError("job_state_unavailable", err)
+		}
+		_ = os.Remove(paths.command)
+		resp, _ := s.jobTerminalReplayResponse(paths.status, claim.JobID)
+		resp.IdempotentReplay = true
+		return resp
 	case "failed":
 		return Response{
 			Error:            "the prior start attempt for this operation_id failed before a durable job start could be proven",
@@ -244,7 +257,7 @@ func (s *Server) resumeClaimedJob(req Request, jobsDir, claimPath string, claim 
 		return jobStateError("job_state_unavailable", fmt.Errorf("unsupported job claim state %q", claim.State))
 	}
 
-	evidence, err := jobHasExecutionEvidence(paths, claim.JobID)
+	evidence, active, err := s.jobExecutionEvidenceState(paths, claim.JobID)
 	if err != nil {
 		return jobStateError("job_state_unavailable", err)
 	}
@@ -255,7 +268,16 @@ func (s *Server) resumeClaimedJob(req Request, jobsDir, claimPath string, claim 
 			resp.IdempotentReplay = true
 			return resp
 		}
-		return Response{OK: true, JobID: claim.JobID, Status: "accepted", IdempotentReplay: true}
+		if active {
+			return Response{OK: true, JobID: claim.JobID, Status: "accepted", IdempotentReplay: true}
+		}
+		if err := s.markJobStatusUnknownIfEmpty(paths.status); err != nil {
+			return jobStateError("job_state_unavailable", err)
+		}
+		_ = os.Remove(paths.command)
+		resp, _ := s.jobTerminalReplayResponse(paths.status, claim.JobID)
+		resp.IdempotentReplay = true
+		return resp
 	}
 
 	if claim.State == "claimed" {
@@ -641,6 +663,41 @@ func jobUnitExists(id string) (bool, error) {
 	return value != "" && value != "not-found", nil
 }
 
+func jobUnitActive(id string) (bool, error) {
+	out := newBoundedOutputCollector(systemdOutputLimit)
+	cmd := exec.Command("systemctl", "list-units", "--type=service", "--state=activating,active,deactivating,reloading", "--no-legend", "--no-pager", "ai-job-"+id+".service")
+	cmd.Stdout = out
+	cmd.Stderr = out
+	if err := cmd.Run(); err != nil {
+		return false, fmt.Errorf("inspect persistent job activity: %w: %s", err, out.Result().Output)
+	}
+	result := out.Result()
+	if result.Truncated {
+		return false, errors.New("persistent job activity response exceeded its bounded limit")
+	}
+	return strings.TrimSpace(result.Output) != "", nil
+}
+
+func (s *Server) jobExecutionEvidenceState(paths jobPaths, id string) (bool, bool, error) {
+	started, err := s.jobStarted(paths.started)
+	if err != nil {
+		return false, false, err
+	}
+	if started {
+		active, err := jobUnitActive(id)
+		return true, active, err
+	}
+	exists, err := jobUnitExists(id)
+	if err != nil {
+		return false, false, err
+	}
+	if !exists {
+		return false, false, nil
+	}
+	active, err := jobUnitActive(id)
+	return true, active, err
+}
+
 func jobHasExecutionEvidence(paths jobPaths, id string) (bool, error) {
 	for _, path := range []string{paths.started, paths.status} {
 		fi, err := os.Lstat(path)
@@ -735,11 +792,11 @@ func (s *Server) cleanupCompletedJobArtifacts(jobsDir, claimsDir string) error {
 			if !accepted {
 				continue
 			}
-			exists, err := jobUnitExists(id)
+			active, err := jobUnitActive(id)
 			if err != nil {
 				return err
 			}
-			if exists {
+			if active {
 				continue
 			}
 			// A started job whose transient unit has disappeared without a

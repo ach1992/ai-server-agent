@@ -226,7 +226,7 @@ func TestPersistentJobIdempotencyAndCommandPrivacy(t *testing.T) {
 	count := filepath.Join(t.TempDir(), "systemd-run.count")
 
 	systemctl := filepath.Join(fakeBin, "systemctl")
-	systemctlScript := "#!/bin/sh\ncase \"$1\" in\n  list-units) exit 0 ;;\n  show) printf 'loaded\\n'; exit 0 ;;\n  *) exit 64 ;;\nesac\n"
+	systemctlScript := "#!/bin/sh\ncase \"$1\" in\n  list-units) printf 'ai-job-test.service loaded active running test\\n'; exit 0 ;;\n  show) printf 'loaded\\n'; exit 0 ;;\n  *) exit 64 ;;\nesac\n"
 	if err := os.WriteFile(systemctl, []byte(systemctlScript), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -735,7 +735,7 @@ func TestInterruptedPersistentJobsEnterBoundedRetention(t *testing.T) {
 	}
 	fakeBin := t.TempDir()
 	systemctl := filepath.Join(fakeBin, "systemctl")
-	if err := os.WriteFile(systemctl, []byte("#!/bin/sh\nif [ \"$1\" = show ]; then printf 'not-found\\n'; exit 0; fi\nexit 64\n"), 0755); err != nil {
+	if err := os.WriteFile(systemctl, []byte("#!/bin/sh\ncase \"$1\" in\n  list-units) exit 0 ;;\n  show) printf 'not-found\\n'; exit 0 ;;\n  *) exit 64 ;;\nesac\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
@@ -835,7 +835,7 @@ func TestActivePersistentJobIsNotRetiredAsUnknown(t *testing.T) {
 	}
 	fakeBin := t.TempDir()
 	systemctl := filepath.Join(fakeBin, "systemctl")
-	if err := os.WriteFile(systemctl, []byte("#!/bin/sh\nif [ \"$1\" = show ]; then printf 'loaded\\n'; exit 0; fi\nexit 64\n"), 0755); err != nil {
+	if err := os.WriteFile(systemctl, []byte("#!/bin/sh\ncase \"$1\" in\n  list-units) printf 'ai-job-812345.service loaded active running test\\n'; exit 0 ;;\n  show) printf 'loaded\\n'; exit 0 ;;\n  *) exit 64 ;;\nesac\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
@@ -872,7 +872,7 @@ func TestJobStatusReconcilesInterruptedJobWithoutExitStatus(t *testing.T) {
 	}
 	fakeBin := t.TempDir()
 	systemctl := filepath.Join(fakeBin, "systemctl")
-	if err := os.WriteFile(systemctl, []byte("#!/bin/sh\nif [ \"$1\" = show ]; then printf 'not-found\\n'; exit 0; fi\nexit 64\n"), 0755); err != nil {
+	if err := os.WriteFile(systemctl, []byte("#!/bin/sh\ncase \"$1\" in\n  list-units) exit 0 ;;\n  show) printf 'loaded\\n'; exit 0 ;;\n  *) exit 64 ;;\nesac\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
@@ -911,7 +911,7 @@ func TestJobStatusReconcilesAcceptedJobBeforeRunnerStart(t *testing.T) {
 	}
 	fakeBin := t.TempDir()
 	systemctl := filepath.Join(fakeBin, "systemctl")
-	if err := os.WriteFile(systemctl, []byte("#!/bin/sh\nif [ \"$1\" = show ]; then printf 'not-found\\n'; exit 0; fi\nexit 64\n"), 0755); err != nil {
+	if err := os.WriteFile(systemctl, []byte("#!/bin/sh\ncase \"$1\" in\n  list-units) exit 0 ;;\n  show) printf 'not-found\\n'; exit 0 ;;\n  *) exit 64 ;;\nesac\n"), 0755); err != nil {
 		t.Fatal(err)
 	}
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
@@ -1080,7 +1080,7 @@ func TestStalePrelaunchClaimRetiresProtectedHandoff(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	server := &Server{}
+	server := &Server{workerUID: uint32(os.Geteuid())}
 	if err := server.cleanupStalePrelaunchClaims(jobs, claims, time.Now()); err != nil {
 		t.Fatal(err)
 	}

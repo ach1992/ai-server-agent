@@ -252,11 +252,11 @@ func (s *Server) jobStatus(req Request) Response {
 		}
 	}
 	if accepted {
-		exists, err := jobUnitExists(id)
+		active, err := jobUnitActive(id)
 		if err != nil {
 			return jobStateError("job_status_unavailable", err)
 		}
-		if !exists {
+		if !active {
 			if err := s.markJobStatusUnknownIfEmpty(paths.status); err != nil {
 				return jobStateError("job_status_unavailable", err)
 			}
