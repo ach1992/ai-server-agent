@@ -103,9 +103,11 @@ The current bearer-authenticated direct surface has one authenticated-principal 
 
 Safe uninstall/purge first reconciles active `ai-job-*.service` units and refuses while any are active, preventing removal of the Agent control plane from silently orphaning still-running persistent work.
 
-### Accepted Gateway-compatible execution/data boundary
+### Standalone execution/data boundary and optional integrations
 
-Before AI Server Agent can claim stable MCP Gateway compatibility, the owner-activated minimum slices in Issues #41 and #42 must be integrated. The rules below are the accepted target boundary for that compatibility claim; they are not a statement that current `main` already implements every bound. README/current source remain authoritative for shipped behavior until those slices integrate.
+AI Server Agent owns its host capabilities and safety boundaries independently of an upstream aggregator. Every supported capability is available directly; installation, operation, Agent-side implementation and standalone release do not require MCP Gateway. The bounded execution/data work in #42 and local audit work in #41 protect direct use as well as future integrations. README/current source remain authoritative for which parts of these rules are shipped.
+
+Future Gateway integration consumes these same MCP tools, structured results, executor and policy boundaries. Real Gateway acceptance belongs to #47 and validates only the Gateway compatibility claim; it is not a prerequisite for standalone Agent acceptance. Do not add a duplicate execution path, freeze the Agent tool inventory for an unfinished connector, or introduce a generic connector framework without an evidenced need. Public API evolution follows the additive-first policy in `DEVELOPER-RUNTIME.md`. Later connector-driven changes remain possible through the normal compatibility and validation process.
 
 The durable execution/data rules are:
 
