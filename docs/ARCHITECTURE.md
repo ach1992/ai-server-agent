@@ -69,15 +69,23 @@ Synchronous MCP command calls carry request cancellation into the private execut
 
 Worker and root synchronous execution use separate non-queueing capacity guards. Worker capacity is `min(GOMAXPROCS, 4)` with a floor of one; root capacity is one. Saturation returns a structured retryable `busy/resource_limit` result immediately rather than maintaining an implicit queue. The private executor response frame is capped at 8 MiB on both the writer and client-reader boundary; an oversized frame fails closed.
 
-This foundation does **not** yet claim that command stdout/stderr is bounded while it is produced. The existing synchronous collector still accumulates command output before the historical 4 MiB presentation clipping; replacing that collector with bounded production-time capture and explicit truncation metadata belongs to the next #42 command/jobs slice.
+Command bodies are capped at 256 KiB and enter the sanitized Bash process through stdin rather than a raw `-c <command>` argv element. Synchronous stdout/stderr is retained in a 1 MiB in-memory head/tail collector while the process runs, so producer volume cannot grow executor memory without bound. Results preserve raw byte counts, returned-byte counts, UTF-8 versus base64 encoding, truncation/omission metadata, exit status, duration and timeout state. MCP structured content carries the full bounded result; the human-readable text fallback does not duplicate a large output field.
 
 **Target Developer Runtime changes this separation:** project worktrees remain under the workspace root, while worker HOME/config/cache state moves to Agent-managed locations outside project worktrees. This is accepted target architecture, not a statement that the current runtime already implements the split. See `docs/DEVELOPER-RUNTIME.md`.
 
 ### Persistent jobs
 
-Persistent jobs run as transient systemd units and survive MCP/client reconnects. Job metadata lives under the root-controlled state container `/var/lib/ai-server-agent/jobs`.
+Persistent jobs run as transient systemd units and survive MCP/client reconnects. Job metadata lives under the root-controlled state container `/var/lib/ai-server-agent/jobs`. The executor admits at most four active Agent jobs and fails immediately with a retryable resource-limit result when that capacity is full; it does not maintain a hidden scheduler or queue.
 
-Job log/status files are created with exclusive, no-follow semantics. Reads reject symlinks, non-regular files, unexpected owners, and world-writable files. Root-owned versus `aiworker`-owned job files record execution provenance and protect filesystem replacement; they are not a separate bearer-auth authorization partition.
+The raw shell body is capped at 256 KiB and written to a short-lived protected handoff file before launch. `systemd-run` receives only fixed runner/path arguments plus the sanitized execution environment; the fixed `job-runner` validates and consumes the handoff, removes it, and feeds the body to Bash through stdin. This removes the Agent-created raw command copy from systemd/process argv and from the slice's durable idempotency state. Full secret-safe audit/correlation policy remains owned by #41.
+
+Each persistent job uses an 8 MiB bounded on-disk ring for combined stdout/stderr. The ring stores logical `available_from` / `current_end` offsets, while `job_output` returns bounded ranges with `requested_offset`, `available_from_offset`, `next_offset`, `current_end`, EOF and retention-truncation metadata. Binary output is base64-encoded. The newest 32 completed job artifact sets are retained; older completed artifacts and matching idempotency claims are removed. Before accepting a new job, the executor also checks an exact state-filesystem reserve derived from the maximum active + retained log footprint plus fixed safety overhead.
+
+Job log/status/runner files are created with exclusive, no-follow semantics. Reads reject symlinks, non-regular files, unexpected owners, and world-writable files. Root-owned versus `aiworker`-owned job files record execution provenance and protect filesystem replacement; they are not a separate bearer-auth authorization partition.
+
+An optional caller `operation_id` provides durable retry idempotency. The root-owned claim stores a keyed fingerprint over the material command/root request rather than plaintext command content. Same-key/same-material retries recover or return the same job handle; same-key/different-material reuse fails closed. A crash while only the pre-launch claim exists can rebuild the protected handoff from a fingerprint-matched retry; once launch may have happened, reconciliation requires durable runner/unit evidence and never starts a differently identified duplicate merely because completion is uncertain.
+
+Safe uninstall/purge first reconciles active `ai-job-*.service` units and refuses while any are active, preventing removal of the Agent control plane from silently orphaning still-running persistent work.
 
 ### Accepted Gateway-compatible execution/data boundary
 
