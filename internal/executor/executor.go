@@ -207,43 +207,74 @@ func (s *Server) startJob(req Request) Response {
 func (s *Server) jobStatus(req Request) Response {
 	id, err := safeID(req.JobID)
 	if err != nil {
-		return Response{Error: err.Error()}
+		return Response{Error: err.Error(), ReasonCode: "invalid_job_id", ErrorCode: "invalid_job_id", ErrorClass: "validation"}
 	}
 	statusPath := filepath.Join(s.cfg.StateDir, "jobs", id+".status")
 	if f, er := s.openJobFile(statusPath); er == nil {
-		b, readErr := io.ReadAll(io.LimitReader(f, 64))
+		b, readErr := io.ReadAll(io.LimitReader(f, 65))
 		_ = f.Close()
 		if readErr != nil {
-			return Response{Error: readErr.Error()}
+			return jobStateError("job_status_unavailable", readErr)
+		}
+		if len(b) > 64 {
+			return Response{Error: "job status file exceeds limit", ReasonCode: "job_status_unavailable", ErrorCode: "job_status_unavailable", ErrorClass: "state"}
 		}
 		status := strings.TrimSpace(string(b))
 		if status != "" {
-			if _, parseErr := strconv.Atoi(status); parseErr == nil {
-				return Response{OK: true, Status: "completed", Output: status}
+			code, parseErr := strconv.Atoi(status)
+			if parseErr == nil {
+				return Response{
+					OK:             true,
+					Status:         "completed",
+					Output:         status,
+					OutputEncoding: "utf-8",
+					BytesSeen:      int64(len(status)),
+					BytesReturned:  int64(len(status)),
+					ExitCode:       code,
+				}
 			}
-			return Response{Error: "invalid job status file"}
+			return Response{Error: "invalid job status file", ReasonCode: "job_status_unavailable", ErrorCode: "job_status_unavailable", ErrorClass: "state"}
 		}
 	} else if !os.IsNotExist(er) {
-		return Response{Error: er.Error()}
+		return jobStateError("job_status_unavailable", er)
 	}
+
 	unit := "ai-job-" + id
-	out, er := exec.Command("systemctl", "show", unit, "--property=ActiveState,SubState,ExecMainStatus,MainPID", "--no-pager").CombinedOutput()
+	out := newBoundedOutputCollector(systemdOutputLimit)
+	cmd := exec.Command("systemctl", "show", unit, "--property=ActiveState,SubState,ExecMainStatus,MainPID", "--no-pager")
+	cmd.Stdout = out
+	cmd.Stderr = out
+	er := cmd.Run()
+	result := out.Result()
 	if er != nil {
-		return Response{Error: er.Error() + ": " + string(out)}
+		resp := Response{Error: er.Error(), ReasonCode: "job_status_unavailable", ErrorCode: "job_status_unavailable", ErrorClass: "state"}
+		applyOutputResult(&resp, result)
+		return resp
 	}
-	return Response{OK: true, Status: string(out)}
+	resp := Response{OK: true, Status: strings.TrimSpace(result.Output)}
+	applyOutputResult(&resp, result)
+	return resp
 }
 func (s *Server) jobStop(req Request) Response {
 	id, err := safeID(req.JobID)
 	if err != nil {
-		return Response{Error: err.Error()}
+		return Response{Error: err.Error(), ReasonCode: "invalid_job_id", ErrorCode: "invalid_job_id", ErrorClass: "validation"}
 	}
-	out, er := exec.Command("systemctl", "stop", "ai-job-"+id).CombinedOutput()
+	out := newBoundedOutputCollector(systemdOutputLimit)
+	cmd := exec.Command("systemctl", "stop", "ai-job-"+id)
+	cmd.Stdout = out
+	cmd.Stderr = out
+	er := cmd.Run()
+	result := out.Result()
 	_ = s.audit.Write(audit.Entry{Action: "job_stop", Success: er == nil, Detail: id})
 	if er != nil {
-		return Response{Error: er.Error() + ": " + string(out)}
+		resp := Response{Error: er.Error(), ReasonCode: "job_stop_failed", ErrorCode: "job_stop_failed", ErrorClass: "process", JobID: id}
+		applyOutputResult(&resp, result)
+		return resp
 	}
-	return Response{OK: true, Output: string(out)}
+	resp := Response{OK: true, JobID: id, Status: "stop_requested"}
+	applyOutputResult(&resp, result)
+	return resp
 }
 func (s *Server) jobOutput(req Request) Response {
 	return s.jobOutputBounded(req)
