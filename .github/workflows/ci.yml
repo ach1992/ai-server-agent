@@ -95,7 +95,7 @@ jobs:
           grep -qF 'lifecycleManagementLockPath' internal/executor/jobs.go
           grep -qF 'syscall.LOCK_SH|syscall.LOCK_NB' internal/executor/jobs.go
           grep -qF 'removeTerminalCommandHandoff' internal/executor/jobs.go
-          grep -qF 'OperationID string' internal/executor/protocol.go
+          grep -Eq 'OperationID[[:space:]]+string' internal/executor/protocol.go
       - name: Installer compatibility check
         run: sudo bash install.sh --check
       - name: Supported platform policy
