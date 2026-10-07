@@ -143,6 +143,14 @@ func responseResult(resp executor.Response) (*mcpsdk.CallToolResult, executor.Re
 	return textResult(summary, !resp.OK), resp, nil
 }
 
+func legacyResponseResult(resp executor.Response) (*mcpsdk.CallToolResult, any, error) {
+	b, err := json.MarshalIndent(resp, "", "  ")
+	if err != nil {
+		return nil, nil, err
+	}
+	return textResult(string(b), !resp.OK), nil, nil
+}
+
 func executorTransportErrorResult(err error) (*mcpsdk.CallToolResult, executor.Response, error) {
 	resp := executor.Response{
 		Error:      err.Error(),
@@ -150,16 +158,6 @@ func executorTransportErrorResult(err error) (*mcpsdk.CallToolResult, executor.R
 		ErrorCode:  "executor_transport",
 		ErrorClass: "transport",
 		Retryable:  true,
-	}
-	return textResult(err.Error(), true), resp, nil
-}
-
-func toolErrorResult(err error) (*mcpsdk.CallToolResult, executor.Response, error) {
-	resp := executor.Response{
-		Error:      err.Error(),
-		ReasonCode: "tool_error",
-		ErrorCode:  "tool_error",
-		ErrorClass: "tool",
 	}
 	return textResult(err.Error(), true), resp, nil
 }
@@ -241,39 +239,39 @@ func (s *Server) registerTools() {
 		})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "read_file", Description: "Read a host file through the privileged executor. Agent credentials/config/state are protected and require explicit approval.", Annotations: annotations(true, false, true, false)},
-		func(ctx context.Context, req *mcpsdk.CallToolRequest, input ReadFileInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+		func(ctx context.Context, req *mcpsdk.CallToolRequest, input ReadFileInput) (*mcpsdk.CallToolResult, any, error) {
 			resp, err := executor.ClientCall(s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "read_file", Path: input.Path, Root: true, Approval: input.Approval})
 			if err != nil {
-				return executorTransportErrorResult(err)
+				return textResult(err.Error(), true), nil, nil
 			}
-			return responseResult(resp)
+			return legacyResponseResult(resp)
 		})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "write_file", Description: "Write a complete host file through the privileged executor. Writes to protected agent resources require explicit approval.", Annotations: annotations(false, true, false, false)},
-		func(ctx context.Context, req *mcpsdk.CallToolRequest, input WriteFileInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+		func(ctx context.Context, req *mcpsdk.CallToolRequest, input WriteFileInput) (*mcpsdk.CallToolResult, any, error) {
 			resp, err := executor.ClientCall(s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "write_file", Path: input.Path, Content: input.Content, Root: true, Mode: input.Mode, Approval: input.Approval})
 			if err != nil {
-				return executorTransportErrorResult(err)
+				return textResult(err.Error(), true), nil, nil
 			}
-			return responseResult(resp)
+			return legacyResponseResult(resp)
 		})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_setup", Description: "Install an optional root-owned Node.js + Playwright + Chromium engine under /opt/ai-server-agent/browser and keep writable browser profile/session data separately under the agent state directory. It does not replace system Node or take over ports 80/443.", Annotations: annotations(false, true, true, true)},
-		func(ctx context.Context, req *mcpsdk.CallToolRequest, input BrowserSetupInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+		func(ctx context.Context, req *mcpsdk.CallToolRequest, input BrowserSetupInput) (*mcpsdk.CallToolResult, any, error) {
 			resp, err := s.browser.Setup(input.Approval)
 			if err != nil {
-				return toolErrorResult(err)
+				return textResult(err.Error(), true), nil, nil
 			}
-			return responseResult(resp)
+			return legacyResponseResult(resp)
 		})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_run", Description: "Run Playwright JavaScript in headless Chromium using a persistent browser profile. Variables browser, context, and page are pre-created; use console.log for observations. Scripts can interact with and modify external web applications, so treat this as an action-capable tool.", Annotations: annotations(false, true, false, true)},
-		func(ctx context.Context, req *mcpsdk.CallToolRequest, input BrowserRunInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+		func(ctx context.Context, req *mcpsdk.CallToolRequest, input BrowserRunInput) (*mcpsdk.CallToolResult, any, error) {
 			resp, err := s.browser.Run(input.Script)
 			if err != nil {
-				return toolErrorResult(err)
+				return textResult(err.Error(), true), nil, nil
 			}
-			return responseResult(resp)
+			return legacyResponseResult(resp)
 		})
 }
 
