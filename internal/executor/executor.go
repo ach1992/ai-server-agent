@@ -33,6 +33,7 @@ type Server struct {
 	runs              *runLimiter
 	jobsMu            sync.Mutex
 	lifecycleLockPath string
+	fileWriteHooks    *fileWriteTestHooks
 }
 
 func NewServer(cfg config.Config, token string) (*Server, error) {
@@ -293,40 +294,6 @@ func (s *Server) jobStop(req Request) Response {
 func (s *Server) jobOutput(req Request) Response {
 	return s.jobOutputBounded(req)
 }
-func (s *Server) readFile(req Request) Response {
-	dec := s.guard.Evaluate("read "+req.Path, true)
-	if dec.RequiresApproval && !req.Approval {
-		return Response{Error: "approval_required", Approval: dec}
-	}
-	b, err := os.ReadFile(req.Path)
-	if err != nil {
-		return Response{Error: err.Error()}
-	}
-	if len(b) > 4<<20 {
-		b = b[:4<<20]
-	}
-	_ = s.audit.Write(audit.Entry{Action: "read_file", Mode: "root", Command: req.Path, Success: true})
-	return Response{OK: true, Output: string(b)}
-}
-func (s *Server) writeFile(req Request) Response {
-	dec := s.guard.Evaluate("write "+req.Path, req.Root)
-	if dec.RequiresApproval && !req.Approval {
-		return Response{Error: "approval_required", Approval: dec}
-	}
-	mode := os.FileMode(req.Mode)
-	if mode == 0 {
-		mode = 0644
-	}
-	if err := os.MkdirAll(filepath.Dir(req.Path), 0755); err != nil {
-		return Response{Error: err.Error()}
-	}
-	if err := os.WriteFile(req.Path, []byte(req.Content), mode); err != nil {
-		return Response{Error: err.Error()}
-	}
-	_ = s.audit.Write(audit.Entry{Action: "write_file", Mode: map[bool]string{true: "root", false: "worker"}[req.Root], Command: req.Path, Success: true})
-	return Response{OK: true}
-}
-
 func errString(err error) string {
 	if err == nil {
 		return ""

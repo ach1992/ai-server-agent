@@ -3,19 +3,21 @@ package executor
 import "time"
 
 type Request struct {
-	Token       string `json:"token"`
-	Action      string `json:"action"`
-	Command     string `json:"command,omitempty"`
-	Root        bool   `json:"root,omitempty"`
-	Approval    bool   `json:"approval,omitempty"`
-	TimeoutMS   int64  `json:"timeout_ms,omitempty"`
-	OperationID string `json:"operation_id,omitempty"`
-	JobID       string `json:"job_id,omitempty"`
-	Offset      int64  `json:"offset,omitempty"`
-	Limit       int    `json:"limit,omitempty"`
-	Path        string `json:"path,omitempty"`
-	Content     string `json:"content,omitempty"`
-	Mode        uint32 `json:"mode,omitempty"`
+	Token        string `json:"token"`
+	Action       string `json:"action"`
+	Command      string `json:"command,omitempty"`
+	Root         bool   `json:"root,omitempty"`
+	Approval     bool   `json:"approval,omitempty"`
+	TimeoutMS    int64  `json:"timeout_ms,omitempty"`
+	OperationID  string `json:"operation_id,omitempty"`
+	JobID        string `json:"job_id,omitempty"`
+	Offset       int64  `json:"offset,omitempty"`
+	Limit        int    `json:"limit,omitempty"`
+	Path         string `json:"path,omitempty"`
+	Content      string `json:"content,omitempty"`
+	Mode         uint32 `json:"mode,omitempty"`
+	FileVersion  string `json:"file_version,omitempty"`
+	MustNotExist bool   `json:"must_not_exist,omitempty"`
 }
 
 type Response struct {
@@ -42,10 +44,16 @@ type Response struct {
 	Status              string      `json:"status,omitempty"`
 	PID                 int         `json:"pid,omitempty"`
 	RequestedOffset     int64       `json:"requested_offset,omitempty"`
+	Offset              *int64      `json:"offset,omitempty"`
 	AvailableFromOffset int64       `json:"available_from_offset,omitempty"`
-	NextOffset          int64       `json:"next_offset,omitempty"`
+	NextOffset          *int64      `json:"next_offset,omitempty"`
 	CurrentEnd          int64       `json:"current_end,omitempty"`
-	EOF                 bool        `json:"eof,omitempty"`
+	FileSize            *int64      `json:"file_size,omitempty"`
+	FileVersion         string      `json:"file_version,omitempty"`
+	EOF                 *bool       `json:"eof,omitempty"`
 	RetentionTruncated  bool        `json:"retention_truncated,omitempty"`
 	GeneratedAt         time.Time   `json:"generated_at,omitempty"`
 }
+
+func int64Ptr(v int64) *int64 { return &v }
+func boolPtr(v bool) *bool    { return &v }
