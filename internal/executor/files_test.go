@@ -282,3 +282,168 @@ func TestWriteFileInputBoundLeavesDestinationUntouched(t *testing.T) {
 		t.Fatalf("oversized write changed destination: %q err=%v", string(b), err)
 	}
 }
+
+func replaceFileForWriteRace(t *testing.T, path, content string) {
+	t.Helper()
+	tmp, err := os.CreateTemp(filepath.Dir(path), ".external-writer-*")
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmpName := tmp.Name()
+	defer os.Remove(tmpName)
+	if _, err := tmp.WriteString(content); err != nil {
+		_ = tmp.Close()
+		t.Fatal(err)
+	}
+	if err := tmp.Sync(); err != nil {
+		_ = tmp.Close()
+		t.Fatal(err)
+	}
+	if err := tmp.Close(); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(tmpName, path); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func assertNoFileWriteTemps(t *testing.T, dir string) {
+	t.Helper()
+	matches, err := filepath.Glob(filepath.Join(dir, ".ai-server-agent-write-*"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(matches) != 0 {
+		t.Fatalf("temporary write artifacts remain: %v", matches)
+	}
+}
+
+func TestWriteFileVersionBindsExistingTargetAtCommitBoundary(t *testing.T) {
+	server := newFileTestServer(t, nil)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "optimistic-race.txt")
+	if err := os.WriteFile(path, []byte("version-a"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	initial := server.readFile(Request{Path: path, Limit: 32})
+	if !initial.OK || initial.FileVersion == "" {
+		t.Fatalf("initial read = %+v", initial)
+	}
+
+	server.fileWriteHooks = &fileWriteTestHooks{
+		beforeExistingCommit: func() {
+			replaceFileForWriteRace(t, path, "external-version-b")
+		},
+	}
+	resp := server.writeFile(Request{
+		Path:        path,
+		Content:     "agent-replacement",
+		FileVersion: initial.FileVersion,
+	})
+	if resp.OK || resp.ErrorCode != "file_changed" || resp.Status == "written" {
+		t.Fatalf("commit-boundary race response = %+v", resp)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "external-version-b" {
+		t.Fatalf("rollback did not preserve concurrent destination: %q", string(got))
+	}
+	assertNoFileWriteTemps(t, dir)
+}
+
+func TestWriteFilePostCommitReplacementIsUnknownCompletion(t *testing.T) {
+	server := newFileTestServer(t, nil)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "post-commit-race.txt")
+	if err := os.WriteFile(path, []byte("version-a"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	initial := server.readFile(Request{Path: path, Limit: 32})
+	if !initial.OK || initial.FileVersion == "" {
+		t.Fatalf("initial read = %+v", initial)
+	}
+
+	server.fileWriteHooks = &fileWriteTestHooks{
+		afterCommit: func() {
+			replaceFileForWriteRace(t, path, "external-after-agent-commit")
+		},
+	}
+	resp := server.writeFile(Request{
+		Path:        path,
+		Content:     "agent-replacement",
+		FileVersion: initial.FileVersion,
+	})
+	if resp.OK || resp.ErrorCode != "unknown_completion" || resp.Status == "written" {
+		t.Fatalf("post-commit race response = %+v", resp)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "external-after-agent-commit" {
+		t.Fatalf("unexpected final content after post-commit race: %q", string(got))
+	}
+	assertNoFileWriteTemps(t, dir)
+}
+
+func TestWriteFileVersionedExistingTargetSucceedsWhenUnchanged(t *testing.T) {
+	server := newFileTestServer(t, nil)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "versioned-success.txt")
+	if err := os.WriteFile(path, []byte("before"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	initial := server.readFile(Request{Path: path, Limit: 32})
+	if !initial.OK || initial.FileVersion == "" {
+		t.Fatalf("initial read = %+v", initial)
+	}
+
+	resp := server.writeFile(Request{
+		Path:        path,
+		Content:     "after",
+		FileVersion: initial.FileVersion,
+	})
+	if !resp.OK || resp.Status != "written" || resp.FileVersion == "" {
+		t.Fatalf("versioned replacement = %+v", resp)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "after" {
+		t.Fatalf("content = %q, want after", string(got))
+	}
+	assertNoFileWriteTemps(t, dir)
+}
+
+func TestWriteFileMustNotExistRejectsCommitBoundaryAppearance(t *testing.T) {
+	server := newFileTestServer(t, nil)
+	dir := t.TempDir()
+	path := filepath.Join(dir, "new-race.txt")
+
+	server.fileWriteHooks = &fileWriteTestHooks{
+		beforeNewCommit: func() {
+			if err := os.WriteFile(path, []byte("external-created"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		},
+	}
+	resp := server.writeFile(Request{
+		Path:         path,
+		Content:      "agent-created",
+		MustNotExist: true,
+	})
+	if resp.OK || resp.ErrorCode != "file_changed" || resp.Status == "written" {
+		t.Fatalf("must-not-exist race response = %+v", resp)
+	}
+	got, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "external-created" {
+		t.Fatalf("RENAME_NOREPLACE overwrote concurrent create: %q", string(got))
+	}
+	assertNoFileWriteTemps(t, dir)
+}

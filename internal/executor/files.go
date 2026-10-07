@@ -283,7 +283,13 @@ func (s *Server) readFile(req Request) Response {
 	}
 }
 
-func destinationState(parentFD int, base string) (unix.Stat_t, bool, error) {
+type fileWriteTestHooks struct {
+	beforeExistingCommit func()
+	beforeNewCommit      func()
+	afterCommit          func()
+}
+
+func pathState(parentFD int, base string) (unix.Stat_t, bool, error) {
 	var st unix.Stat_t
 	err := unix.Fstatat(parentFD, base, &st, unix.AT_SYMLINK_NOFOLLOW)
 	if errors.Is(err, unix.ENOENT) {
@@ -291,6 +297,14 @@ func destinationState(parentFD int, base string) (unix.Stat_t, bool, error) {
 	}
 	if err != nil {
 		return unix.Stat_t{}, false, err
+	}
+	return st, true, nil
+}
+
+func destinationState(parentFD int, base string) (unix.Stat_t, bool, error) {
+	st, exists, err := pathState(parentFD, base)
+	if err != nil || !exists {
+		return st, exists, err
 	}
 	if st.Mode&unix.S_IFMT != unix.S_IFREG {
 		return unix.Stat_t{}, true, errors.New("destination must be a regular file")
@@ -329,6 +343,98 @@ func writeAllFD(fd int, b []byte) error {
 			return io.ErrShortWrite
 		}
 		b = b[n:]
+	}
+	return nil
+}
+
+func sameFileSnapshot(a, b unix.Stat_t) bool {
+	return sameFileIdentity(a, b) && fileVersion(a) == fileVersion(b)
+}
+
+func sameFileCommitState(a, b unix.Stat_t) bool {
+	// RENAME_EXCHANGE is a namespace mutation and may update ctime on some
+	// filesystems. Commit-boundary comparison therefore binds the exact inode
+	// and all ordinary write-relevant metadata that exchange itself does not
+	// change. The full file_version (including ctime) is still checked before
+	// commit.
+	return sameFileIdentity(a, b) &&
+		a.Size == b.Size &&
+		a.Mode == b.Mode &&
+		a.Uid == b.Uid &&
+		a.Gid == b.Gid &&
+		a.Mtim.Sec == b.Mtim.Sec &&
+		a.Mtim.Nsec == b.Mtim.Nsec
+}
+
+func (s *Server) runBeforeExistingCommitHook() {
+	if s.fileWriteHooks != nil && s.fileWriteHooks.beforeExistingCommit != nil {
+		s.fileWriteHooks.beforeExistingCommit()
+	}
+}
+
+func (s *Server) runBeforeNewCommitHook() {
+	if s.fileWriteHooks != nil && s.fileWriteHooks.beforeNewCommit != nil {
+		s.fileWriteHooks.beforeNewCommit()
+	}
+}
+
+func (s *Server) runAfterCommitHook() {
+	if s.fileWriteHooks != nil && s.fileWriteHooks.afterCommit != nil {
+		s.fileWriteHooks.afterCommit()
+	}
+}
+
+func unknownFileCompletion(message string, st *unix.Stat_t) Response {
+	resp := fileError("unknown_completion", "state", errors.New(message))
+	if st != nil {
+		resp.FileVersion = fileVersion(*st)
+		resp.FileSize = int64Ptr(st.Size)
+	}
+	return resp
+}
+
+// rollbackExistingExchange tries to restore the object displaced by an
+// optimistic RENAME_EXCHANGE. It returns nil only when both names are observed
+// back in their expected state and the directory entry changes are synced.
+func rollbackExistingExchange(parentFD int, base, tempName string, prepared, displaced unix.Stat_t) error {
+	currentBase, baseExists, err := pathState(parentFD, base)
+	if err != nil {
+		return fmt.Errorf("inspect replacement before rollback: %w", err)
+	}
+	if !baseExists || !sameFileCommitState(prepared, currentBase) {
+		return errors.New("replacement changed before rollback")
+	}
+	currentTemp, tempExists, err := pathState(parentFD, tempName)
+	if err != nil {
+		return fmt.Errorf("inspect displaced destination before rollback: %w", err)
+	}
+	if !tempExists || !sameFileCommitState(displaced, currentTemp) {
+		return errors.New("displaced destination changed before rollback")
+	}
+	if err := unix.Renameat2(parentFD, tempName, parentFD, base, unix.RENAME_EXCHANGE); err != nil {
+		return fmt.Errorf("rollback exchange: %w", err)
+	}
+	restoredBase, baseExists, err := pathState(parentFD, base)
+	if err != nil {
+		return fmt.Errorf("inspect restored destination: %w", err)
+	}
+	restoredTemp, tempExists, tempErr := pathState(parentFD, tempName)
+	if tempErr != nil {
+		return fmt.Errorf("inspect prepared file after rollback: %w", tempErr)
+	}
+	if !baseExists || !sameFileCommitState(displaced, restoredBase) || !tempExists || !sameFileCommitState(prepared, restoredTemp) {
+		return errors.New("rollback completed but restored identities could not be proven")
+	}
+	if err := unix.Fsync(parentFD); err != nil {
+		return fmt.Errorf("sync restored destination directory: %w", err)
+	}
+	restoredBase, baseExists, err = pathState(parentFD, base)
+	if err != nil || !baseExists || !sameFileCommitState(displaced, restoredBase) {
+		return errors.New("restored destination changed after rollback sync")
+	}
+	restoredTemp, tempExists, err = pathState(parentFD, tempName)
+	if err != nil || !tempExists || !sameFileCommitState(prepared, restoredTemp) {
+		return errors.New("prepared file changed after rollback sync")
 	}
 	return nil
 }
@@ -395,10 +501,10 @@ func (s *Server) writeFile(req Request) Response {
 	if err != nil {
 		return fileError("file_write_failed", "io", err)
 	}
-	renamed := false
+	tempNameOwned := true
 	defer func() {
 		_ = unix.Close(tempFD)
-		if !renamed {
+		if tempNameOwned {
 			_ = unix.Unlinkat(parentFD, tempName, 0)
 		}
 	}()
@@ -419,51 +525,89 @@ func (s *Server) writeFile(req Request) Response {
 	if err := unix.Fsync(tempFD); err != nil {
 		return fileError("file_write_failed", "io", err)
 	}
+	var prepared unix.Stat_t
+	if err := unix.Fstat(tempFD, &prepared); err != nil {
+		return fileError("file_write_failed", "io", fmt.Errorf("inspect prepared replacement: %w", err))
+	}
 
 	current, currentExists, err := destinationState(parentFD, base)
 	if err != nil {
 		return fileError("unsafe_file_type", "validation", err)
 	}
 	if exists {
-		if !currentExists || !sameFileIdentity(initial, current) || fileVersion(initial) != fileVersion(current) {
+		if !currentExists || !sameFileSnapshot(initial, current) {
 			return fileError("file_changed", "conflict", errors.New("destination changed before atomic replacement"))
 		}
 	} else if currentExists {
 		return fileError("file_changed", "conflict", errors.New("destination appeared before atomic replacement"))
 	}
 
-	if exists {
-		err = unix.Renameat(parentFD, tempName, parentFD, base)
-	} else {
-		err = unix.Renameat2(parentFD, tempName, parentFD, base, unix.RENAME_NOREPLACE)
-	}
-	if errors.Is(err, unix.EEXIST) {
-		return fileError("file_changed", "conflict", errors.New("destination appeared before atomic replacement"))
-	}
-	if err != nil {
-		return fileError("file_write_failed", "io", err)
-	}
-	renamed = true
+	if exists && req.FileVersion != "" {
+		// RENAME_EXCHANGE atomically captures the exact object displaced at
+		// commit time under tempName. That lets the optimistic precondition be
+		// verified against the commit boundary rather than a preceding lookup.
+		s.runBeforeExistingCommitHook()
+		if err := unix.Renameat2(parentFD, tempName, parentFD, base, unix.RENAME_EXCHANGE); err != nil {
+			return fileError("file_write_failed", "io", err)
+		}
+		// tempName now contains the atomically displaced destination, not our
+		// prepared file. Never let generic cleanup unlink it on an uncertain path.
+		tempNameOwned = false
+		s.runAfterCommitHook()
 
-	var final unix.Stat_t
-	if err := unix.Fstatat(parentFD, base, &final, unix.AT_SYMLINK_NOFOLLOW); err != nil {
-		return fileError("unknown_completion", "state", fmt.Errorf("replacement completed but final file could not be inspected: %w", err))
+		displaced, displacedExists, inspectErr := pathState(parentFD, tempName)
+		if inspectErr != nil || !displacedExists {
+			return unknownFileCompletion("replacement committed but displaced destination identity could not be inspected", nil)
+		}
+		if !sameFileCommitState(initial, displaced) {
+			if err := rollbackExistingExchange(parentFD, base, tempName, prepared, displaced); err != nil {
+				return unknownFileCompletion("replacement raced with a destination change and rollback could not be proven", nil)
+			}
+			// Proven rollback puts our prepared inode back under tempName.
+			tempNameOwned = true
+			return fileError("file_changed", "conflict", errors.New("destination changed at atomic replacement boundary"))
+		}
+		if err := unix.Unlinkat(parentFD, tempName, 0); err != nil {
+			return unknownFileCompletion("replacement committed but displaced destination cleanup failed", &prepared)
+		}
+	} else if exists {
+		if err := unix.Renameat(parentFD, tempName, parentFD, base); err != nil {
+			return fileError("file_write_failed", "io", err)
+		}
+		tempNameOwned = false
+		s.runAfterCommitHook()
+	} else {
+		s.runBeforeNewCommitHook()
+		if err := unix.Renameat2(parentFD, tempName, parentFD, base, unix.RENAME_NOREPLACE); err != nil {
+			if errors.Is(err, unix.EEXIST) {
+				return fileError("file_changed", "conflict", errors.New("destination appeared before atomic replacement"))
+			}
+			return fileError("file_write_failed", "io", err)
+		}
+		tempNameOwned = false
+		s.runAfterCommitHook()
 	}
-	if final.Mode&unix.S_IFMT != unix.S_IFREG {
-		return fileError("unknown_completion", "state", errors.New("replacement completed but final destination is not a regular file"))
+
+	final, finalExists, err := destinationState(parentFD, base)
+	if err != nil || !finalExists {
+		return unknownFileCompletion("replacement committed but final destination could not be inspected", nil)
+	}
+	if !sameFileIdentity(prepared, final) {
+		return unknownFileCompletion("replacement committed but final destination no longer names the prepared replacement", nil)
 	}
 	if err := unix.Fsync(parentFD); err != nil {
-		resp := fileError("unknown_completion", "state", fmt.Errorf("replacement completed but parent directory sync failed: %w", err))
-		resp.FileVersion = fileVersion(final)
-		resp.FileSize = int64Ptr(final.Size)
-		return resp
+		return unknownFileCompletion(fmt.Sprintf("replacement committed but parent directory sync failed: %v", err), &final)
+	}
+	confirmed, confirmedExists, err := destinationState(parentFD, base)
+	if err != nil || !confirmedExists || !sameFileIdentity(prepared, confirmed) {
+		return unknownFileCompletion("replacement committed but final destination identity changed after directory sync", nil)
 	}
 
 	_ = s.audit.Write(audit.Entry{Action: "write_file", Mode: "root", Command: path, Success: true})
 	return Response{
 		OK:          true,
 		Status:      "written",
-		FileSize:    int64Ptr(final.Size),
-		FileVersion: fileVersion(final),
+		FileSize:    int64Ptr(confirmed.Size),
+		FileVersion: fileVersion(confirmed),
 	}
 }

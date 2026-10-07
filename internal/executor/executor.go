@@ -33,6 +33,7 @@ type Server struct {
 	runs              *runLimiter
 	jobsMu            sync.Mutex
 	lifecycleLockPath string
+	fileWriteHooks    *fileWriteTestHooks
 }
 
 func NewServer(cfg config.Config, token string) (*Server, error) {
