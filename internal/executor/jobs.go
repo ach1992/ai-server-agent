@@ -1122,7 +1122,11 @@ func readJobLogHeader(f *os.File, size int64) (jobLogHeader, bool, error) {
 		AvailableFrom: int64(binary.LittleEndian.Uint64(raw[16:24])),
 		CurrentEnd:    int64(binary.LittleEndian.Uint64(raw[24:32])),
 	}
-	if h.Capacity != maxJobLogBytes || h.AvailableFrom < 0 || h.CurrentEnd < h.AvailableFrom || h.CurrentEnd-h.AvailableFrom > h.Capacity {
+	expectedAvailable := h.CurrentEnd - h.Capacity
+	if expectedAvailable < 0 {
+		expectedAvailable = 0
+	}
+	if h.Capacity != maxJobLogBytes || h.AvailableFrom < 0 || h.CurrentEnd < h.AvailableFrom || h.CurrentEnd-h.AvailableFrom > h.Capacity || h.AvailableFrom != expectedAvailable {
 		return jobLogHeader{}, false, errors.New("invalid bounded job log header")
 	}
 	if size > int64(jobLogHeaderSize)+h.Capacity {
