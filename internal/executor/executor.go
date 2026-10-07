@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -30,6 +31,7 @@ type Server struct {
 	workerUID uint32
 	workerGID uint32
 	runs      *runLimiter
+	jobsMu    sync.Mutex
 }
 
 func NewServer(cfg config.Config, token string) (*Server, error) {
@@ -200,63 +202,8 @@ func (s *Server) openJobFile(path string) (*os.File, error) {
 }
 
 func (s *Server) startJob(req Request) Response {
-	_, dec := s.command(req)
-	if !dec.Allowed {
-		return Response{Error: dec.Reason}
-	}
-	if dec.RequiresApproval && !req.Approval {
-		return Response{Error: "approval_required", Approval: dec}
-	}
-	id := fmt.Sprintf("%d", time.Now().UnixNano())
-	jobsDir := filepath.Join(s.cfg.StateDir, "jobs")
-	if err := trustedDir(s.cfg.StateDir); err != nil {
-		return Response{Error: err.Error()}
-	}
-	if err := trustedDir(jobsDir); err != nil {
-		return Response{Error: err.Error()}
-	}
-	logPath := filepath.Join(jobsDir, id+".log")
-	statusPath := filepath.Join(jobsDir, id+".status")
-	fileUID, fileGID := uint32(0), uint32(0)
-	if !req.Root {
-		fileUID, fileGID = s.workerUID, s.workerGID
-	}
-	if err := createJobFile(logPath, fileUID, fileGID); err != nil {
-		return Response{Error: "prepare job log: " + err.Error()}
-	}
-	if err := createJobFile(statusPath, fileUID, fileGID); err != nil {
-		_ = os.Remove(logPath)
-		return Response{Error: "prepare job status: " + err.Error()}
-	}
-	unit := "ai-job-" + id
-	shell := fmt.Sprintf("( %s ) >>%s 2>&1; rc=$?; printf '%%s\n' \"$rc\" >%s; exit \"$rc\"", req.Command, shellQuote(logPath), shellQuote(statusPath))
-	home := s.cfg.WorkspaceDir
-	workDir := s.cfg.WorkspaceDir
-	if req.Root {
-		home = "/root"
-		workDir = "/root"
-	}
-	args := []string{"--unit", unit, "--collect", "--property=WorkingDirectory=" + workDir}
-	if !req.Root {
-		args = append(args, "--uid="+s.cfg.WorkerUser)
-	}
-	args = append(args,
-		"/usr/bin/env", "-i",
-		"HOME="+home,
-		"PATH="+safeCommandPath,
-		"LANG=C.UTF-8",
-		"LC_ALL=C.UTF-8",
-		"AI_SERVER_AGENT=1",
-		"/bin/bash", "--noprofile", "--norc", "-c", shell,
-	)
-	out, err := exec.Command("systemd-run", args...).CombinedOutput()
-	_ = s.audit.Write(audit.Entry{Action: "start_job", Mode: map[bool]string{true: "root", false: "worker"}[req.Root], Command: req.Command, Success: err == nil, Detail: string(out)})
-	if err != nil {
-		return Response{Error: err.Error() + ": " + string(out)}
-	}
-	return Response{OK: true, JobID: id, Output: string(out)}
+	return s.startJobBounded(req)
 }
-
 func (s *Server) jobStatus(req Request) Response {
 	id, err := safeID(req.JobID)
 	if err != nil {
@@ -299,33 +246,8 @@ func (s *Server) jobStop(req Request) Response {
 	return Response{OK: true, Output: string(out)}
 }
 func (s *Server) jobOutput(req Request) Response {
-	id, err := safeID(req.JobID)
-	if err != nil {
-		return Response{Error: err.Error()}
-	}
-	path := filepath.Join(s.cfg.StateDir, "jobs", id+".log")
-	f, er := s.openJobFile(path)
-	if er != nil {
-		return Response{Error: er.Error()}
-	}
-	defer f.Close()
-	if req.Offset < 0 {
-		req.Offset = 0
-	}
-	if _, er = f.Seek(req.Offset, 0); er != nil {
-		return Response{Error: er.Error()}
-	}
-	lim := req.Limit
-	if lim <= 0 || lim > 1<<20 {
-		lim = 1 << 20
-	}
-	b, er := io.ReadAll(io.LimitReader(f, int64(lim)))
-	if er != nil {
-		return Response{Error: er.Error()}
-	}
-	return Response{OK: true, Output: string(b), NextOffset: req.Offset + int64(len(b))}
+	return s.jobOutputBounded(req)
 }
-
 func (s *Server) readFile(req Request) Response {
 	dec := s.guard.Evaluate("read "+req.Path, true)
 	if dec.RequiresApproval && !req.Approval {
