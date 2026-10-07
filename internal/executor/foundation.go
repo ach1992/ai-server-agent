@@ -234,7 +234,11 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	err := cmd.Run()
-	lingeringGroup, cleanupErr := terminateProcessGroup(cmd.Process.Pid)
+	lingeringGroup := false
+	var cleanupErr error
+	if cmd.Process != nil {
+		lingeringGroup, cleanupErr = terminateProcessGroup(cmd.Process.Pid)
+	}
 	code := 0
 	if err != nil {
 		code = 1
