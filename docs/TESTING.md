@@ -116,7 +116,30 @@ The lifecycle overlap tests use the installed management wrapper and the real `/
 
 Go tests exercise root command environment isolation and the persistent-job command construction. The current persistent-job isolation test uses a fake `systemd-run` command to inspect/execute the generated invocation.
 
-**Known coverage limit:** CI does not currently exercise an actual privileged systemd transient job end-to-end. A real Ubuntu/systemd transient-unit integration test is useful additional confidence, but it is not a substitute for the existing command/environment tests and is not currently a stable v0.1 release blocker by itself.
+CI does not currently exercise an actual privileged systemd transient job end-to-end. The opt-in `tests/integrated_data_path.py` acceptance fixture below covers real transient jobs on a dedicated Linux/systemd test host. This complements the existing command/environment tests; it is not part of every ordinary CI run.
+
+### Integrated resource-governance acceptance
+
+Issue #42 owns the current acceptance state and exact-run evidence. These opt-in fixtures prove boundaries that ordinary unit tests cannot exercise together. Build the supplied candidate and test binaries as the ordinary development user after inspecting the source; execute only the identified fixtures as root on a dedicated test host with the existing `aiworker` account:
+
+```bash
+CGO_ENABLED=0 go build -trimpath -o /absolute/task/path/candidate ./cmd/ai-server-agent
+go test -c -race -o /absolute/task/path/executor.test ./internal/executor
+go test -c -race -o /absolute/task/path/browser.test ./internal/browser
+
+sudo env GOMAXPROCS=1 /absolute/task/path/executor.test -test.run '^TestIntegratedExecutorCapacityAndDataPaths$' -test.v -test.timeout 60s
+sudo env GOMAXPROCS=4 /absolute/task/path/executor.test -test.run '^TestIntegratedExecutorCapacityAndDataPaths$' -test.v -test.timeout 60s
+sudo python3 tests/integrated_data_path.py /absolute/task/path/candidate
+sudo env AI_SERVER_AGENT_BROWSER_ACCEPTANCE_RUNTIME=/absolute/task/path/verified-runtime AI_SERVER_AGENT_BROWSER_ACCEPTANCE_WORKER=aiworker /absolute/task/path/browser.test -test.run '^TestBrowserPinnedRuntimeAcceptance$' -test.v -test.timeout 90s
+```
+
+The race builds need a C compiler; Python 3 is only a dependency of this optional test fixture. Neither is added to the Agent's core host footprint. Without the opt-in environment/privilege prerequisites, the Go fixtures skip; a skip is not live acceptance evidence.
+
+- The executor fixture saturates separate worker/root budgets with noisy commands, concurrently reads regular-file ranges and a growing retained job log through the real Unix-socket handler/client, then verifies capacity recovery. The one/four `GOMAXPROCS` cases exercise different admitted capacities, rather than duplicate the same proof.
+- The MCP/systemd fixture launches its own loopback MCP server and root executor with temporary credentials/state. It measures complete small output and bounded head/tail wire responses, binary/ranged-file behavior, real job replay/conflict/capacity, logical log retention and job survival across restart of those fixture processes. It preserves unrelated active jobs and stops only its own transient units. It never installs, updates or restarts the connected Agent services. If cleanup cannot be verified, it retains the fixture for recovery.
+- The browser fixture uses a verified task-owned copy of the pinned runtime with its own socket/profile/state. It verifies shared cookies/storage, default TLS and a scoped exception, timeout/busy/recovery, bounded output and disposable-artifact refusal. Its reconstructed manifest proves runtime execution compatibility, not `browser_setup` provenance or convergence; existing setup behavioral tests cover those separately. Verify copied runtime versions, locked dependency identities and browser content-tree hashes against the release manifest before running it.
+
+A successful direct wire fixture is not proof of ChatGPT's presentation of `structuredContent`, or real Gateway forwarding. Those require the current supported client and an implemented compatible Gateway connector. Likewise, wire-size measurements alone do not settle the synchronous inline budget's client/Gateway usability requirement. Keep the unresolved checks open in Issue #42; do not replace them with a mock proxy, a higher global cap or a repeated broad unit suite.
 
 ### Bounded privileged file path
 
