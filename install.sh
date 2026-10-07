@@ -241,10 +241,11 @@ chown root:"$AGENT_USER" "$MCP_AUTH_HEADER_FILE"; chmod 0640 "$MCP_AUTH_HEADER_F
 
 install_helpers(){
   local root="$1"
-  [ -f "$root/manage.sh" ] && [ -f "$root/update.sh" ] && [ -f "$root/uninstall.sh" ] || die "release/source payload is missing management helpers"
+  [ -f "$root/manage.sh" ] && [ -f "$root/update.sh" ] && [ -f "$root/uninstall.sh" ] && [ -f "$root/ensure-lifecycle-lock.sh" ] || die "release/source payload is missing management helpers"
   install -o root -g root -m 0700 "$root/manage.sh" "$LIB_DIR/manage.sh"
   install -o root -g root -m 0755 "$root/update.sh" "$LIB_DIR/update.sh"
   install -o root -g root -m 0755 "$root/uninstall.sh" "$LIB_DIR/uninstall.sh"
+  install -o root -g root -m 0700 "$root/ensure-lifecycle-lock.sh" "$LIB_DIR/ensure-lifecycle-lock.sh"
   cat > "$MANAGE_BIN" <<'EOF_MANAGE_WRAPPER'
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -387,6 +388,7 @@ After=local-fs.target
 [Service]
 Type=simple
 Group=$AGENT_USER
+ExecStartPre=$LIB_DIR/ensure-lifecycle-lock.sh
 ExecStart=$INSTALL_BIN -config $CONFIG_FILE executor
 Restart=always
 RestartSec=2

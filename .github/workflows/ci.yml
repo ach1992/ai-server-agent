@@ -227,6 +227,9 @@ jobs:
           enable_line="$(grep -nF 'systemctl enable ai-server-agent-executor.service ai-server-agent.service' install.sh | cut -d: -f1 | head -n1)"
           restart_line="$(grep -nF 'systemctl restart ai-server-agent-executor.service ai-server-agent.service' install.sh | cut -d: -f1 | head -n1)"
           active_line="$(grep -nF 'systemctl is-active --quiet ai-server-agent-executor.service' install.sh | cut -d: -f1 | head -n1)"
+          grep -qF 'ExecStartPre=$LIB_DIR/ensure-lifecycle-lock.sh' install.sh
+          grep -qF 'ensure-lifecycle-lock.sh' scripts/build-release.sh
+          bash -n ensure-lifecycle-lock.sh
           test -n "$daemon_line" && test -n "$enable_line" && test -n "$restart_line" && test -n "$active_line"
           test "$enable_line" -gt "$daemon_line"
           test "$restart_line" -gt "$enable_line"
@@ -299,6 +302,7 @@ jobs:
             tar -tzf "$archive" | grep -qF "$root/manage.sh"
             tar -tzf "$archive" | grep -qF "$root/update.sh"
             tar -tzf "$archive" | grep -qF "$root/uninstall.sh"
+            tar -tzf "$archive" | grep -qF "$root/ensure-lifecycle-lock.sh"
             tar -tzf "$archive" | grep -qF "$root/README.md"
             tar -tzf "$archive" | grep -qF "$root/LICENSE"
           done
@@ -319,8 +323,91 @@ jobs:
           sudo systemctl is-active --quiet ai-server-agent-executor.service
           sudo test -x /usr/local/sbin/ai-server-agent-manage
           sudo test -x /usr/local/lib/ai-server-agent/update.sh
+          sudo test -x /usr/local/lib/ai-server-agent/ensure-lifecycle-lock.sh
           sudo jq -e '.channel == "source" and .version == "source"' /etc/ai-server-agent/control/install-state.json >/dev/null
           sudo bash tests/root_trust_boundary.sh
+
+          # Model a reboot-cleared /run namespace. Executor startup must recreate
+          # the root-only lifecycle lock before persistent-job admission is served.
+          sudo systemctl stop ai-server-agent.service ai-server-agent-executor.service
+          sudo rm -rf /run/lock/ai-server-agent
+          sudo systemctl start ai-server-agent-executor.service ai-server-agent.service
+          sudo systemctl is-active --quiet ai-server-agent-executor.service
+          sudo systemctl is-active --quiet ai-server-agent.service
+          test "$(sudo stat -c '%u:%g:%a' /run/lock/ai-server-agent)" = '0:0:700'
+          test "$(sudo stat -c '%u:%g:%a' /run/lock/ai-server-agent/management.lock)" = '0:0:600'
+
+          # Exercise the installed production executor path after volatile-state
+          # recovery. The probe starts a real worker job and immediately stops it.
+          rm -rf ci-start-job-probe
+          mkdir ci-start-job-probe
+          cat > ci-start-job-probe/main.go <<'EOF_GO_PROBE'
+          package main
+
+          import (
+              "context"
+              "fmt"
+              "os"
+              "strings"
+              "time"
+
+              "github.com/ach1992/ai-server-agent/internal/config"
+              "github.com/ach1992/ai-server-agent/internal/executor"
+          )
+
+          func main() {
+              cfg, err := config.Load("/etc/ai-server-agent/config.json")
+              if err != nil {
+                  panic(err)
+              }
+              tokenBytes, err := os.ReadFile(cfg.ExecutorToken)
+              if err != nil {
+                  panic(err)
+              }
+              ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+              defer cancel()
+              resp, err := executor.ClientCallContext(ctx, cfg.ExecutorSocket, strings.TrimSpace(string(tokenBytes)), executor.Request{
+                  Action: "start_job",
+                  Command: "sleep 30",
+                  OperationID: "ci-post-volatile-runtime-recovery",
+              })
+              if err != nil {
+                  panic(err)
+              }
+              if !resp.OK || resp.Status != "accepted" || resp.JobID == "" {
+                  panic(fmt.Sprintf("post-reboot start_job failed: %+v", resp))
+              }
+              stop, err := executor.ClientCallContext(ctx, cfg.ExecutorSocket, strings.TrimSpace(string(tokenBytes)), executor.Request{Action: "job_stop", JobID: resp.JobID})
+              if err != nil {
+                  panic(err)
+              }
+              if !stop.OK {
+                  panic(fmt.Sprintf("post-reboot job cleanup failed: %+v", stop))
+              }
+          }
+          EOF_GO_PROBE
+          go build -o /tmp/ai-server-agent-start-job-probe ./ci-start-job-probe
+          rm -rf ci-start-job-probe
+          sudo /tmp/ai-server-agent-start-job-probe
+          rm -f /tmp/ai-server-agent-start-job-probe
+
+          # Unsafe volatile state must fail closed; startup must not follow or
+          # repair a symlink supplied at the lifecycle-lock path.
+          sudo systemctl stop ai-server-agent.service ai-server-agent-executor.service
+          sudo rm -rf /run/lock/ai-server-agent
+          sudo ln -s /tmp /run/lock/ai-server-agent
+          if sudo systemctl start ai-server-agent-executor.service; then
+            echo 'executor startup unexpectedly accepted a symlinked lifecycle lock namespace' >&2
+            exit 1
+          fi
+          sudo test -L /run/lock/ai-server-agent
+          sudo rm -f /run/lock/ai-server-agent
+          sudo systemctl reset-failed ai-server-agent-executor.service
+          sudo systemctl start ai-server-agent-executor.service ai-server-agent.service
+          sudo systemctl is-active --quiet ai-server-agent-executor.service
+          sudo systemctl is-active --quiet ai-server-agent.service
+          test "$(sudo stat -c '%u:%g:%a' /run/lock/ai-server-agent)" = '0:0:700'
+          test "$(sudo stat -c '%u:%g:%a' /run/lock/ai-server-agent/management.lock)" = '0:0:600'
           sudo touch /etc/ai-server-agent/lifecycle-config-sentinel
           sudo touch /var/lib/ai-server-agent/lifecycle-state-sentinel
           sudo touch /var/log/ai-server-agent/lifecycle-log-sentinel

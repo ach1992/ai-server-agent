@@ -108,7 +108,7 @@ The crash suite covers both:
 
 `tests/root_trust_boundary.sh` and `tests/root_trust_migration.sh` exercise hostile legacy layouts, symlink/replacement attempts, root-only control state, root-controlled state containers and the global lifecycle lock.
 
-The lifecycle overlap tests use the installed management wrapper and the real `/run/lock/ai-server-agent/management.lock` namespace to verify that configure/update/install/purge cannot overlap before mutation.
+The lifecycle overlap tests use the installed management wrapper and the real `/run/lock/ai-server-agent/management.lock` namespace to verify that configure/update/install/purge cannot overlap before mutation. Privileged lifecycle CI also clears that volatile namespace to model reboot, verifies executor startup recreates the root-only directory/file, proves symlinked unsafe state fails closed, and then repeats the shared-vs-exclusive exclusion checks.
 
 `tests/root_trust_boundary.sh` also invokes `tests/stable_bootstrap.sh`, so the initial stable-install privilege handoff is exercised by the existing High Assurance root-trust job rather than by a separate duplicate workflow.
 
