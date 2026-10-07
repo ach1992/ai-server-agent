@@ -118,6 +118,12 @@ Go tests exercise root command environment isolation and the persistent-job comm
 
 **Known coverage limit:** CI does not currently exercise an actual privileged systemd transient job end-to-end. A real Ubuntu/systemd transient-unit integration test is useful additional confidence, but it is not a substitute for the existing command/environment tests and is not currently a stable v0.1 release blocker by itself.
 
+### Bounded privileged file path
+
+Go tests exercise the root file-tool data contract without broad host mutation: ranged reads, raw offsets/continuation metadata, binary base64 encoding, file-version consistency conflicts, the 1 MiB read/write bounds, atomic replacement, mode preservation, `must_not_exist`, missing-parent refusal, symlinked protected-path approval, final-symlink rejection and FIFO/special-file rejection.
+
+The implementation resolves parent directories and read targets through stable file descriptors, so the tests assert behavior through the same production helpers rather than a separate mock path. Repository CI/race runs own the broader exact-head evidence; later Issue #42 integrated direct-client/Gateway acceptance remains intentionally separate from this file-path slice.
+
 ## 4. Stable installer and updater trust
 
 ### Stable bootstrap

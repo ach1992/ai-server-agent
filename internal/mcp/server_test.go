@@ -82,6 +82,8 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 	foundBrowser := false
 	foundStartJob := false
 	foundJobStatus := false
+	foundReadFile := false
+	foundWriteFile := false
 	for _, tool := range res.Tools {
 		switch tool.Name {
 		case "agent_environment":
@@ -127,6 +129,49 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			if !tool.Annotations.IdempotentHint {
 				t.Fatal("job_status reconciliation must remain idempotent")
 			}
+		case "read_file":
+			foundReadFile = true
+			if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint {
+				t.Fatal("read_file must advertise readOnlyHint")
+			}
+			if !strings.Contains(tool.Description, "root-readable") {
+				t.Fatalf("read_file description must state root-readable authority: %q", tool.Description)
+			}
+			in, err := json.Marshal(tool.InputSchema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"offset", "limit", "file_version"} {
+				if !strings.Contains(string(in), `"`+field+`"`) {
+					t.Fatalf("read_file input schema missing %q: %s", field, in)
+				}
+			}
+			out, err := json.Marshal(tool.OutputSchema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"file_size", "file_version", "requested_offset", "next_offset", "eof", "output_encoding", "bytes_returned"} {
+				if !strings.Contains(string(out), `"`+field+`"`) {
+					t.Fatalf("read_file output schema missing %q: %s", field, out)
+				}
+			}
+		case "write_file":
+			foundWriteFile = true
+			if tool.Annotations == nil || tool.Annotations.DestructiveHint == nil || !*tool.Annotations.DestructiveHint {
+				t.Fatal("write_file must advertise destructiveHint")
+			}
+			if !strings.Contains(tool.Description, "root-capable") {
+				t.Fatalf("write_file description must state root-capable authority: %q", tool.Description)
+			}
+			in, err := json.Marshal(tool.InputSchema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"file_version", "must_not_exist"} {
+				if !strings.Contains(string(in), `"`+field+`"`) {
+					t.Fatalf("write_file input schema missing %q: %s", field, in)
+				}
+			}
 		case "browser_run":
 			foundBrowser = true
 			if tool.Annotations == nil || tool.Annotations.DestructiveHint == nil || !*tool.Annotations.DestructiveHint || tool.Annotations.OpenWorldHint == nil || !*tool.Annotations.OpenWorldHint {
@@ -134,8 +179,8 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			}
 		}
 	}
-	if !foundEnvironment || !foundRoot || !foundStartJob || !foundJobStatus || !foundBrowser {
-		t.Fatalf("required tools missing: environment=%v root=%v start_job=%v job_status=%v browser=%v", foundEnvironment, foundRoot, foundStartJob, foundJobStatus, foundBrowser)
+	if !foundEnvironment || !foundRoot || !foundStartJob || !foundJobStatus || !foundReadFile || !foundWriteFile || !foundBrowser {
+		t.Fatalf("required tools missing: environment=%v root=%v start_job=%v job_status=%v read_file=%v write_file=%v browser=%v", foundEnvironment, foundRoot, foundStartJob, foundJobStatus, foundReadFile, foundWriteFile, foundBrowser)
 	}
 }
 

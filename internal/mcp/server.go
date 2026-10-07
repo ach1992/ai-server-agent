@@ -53,14 +53,19 @@ type JobOutputInput struct {
 	Limit  int    `json:"limit,omitempty" jsonschema:"Maximum bytes to read; maximum 1048576"`
 }
 type ReadFileInput struct {
-	Path     string `json:"path" jsonschema:"Absolute host path"`
-	Approval bool   `json:"approval,omitempty" jsonschema:"Set true only after explicit user approval when reading an agent-protected resource"`
+	Path        string `json:"path" jsonschema:"Absolute host path"`
+	Offset      int64  `json:"offset,omitempty" jsonschema:"Raw byte offset to start reading at"`
+	Limit       int    `json:"limit,omitempty" jsonschema:"Maximum raw bytes to read; default and maximum 1048576"`
+	FileVersion string `json:"file_version,omitempty" jsonschema:"Optional consistency token returned by an earlier read; mismatches fail with file_changed"`
+	Approval    bool   `json:"approval,omitempty" jsonschema:"Set true only after explicit user approval when reading an Agent-protected resource"`
 }
 type WriteFileInput struct {
-	Path     string `json:"path" jsonschema:"Absolute host path"`
-	Content  string `json:"content" jsonschema:"Complete replacement file content"`
-	Mode     uint32 `json:"mode,omitempty" jsonschema:"Unix file mode as decimal; 420 equals 0644"`
-	Approval bool   `json:"approval,omitempty" jsonschema:"Set true only after explicit user approval when writing an agent-protected resource"`
+	Path         string `json:"path" jsonschema:"Absolute host path; parent directory must already exist"`
+	Content      string `json:"content" jsonschema:"Complete UTF-8 replacement file content; maximum 1048576 bytes"`
+	Mode         uint32 `json:"mode,omitempty" jsonschema:"Optional Unix permission/special bits as decimal; existing mode is preserved when omitted, new files default to 0644"`
+	FileVersion  string `json:"file_version,omitempty" jsonschema:"Optional optimistic precondition from an earlier read; mismatches fail with file_changed"`
+	MustNotExist bool   `json:"must_not_exist,omitempty" jsonschema:"Require the destination not to exist; conflicts with file_version"`
+	Approval     bool   `json:"approval,omitempty" jsonschema:"Set true only after explicit user approval when writing an Agent-protected resource"`
 }
 type BrowserSetupInput struct {
 	Approval bool `json:"approval,omitempty" jsonschema:"Set true to allow downloading the private browser runtime and installing required shared libraries"`
@@ -238,22 +243,22 @@ func (s *Server) registerTools() {
 			return responseResult(resp)
 		})
 
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "read_file", Description: "Read a host file through the privileged executor. Agent credentials/config/state are protected and require explicit approval.", Annotations: annotations(true, false, true, false)},
-		func(ctx context.Context, req *mcpsdk.CallToolRequest, input ReadFileInput) (*mcpsdk.CallToolResult, any, error) {
-			resp, err := executor.ClientCall(s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "read_file", Path: input.Path, Root: true, Approval: input.Approval})
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "read_file", Description: "Read a bounded raw-byte range from a regular host file through the root executor. This is broad root-readable host-file access, not a low-privilege sandbox. Binary data is returned with explicit base64 encoding; Agent-protected aliases still require approval.", Annotations: annotations(true, false, true, false)},
+		func(ctx context.Context, req *mcpsdk.CallToolRequest, input ReadFileInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+			resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "read_file", Path: input.Path, Offset: input.Offset, Limit: input.Limit, FileVersion: input.FileVersion, Root: true, Approval: input.Approval})
 			if err != nil {
-				return textResult(err.Error(), true), nil, nil
+				return executorTransportErrorResult(err)
 			}
-			return legacyResponseResult(resp)
+			return responseResult(resp)
 		})
 
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "write_file", Description: "Write a complete host file through the privileged executor. Writes to protected agent resources require explicit approval.", Annotations: annotations(false, true, false, false)},
-		func(ctx context.Context, req *mcpsdk.CallToolRequest, input WriteFileInput) (*mcpsdk.CallToolResult, any, error) {
-			resp, err := executor.ClientCall(s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "write_file", Path: input.Path, Content: input.Content, Root: true, Mode: input.Mode, Approval: input.Approval})
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "write_file", Description: "Atomically replace a bounded regular host file through the root executor. This is root-capable host mutation, not a safer substitute for run_root_command. The parent must already exist; optional file_version/must_not_exist preconditions prevent accidental lost updates; Agent-protected aliases require approval.", Annotations: annotations(false, true, false, false)},
+		func(ctx context.Context, req *mcpsdk.CallToolRequest, input WriteFileInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+			resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "write_file", Path: input.Path, Content: input.Content, Root: true, Mode: input.Mode, FileVersion: input.FileVersion, MustNotExist: input.MustNotExist, Approval: input.Approval})
 			if err != nil {
-				return textResult(err.Error(), true), nil, nil
+				return executorTransportErrorResult(err)
 			}
-			return legacyResponseResult(resp)
+			return responseResult(resp)
 		})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_setup", Description: "Install an optional root-owned Node.js + Playwright + Chromium engine under /opt/ai-server-agent/browser and keep writable browser profile/session data separately under the agent state directory. It does not replace system Node or take over ports 80/443.", Annotations: annotations(false, true, true, true)},
