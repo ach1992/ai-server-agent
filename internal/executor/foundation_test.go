@@ -7,6 +7,7 @@ import (
 	"errors"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -128,6 +129,36 @@ func TestTerminateProcessGroupCleansBackgroundChildAfterShellExit(t *testing.T) 
 	time.Sleep(850 * time.Millisecond)
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("same-process-group background child survived cleanup; stat err=%v", err)
+	}
+}
+
+func TestShellWaitDelaySurfacesInheritedBackgroundOutput(t *testing.T) {
+	dir := t.TempDir()
+	marker := filepath.Join(dir, "background-child")
+	command := "(sleep 4; printf leaked > " + shellQuote(marker) + ") &"
+	cmd := newShellCommandContext(context.Background(), command, dir, dir)
+	var out bytes.Buffer
+	cmd.Stdout = &out
+	cmd.Stderr = &out
+
+	start := time.Now()
+	err := cmd.Run()
+	if !errors.Is(err, exec.ErrWaitDelay) {
+		t.Fatalf("command error = %v, want exec.ErrWaitDelay", err)
+	}
+	if elapsed := time.Since(start); elapsed < processGroupTerminateGrace {
+		t.Fatalf("wait delay returned too early after %s", elapsed)
+	}
+	lingering, cleanupErr := terminateProcessGroup(cmd.Process.Pid)
+	if cleanupErr != nil {
+		t.Fatalf("terminateProcessGroup: %v", cleanupErr)
+	}
+	if !lingering {
+		t.Fatal("expected inherited-output background child to remain until explicit group cleanup")
+	}
+	time.Sleep(250 * time.Millisecond)
+	if _, statErr := os.Stat(marker); !os.IsNotExist(statErr) {
+		t.Fatalf("background child survived wait-delay cleanup; stat err=%v", statErr)
 	}
 }
 
