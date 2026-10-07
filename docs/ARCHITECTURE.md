@@ -27,6 +27,16 @@ Complete-file writes use a held resolved parent-directory descriptor rather than
 
 The public MCP surface uses bearer authentication. Direct public mode also requires native TLS. The bearer-authenticated MCP control plane is one authorization domain: root and worker jobs are different execution modes, not different external principals.
 
+### Browser runtime and shared profile
+
+Browser is an optional capability layered on the same bounded executor foundation; Node.js/Playwright/Chromium are not core host dependencies. One Agent process owns one browser-operation mutex shared by setup and execution. Acquisition is fail-fast (`resource_limit`) rather than queued, so a setup or hung run cannot silently accumulate browser work. Browser execution carries an explicit executor timeout and request cancellation into the worker process group; the default run budget is 90 seconds and the caller may request up to five minutes. Setup has a separate bounded twenty-minute budget appropriate to downloads/package installation and takes the global root lifecycle lock before changing Agent-owned runtime or host packages, so it cannot race install/update/uninstall/purge. Executor output framing supplies the same bounded raw-byte accounting, truncation and UTF-8/base64 behavior as synchronous commands.
+
+The desired runtime is a small pinned manifest: Node `v24.18.1`, Playwright `1.61.1`, Chromium revision `1228` / browser `149.0.7827.55`, and FFmpeg revision `1011`. Setup stages a replacement under the root-controlled engine parent, verifies the architecture-specific Node SHA-256, installs exact Playwright dependencies with the repository-embedded lockfile/integrity metadata, installs the Playwright browser build, verifies runtime/package/browser metadata, installation markers, and architecture-specific SHA-256 content-tree digests, then swaps the verified runtime into `/opt/ai-server-agent/browser`. Existing runtime presence alone never establishes readiness. `browser_status` independently checks the installed manifest plus executable/package/browser evidence and exposes only bounded non-secret version/readiness information.
+
+Browser scripts are capped at 128 KiB. The MCP request remains below the generic transport ceiling; the script is encoded inside the already-bounded executor command body, delivered to Bash through stdin (not `bash -c` argv), decoded into a worker-only per-run temporary file, and removed on exit. The generated Playwright runner enables ordinary HTTPS certificate validation by default. A caller may opt into `ignore_https_errors` only for that individual run.
+
+The persistent profile under Agent state is deliberately Agent-wide shared authenticated browser state, not a per-principal sandbox. Browser users with authority can therefore reuse or affect the same cookies/local-storage/session state. Setup preserves that profile. Runtime temp/download directories and known Chromium cache directories are disposable and cleaned/bounded separately so disk housekeeping does not silently erase durable login/session state. Per-run disposable data is capped at 256 MiB; execution enforces a 512 MiB state-filesystem reserve continuously, while setup requires a 2 GiB engine-filesystem reserve before staging the pinned runtime.
+
 ### AI-client / vendor boundary
 
 The Agent core is **AI-client and AI-vendor neutral**.
