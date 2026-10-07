@@ -22,9 +22,10 @@ const (
 	maxExecutorRequestBytes   = 8 << 20
 	maxExecutorResponseBytes  = 8 << 20
 	executorConnectionTimeout = 31 * time.Minute
-	defaultRunTimeout         = 30 * time.Minute
-	maxWorkerRunConcurrency   = 4
-	rootRunConcurrency        = 1
+	defaultRunTimeout          = 30 * time.Minute
+	processGroupTerminateGrace = 2 * time.Second
+	maxWorkerRunConcurrency    = 4
+	rootRunConcurrency         = 1
 )
 
 type runLimiter struct {
@@ -96,6 +97,65 @@ func (s *Server) dispatchContext(ctx context.Context, req Request) Response {
 	return s.dispatch(req)
 }
 
+func processGroupExists(pgid int) (bool, error) {
+	if pgid <= 0 {
+		return false, nil
+	}
+	err := syscall.Kill(-pgid, 0)
+	if err == nil {
+		return true, nil
+	}
+	if errors.Is(err, syscall.ESRCH) {
+		return false, nil
+	}
+	return true, err
+}
+
+func terminateProcessGroup(pgid int) (bool, error) {
+	exists, err := processGroupExists(pgid)
+	if err != nil || !exists {
+		return false, err
+	}
+	if err := syscall.Kill(-pgid, syscall.SIGTERM); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return true, err
+	}
+
+	deadline := time.Now().Add(processGroupTerminateGrace)
+	for time.Now().Before(deadline) {
+		exists, err = processGroupExists(pgid)
+		if err != nil {
+			return true, err
+		}
+		if !exists {
+			return true, nil
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+		return true, err
+	}
+	killDeadline := time.Now().Add(250 * time.Millisecond)
+	for time.Now().Before(killDeadline) {
+		exists, err = processGroupExists(pgid)
+		if err != nil {
+			return true, err
+		}
+		if !exists {
+			return true, nil
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	exists, err = processGroupExists(pgid)
+	if err != nil {
+		return true, err
+	}
+	if exists {
+		return true, errors.New("process group still exists after SIGKILL")
+	}
+	return true, nil
+}
+
 func newShellCommandContext(ctx context.Context, command, home, dir string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "/bin/bash", "--noprofile", "--norc", "-c", command)
 	cmd.Dir = dir
@@ -105,13 +165,13 @@ func newShellCommandContext(ctx context.Context, command, home, dir string) *exe
 		if cmd.Process == nil {
 			return os.ErrProcessDone
 		}
-		err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-		if errors.Is(err, syscall.ESRCH) {
-			return os.ErrProcessDone
+		_, err := terminateProcessGroup(cmd.Process.Pid)
+		if err == nil {
+			return nil
 		}
 		return err
 	}
-	cmd.WaitDelay = 2 * time.Second
+	cmd.WaitDelay = processGroupTerminateGrace
 	return cmd
 }
 
@@ -174,6 +234,7 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 	cmd.Stdout = &out
 	cmd.Stderr = &out
 	err := cmd.Run()
+	lingeringGroup, cleanupErr := terminateProcessGroup(cmd.Process.Pid)
 	code := 0
 	if err != nil {
 		code = 1
@@ -185,14 +246,32 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 
 	errorText := errString(err)
 	reasonCode := ""
-	if err != nil {
-		switch ctx.Err() {
-		case context.DeadlineExceeded:
-			errorText = "command timed out"
-			reasonCode = "timeout"
-		case context.Canceled:
-			errorText = "command canceled"
-			reasonCode = "canceled"
+	switch ctx.Err() {
+	case context.DeadlineExceeded:
+		errorText = "command timed out"
+		reasonCode = "timeout"
+	case context.Canceled:
+		errorText = "command canceled"
+		reasonCode = "canceled"
+	default:
+		if errors.Is(err, exec.ErrWaitDelay) {
+			errorText = "command left background work after the shell exited; completion cannot be proven; use start_job or a managed service"
+			reasonCode = "unknown_completion"
+		} else if lingeringGroup {
+			errorText = "synchronous command left background work; remaining process-group members were stopped; use start_job or a managed service"
+			reasonCode = "background_process"
+			if err == nil {
+				err = errors.New(errorText)
+				code = 1
+			}
+		}
+	}
+	if cleanupErr != nil {
+		errorText = "command process-group termination could not be proven: " + cleanupErr.Error()
+		reasonCode = "unknown_completion"
+		if err == nil {
+			err = cleanupErr
+			code = 1
 		}
 	}
 
