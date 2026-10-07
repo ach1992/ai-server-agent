@@ -1,8 +1,7 @@
 package executor
 
 import (
-	"bufio"
-	"bytes"
+	"context"
 	"crypto/subtle"
 	"encoding/json"
 	"errors"
@@ -30,6 +29,7 @@ type Server struct {
 	audit     *audit.Logger
 	workerUID uint32
 	workerGID uint32
+	runs      *runLimiter
 }
 
 func NewServer(cfg config.Config, token string) (*Server, error) {
@@ -44,7 +44,7 @@ func NewServer(cfg config.Config, token string) (*Server, error) {
 	uid64, _ := strconv.ParseUint(u.Uid, 10, 32)
 	gid64, _ := strconv.ParseUint(u.Gid, 10, 32)
 	protected := []string{"ai-server-agent", "/usr/local/bin/ai-server-agent", "/etc/ai-server-agent", cfg.StateDir, cfg.LogDir, cfg.ExecutorSocket, cfg.ListenAddress}
-	return &Server{cfg: cfg, token: token, guard: policy.New(protected), audit: audit.New(filepath.Join(cfg.LogDir, "audit.jsonl")), workerUID: uint32(uid64), workerGID: uint32(gid64)}, nil
+	return &Server{cfg: cfg, token: token, guard: policy.New(protected), audit: audit.New(filepath.Join(cfg.LogDir, "audit.jsonl")), workerUID: uint32(uid64), workerGID: uint32(gid64), runs: newRunLimiter()}, nil
 }
 
 func (s *Server) Serve() error {
@@ -76,15 +76,17 @@ func (s *Server) Serve() error {
 
 func (s *Server) handle(c net.Conn) {
 	defer c.Close()
-	_ = c.SetDeadline(time.Now().Add(10 * time.Minute))
+	_ = c.SetDeadline(time.Now().Add(executorConnectionTimeout))
 	var req Request
-	if err := json.NewDecoder(io.LimitReader(c, 8<<20)).Decode(&req); err != nil {
-		_ = json.NewEncoder(c).Encode(Response{Error: "invalid request: " + err.Error(), GeneratedAt: time.Now().UTC()})
+	if err := json.NewDecoder(io.LimitReader(c, maxExecutorRequestBytes)).Decode(&req); err != nil {
+		_, _ = c.Write(encodeExecutorResponse(Response{Error: "invalid request: " + err.Error(), GeneratedAt: time.Now().UTC()}))
 		return
 	}
-	resp := s.dispatch(req)
+	ctx, cancel := connectionContext(c)
+	defer cancel()
+	resp := s.dispatchContext(ctx, req)
 	resp.GeneratedAt = time.Now().UTC()
-	_ = json.NewEncoder(c).Encode(resp)
+	_, _ = c.Write(encodeExecutorResponse(resp))
 }
 
 func (s *Server) auth(tok string) bool {
@@ -130,51 +132,15 @@ func sanitizedCommandEnv(home string) []string {
 }
 
 func newShellCommand(command, home, dir string) *exec.Cmd {
-	cmd := exec.Command("/bin/bash", "--noprofile", "--norc", "-c", command)
-	cmd.Dir = dir
-	cmd.Env = sanitizedCommandEnv(home)
-	return cmd
+	return newShellCommandContext(context.Background(), command, home, dir)
 }
 
 func (s *Server) command(req Request) (*exec.Cmd, policy.Decision) {
-	dec := s.guard.Evaluate(req.Command, req.Root)
-	home := s.cfg.WorkspaceDir
-	dir := s.cfg.WorkspaceDir
-	if req.Root {
-		home = "/root"
-		dir = "/root"
-	}
-	cmd := newShellCommand(req.Command, home, dir)
-	if req.Root {
-		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: 0, Gid: 0, Groups: []uint32{0}}}
-	} else {
-		cmd.SysProcAttr = &syscall.SysProcAttr{Credential: &syscall.Credential{Uid: s.workerUID, Gid: s.workerGID, Groups: []uint32{s.workerGID}}}
-	}
-	return cmd, dec
+	return s.commandContext(context.Background(), req)
 }
 
 func (s *Server) run(req Request) Response {
-	cmd, dec := s.command(req)
-	if !dec.Allowed {
-		return Response{Error: dec.Reason}
-	}
-	if dec.RequiresApproval && !req.Approval {
-		return Response{Error: "approval_required", Approval: dec}
-	}
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	cmd.Stderr = &out
-	err := cmd.Run()
-	code := 0
-	if err != nil {
-		code = 1
-		var ee *exec.ExitError
-		if errors.As(err, &ee) {
-			code = ee.ExitCode()
-		}
-	}
-	_ = s.audit.Write(audit.Entry{Action: "run", Mode: map[bool]string{true: "root", false: "worker"}[req.Root], Command: req.Command, Success: err == nil, Detail: dec.Category})
-	return Response{OK: err == nil, Error: errString(err), Output: limit(out.String(), 4<<20), ExitCode: code}
+	return s.runContext(context.Background(), req)
 }
 
 func trustedDir(path string) error {
@@ -420,16 +386,5 @@ func safeID(s string) (string, error) {
 }
 
 func ClientCall(socket, token string, req Request) (Response, error) {
-	req.Token = token
-	c, err := net.DialTimeout("unix", socket, 5*time.Second)
-	if err != nil {
-		return Response{}, err
-	}
-	defer c.Close()
-	if err := json.NewEncoder(c).Encode(req); err != nil {
-		return Response{}, err
-	}
-	var resp Response
-	err = json.NewDecoder(bufio.NewReader(c)).Decode(&resp)
-	return resp, err
+	return ClientCallContext(context.Background(), socket, token, req)
 }

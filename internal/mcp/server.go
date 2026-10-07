@@ -20,6 +20,7 @@ import (
 )
 
 const version = "0.1.0-dev"
+const synchronousCommandTimeout = 5 * time.Minute
 
 type Server struct {
 	cfg           config.Config
@@ -148,10 +149,10 @@ func (s *Server) registerTools() {
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "run_command",
-		Description: "Run an arbitrary Bash command as the unprivileged aiworker user in the dedicated workspace. Use for normal project work, builds, tests, Git, package managers inside the project, and diagnostics that do not require host privileges.",
+		Description: "Run an arbitrary Bash command as the unprivileged aiworker user in the dedicated workspace. Use for normal project work, builds, tests, Git, package managers inside the project, and diagnostics that do not require host privileges. Synchronous execution is bounded to five minutes; use start_job for work expected to run longer or produce high output.",
 		Annotations: annotations(false, false, false, true),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input RunInput) (*mcpsdk.CallToolResult, any, error) {
-		resp, err := executor.ClientCall(s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "run", Command: input.Command})
+		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "run", Command: input.Command, TimeoutMS: int64(synchronousCommandTimeout / time.Millisecond)})
 		if err != nil {
 			return textResult(err.Error(), true), nil, nil
 		}
@@ -160,10 +161,10 @@ func (s *Server) registerTools() {
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "run_root_command",
-		Description: "Run an arbitrary Bash command as root. Use for apt packages, services, Docker, aaPanel, networking, system configuration, deployment setup, and tests that genuinely need root. Connection-risk and destructive commands return approval_required until the user explicitly confirms and approval=true is supplied.",
+		Description: "Run an arbitrary Bash command as root. Use for apt packages, services, Docker, aaPanel, networking, system configuration, deployment setup, and tests that genuinely need root. Synchronous execution is bounded to five minutes; use a root persistent job for work expected to run longer or produce high output. Connection-risk and destructive commands return approval_required until the user explicitly confirms and approval=true is supplied.",
 		Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input RootRunInput) (*mcpsdk.CallToolResult, any, error) {
-		resp, err := executor.ClientCall(s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "run", Command: input.Command, Root: true, Approval: input.Approval})
+		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "run", Command: input.Command, Root: true, Approval: input.Approval, TimeoutMS: int64(synchronousCommandTimeout / time.Millisecond)})
 		if err != nil {
 			return textResult(err.Error(), true), nil, nil
 		}
