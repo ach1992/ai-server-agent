@@ -9,22 +9,22 @@ import (
 )
 
 type Config struct {
-	ListenAddress   string `json:"listen_address"`
-	MCPPath         string `json:"mcp_path"`
-	HealthPath      string `json:"health_path"`
-	AuthMode        string `json:"auth_mode"`
+	ListenAddress       string `json:"listen_address"`
+	MCPPath             string `json:"mcp_path"`
+	HealthPath          string `json:"health_path"`
+	AuthMode            string `json:"auth_mode"`
 	BearerTokenFile     string `json:"bearer_token_file,omitempty"`
 	CredentialStoreFile string `json:"credential_store_file,omitempty"`
-	TLSCertFile     string `json:"tls_cert_file,omitempty"`
-	TLSKeyFile      string `json:"tls_key_file,omitempty"`
-	ExecutorSocket  string `json:"executor_socket"`
-	ExecutorToken   string `json:"executor_token_file"`
-	StateDir        string `json:"state_dir"`
-	LogDir          string `json:"log_dir"`
-	WorkspaceDir    string `json:"workspace_dir"`
-	WorkerUser      string `json:"worker_user"`
-	AgentUser       string `json:"agent_user"`
-	PublicBaseURL   string `json:"public_base_url,omitempty"`
+	TLSCertFile         string `json:"tls_cert_file,omitempty"`
+	TLSKeyFile          string `json:"tls_key_file,omitempty"`
+	ExecutorSocket      string `json:"executor_socket"`
+	ExecutorToken       string `json:"executor_token_file"`
+	StateDir            string `json:"state_dir"`
+	LogDir              string `json:"log_dir"`
+	WorkspaceDir        string `json:"workspace_dir"`
+	WorkerUser          string `json:"worker_user"`
+	AgentUser           string `json:"agent_user"`
+	PublicBaseURL       string `json:"public_base_url,omitempty"`
 }
 
 func Default() Config {
