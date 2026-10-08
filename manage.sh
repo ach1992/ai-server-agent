@@ -232,9 +232,8 @@ credential_principal_fields(){
 validate_credential_store_file(){
   local meta
   [ -f "$CREDENTIAL_STORE" ] && [ ! -L "$CREDENTIAL_STORE" ] || die "Named MCP credential store is missing or unsafe: $CREDENTIAL_STORE"
-  meta="$(stat -c '%u:%a' "$CREDENTIAL_STORE" 2>/dev/null || true)"
-  [ "${meta%%:*}" = "0" ] || die "Named MCP credential store must be root-owned."
-  case "${meta##*:}" in 600|640) ;; *) die "Named MCP credential store mode is unsafe: ${meta##*:}" ;; esac
+  meta="$(stat -c '%u:%G:%a' "$CREDENTIAL_STORE" 2>/dev/null || true)"
+  [ "$meta" = "0:$AGENT_USER:640" ] || die "Named MCP credential store must be root:$AGENT_USER with mode 0640; found ${meta:-unknown}."
   jq -e 'type=="object" and .version==1 and (.credentials|type)=="array" and (.credentials|length)>0 and (.credentials|length)<=2' "$CREDENTIAL_STORE" >/dev/null 2>&1 || die "Named MCP credential store is malformed."
 }
 
