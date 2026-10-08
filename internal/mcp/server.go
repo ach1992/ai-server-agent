@@ -24,12 +24,12 @@ const version = "0.1.0-dev"
 const synchronousCommandTimeout = 5 * time.Minute
 
 type Server struct {
-	cfg           config.Config
+	cfg             config.Config
 	executorToken   string
 	bearerToken     string
 	credentialStore *credential.Store
-	browser       *browser.Manager
-	mcp           *mcpsdk.Server
+	browser         *browser.Manager
+	mcp             *mcpsdk.Server
 }
 
 type EmptyInput struct{}
