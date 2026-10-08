@@ -503,6 +503,42 @@ jobs:
           id aiworker >/dev/null
           getent group aiworker >/dev/null
           sudo test -e /srv/ai-workspace/lifecycle-workspace-sentinel
+      - name: Legacy bearer migrates without forced rotation
+        run: |
+          legacy='0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+          sudo install -d -m 0750 -o root -g root /etc/ai-server-agent
+          cat >/tmp/legacy-agent-config.json <<'EOF_LEGACY_CONFIG'
+          {
+            "listen_address": "127.0.0.1:3210",
+            "mcp_path": "/mcp",
+            "health_path": "/healthz",
+            "auth_mode": "bearer",
+            "bearer_token_file": "/etc/ai-server-agent/mcp.token",
+            "executor_socket": "/run/ai-server-agent/executor.sock",
+            "executor_token_file": "/etc/ai-server-agent/executor.token",
+            "state_dir": "/var/lib/ai-server-agent",
+            "log_dir": "/var/log/ai-server-agent",
+            "workspace_dir": "/srv/ai-workspace",
+            "worker_user": "aiworker",
+            "agent_user": "aiagent"
+          }
+          EOF_LEGACY_CONFIG
+          sudo install -o root -g root -m 0640 /tmp/legacy-agent-config.json /etc/ai-server-agent/config.json
+          printf '%s\n' "$legacy" | sudo tee /etc/ai-server-agent/mcp.token >/dev/null
+          sudo chmod 0640 /etc/ai-server-agent/mcp.token
+          sudo env AI_SERVER_AGENT_BINARY=/tmp/ai-server-agent AI_SERVER_AGENT_NONINTERACTIVE=1 bash install.sh
+
+          sudo test -s /etc/ai-server-agent/mcp-credentials.json
+          sudo test ! -e /etc/ai-server-agent/mcp.token
+          sudo test ! -e /etc/ai-server-agent/mcp.authorization
+          test "$(sudo jq -r '.credentials[] | select(.principal.id=="direct-default") | .verifier' /etc/ai-server-agent/mcp-credentials.json)" = "$(printf '%s' "$legacy" | sha256sum | awk '{print $1}')"
+          code="$(printf 'header = "Authorization: Bearer %s"\n' "$legacy" | curl -sS --config - -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' --data '{}' http://127.0.0.1:3210/mcp)"
+          test "$code" != 000
+          test "$code" != 401
+
+          sudo env AI_SERVER_AGENT_YES=1 bash uninstall.sh --purge
+          sudo test ! -e /etc/ai-server-agent
+          rm -f /tmp/legacy-agent-config.json
       - name: First-run deferral is not an installation failure
         run: |
           command -v script >/dev/null
