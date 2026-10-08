@@ -107,3 +107,17 @@ func TestLoadDoesNotRequirePlaintextBearer(t *testing.T) {
 		t.Fatalf("loaded store authentication failed: %+v ok=%v", p, ok)
 	}
 }
+
+func TestStoreRejectsPrincipalsOutsideBoundedSchema(t *testing.T) {
+	token := strings.Repeat("e", TokenHexLength)
+	tests := []Record{
+		{Principal: Principal{ID: "unknown", Class: "direct", Name: "unknown"}, VerifierAlgorithm: VerifierAlgorithm, Verifier: verifier(token), CreatedAt: "2026-10-08T00:00:00Z", Enabled: true},
+		{Principal: Principal{ID: "direct-default", Class: "gateway", Name: "direct/default"}, VerifierAlgorithm: VerifierAlgorithm, Verifier: verifier(token), CreatedAt: "2026-10-08T00:00:00Z", Enabled: true},
+	}
+	for _, rec := range tests {
+		store := Store{Version: StoreVersion, Credentials: []Record{rec}}
+		if err := store.Validate(); err == nil {
+			t.Fatalf("unexpectedly accepted principal: %+v", rec.Principal)
+		}
+	}
+}
