@@ -274,7 +274,7 @@ credential_issue(){ (
   acquire_management_lock
   need_cmd jq; need_cmd sha256sum; need_cmd curl
   [ -t 0 ] && [ -t 1 ] || die "Credential issuance/rotation requires an interactive local terminal so the newly issued secret can be revealed exactly once."
-  local principal="$1" fields class name token verifier now created existed candidate backup
+  local principal="$1" fields class name token verifier now created existed candidate backup restore
   fields="$(credential_principal_fields "$principal")" || die "Unknown MCP principal: $principal"
   IFS='|' read -r class name <<<"$fields"
   validate_credential_store_file
@@ -301,10 +301,12 @@ credential_issue(){ (
       enabled:true
     }])
   ' "$CREDENTIAL_STORE" > "$candidate" || { rm -f "$candidate" "$backup"; die "Could not construct credential update."; }
-  install -o root -g "$AGENT_USER" -m 0640 "$candidate" "$CREDENTIAL_STORE"
-  rm -f "$candidate"
+  chown root:"$AGENT_USER" "$candidate"; chmod 0640 "$candidate"
+  mv -f "$candidate" "$CREDENTIAL_STORE"
   if ! systemctl restart ai-server-agent.service || ! systemctl is-active --quiet ai-server-agent.service || ! credential_health || ! verify_mcp_token_local "$token"; then
-    install -o root -g "$AGENT_USER" -m 0640 "$backup" "$CREDENTIAL_STORE"
+    restore="$(mktemp "$CONFIG_DIR/.mcp-credentials.restore.XXXXXX")"
+    cp -a "$backup" "$restore"; chown root:"$AGENT_USER" "$restore"; chmod 0640 "$restore"
+    mv -f "$restore" "$CREDENTIAL_STORE"
     systemctl restart ai-server-agent.service || true
     rm -f "$backup"
     token=""
@@ -321,7 +323,7 @@ credential_issue(){ (
 credential_revoke(){ (
   acquire_management_lock
   need_cmd jq
-  local principal="$1" now active candidate backup
+  local principal="$1" now active candidate backup restore
   credential_principal_fields "$principal" >/dev/null || die "Unknown MCP principal: $principal"
   validate_credential_store_file
   jq -e --arg id "$principal" '.credentials[] | select(.principal.id==$id and .enabled==true)' "$CREDENTIAL_STORE" >/dev/null || die "Credential $principal is not active."
@@ -332,10 +334,12 @@ credential_revoke(){ (
   backup="$(mktemp "$CONTROL_DIR/.mcp-credentials.backup.XXXXXX")"
   cp -a "$CREDENTIAL_STORE" "$backup"
   jq --arg id "$principal" --arg now "$now" '(.credentials[] | select(.principal.id==$id)) |= (.enabled=false | .revoked_at=$now)' "$CREDENTIAL_STORE" > "$candidate"
-  install -o root -g "$AGENT_USER" -m 0640 "$candidate" "$CREDENTIAL_STORE"
-  rm -f "$candidate"
+  chown root:"$AGENT_USER" "$candidate"; chmod 0640 "$candidate"
+  mv -f "$candidate" "$CREDENTIAL_STORE"
   if ! systemctl restart ai-server-agent.service || ! systemctl is-active --quiet ai-server-agent.service || ! credential_health; then
-    install -o root -g "$AGENT_USER" -m 0640 "$backup" "$CREDENTIAL_STORE"
+    restore="$(mktemp "$CONFIG_DIR/.mcp-credentials.restore.XXXXXX")"
+    cp -a "$backup" "$restore"; chown root:"$AGENT_USER" "$restore"; chmod 0640 "$restore"
+    mv -f "$restore" "$CREDENTIAL_STORE"
     systemctl restart ai-server-agent.service || true
     rm -f "$backup"
     die "Credential revocation activation could not be verified; the previous credential store was restored."
