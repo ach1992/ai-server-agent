@@ -13,12 +13,15 @@ type Logger struct {
 	mu   sync.Mutex
 }
 type Entry struct {
-	Time    string `json:"time"`
-	Action  string `json:"action"`
-	Mode    string `json:"mode,omitempty"`
-	Command string `json:"command,omitempty"`
-	Success bool   `json:"success"`
-	Detail  string `json:"detail,omitempty"`
+	Time           string `json:"time"`
+	Action         string `json:"action"`
+	Mode           string `json:"mode,omitempty"`
+	Command        string `json:"command,omitempty"`
+	Success        bool   `json:"success"`
+	Detail         string `json:"detail,omitempty"`
+	PrincipalID    string `json:"principal_id,omitempty"`
+	PrincipalClass string `json:"principal_class,omitempty"`
+	PrincipalName  string `json:"principal_name,omitempty"`
 }
 
 func New(path string) *Logger { return &Logger{path: path} }
