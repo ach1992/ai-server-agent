@@ -42,6 +42,7 @@ MCP_ACTIVATION_TOKEN=""
 MCP_CREDENTIAL_ORIGIN=""
 MCP_STORE_CREATED=0
 PREVIOUS_CONFIG_BACKUP=""
+PREVIOUS_CREDENTIAL_STORE=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-/dev/null}")" 2>/dev/null && pwd || true)"
 LIFECYCLE_LOCK_DIR=/run/lock/ai-server-agent
 LIFECYCLE_LOCK="$LIFECYCLE_LOCK_DIR/management.lock"
@@ -172,6 +173,7 @@ apt-get install -y -qq ca-certificates curl jq openssl tar xz-utils >/dev/null
 
 # Preserve an existing connection unless explicit environment variables override it.
 if [ "$FRESH_INSTALL" -eq 0 ]; then
+  PREVIOUS_CREDENTIAL_STORE="$(json_string_value credential_store_file)"
   existing_listen="$(json_string_value listen_address)"
   if [ -z "${AI_SERVER_AGENT_BIND_MODE+x}" ]; then case "$existing_listen" in 0.0.0.0:*) MODE=public ;; *) MODE=local ;; esac; fi
   if [ -z "${AI_SERVER_AGENT_PORT+x}" ]; then existing_port="${existing_listen##*:}"; [[ "$existing_port" =~ ^[0-9]+$ ]] && PORT="$existing_port"; fi
@@ -349,6 +351,9 @@ if [ -s "$LEGACY_MCP_TOKEN_FILE" ]; then
   if [ -s "$MCP_CREDENTIAL_STORE" ]; then
     existing_verifier="$(jq -r '.credentials[]? | select(.principal.id=="direct-default") | .verifier' "$MCP_CREDENTIAL_STORE" 2>/dev/null || true)"
     [ "$existing_verifier" = "$verifier" ] || die "A named credential store and legacy bearer both exist but do not represent the same direct/default credential. Refusing ambiguous migration; previous auth files were left unchanged."
+    if [ -z "$PREVIOUS_CREDENTIAL_STORE" ]; then
+      MCP_STORE_CREATED=1
+    fi
   else
     created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
     cred_tmp="$(mktemp "$CONFIG_DIR/.mcp-credentials.XXXXXX")"
