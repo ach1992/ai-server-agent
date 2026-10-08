@@ -143,3 +143,24 @@ func TestSelectedPrincipalReplacementHasImmediateCutover(t *testing.T) {
 		t.Fatalf("replacement credential not active: principal=%+v ok=%v", p, ok)
 	}
 }
+
+func TestRevokedPrincipalFailsClosedWhileAnotherPrincipalRemainsActive(t *testing.T) {
+	direct := strings.Repeat("3", TokenHexLength)
+	gateway := strings.Repeat("4", TokenHexLength)
+	store := Store{
+		Version: StoreVersion,
+		Credentials: []Record{
+			{Principal: Principal{ID: "direct-default", Class: "direct", Name: "direct/default"}, VerifierAlgorithm: VerifierAlgorithm, Verifier: verifier(direct), CreatedAt: "2026-10-08T00:00:00Z", Enabled: true},
+			{Principal: Principal{ID: "mcp-gateway", Class: "gateway", Name: "mcp-gateway"}, VerifierAlgorithm: VerifierAlgorithm, Verifier: verifier(gateway), CreatedAt: "2026-10-08T00:00:00Z", Enabled: false, RevokedAt: "2026-10-08T01:00:00Z"},
+		},
+	}
+	if err := store.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.Authenticate(gateway); ok {
+		t.Fatal("revoked gateway credential remained valid")
+	}
+	if p, ok := store.Authenticate(direct); !ok || p.ID != "direct-default" {
+		t.Fatalf("remaining direct credential rejected: principal=%+v ok=%v", p, ok)
+	}
+}
