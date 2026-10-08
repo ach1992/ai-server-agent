@@ -87,7 +87,7 @@ jobs:
           go-version: '1.26.x'
           cache: false
       - name: Stable bootstrap contract
-        run: bash tests/stable_bootstrap.sh
+        run: sudo bash tests/stable_bootstrap.sh
       - name: Build release-scoped installer
         run: |
           set -Eeuo pipefail
