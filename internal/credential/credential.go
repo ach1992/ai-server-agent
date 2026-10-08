@@ -68,12 +68,14 @@ func (s *Store) Validate() error {
 	names := make(map[string]struct{}, len(s.Credentials))
 	verifiers := make(map[string]struct{}, len(s.Credentials))
 	active := 0
+	directFound := false
 	for i, rec := range s.Credentials {
 		if strings.TrimSpace(rec.Principal.ID) == "" || strings.TrimSpace(rec.Principal.Class) == "" || strings.TrimSpace(rec.Principal.Name) == "" {
 			return fmt.Errorf("MCP credential record %d has empty principal metadata", i)
 		}
 		switch rec.Principal.ID {
 		case "direct-default":
+			directFound = true
 			if rec.Principal.Class != "direct" || rec.Principal.Name != "direct/default" {
 				return fmt.Errorf("MCP principal %q metadata does not match its fixed identity", rec.Principal.ID)
 			}
@@ -115,6 +117,9 @@ func (s *Store) Validate() error {
 		} else if rec.RevokedAt == "" {
 			return fmt.Errorf("disabled MCP credential %q has no revocation timestamp", rec.Principal.ID)
 		}
+	}
+	if !directFound {
+		return errors.New("MCP credential store is missing the direct-default principal")
 	}
 	if active == 0 {
 		return errors.New("MCP credential store has no active credential")
