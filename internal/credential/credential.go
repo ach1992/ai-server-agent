@@ -61,6 +61,9 @@ func (s *Store) Validate() error {
 	if len(s.Credentials) == 0 {
 		return errors.New("MCP credential store has no credential records")
 	}
+	if len(s.Credentials) > 2 {
+		return errors.New("MCP credential store exceeds the bounded principal set")
+	}
 	ids := make(map[string]struct{}, len(s.Credentials))
 	names := make(map[string]struct{}, len(s.Credentials))
 	verifiers := make(map[string]struct{}, len(s.Credentials))
@@ -68,6 +71,21 @@ func (s *Store) Validate() error {
 	for i, rec := range s.Credentials {
 		if strings.TrimSpace(rec.Principal.ID) == "" || strings.TrimSpace(rec.Principal.Class) == "" || strings.TrimSpace(rec.Principal.Name) == "" {
 			return fmt.Errorf("MCP credential record %d has empty principal metadata", i)
+		}
+		switch rec.Principal.ID {
+		case "direct-default":
+			if rec.Principal.Class != "direct" || rec.Principal.Name != "direct/default" {
+				return fmt.Errorf("MCP principal %q metadata does not match its fixed identity", rec.Principal.ID)
+			}
+		case "mcp-gateway":
+			if rec.Principal.Class != "gateway" || rec.Principal.Name != "mcp-gateway" {
+				return fmt.Errorf("MCP principal %q metadata does not match its fixed identity", rec.Principal.ID)
+			}
+		default:
+			return fmt.Errorf("unsupported MCP principal id %q", rec.Principal.ID)
+		}
+		if strings.TrimSpace(rec.CreatedAt) == "" {
+			return fmt.Errorf("MCP credential %q has no creation timestamp", rec.Principal.ID)
 		}
 		if _, ok := ids[rec.Principal.ID]; ok {
 			return fmt.Errorf("duplicate MCP principal id %q", rec.Principal.ID)
@@ -94,6 +112,8 @@ func (s *Store) Validate() error {
 				return fmt.Errorf("MCP credential %q is both enabled and revoked", rec.Principal.ID)
 			}
 			active++
+		} else if rec.RevokedAt == "" {
+			return fmt.Errorf("disabled MCP credential %q has no revocation timestamp", rec.Principal.ID)
 		}
 	}
 	if active == 0 {
