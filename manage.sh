@@ -9,6 +9,7 @@ INSTALL_STATE="$CONTROL_DIR/install-state.json"
 MANAGED_STATE="$CONFIG_DIR/managed.json"
 TLS_DIR="$CONFIG_DIR/tls"
 AUTH_HEADER_FILE="$CONFIG_DIR/mcp.authorization"
+CREDENTIAL_STORE="$CONFIG_DIR/mcp-credentials.json"
 LIB_DIR="/usr/local/lib/ai-server-agent"
 UPDATE_HELPER="$LIB_DIR/update.sh"
 UNINSTALL_HELPER="$LIB_DIR/uninstall.sh"
@@ -218,11 +219,149 @@ status(){
   printf '  MCP endpoint:  %s\n' "$endpoint"
 }
 
+random_mcp_token(){ od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; printf '\n'; }
+
+credential_principal_fields(){
+  case "$1" in
+    direct-default) printf 'direct|direct/default\n' ;;
+    mcp-gateway) printf 'gateway|mcp-gateway\n' ;;
+    *) return 1 ;;
+  esac
+}
+
+validate_credential_store_file(){
+  [ -f "$CREDENTIAL_STORE" ] && [ ! -L "$CREDENTIAL_STORE" ] || die "Named MCP credential store is missing or unsafe: $CREDENTIAL_STORE"
+  jq -e 'type=="object" and .version==1 and (.credentials|type)=="array" and (.credentials|length)>0' "$CREDENTIAL_STORE" >/dev/null 2>&1 || die "Named MCP credential store is malformed."
+}
+
+verify_mcp_token_local(){
+  local token="$1" port scheme url code
+  port="$(current_port)"
+  scheme=http
+  [ -n "$(config_get tls_cert_file)" ] && scheme=https
+  url="$scheme://127.0.0.1:$port$(config_get mcp_path)"
+  if [ "$scheme" = https ]; then
+    code="$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -ksS --config - -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' --data '{}' "$url" || true)"
+  else
+    code="$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -sS --config - -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' --data '{}' "$url" || true)"
+  fi
+  [ "$code" != "000" ] && [ "$code" != "401" ]
+}
+
+credential_health(){
+  local port scheme
+  port="$(current_port)"
+  scheme=http
+  [ -n "$(config_get tls_cert_file)" ] && scheme=https
+  if [ "$scheme" = https ]; then curl -kfsS "https://127.0.0.1:$port/healthz" >/dev/null
+  else curl -fsS "http://127.0.0.1:$port/healthz" >/dev/null
+  fi
+}
+
+credential_status(){
+  need_cmd jq
+  validate_credential_store_file
+  printf '%sMCP credentials%s\n' "$BOLD" "$RESET"
+  jq -r '.credentials[] | "  \(.principal.name): id=\(.principal.id) class=\(.principal.class) state=\(if .enabled then "active" else "revoked" end) created=\(.created_at)\(if (.rotated_at // "") != "" then " rotated="+.rotated_at else "" end)\(if (.revoked_at // "") != "" then " revoked="+.revoked_at else "" end)"' "$CREDENTIAL_STORE"
+  printf '  Stored secrets: verifier digests only; existing bearer plaintext is not re-displayable.\n'
+}
+
+credential_issue(){ (
+  acquire_management_lock
+  need_cmd jq; need_cmd sha256sum; need_cmd curl
+  local principal="$1" fields class name token verifier now created existed candidate backup
+  fields="$(credential_principal_fields "$principal")" || die "Unknown MCP principal: $principal"
+  IFS='|' read -r class name <<<"$fields"
+  validate_credential_store_file
+  token="$(random_mcp_token)"
+  [[ "$token" =~ ^[0-9a-f]{64}$ ]] || die "Could not generate a valid MCP bearer credential."
+  verifier="$(printf '%s' "$token" | sha256sum | awk '{print $1}')"
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  existed=false
+  created="$now"
+  if jq -e --arg id "$principal" '.credentials[] | select(.principal.id==$id)' "$CREDENTIAL_STORE" >/dev/null; then
+    existed=true
+    created="$(jq -r --arg id "$principal" '.credentials[] | select(.principal.id==$id) | .created_at' "$CREDENTIAL_STORE")"
+  fi
+  candidate="$(mktemp "$CONFIG_DIR/.mcp-credentials.candidate.XXXXXX")"
+  backup="$(mktemp "$CONTROL_DIR/.mcp-credentials.backup.XXXXXX")"
+  cp -a "$CREDENTIAL_STORE" "$backup"
+  jq --arg id "$principal" --arg class "$class" --arg name "$name" --arg verifier "$verifier" --arg created "$created" --arg now "$now" --argjson existed "$existed" '
+    .credentials = ([.credentials[] | select(.principal.id != $id)] + [{
+      principal:{id:$id,class:$class,name:$name},
+      verifier_algorithm:"sha256-v1",
+      verifier:$verifier,
+      created_at:$created,
+      rotated_at:(if $existed then $now else "" end),
+      enabled:true
+    }])
+  ' "$CREDENTIAL_STORE" > "$candidate" || { rm -f "$candidate" "$backup"; die "Could not construct credential update."; }
+  install -o root -g "$AGENT_USER" -m 0640 "$candidate" "$CREDENTIAL_STORE"
+  rm -f "$candidate"
+  if ! systemctl restart ai-server-agent.service || ! systemctl is-active --quiet ai-server-agent.service || ! credential_health || ! verify_mcp_token_local "$token"; then
+    install -o root -g "$AGENT_USER" -m 0640 "$backup" "$CREDENTIAL_STORE"
+    systemctl restart ai-server-agent.service || true
+    rm -f "$backup"
+    token=""
+    die "Credential activation could not be verified; the previous credential store was restored."
+  fi
+  rm -f "$backup"
+  rm -f -- "$AUTH_HEADER_FILE" "$CONFIG_DIR/mcp.token"
+  printf '%sCredential cutover verified.%s The previous credential for %s is no longer accepted by the active store.\n' "$GREEN" "$RESET" "$name"
+  printf '%sThis newly issued bearer is shown only now. Do not copy it into chat, logs, tickets, screenshots, shell history, or Git.%s\n' "$YELLOW" "$RESET"
+  printf 'Authorization: Bearer %s\n' "$token" >/dev/tty
+  token=""
+) }
+
+credential_revoke(){ (
+  acquire_management_lock
+  need_cmd jq
+  local principal="$1" now active candidate backup
+  credential_principal_fields "$principal" >/dev/null || die "Unknown MCP principal: $principal"
+  validate_credential_store_file
+  jq -e --arg id "$principal" '.credentials[] | select(.principal.id==$id and .enabled==true)' "$CREDENTIAL_STORE" >/dev/null || die "Credential $principal is not active."
+  active="$(jq '[.credentials[] | select(.enabled==true)] | length' "$CREDENTIAL_STORE")"
+  [ "$active" -gt 1 ] || die "Refusing to revoke the last active MCP credential."
+  now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  candidate="$(mktemp "$CONFIG_DIR/.mcp-credentials.candidate.XXXXXX")"
+  backup="$(mktemp "$CONTROL_DIR/.mcp-credentials.backup.XXXXXX")"
+  cp -a "$CREDENTIAL_STORE" "$backup"
+  jq --arg id "$principal" --arg now "$now" '(.credentials[] | select(.principal.id==$id)) |= (.enabled=false | .revoked_at=$now)' "$CREDENTIAL_STORE" > "$candidate"
+  install -o root -g "$AGENT_USER" -m 0640 "$candidate" "$CREDENTIAL_STORE"
+  rm -f "$candidate"
+  if ! systemctl restart ai-server-agent.service || ! systemctl is-active --quiet ai-server-agent.service || ! credential_health; then
+    install -o root -g "$AGENT_USER" -m 0640 "$backup" "$CREDENTIAL_STORE"
+    systemctl restart ai-server-agent.service || true
+    rm -f "$backup"
+    die "Credential revocation activation could not be verified; the previous credential store was restored."
+  fi
+  rm -f "$backup"
+  printf '%sCredential revoked:%s %s\n' "$GREEN" "$RESET" "$principal"
+) }
+
+credential_menu(){
+  while true; do
+    header
+    credential_status
+    printf '\n  1) Issue / rotate direct/default credential\n'
+    printf '  2) Issue / rotate mcp-gateway credential\n'
+    printf '  3) Revoke direct/default credential\n'
+    printf '  4) Revoke mcp-gateway credential\n'
+    printf '  0) Back\n\n'
+    read -r -p 'Choose: ' choice </dev/tty
+    case "$choice" in
+      1) confirm "Rotate direct/default now? Existing direct clients must reconnect with the new value." no && credential_issue direct-default; pause ;;
+      2) confirm "Issue/rotate mcp-gateway now? An existing Gateway connection must reconnect with the new value." no && credential_issue mcp-gateway; pause ;;
+      3) confirm "Revoke direct/default now?" no && credential_revoke direct-default; pause ;;
+      4) confirm "Revoke mcp-gateway now?" no && credential_revoke mcp-gateway; pause ;;
+      0) return ;;
+      *) echo "Invalid choice."; pause ;;
+    esac
+  done
+}
+
 reveal_auth(){
-  [ -s "$AUTH_HEADER_FILE" ] || die "Authorization header file is missing."
-  printf '%sThis is a privileged bearer credential. Do not paste it into chat, logs, tickets, or source control.%s\n' "$YELLOW" "$RESET"
-  confirm "Reveal the MCP Authorization header in this terminal?" no || { echo "Not shown."; return 0; }
-  cat "$AUTH_HEADER_FILE"
+  die "Existing MCP bearer plaintext is not retained for re-display. Use 'sudo ai-server-agent-manage credential-rotate direct-default' to issue and reveal a fresh direct/default credential once."
 }
 
 chatgpt_setup(){
@@ -237,10 +376,10 @@ chatgpt_setup(){
     printf '  1. Enable Developer mode if required by your workspace.\n'
     printf '  2. Open Workspace Settings -> Apps -> Create.\n'
     printf '  3. Enter the MCP URL above and choose the available bearer/auth option.\n'
-    printf '  4. Use the protected Authorization value only when ChatGPT asks for it.\n'
+    printf '  4. Use a current direct/default Authorization value only when ChatGPT asks for it.\n'
     printf '  5. Scan tools, create the app, then test agent_environment and run_command.\n\n'
-    printf 'Protected Authorization file: %s\n' "$AUTH_HEADER_FILE"
-    if confirm "Reveal the Authorization header now?" no; then reveal_auth; fi
+    printf 'Existing bearer plaintext is not stored for re-display.\n'
+    printf 'To issue a fresh value, run: sudo ai-server-agent-manage credential-rotate direct-default\n'
   else
     printf 'The Agent is loopback-only at http://127.0.0.1:%s/mcp.\n' "$port"
     printf 'ChatGPT cannot connect directly to a local/private MCP endpoint. Use Secure MCP Tunnel,\n'
@@ -1700,6 +1839,7 @@ menu(){
     printf '  %s7)%s Safe uninstall (preserve data)\n' "$YELLOW" "$RESET"
     printf '  %s8)%s Purge Agent-owned server data\n' "$RED" "$RESET"
     printf '  %s9)%s Remove recorded Cloudflare resources\n' "$YELLOW" "$RESET"
+    printf '  %s10)%s MCP credential management\n' "$CYAN" "$RESET"
     printf '  0) Exit\n\n'
     read -r -p 'Choose: ' choice </dev/tty
     case "$choice" in
@@ -1712,6 +1852,7 @@ menu(){
       7) run_uninstall 0; return ;;
       8) run_uninstall 1; return ;;
       9) cloudflare_cleanup; pause ;;
+      10) credential_menu ;;
       0) return ;;
       *) echo "Invalid choice."; pause ;;
     esac
@@ -1729,6 +1870,9 @@ case "${1:-menu}" in
   status) status ;;
   chatgpt|chatgpt-setup) chatgpt_setup ;;
   reveal-auth) reveal_auth ;;
+  credentials|credential-status) credential_status ;;
+  credential-rotate) [ "$#" -eq 2 ] || die "Usage: ai-server-agent-manage credential-rotate direct-default|mcp-gateway"; credential_issue "$2" ;;
+  credential-revoke) [ "$#" -eq 2 ] || die "Usage: ai-server-agent-manage credential-revoke direct-default|mcp-gateway"; credential_revoke "$2" ;;
   setup|configure) connection_menu ;;
   configure-cloudflare) configure_cloudflare ;;
   configure-local) configure_local ;;
@@ -1738,5 +1882,5 @@ case "${1:-menu}" in
   repair) repair ;;
   uninstall) run_uninstall 0 ;;
   purge) run_uninstall 1 ;;
-  *) die "Unknown command: ${1:-}. Use menu, status, chatgpt-setup, configure-cloudflare, configure-local, configure-manual-tls, cloudflare-cleanup, update, repair, uninstall, or purge." ;;
+  *) die "Unknown command: ${1:-}. Use menu, status, chatgpt-setup, credential-status, credential-rotate, credential-revoke, configure-cloudflare, configure-local, configure-manual-tls, cloudflare-cleanup, update, repair, uninstall, or purge." ;;
 esac
