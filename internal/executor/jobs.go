@@ -219,10 +219,10 @@ func (s *Server) startJobBounded(req Request) Response {
 	}
 
 	_ = s.audit.Write(audit.Entry{
-		Action:  "start_job",
-		Mode:    map[bool]string{true: "root", false: "worker"}[req.Root],
-		Success: resp.OK,
-		Detail:  dec.Category,
+		Action:         "start_job",
+		Mode:           map[bool]string{true: "root", false: "worker"}[req.Root],
+		Success:        resp.OK,
+		Detail:         dec.Category,
 		PrincipalID:    req.PrincipalID,
 		PrincipalClass: req.PrincipalClass,
 		PrincipalName:  req.PrincipalName,
