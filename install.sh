@@ -363,6 +363,9 @@ if [ -s "$LEGACY_MCP_TOKEN_FILE" ]; then
     MCP_STORE_CREATED=1
   fi
 elif [ ! -s "$MCP_CREDENTIAL_STORE" ]; then
+  if [ "$FRESH_INSTALL" -eq 0 ] && [ -n "$PREVIOUS_CREDENTIAL_STORE" ]; then
+    die "Configured named MCP credential store is missing or empty. Refusing implicit credential regeneration; restore the preserved store or use explicit local credential recovery."
+  fi
   MCP_ACTIVATION_TOKEN="$(random_hex)"
   MCP_CREDENTIAL_ORIGIN=fresh
   verifier="$(token_verifier "$MCP_ACTIVATION_TOKEN")"
