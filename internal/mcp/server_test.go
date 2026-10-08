@@ -85,6 +85,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 	foundJobStatus := false
 	foundReadFile := false
 	foundWriteFile := false
+	foundRepositoryEnvironment := false
 	for _, tool := range res.Tools {
 		switch tool.Name {
 		case "agent_environment":
@@ -173,6 +174,33 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 					t.Fatalf("write_file input schema missing %q: %s", field, in)
 				}
 			}
+		case "repository_environment":
+			foundRepositoryEnvironment = true
+			if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint || !tool.Annotations.IdempotentHint {
+				t.Fatal("repository_environment must advertise read-only/idempotent hints")
+			}
+			if tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint {
+				t.Fatal("repository_environment must remain non-destructive")
+			}
+			if tool.Annotations.OpenWorldHint == nil || *tool.Annotations.OpenWorldHint {
+				t.Fatal("repository_environment discovery must remain local-only")
+			}
+			in, err := json.Marshal(tool.InputSchema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(in), `"path"`) {
+				t.Fatalf("repository_environment input schema missing explicit path: %s", in)
+			}
+			out, err := json.Marshal(tool.OutputSchema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"repository_root", "repository_head", "declarations", "languages", "mechanisms", "tools", "entrypoints", "host_status", "selection_required", "isolation_requirement"} {
+				if !strings.Contains(string(out), `"`+field+`"`) {
+					t.Fatalf("repository_environment output schema missing %q: %s", field, out)
+				}
+			}
 		case "browser_status":
 			foundBrowserStatus = true
 			if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint || !tool.Annotations.IdempotentHint {
@@ -209,8 +237,8 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			}
 		}
 	}
-	if !foundEnvironment || !foundRoot || !foundStartJob || !foundJobStatus || !foundReadFile || !foundWriteFile || !foundBrowserStatus || !foundBrowser {
-		t.Fatalf("required tools missing: environment=%v root=%v start_job=%v job_status=%v read_file=%v write_file=%v browser_status=%v browser=%v", foundEnvironment, foundRoot, foundStartJob, foundJobStatus, foundReadFile, foundWriteFile, foundBrowserStatus, foundBrowser)
+	if !foundEnvironment || !foundRoot || !foundStartJob || !foundJobStatus || !foundReadFile || !foundWriteFile || !foundRepositoryEnvironment || !foundBrowserStatus || !foundBrowser {
+		t.Fatalf("required tools missing: environment=%v root=%v start_job=%v job_status=%v read_file=%v write_file=%v repository_environment=%v browser_status=%v browser=%v", foundEnvironment, foundRoot, foundStartJob, foundJobStatus, foundReadFile, foundWriteFile, foundRepositoryEnvironment, foundBrowserStatus, foundBrowser)
 	}
 }
 

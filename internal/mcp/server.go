@@ -278,6 +278,8 @@ func (s *Server) registerTools() {
 			}
 			return responseResult(resp)
 		})
+
+	s.registerRepositoryEnvironmentTool()
 }
 
 func (s *Server) auth(next http.Handler) http.Handler {
