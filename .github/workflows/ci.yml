@@ -509,7 +509,11 @@ jobs:
           legacy="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
           test "${#legacy}" -eq 64
           command -v script >/dev/null
-          sudo install -d -m 0750 -o root -g root /etc/ai-server-agent
+          # Recreate the legacy service identity removed by the preceding
+          # purge so this fixture matches a real pre-#43 installed host.
+          sudo getent group aiagent >/dev/null 2>&1 || sudo groupadd --system aiagent
+          sudo id aiagent >/dev/null 2>&1 || sudo useradd --system --gid aiagent --home /var/lib/ai-server-agent --shell /usr/sbin/nologin aiagent
+          sudo install -d -m 0750 -o root -g aiagent /etc/ai-server-agent
           cat >/tmp/legacy-agent-config.json <<'EOF_LEGACY_CONFIG'
           {
             "listen_address": "127.0.0.1:3210",
@@ -526,8 +530,9 @@ jobs:
             "agent_user": "aiagent"
           }
           EOF_LEGACY_CONFIG
-          sudo install -o root -g root -m 0640 /tmp/legacy-agent-config.json /etc/ai-server-agent/config.json
+          sudo install -o root -g aiagent -m 0640 /tmp/legacy-agent-config.json /etc/ai-server-agent/config.json
           printf '%s\n' "$legacy" | sudo tee /etc/ai-server-agent/mcp.token >/dev/null
+          sudo chown root:aiagent /etc/ai-server-agent/mcp.token
           sudo chmod 0640 /etc/ai-server-agent/mcp.token
 
           # An ambiguous pre-existing store must fail before replacing the
