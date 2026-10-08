@@ -14,6 +14,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/ach1992/ai-server-agent/internal/credential"
+
 	"github.com/ach1992/ai-server-agent/internal/audit"
 	"github.com/ach1992/ai-server-agent/internal/policy"
 )
@@ -334,6 +336,11 @@ func encodeExecutorResponse(resp Response) []byte {
 }
 
 func ClientCallContext(ctx context.Context, socket, token string, req Request) (Response, error) {
+	if principal, ok := credential.PrincipalFromContext(ctx); ok {
+		req.PrincipalID = principal.ID
+		req.PrincipalClass = principal.Class
+		req.PrincipalName = principal.Name
+	}
 	req.Token = token
 	dialer := net.Dialer{Timeout: 5 * time.Second}
 	c, err := dialer.DialContext(ctx, "unix", socket)
