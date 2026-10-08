@@ -109,7 +109,7 @@ jobs:
           grep -qF 'Core installation succeeded, but connection setup was not completed.' install.sh
           grep -qF 'Resume setup with: sudo ai-server-agent-manage' install.sh
           grep -qF 'Configure later - keep the healthy local Agent' manage.sh
-          grep -qF 'ca-certificates curl jq openssl tar xz-utils' install.sh
+          grep -qF 'ca-certificates curl git jq openssl tar xz-utils' install.sh
           grep -qF 'CONTROL_DIR="$CONFIG_DIR/control"' install.sh
           grep -qF 'INSTALL_STATE="$CONTROL_DIR/install-state.json"' install.sh
           grep -qF "'{channel:\$channel,version:\$version,ref:\$ref,track_ref:\$track_ref}'" install.sh

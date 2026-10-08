@@ -85,6 +85,10 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 	foundJobStatus := false
 	foundReadFile := false
 	foundWriteFile := false
+	foundRepositoryDiscover := false
+	foundRepositoryInspect := false
+	foundWorktreeCreate := false
+	foundWorktreeRemove := false
 	for _, tool := range res.Tools {
 		switch tool.Name {
 		case "agent_environment":
@@ -173,6 +177,60 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 					t.Fatalf("write_file input schema missing %q: %s", field, in)
 				}
 			}
+		case "repository_discover":
+			foundRepositoryDiscover = true
+			if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint || !tool.Annotations.IdempotentHint {
+				t.Fatal("repository_discover must advertise read-only/idempotent hints")
+			}
+			if tool.Annotations.OpenWorldHint == nil || *tool.Annotations.OpenWorldHint {
+				t.Fatal("repository_discover must remain local-only")
+			}
+			in, _ := json.Marshal(tool.InputSchema)
+			if !strings.Contains(string(in), "\"remote_identity\"") {
+				t.Fatalf("repository_discover input schema missing remote_identity: %s", in)
+			}
+		case "repository_inspect":
+			foundRepositoryInspect = true
+			if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint || !tool.Annotations.IdempotentHint {
+				t.Fatal("repository_inspect must advertise read-only/idempotent hints")
+			}
+			if tool.Annotations.OpenWorldHint == nil || !*tool.Annotations.OpenWorldHint {
+				t.Fatal("repository_inspect must disclose optional remote verification")
+			}
+			in, _ := json.Marshal(tool.InputSchema)
+			for _, field := range []string{"path", "verify_remote"} {
+				if !strings.Contains(string(in), "\""+field+"\"") {
+					t.Fatalf("repository_inspect input schema missing %q: %s", field, in)
+				}
+			}
+		case "worktree_create":
+			foundWorktreeCreate = true
+			if tool.Annotations == nil || tool.Annotations.ReadOnlyHint || !tool.Annotations.IdempotentHint {
+				t.Fatal("worktree_create must advertise mutating/idempotent semantics")
+			}
+			if tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint {
+				t.Fatal("worktree_create is reversible and must not advertise destructiveHint")
+			}
+			in, _ := json.Marshal(tool.InputSchema)
+			for _, field := range []string{"repository_path", "worktree_path", "branch", "start_ref", "expected_start_sha"} {
+				if !strings.Contains(string(in), "\""+field+"\"") {
+					t.Fatalf("worktree_create input schema missing %q: %s", field, in)
+				}
+			}
+		case "worktree_remove":
+			foundWorktreeRemove = true
+			if tool.Annotations == nil || tool.Annotations.ReadOnlyHint || !tool.Annotations.IdempotentHint {
+				t.Fatal("worktree_remove must advertise mutating/idempotent semantics")
+			}
+			if tool.Annotations.DestructiveHint == nil || !*tool.Annotations.DestructiveHint || tool.Annotations.OpenWorldHint == nil || !*tool.Annotations.OpenWorldHint {
+				t.Fatal("worktree_remove must disclose destructive/remote-verification semantics")
+			}
+			in, _ := json.Marshal(tool.InputSchema)
+			for _, field := range []string{"repository_path", "worktree_path", "expected_head", "remote", "remote_branch", "disposable"} {
+				if !strings.Contains(string(in), "\""+field+"\"") {
+					t.Fatalf("worktree_remove input schema missing %q: %s", field, in)
+				}
+			}
 		case "browser_status":
 			foundBrowserStatus = true
 			if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint || !tool.Annotations.IdempotentHint {
@@ -209,8 +267,8 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			}
 		}
 	}
-	if !foundEnvironment || !foundRoot || !foundStartJob || !foundJobStatus || !foundReadFile || !foundWriteFile || !foundBrowserStatus || !foundBrowser {
-		t.Fatalf("required tools missing: environment=%v root=%v start_job=%v job_status=%v read_file=%v write_file=%v browser_status=%v browser=%v", foundEnvironment, foundRoot, foundStartJob, foundJobStatus, foundReadFile, foundWriteFile, foundBrowserStatus, foundBrowser)
+	if !foundEnvironment || !foundRoot || !foundStartJob || !foundJobStatus || !foundReadFile || !foundWriteFile || !foundRepositoryDiscover || !foundRepositoryInspect || !foundWorktreeCreate || !foundWorktreeRemove || !foundBrowserStatus || !foundBrowser {
+		t.Fatalf("required tools missing: environment=%v root=%v start_job=%v job_status=%v read_file=%v write_file=%v repository_discover=%v repository_inspect=%v worktree_create=%v worktree_remove=%v browser_status=%v browser=%v", foundEnvironment, foundRoot, foundStartJob, foundJobStatus, foundReadFile, foundWriteFile, foundRepositoryDiscover, foundRepositoryInspect, foundWorktreeCreate, foundWorktreeRemove, foundBrowserStatus, foundBrowser)
 	}
 }
 

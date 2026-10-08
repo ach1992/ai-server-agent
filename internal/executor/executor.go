@@ -34,6 +34,7 @@ type Server struct {
 	jobsMu            sync.Mutex
 	lifecycleLockPath string
 	fileWriteHooks    *fileWriteTestHooks
+	workspaceHooks    *workspaceTestHooks
 }
 
 func NewServer(cfg config.Config, token string) (*Server, error) {
@@ -127,6 +128,14 @@ func (s *Server) dispatch(req Request) Response {
 		return s.readFile(req)
 	case "write_file":
 		return s.writeFile(req)
+	case "repository_discover":
+		return s.repositoryDiscoverContext(context.Background(), req)
+	case "repository_inspect":
+		return s.repositoryInspectContext(context.Background(), req)
+	case "worktree_create":
+		return s.worktreeCreateContext(context.Background(), req)
+	case "worktree_remove":
+		return s.worktreeRemoveContext(context.Background(), req)
 	default:
 		return Response{Error: "unknown action"}
 	}
