@@ -57,3 +57,31 @@ func TestNamedCredentialStoreConfiguration(t *testing.T) {
 		t.Fatalf("named credential store config rejected: %v", err)
 	}
 }
+
+func TestLoadNamedCredentialStoreDoesNotRetainLegacyDefault(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "config.json")
+	body := []byte(`{
+  "listen_address":"127.0.0.1:3210",
+  "mcp_path":"/mcp",
+  "health_path":"/healthz",
+  "auth_mode":"bearer",
+  "credential_store_file":"/etc/ai-server-agent/mcp-credentials.json",
+  "executor_socket":"/run/ai-server-agent/executor.sock",
+  "executor_token_file":"/etc/ai-server-agent/executor.token",
+  "state_dir":"/var/lib/ai-server-agent",
+  "log_dir":"/var/log/ai-server-agent",
+  "workspace_dir":"/srv/ai-workspace",
+  "worker_user":"aiworker",
+  "agent_user":"aiagent"
+}`)
+	if err := os.WriteFile(path, body, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.BearerTokenFile != "" || cfg.CredentialStoreFile == "" {
+		t.Fatalf("unexpected credential sources: bearer=%q store=%q", cfg.BearerTokenFile, cfg.CredentialStoreFile)
+	}
+}
