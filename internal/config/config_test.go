@@ -1,6 +1,10 @@
 package config
 
-import (\n\t"os"\n\t"path/filepath"\n\t"testing"\n)
+import (
+	"os"
+	"path/filepath"
+	"testing"
+)
 
 func TestTLSConfigurationRequiresCertificateAndKeyTogether(t *testing.T) {
 	c := Default()
