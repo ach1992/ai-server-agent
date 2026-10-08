@@ -11,6 +11,7 @@ import (
 	"testing"
 
 	"github.com/ach1992/ai-server-agent/internal/config"
+	"github.com/ach1992/ai-server-agent/internal/credential"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -310,5 +311,64 @@ func TestHealthDoesNotRequireMCPAuth(t *testing.T) {
 	s.Handler().ServeHTTP(w, r)
 	if w.Code != http.StatusOK {
 		t.Fatalf("got %d, want %d", w.Code, http.StatusOK)
+	}
+}
+
+func TestNamedCredentialAuthAttachesServerDerivedPrincipal(t *testing.T) {
+	cfg := testConfig(t, "bearer")
+	token := strings.Repeat("a", credential.TokenHexLength)
+	digest, err := credential.VerifyToken(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storePath := filepath.Join(cfg.StateDir, "mcp-credentials.json")
+	storeJSON := `{"version":1,"credentials":[{"principal":{"id":"mcp-gateway","class":"gateway","name":"mcp-gateway"},"verifier_algorithm":"sha256-v1","verifier":"` + digest + `","created_at":"2026-10-08T00:00:00Z","enabled":true}]}`
+	if err := os.WriteFile(storePath, []byte(storeJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.BearerTokenFile = ""
+	cfg.CredentialStoreFile = storePath
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got credential.Principal
+	protected := s.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var ok bool
+		got, ok = credential.PrincipalFromContext(r.Context())
+		if !ok {
+			t.Fatal("authenticated principal missing from request context")
+		}
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	req := httptest.NewRequest(http.MethodGet, "/", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	w := httptest.NewRecorder()
+	protected.ServeHTTP(w, req)
+	if w.Code != http.StatusNoContent {
+		t.Fatalf("status = %d, want %d", w.Code, http.StatusNoContent)
+	}
+	if got.ID != "mcp-gateway" || got.Class != "gateway" || got.Name != "mcp-gateway" {
+		t.Fatalf("unexpected principal: %+v", got)
+	}
+}
+
+func TestNamedCredentialStoreFailsClosedOnDuplicateVerifier(t *testing.T) {
+	cfg := testConfig(t, "bearer")
+	token := strings.Repeat("b", credential.TokenHexLength)
+	digest, err := credential.VerifyToken(token)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storePath := filepath.Join(cfg.StateDir, "mcp-credentials.json")
+	storeJSON := `{"version":1,"credentials":[{"principal":{"id":"direct-default","class":"direct","name":"direct/default"},"verifier_algorithm":"sha256-v1","verifier":"` + digest + `","created_at":"2026-10-08T00:00:00Z","enabled":true},{"principal":{"id":"mcp-gateway","class":"gateway","name":"mcp-gateway"},"verifier_algorithm":"sha256-v1","verifier":"` + digest + `","created_at":"2026-10-08T00:00:00Z","enabled":true}]}`
+	if err := os.WriteFile(storePath, []byte(storeJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.BearerTokenFile = ""
+	cfg.CredentialStoreFile = storePath
+	if _, err := New(cfg); err == nil || !strings.Contains(err.Error(), "duplicate MCP credential verifier") {
+		t.Fatalf("New() error = %v, want duplicate verifier rejection", err)
 	}
 }
