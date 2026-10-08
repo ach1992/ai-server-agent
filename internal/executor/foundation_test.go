@@ -336,3 +336,54 @@ func TestClientCallContextOverridesCallerPrincipalFromAuthenticatedContext(t *te
 		t.Fatal("timed out waiting for executor request")
 	}
 }
+
+func TestClientCallContextClearsPrincipalWithoutAuthenticatedContext(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "executor.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	reqCh := make(chan Request, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			errCh <- err
+			return
+		}
+		defer conn.Close()
+		var req Request
+		if err := json.NewDecoder(conn).Decode(&req); err != nil {
+			errCh <- err
+			return
+		}
+		reqCh <- req
+		if err := json.NewEncoder(conn).Encode(Response{OK: true, Status: "ok"}); err != nil {
+			errCh <- err
+		}
+	}()
+
+	_, err = ClientCallContext(context.Background(), socket, "executor-secret", Request{
+		Action:         "run",
+		Command:        "true",
+		PrincipalID:    "caller-controlled",
+		PrincipalClass: "caller",
+		PrincipalName:  "caller",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatal(err)
+	case req := <-reqCh:
+		if req.PrincipalID != "" || req.PrincipalClass != "" || req.PrincipalName != "" {
+			t.Fatalf("unauthenticated context preserved caller principal: %+v", req)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for executor request")
+	}
+}
