@@ -252,6 +252,34 @@ verify_mcp_token_local(){
   fi
   [ "$code" != "000" ] && [ "$code" != "401" ]
 }
+
+rollback_legacy_mcp_migration(){
+  local reason="$1" config_restore rollback_ok=1
+  [ "$MCP_CREDENTIAL_ORIGIN" = legacy ] && [ -n "$PREVIOUS_CONFIG_BACKUP" ] || return 1
+  config_restore="$(mktemp "$CONFIG_DIR/.config.restore.XXXXXX")"
+  cp -a "$PREVIOUS_CONFIG_BACKUP" "$config_restore"
+  chown root:"$AGENT_USER" "$config_restore"; chmod 0640 "$config_restore"
+  mv -f "$config_restore" "$CONFIG_FILE"
+  [ "$MCP_STORE_CREATED" -eq 0 ] || rm -f -- "$MCP_CREDENTIAL_STORE"
+  if ! systemctl restart ai-server-agent-executor.service ai-server-agent.service; then
+    rollback_ok=0
+  else
+    sleep 1
+    systemctl is-active --quiet ai-server-agent-executor.service || rollback_ok=0
+    systemctl is-active --quiet ai-server-agent.service || rollback_ok=0
+    if [ "$rollback_ok" -eq 1 ]; then
+      if [ "$SCHEME" = https ]; then curl -kfsS "https://127.0.0.1:$PORT/healthz" >/dev/null || rollback_ok=0
+      else curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null || rollback_ok=0
+      fi
+    fi
+  fi
+  rm -f -- "$PREVIOUS_CONFIG_BACKUP"
+  PREVIOUS_CONFIG_BACKUP=""
+  if [ "$rollback_ok" -eq 1 ]; then
+    die "Named-credential migration failed ($reason); the previous legacy bearer configuration was restored and verified, and its plaintext token was preserved for recovery."
+  fi
+  die "Named-credential migration failed ($reason); the previous config was restored on disk but service recovery could not be verified. The legacy plaintext token was preserved for manual recovery."
+}
 if [ ! -s "$CONFIG_DIR/executor.token" ]; then random_hex > "$CONFIG_DIR/executor.token"; fi
 chown root:"$AGENT_USER" "$CONFIG_DIR/executor.token"
 chmod 0640 "$CONFIG_DIR/executor.token"
@@ -489,25 +517,24 @@ EOF_UNIT
 
 systemctl daemon-reload
 systemctl enable ai-server-agent-executor.service ai-server-agent.service
-systemctl restart ai-server-agent-executor.service ai-server-agent.service
-sleep 1
-systemctl is-active --quiet ai-server-agent-executor.service || die "privileged executor did not start"
-systemctl is-active --quiet ai-server-agent.service || die "MCP service did not start"
-if [ "$SCHEME" = "https" ]; then curl -kfsS "https://127.0.0.1:$PORT/healthz" >/dev/null || die "TLS health check failed"
-else curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null || die "health check failed"; fi
+activation_error=""
+if ! systemctl restart ai-server-agent-executor.service ai-server-agent.service; then
+  activation_error="service restart failed"
+else
+  sleep 1
+  if ! systemctl is-active --quiet ai-server-agent-executor.service; then activation_error="privileged executor did not start"
+  elif ! systemctl is-active --quiet ai-server-agent.service; then activation_error="MCP service did not start"
+  elif [ "$SCHEME" = "https" ] && ! curl -kfsS "https://127.0.0.1:$PORT/healthz" >/dev/null; then activation_error="TLS health check failed"
+  elif [ "$SCHEME" != "https" ] && ! curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null; then activation_error="health check failed"
+  fi
+fi
+if [ -n "$activation_error" ]; then
+  rollback_legacy_mcp_migration "$activation_error" || die "$activation_error"
+fi
 
 if [ -n "$MCP_ACTIVATION_TOKEN" ]; then
   if ! verify_mcp_token_local "$MCP_ACTIVATION_TOKEN"; then
-    if [ "$MCP_CREDENTIAL_ORIGIN" = legacy ] && [ -n "$PREVIOUS_CONFIG_BACKUP" ]; then
-      config_restore="$(mktemp "$CONFIG_DIR/.config.restore.XXXXXX")"
-      cp -a "$PREVIOUS_CONFIG_BACKUP" "$config_restore"; chown root:"$AGENT_USER" "$config_restore"; chmod 0640 "$config_restore"
-      mv -f "$config_restore" "$CONFIG_FILE"
-      [ "$MCP_STORE_CREATED" -eq 0 ] || rm -f -- "$MCP_CREDENTIAL_STORE"
-      systemctl restart ai-server-agent-executor.service ai-server-agent.service || true
-      rm -f -- "$PREVIOUS_CONFIG_BACKUP"
-      die "Named-credential migration could not be verified; the previous legacy bearer configuration was restored and its plaintext token was preserved for recovery."
-    fi
-    die "New named MCP credential could not be verified after service activation; authentication remains fail-closed. Re-run repair and rotate the direct/default credential locally."
+    rollback_legacy_mcp_migration "new credential verification failed" || die "New named MCP credential could not be verified after service activation; authentication remains fail-closed. Re-run repair and rotate the direct/default credential locally."
   fi
   rm -f -- "$LEGACY_MCP_TOKEN_FILE" "$MCP_AUTH_HEADER_FILE"
 fi
