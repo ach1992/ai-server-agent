@@ -265,7 +265,7 @@ func (s *Server) readFile(req Request) Response {
 	if next < before.Size {
 		omitted = before.Size - next
 	}
-	_ = s.audit.Write(audit.Entry{Action: "read_file", Mode: "root", Command: path, Success: true})
+	_ = s.audit.Write(audit.Entry{Action: "read_file", Mode: "root", Command: path, Success: true, PrincipalID: req.PrincipalID, PrincipalClass: req.PrincipalClass, PrincipalName: req.PrincipalName})
 	return Response{
 		OK:              true,
 		Output:          output,
@@ -603,7 +603,7 @@ func (s *Server) writeFile(req Request) Response {
 		return unknownFileCompletion("replacement committed but final destination identity changed after directory sync", nil)
 	}
 
-	_ = s.audit.Write(audit.Entry{Action: "write_file", Mode: "root", Command: path, Success: true})
+	_ = s.audit.Write(audit.Entry{Action: "write_file", Mode: "root", Command: path, Success: true, PrincipalID: req.PrincipalID, PrincipalClass: req.PrincipalClass, PrincipalName: req.PrincipalName})
 	return Response{
 		OK:          true,
 		Status:      "written",
