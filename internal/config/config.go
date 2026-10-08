@@ -13,7 +13,8 @@ type Config struct {
 	MCPPath         string `json:"mcp_path"`
 	HealthPath      string `json:"health_path"`
 	AuthMode        string `json:"auth_mode"`
-	BearerTokenFile string `json:"bearer_token_file"`
+	BearerTokenFile     string `json:"bearer_token_file,omitempty"`
+	CredentialStoreFile string `json:"credential_store_file,omitempty"`
 	TLSCertFile     string `json:"tls_cert_file,omitempty"`
 	TLSKeyFile      string `json:"tls_key_file,omitempty"`
 	ExecutorSocket  string `json:"executor_socket"`
@@ -48,8 +49,11 @@ func (c Config) TLSConfigured() bool {
 }
 
 func (c Config) Validate() error {
-	if c.ListenAddress == "" || c.MCPPath == "" || c.ExecutorSocket == "" || c.ExecutorToken == "" || c.BearerTokenFile == "" || c.StateDir == "" || c.WorkspaceDir == "" {
+	if c.ListenAddress == "" || c.MCPPath == "" || c.ExecutorSocket == "" || c.ExecutorToken == "" || c.StateDir == "" || c.WorkspaceDir == "" {
 		return errors.New("config contains empty required values")
+	}
+	if (c.BearerTokenFile == "") == (c.CredentialStoreFile == "") {
+		return errors.New("config must select exactly one MCP credential source")
 	}
 	if c.AuthMode != "bearer" {
 		return fmt.Errorf("unsupported auth_mode %q: bearer authentication is required", c.AuthMode)
