@@ -164,3 +164,17 @@ func TestRevokedPrincipalFailsClosedWhileAnotherPrincipalRemainsActive(t *testin
 		t.Fatalf("remaining direct credential rejected: principal=%+v ok=%v", p, ok)
 	}
 }
+
+func TestStoreRequiresDirectDefaultPrincipalRecord(t *testing.T) {
+	token := strings.Repeat("5", TokenHexLength)
+	store := Store{Version: StoreVersion, Credentials: []Record{{
+		Principal:         Principal{ID: "mcp-gateway", Class: "gateway", Name: "mcp-gateway"},
+		VerifierAlgorithm: VerifierAlgorithm,
+		Verifier:          verifier(token),
+		CreatedAt:         "2026-10-08T00:00:00Z",
+		Enabled:           true,
+	}}}
+	if err := store.Validate(); err == nil || !strings.Contains(err.Error(), "missing the direct-default principal") {
+		t.Fatalf("Validate() error = %v, want missing direct-default rejection", err)
+	}
+}
