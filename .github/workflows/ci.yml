@@ -225,8 +225,8 @@ jobs:
         run: |
           daemon_line="$(grep -nF 'systemctl daemon-reload' install.sh | cut -d: -f1 | head -n1)"
           enable_line="$(grep -nF 'systemctl enable ai-server-agent-executor.service ai-server-agent.service' install.sh | cut -d: -f1 | head -n1)"
-          restart_line="$(grep -nF 'systemctl restart ai-server-agent-executor.service ai-server-agent.service' install.sh | cut -d: -f1 | head -n1)"
-          active_line="$(grep -nF 'systemctl is-active --quiet ai-server-agent-executor.service' install.sh | cut -d: -f1 | head -n1)"
+          restart_line="$(grep -nF 'systemctl restart ai-server-agent-executor.service ai-server-agent.service' install.sh | cut -d: -f1 | awk -v after="$enable_line" '$1 > after { print $1; exit }')"
+          active_line="$(grep -nF 'systemctl is-active --quiet ai-server-agent-executor.service' install.sh | cut -d: -f1 | awk -v after="$restart_line" '$1 > after { print $1; exit }')"
           grep -qF 'ExecStartPre=$LIB_DIR/ensure-lifecycle-lock.sh' install.sh
           grep -qF 'ensure-lifecycle-lock.sh' scripts/build-release.sh
           bash -n ensure-lifecycle-lock.sh
