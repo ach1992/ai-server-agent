@@ -254,28 +254,6 @@ if [ ! -s "$CONFIG_DIR/executor.token" ]; then random_hex > "$CONFIG_DIR/executo
 chown root:"$AGENT_USER" "$CONFIG_DIR/executor.token"
 chmod 0640 "$CONFIG_DIR/executor.token"
 
-[ ! -L "$MCP_CREDENTIAL_STORE" ] || die "Refusing symlinked MCP credential store: $MCP_CREDENTIAL_STORE"
-if [ -e "$MCP_CREDENTIAL_STORE" ] && [ ! -f "$MCP_CREDENTIAL_STORE" ]; then die "MCP credential store is not a regular file: $MCP_CREDENTIAL_STORE"; fi
-if [ ! -s "$MCP_CREDENTIAL_STORE" ]; then
-  if [ -s "$LEGACY_MCP_TOKEN_FILE" ]; then
-    MCP_ACTIVATION_TOKEN="$(tr -d '\r\n' < "$LEGACY_MCP_TOKEN_FILE")"
-    [[ "$MCP_ACTIVATION_TOKEN" =~ ^[0-9a-f]{64}$ ]] || die "Existing MCP bearer cannot be migrated safely because it does not match the supported 32-byte hex credential contract. Existing auth was left unchanged."
-    MCP_CREDENTIAL_ORIGIN=legacy
-  else
-    MCP_ACTIVATION_TOKEN="$(random_hex)"
-    MCP_CREDENTIAL_ORIGIN=fresh
-  fi
-  verifier="$(token_verifier "$MCP_ACTIVATION_TOKEN")"
-  created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
-  cred_tmp="$(mktemp "$CONFIG_DIR/.mcp-credentials.XXXXXX")"
-  jq -n --arg verifier "$verifier" --arg created_at "$created_at"     '{version:1,credentials:[{principal:{id:"direct-default",class:"direct",name:"direct/default"},verifier_algorithm:"sha256-v1",verifier:$verifier,created_at:$created_at,enabled:true}]}' > "$cred_tmp"
-  chown root:"$AGENT_USER" "$cred_tmp"; chmod 0640 "$cred_tmp"
-  mv -f "$cred_tmp" "$MCP_CREDENTIAL_STORE"
-  MCP_STORE_CREATED=1
-fi
-chown root:"$AGENT_USER" "$MCP_CREDENTIAL_STORE"
-chmod 0640 "$MCP_CREDENTIAL_STORE"
-
 install_helpers(){
   local root="$1"
   [ -f "$root/manage.sh" ] && [ -f "$root/update.sh" ] && [ -f "$root/uninstall.sh" ] && [ -f "$root/ensure-lifecycle-lock.sh" ] || die "release/source payload is missing management helpers"
@@ -359,6 +337,39 @@ elif [ "$AGENT_VERSION" = "source" ]; then
 else
   download_release
 fi
+
+[ ! -L "$MCP_CREDENTIAL_STORE" ] || die "Refusing symlinked MCP credential store: $MCP_CREDENTIAL_STORE"
+if [ -e "$MCP_CREDENTIAL_STORE" ] && [ ! -f "$MCP_CREDENTIAL_STORE" ]; then die "MCP credential store is not a regular file: $MCP_CREDENTIAL_STORE"; fi
+
+if [ -s "$LEGACY_MCP_TOKEN_FILE" ]; then
+  MCP_ACTIVATION_TOKEN="$(tr -d '\r\n' < "$LEGACY_MCP_TOKEN_FILE")"
+  [[ "$MCP_ACTIVATION_TOKEN" =~ ^[0-9a-f]{64}$ ]] || die "Existing MCP bearer cannot be migrated safely because it does not match the supported 32-byte hex credential contract. Existing auth was left unchanged."
+  MCP_CREDENTIAL_ORIGIN=legacy
+  verifier="$(token_verifier "$MCP_ACTIVATION_TOKEN")"
+  if [ -s "$MCP_CREDENTIAL_STORE" ]; then
+    existing_verifier="$(jq -r '.credentials[]? | select(.principal.id=="direct-default") | .verifier' "$MCP_CREDENTIAL_STORE" 2>/dev/null || true)"
+    [ "$existing_verifier" = "$verifier" ] || die "A named credential store and legacy bearer both exist but do not represent the same direct/default credential. Refusing ambiguous migration; previous auth files were left unchanged."
+  else
+    created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    cred_tmp="$(mktemp "$CONFIG_DIR/.mcp-credentials.XXXXXX")"
+    jq -n --arg verifier "$verifier" --arg created_at "$created_at" '{version:1,credentials:[{principal:{id:"direct-default",class:"direct",name:"direct/default"},verifier_algorithm:"sha256-v1",verifier:$verifier,created_at:$created_at,enabled:true}]}' > "$cred_tmp"
+    chown root:"$AGENT_USER" "$cred_tmp"; chmod 0640 "$cred_tmp"
+    mv -f "$cred_tmp" "$MCP_CREDENTIAL_STORE"
+    MCP_STORE_CREATED=1
+  fi
+elif [ ! -s "$MCP_CREDENTIAL_STORE" ]; then
+  MCP_ACTIVATION_TOKEN="$(random_hex)"
+  MCP_CREDENTIAL_ORIGIN=fresh
+  verifier="$(token_verifier "$MCP_ACTIVATION_TOKEN")"
+  created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  cred_tmp="$(mktemp "$CONFIG_DIR/.mcp-credentials.XXXXXX")"
+  jq -n --arg verifier "$verifier" --arg created_at "$created_at" '{version:1,credentials:[{principal:{id:"direct-default",class:"direct",name:"direct/default"},verifier_algorithm:"sha256-v1",verifier:$verifier,created_at:$created_at,enabled:true}]}' > "$cred_tmp"
+  chown root:"$AGENT_USER" "$cred_tmp"; chmod 0640 "$cred_tmp"
+  mv -f "$cred_tmp" "$MCP_CREDENTIAL_STORE"
+  MCP_STORE_CREATED=1
+fi
+chown root:"$AGENT_USER" "$MCP_CREDENTIAL_STORE"
+chmod 0640 "$MCP_CREDENTIAL_STORE"
 
 BIND="127.0.0.1:$PORT"; AUTH_MODE="bearer"; SCHEME="http"
 if [ "$MODE" = "public" ]; then BIND="0.0.0.0:$PORT"; fi
