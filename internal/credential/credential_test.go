@@ -121,3 +121,25 @@ func TestStoreRejectsPrincipalsOutsideBoundedSchema(t *testing.T) {
 		}
 	}
 }
+
+func TestSelectedPrincipalReplacementHasImmediateCutover(t *testing.T) {
+	oldToken := strings.Repeat("1", TokenHexLength)
+	newToken := strings.Repeat("2", TokenHexLength)
+	store := Store{Version: StoreVersion, Credentials: []Record{{
+		Principal:         Principal{ID: "direct-default", Class: "direct", Name: "direct/default"},
+		VerifierAlgorithm: VerifierAlgorithm,
+		Verifier:          verifier(newToken),
+		CreatedAt:         "2026-10-08T00:00:00Z",
+		RotatedAt:         "2026-10-08T01:00:00Z",
+		Enabled:           true,
+	}}}
+	if err := store.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.Authenticate(oldToken); ok {
+		t.Fatal("old credential remained valid after immediate replacement")
+	}
+	if p, ok := store.Authenticate(newToken); !ok || p.ID != "direct-default" {
+		t.Fatalf("replacement credential not active: principal=%+v ok=%v", p, ok)
+	}
+}
