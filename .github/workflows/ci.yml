@@ -237,8 +237,10 @@ jobs:
       - name: Local MCP authentication contract
         run: |
           grep -qF 'AUTH_MODE="bearer"' install.sh
-          grep -qF 'MCP_AUTH_HEADER_FILE="$CONFIG_DIR/mcp.authorization"' install.sh
-          grep -qF "printf 'Bearer %s\\n'" install.sh
+          grep -qF 'MCP_CREDENTIAL_STORE="$CONFIG_DIR/mcp-credentials.json"' install.sh
+          grep -qF '"credential_store_file": "$MCP_CREDENTIAL_STORE"' install.sh
+          grep -qF 'verifier_algorithm:"sha256-v1"' install.sh
+          grep -qF 'rm -f -- "$LEGACY_MCP_TOKEN_FILE" "$MCP_AUTH_HEADER_FILE"' install.sh
           if grep -qF 'AUTH_MODE="none"' install.sh; then
             echo 'loopback MCP must not disable authentication' >&2
             exit 1
@@ -468,7 +470,9 @@ jobs:
           sudo test -e /var/lib/ai-server-agent/lifecycle-state-sentinel
           sudo test -e /var/log/ai-server-agent/lifecycle-log-sentinel
           sudo test -e /opt/ai-server-agent/lifecycle-runtime-sentinel
-          sudo test -s /etc/ai-server-agent/mcp.token
+          sudo test -s /etc/ai-server-agent/mcp-credentials.json
+          sudo test ! -e /etc/ai-server-agent/mcp.token
+          sudo test ! -e /etc/ai-server-agent/mcp.authorization
           sudo test -e /srv/ai-workspace/lifecycle-workspace-sentinel
           id aiagent >/dev/null
           getent group aiagent >/dev/null
