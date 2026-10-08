@@ -70,6 +70,16 @@ func Load(path string) (Config, error) {
 	if err != nil {
 		return c, fmt.Errorf("read config: %w", err)
 	}
+	var authSources struct {
+		BearerTokenFile     *string `json:"bearer_token_file"`
+		CredentialStoreFile *string `json:"credential_store_file"`
+	}
+	if err := json.Unmarshal(b, &authSources); err != nil {
+		return c, fmt.Errorf("parse config: %w", err)
+	}
+	if authSources.CredentialStoreFile != nil && authSources.BearerTokenFile == nil {
+		c.BearerTokenFile = ""
+	}
 	if err := json.Unmarshal(b, &c); err != nil {
 		return c, fmt.Errorf("parse config: %w", err)
 	}
