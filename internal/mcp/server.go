@@ -2,6 +2,7 @@ package mcp
 
 import (
 	"context"
+	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -307,9 +308,7 @@ func (s *Server) auth(next http.Handler) http.Handler {
 			principal, authorized = s.credentialStore.Authenticate(got)
 		} else {
 			want := s.bearerToken
-			gotDigest, gotErr := credential.VerifyToken(got)
-			wantDigest, wantErr := credential.VerifyToken(want)
-			authorized = gotErr == nil && wantErr == nil && gotDigest == wantDigest
+			authorized = len(got) == len(want) && subtle.ConstantTimeCompare([]byte(got), []byte(want)) == 1
 		}
 		if !authorized {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="ai-server-agent"`)
