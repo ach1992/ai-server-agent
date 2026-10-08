@@ -254,6 +254,8 @@ if [ ! -s "$CONFIG_DIR/executor.token" ]; then random_hex > "$CONFIG_DIR/executo
 chown root:"$AGENT_USER" "$CONFIG_DIR/executor.token"
 chmod 0640 "$CONFIG_DIR/executor.token"
 
+[ ! -L "$MCP_CREDENTIAL_STORE" ] || die "Refusing symlinked MCP credential store: $MCP_CREDENTIAL_STORE"
+if [ -e "$MCP_CREDENTIAL_STORE" ] && [ ! -f "$MCP_CREDENTIAL_STORE" ]; then die "MCP credential store is not a regular file: $MCP_CREDENTIAL_STORE"; fi
 if [ ! -s "$MCP_CREDENTIAL_STORE" ]; then
   if [ -s "$LEGACY_MCP_TOKEN_FILE" ]; then
     MCP_ACTIVATION_TOKEN="$(tr -d '\r\n' < "$LEGACY_MCP_TOKEN_FILE")"
