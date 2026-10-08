@@ -338,6 +338,9 @@ func encodeExecutorResponse(resp Response) []byte {
 }
 
 func ClientCallContext(ctx context.Context, socket, token string, req Request) (Response, error) {
+	req.PrincipalID = ""
+	req.PrincipalClass = ""
+	req.PrincipalName = ""
 	if principal, ok := credential.PrincipalFromContext(ctx); ok {
 		req.PrincipalID = principal.ID
 		req.PrincipalClass = principal.Class
