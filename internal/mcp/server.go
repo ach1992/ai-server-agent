@@ -2,7 +2,6 @@ package mcp
 
 import (
 	"context"
-	"crypto/subtle"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -14,6 +13,7 @@ import (
 
 	"github.com/ach1992/ai-server-agent/internal/browser"
 	"github.com/ach1992/ai-server-agent/internal/config"
+	"github.com/ach1992/ai-server-agent/internal/credential"
 	"github.com/ach1992/ai-server-agent/internal/executor"
 	"github.com/ach1992/ai-server-agent/internal/manifest"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -24,8 +24,9 @@ const synchronousCommandTimeout = 5 * time.Minute
 
 type Server struct {
 	cfg           config.Config
-	executorToken string
-	bearerToken   string
+	executorToken   string
+	bearerToken     string
+	credentialStore *credential.Store
 	browser       *browser.Manager
 	mcp           *mcpsdk.Server
 }
@@ -88,20 +89,30 @@ func New(cfg config.Config) (*Server, error) {
 	if executorToken == "" {
 		return nil, errors.New("executor token is empty")
 	}
-	b, err := os.ReadFile(cfg.BearerTokenFile)
-	if err != nil {
-		return nil, fmt.Errorf("read MCP bearer token: %w", err)
-	}
-	bearerToken := strings.TrimSpace(string(b))
-	if bearerToken == "" {
-		return nil, errors.New("MCP bearer token is empty")
+	var bearerToken string
+	var credentialStore *credential.Store
+	if cfg.CredentialStoreFile != "" {
+		credentialStore, err = credential.Load(cfg.CredentialStoreFile)
+		if err != nil {
+			return nil, err
+		}
+	} else {
+		b, readErr := os.ReadFile(cfg.BearerTokenFile)
+		if readErr != nil {
+			return nil, fmt.Errorf("read MCP bearer token: %w", readErr)
+		}
+		bearerToken = strings.TrimSpace(string(b))
+		if bearerToken == "" {
+			return nil, errors.New("MCP bearer token is empty")
+		}
 	}
 
 	s := &Server{
-		cfg:           cfg,
-		executorToken: executorToken,
-		bearerToken:   bearerToken,
-		browser:       browser.New(cfg, executorToken),
+		cfg:             cfg,
+		executorToken:   executorToken,
+		bearerToken:     bearerToken,
+		credentialStore: credentialStore,
+		browser:         browser.New(cfg, executorToken),
 	}
 	s.mcp = mcpsdk.NewServer(
 		&mcpsdk.Implementation{Name: "ai-server-agent", Version: version},
@@ -290,13 +301,23 @@ func (s *Server) auth(next http.Handler) http.Handler {
 			return
 		}
 		got := strings.TrimSpace(strings.TrimPrefix(h, prefix))
-		want := s.bearerToken
-		if len(got) != len(want) || subtle.ConstantTimeCompare([]byte(got), []byte(want)) != 1 {
+		principal := credential.Principal{ID: "direct-default", Class: "direct", Name: "direct/default"}
+		authorized := false
+		if s.credentialStore != nil {
+			principal, authorized = s.credentialStore.Authenticate(got)
+		} else {
+			want := s.bearerToken
+			gotDigest, gotErr := credential.VerifyToken(got)
+			wantDigest, wantErr := credential.VerifyToken(want)
+			authorized = gotErr == nil && wantErr == nil && gotDigest == wantDigest
+		}
+		if !authorized {
 			w.Header().Set("WWW-Authenticate", `Bearer realm="ai-server-agent"`)
 			http.Error(w, "unauthorized", http.StatusUnauthorized)
 			return
 		}
-		next.ServeHTTP(w, r)
+		ctx := credential.WithPrincipal(r.Context(), principal)
+		next.ServeHTTP(w, r.WithContext(ctx))
 	})
 }
 
