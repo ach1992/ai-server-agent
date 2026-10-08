@@ -223,7 +223,7 @@ func (s *Server) startJobBounded(req Request) Response {
 		Mode:    map[bool]string{true: "root", false: "worker"}[req.Root],
 		Success: resp.OK,
 		Detail:  dec.Category,
-	})
+		PrincipalID:    req.PrincipalID,\n\t\tPrincipalClass: req.PrincipalClass,\n\t\tPrincipalName:  req.PrincipalName,\n	})
 	return resp
 }
 
