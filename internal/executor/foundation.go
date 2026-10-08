@@ -14,9 +14,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ach1992/ai-server-agent/internal/credential"
-
 	"github.com/ach1992/ai-server-agent/internal/audit"
+	"github.com/ach1992/ai-server-agent/internal/credential"
 	"github.com/ach1992/ai-server-agent/internal/policy"
 )
 
