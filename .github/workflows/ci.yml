@@ -546,6 +546,26 @@ jobs:
           test "$(sudo sha256sum /etc/ai-server-agent/mcp.token | awk '{print $1}')" = "$legacy_token_before"
           sudo rm -f /etc/ai-server-agent/mcp-credentials.json
 
+          # Now pass the legacy/store verifier precheck but make the named store
+          # invalid for the running server. The new service must fail startup,
+          # and the installer must restore + verify the legacy auth path.
+          legacy_verifier="$(printf '%s' "$legacy" | sha256sum | awk '{print $1}')"
+          sudo tee /etc/ai-server-agent/mcp-credentials.json >/dev/null <<EOF_INVALID_ACTIVE_STORE
+          {"version":1,"credentials":[{"principal":{"id":"direct-default","class":"direct","name":"direct/default"},"verifier_algorithm":"sha256-v1","verifier":"$legacy_verifier","created_at":"2026-10-08T00:00:00Z","enabled":true},{"principal":{"id":"rogue","class":"gateway","name":"rogue"},"verifier_algorithm":"sha256-v1","verifier":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb","created_at":"2026-10-08T00:00:00Z","enabled":true}]}
+          EOF_INVALID_ACTIVE_STORE
+          if sudo env AI_SERVER_AGENT_BINARY=/tmp/ai-server-agent AI_SERVER_AGENT_NONINTERACTIVE=1 bash install.sh >/tmp/legacy-activation-failure.out 2>&1; then
+            echo 'invalid named-store activation unexpectedly succeeded' >&2
+            exit 1
+          fi
+          grep -Eq 'previous legacy bearer configuration was restored|previous config was restored on disk' /tmp/legacy-activation-failure.out
+          test "$(sudo sha256sum /etc/ai-server-agent/config.json | awk '{print $1}')" = "$legacy_config_before"
+          test "$(sudo sha256sum /etc/ai-server-agent/mcp.token | awk '{print $1}')" = "$legacy_token_before"
+          sudo test ! -e /etc/ai-server-agent/mcp-credentials.json
+          sudo systemctl is-active --quiet ai-server-agent.service
+          rollback_code="$(printf 'header = "Authorization: Bearer %s"\n' "$legacy" | curl -sS --config - -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' --data '{}' http://127.0.0.1:3210/mcp)"
+          test "$rollback_code" != 000
+          test "$rollback_code" != 401
+
           sudo env AI_SERVER_AGENT_BINARY=/tmp/ai-server-agent AI_SERVER_AGENT_NONINTERACTIVE=1 bash install.sh
 
           sudo test -s /etc/ai-server-agent/mcp-credentials.json
