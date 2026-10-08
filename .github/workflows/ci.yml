@@ -536,6 +536,28 @@ jobs:
           test "$code" != 000
           test "$code" != 401
 
+          # Rotation is an interactive root-only one-time reveal. Allocate a
+          # local pseudo-TTY but discard its transcript/stdout so CI never logs
+          # the newly issued bearer. The command itself verifies the new bearer
+          # against the live MCP path before returning success.
+          script -qefc "sudo ai-server-agent-manage credential-rotate mcp-gateway" /dev/null >/dev/null
+          gateway_v1="$(sudo jq -r '.credentials[] | select(.principal.id=="mcp-gateway") | .verifier' /etc/ai-server-agent/mcp-credentials.json)"
+          test -n "$gateway_v1"
+          sudo systemctl is-active --quiet ai-server-agent.service
+
+          # A second rotation is the supported recovery when the first reveal
+          # is lost. It must replace, not overlap, the selected principal.
+          script -qefc "sudo ai-server-agent-manage credential-rotate mcp-gateway" /dev/null >/dev/null
+          gateway_v2="$(sudo jq -r '.credentials[] | select(.principal.id=="mcp-gateway") | .verifier' /etc/ai-server-agent/mcp-credentials.json)"
+          test -n "$gateway_v2"
+          test "$gateway_v1" != "$gateway_v2"
+          test "$(sudo jq '[.credentials[] | select(.principal.id=="mcp-gateway")] | length' /etc/ai-server-agent/mcp-credentials.json)" -eq 1
+
+          sudo ai-server-agent-manage credential-revoke mcp-gateway
+          test "$(sudo jq -r '.credentials[] | select(.principal.id=="mcp-gateway") | .enabled' /etc/ai-server-agent/mcp-credentials.json)" = false
+          test "$(sudo jq -r '[.credentials[] | select(.enabled==true)] | length' /etc/ai-server-agent/mcp-credentials.json)" -eq 1
+          sudo systemctl is-active --quiet ai-server-agent.service
+
           sudo env AI_SERVER_AGENT_YES=1 bash uninstall.sh --purge
           sudo test ! -e /etc/ai-server-agent
           rm -f /tmp/legacy-agent-config.json
