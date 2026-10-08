@@ -383,7 +383,8 @@ if [ "$FRESH_INSTALL" -eq 0 ]; then
   PREVIOUS_CONFIG_BACKUP="$(mktemp)"
   cp -a "$CONFIG_FILE" "$PREVIOUS_CONFIG_BACKUP"
 fi
-cat > "$CONFIG_FILE" <<JSON
+config_tmp="$(mktemp "$CONFIG_DIR/.config.XXXXXX")"
+cat > "$config_tmp" <<JSON
 {
   "listen_address": "$BIND",
   "mcp_path": "/mcp",
@@ -401,7 +402,8 @@ cat > "$CONFIG_FILE" <<JSON
   "agent_user": "$AGENT_USER"
 }
 JSON
-chown root:"$AGENT_USER" "$CONFIG_FILE"; chmod 0640 "$CONFIG_FILE"
+chown root:"$AGENT_USER" "$config_tmp"; chmod 0640 "$config_tmp"
+mv -f "$config_tmp" "$CONFIG_FILE"
 
 if [ "$AGENT_VERSION" = "source" ]; then
   STATE_CHANNEL=source; STATE_VERSION=source; STATE_REF="${RESOLVED_SOURCE_REF:-$REF}"
@@ -494,7 +496,9 @@ else curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null || die "health check 
 if [ -n "$MCP_ACTIVATION_TOKEN" ]; then
   if ! verify_mcp_token_local "$MCP_ACTIVATION_TOKEN"; then
     if [ "$MCP_CREDENTIAL_ORIGIN" = legacy ] && [ -n "$PREVIOUS_CONFIG_BACKUP" ]; then
-      install -o root -g "$AGENT_USER" -m 0640 "$PREVIOUS_CONFIG_BACKUP" "$CONFIG_FILE"
+      config_restore="$(mktemp "$CONFIG_DIR/.config.restore.XXXXXX")"
+      cp -a "$PREVIOUS_CONFIG_BACKUP" "$config_restore"; chown root:"$AGENT_USER" "$config_restore"; chmod 0640 "$config_restore"
+      mv -f "$config_restore" "$CONFIG_FILE"
       [ "$MCP_STORE_CREATED" -eq 0 ] || rm -f -- "$MCP_CREDENTIAL_STORE"
       systemctl restart ai-server-agent-executor.service ai-server-agent.service || true
       rm -f -- "$PREVIOUS_CONFIG_BACKUP"
