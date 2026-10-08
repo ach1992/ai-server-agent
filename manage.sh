@@ -230,8 +230,12 @@ credential_principal_fields(){
 }
 
 validate_credential_store_file(){
+  local meta
   [ -f "$CREDENTIAL_STORE" ] && [ ! -L "$CREDENTIAL_STORE" ] || die "Named MCP credential store is missing or unsafe: $CREDENTIAL_STORE"
-  jq -e 'type=="object" and .version==1 and (.credentials|type)=="array" and (.credentials|length)>0' "$CREDENTIAL_STORE" >/dev/null 2>&1 || die "Named MCP credential store is malformed."
+  meta="$(stat -c '%u:%a' "$CREDENTIAL_STORE" 2>/dev/null || true)"
+  [ "${meta%%:*}" = "0" ] || die "Named MCP credential store must be root-owned."
+  case "${meta##*:}" in 600|640) ;; *) die "Named MCP credential store mode is unsafe: ${meta##*:}" ;; esac
+  jq -e 'type=="object" and .version==1 and (.credentials|type)=="array" and (.credentials|length)>0 and (.credentials|length)<=2' "$CREDENTIAL_STORE" >/dev/null 2>&1 || die "Named MCP credential store is malformed."
 }
 
 verify_mcp_token_local(){
@@ -269,6 +273,7 @@ credential_status(){
 credential_issue(){ (
   acquire_management_lock
   need_cmd jq; need_cmd sha256sum; need_cmd curl
+  [ -r /dev/tty ] && [ -w /dev/tty ] || die "Credential issuance/rotation requires an interactive local terminal so the newly issued secret can be revealed exactly once."
   local principal="$1" fields class name token verifier now created existed candidate backup
   fields="$(credential_principal_fields "$principal")" || die "Unknown MCP principal: $principal"
   IFS='|' read -r class name <<<"$fields"
