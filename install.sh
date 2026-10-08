@@ -510,7 +510,8 @@ fi
 
 if [ "$MCP_CREDENTIAL_ORIGIN" = fresh ] && [ "$NONINTERACTIVE" != "1" ] && [ -r /dev/tty ]; then
   printf '\nA new direct/default MCP credential was issued. It is not stored in recoverable plaintext.\n' >/dev/tty
-  read -r -p 'Reveal the new Authorization value once in this terminal? [y/N] ' reveal_new </dev/tty
+  reveal_new=n
+  read -r -p 'Reveal the new Authorization value once in this terminal? [y/N] ' reveal_new </dev/tty || true
   if [[ "$reveal_new" =~ ^[Yy]$ ]]; then
     printf 'Authorization: Bearer %s\n' "$MCP_ACTIVATION_TOKEN" >/dev/tty
   else
