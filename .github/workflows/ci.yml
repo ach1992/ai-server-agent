@@ -505,6 +505,7 @@ jobs:
           sudo test -e /srv/ai-workspace/lifecycle-workspace-sentinel
       - name: Legacy bearer migrates without forced rotation
         run: |
+          trap 'rc=$?; printf "credential lifecycle acceptance failed at shell line %s (rc=%s)\\n" "$LINENO" "$rc" >&2' ERR
           legacy="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
           test "${#legacy}" -eq 64
           command -v script >/dev/null
