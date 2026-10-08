@@ -3,39 +3,16 @@ package executor
 import "time"
 
 type Request struct {
-	Token          string `json:"token"`
-	Action         string `json:"action"`
-	Command        string `json:"command,omitempty"`
-	Root           bool   `json:"root,omitempty"`
-	Approval       bool   `json:"approval,omitempty"`
-	TimeoutMS      int64  `json:"timeout_ms,omitempty"`
-	OperationID    string `json:"operation_id,omitempty"`
-	PrincipalID    string `json:"principal_id,omitempty"`
-	PrincipalClass string `json:"principal_class,omitempty"`
-	PrincipalName  string `json:"principal_name,omitempty"`
-	JobID          string `json:"job_id,omitempty"`
-	Offset         int64  `json:"offset,omitempty"`
-	Limit          int    `json:"limit,omitempty"`
-	Path           string `json:"path,omitempty"`
-	Content        string `json:"content,omitempty"`
-	Mode           uint32 `json:"mode,omitempty"`
-	FileVersion    string `json:"file_version,omitempty"`
-	MustNotExist   bool   `json:"must_not_exist,omitempty"`
-}ackage executor
-
-import "time"
-
-type Request struct {
 	Token        string `json:"token"`
 	Action       string `json:"action"`
 	Command      string `json:"command,omitempty"`
 	Root         bool   `json:"root,omitempty"`
 	Approval     bool   `json:"approval,omitempty"`
 	TimeoutMS    int64  `json:"timeout_ms,omitempty"`
-	OperationID   string `json:"operation_id,omitempty"`
-	PrincipalID   string `json:"principal_id,omitempty"`
+	OperationID    string `json:"operation_id,omitempty"`
+	PrincipalID    string `json:"principal_id,omitempty"`
 	PrincipalClass string `json:"principal_class,omitempty"`
-	PrincipalName string `json:"principal_name,omitempty"`
+	PrincipalName  string `json:"principal_name,omitempty"`
 	JobID        string `json:"job_id,omitempty"`
 	Offset       int64  `json:"offset,omitempty"`
 	Limit        int    `json:"limit,omitempty"`
