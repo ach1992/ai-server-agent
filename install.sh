@@ -492,17 +492,6 @@ fi
 
 log "Core installation is healthy."
 
-if [ "$MCP_CREDENTIAL_ORIGIN" = fresh ] && [ "$NONINTERACTIVE" != "1" ] && [ -r /dev/tty ]; then
-  printf '\nA new direct/default MCP credential was issued. It is not stored in recoverable plaintext.\n' >/dev/tty
-  read -r -p 'Reveal the new Authorization value once in this terminal? [y/N] ' reveal_new </dev/tty
-  if [[ "$reveal_new" =~ ^[Yy]$ ]]; then
-    printf 'Authorization: Bearer %s\n' "$MCP_ACTIVATION_TOKEN" >/dev/tty
-  else
-    printf 'Not shown. If needed later, rotate direct/default locally to issue a replacement.\n' >/dev/tty
-  fi
-fi
-MCP_ACTIVATION_TOKEN=""
-
 if [ "$NONINTERACTIVE" = "1" ]; then
   case "$SETUP_MODE" in
     ""|keep) ;;
@@ -518,6 +507,17 @@ elif [ "$FRESH_INSTALL" -eq 1 ] && [ -r /dev/tty ] && [ -z "${AI_SERVER_AGENT_BI
     warn "Resume setup with: sudo ai-server-agent-manage"
   fi
 fi
+
+if [ "$MCP_CREDENTIAL_ORIGIN" = fresh ] && [ "$NONINTERACTIVE" != "1" ] && [ -r /dev/tty ]; then
+  printf '\nA new direct/default MCP credential was issued. It is not stored in recoverable plaintext.\n' >/dev/tty
+  read -r -p 'Reveal the new Authorization value once in this terminal? [y/N] ' reveal_new </dev/tty
+  if [[ "$reveal_new" =~ ^[Yy]$ ]]; then
+    printf 'Authorization: Bearer %s\n' "$MCP_ACTIVATION_TOKEN" >/dev/tty
+  else
+    printf 'Not shown. If needed later, rotate direct/default locally to issue a replacement.\n' >/dev/tty
+  fi
+fi
+MCP_ACTIVATION_TOKEN=""
 
 if [ "$SETUP_INCOMPLETE" -eq 1 ]; then
   cat <<EOF_SUMMARY
