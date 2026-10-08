@@ -198,7 +198,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 				t.Fatal("repository_inspect must disclose optional remote verification")
 			}
 			in, _ := json.Marshal(tool.InputSchema)
-			for _, field := range []string{"path", "verify_remote"} {
+			for _, field := range []string{"path", "verify_remote", "remote", "remote_branch"} {
 				if !strings.Contains(string(in), "\""+field+"\"") {
 					t.Fatalf("repository_inspect input schema missing %q: %s", field, in)
 				}

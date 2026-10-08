@@ -13,7 +13,9 @@ type RepositoryDiscoverInput struct {
 
 type RepositoryInspectInput struct {
 	Path         string `json:"path" jsonschema:"Repository or linked-worktree path inside the configured workspace"`
-	VerifyRemote bool   `json:"verify_remote,omitempty" jsonschema:"Also verify the current branch against its configured external upstream with git ls-remote; terminal prompts remain disabled"`
+	VerifyRemote bool   `json:"verify_remote,omitempty" jsonschema:"Also verify the exact local HEAD against an external branch with git ls-remote; terminal prompts remain disabled"`
+	Remote       string `json:"remote,omitempty" jsonschema:"Optional configured remote name for explicit push-result reconciliation; supply together with remote_branch and verify_remote=true, otherwise the current branch upstream is used"`
+	RemoteBranch string `json:"remote_branch,omitempty" jsonschema:"Optional external branch for explicit push-result reconciliation; supply together with remote and verify_remote=true"`
 }
 
 type WorktreeCreateInput struct {
@@ -51,13 +53,15 @@ func (s *Server) registerRepositoryTools() {
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "repository_inspect",
-		Description: "Inspect one Git repository/worktree inside the configured workspace and return exact remote/ref/HEAD/dirty/conflict/worktree identity. With verify_remote=true it also checks the configured external upstream with git ls-remote, without mutating local refs or prompting for credentials.",
+		Description: "Inspect one Git repository/worktree inside the configured workspace and return exact remote/ref/HEAD/dirty/conflict/worktree identity. With verify_remote=true it checks either the explicitly supplied remote/remote_branch or the current upstream with git ls-remote, allowing an ordinary CLI push to be reconciled to the exact local HEAD without mutating local refs or prompting for credentials.",
 		Annotations: annotations(true, false, true, true),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input RepositoryInspectInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{
 			Action:         "repository_inspect",
 			RepositoryPath: input.Path,
 			VerifyRemote:   input.VerifyRemote,
+			RemoteName:     input.Remote,
+			RemoteBranch:   input.RemoteBranch,
 		})
 		if err != nil {
 			return executorTransportErrorResult(err)

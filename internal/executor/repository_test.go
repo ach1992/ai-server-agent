@@ -469,6 +469,32 @@ func TestFreshCloneRecoveryCreatesTaskWorktreeFromRemoteBranch(t *testing.T) {
 	}
 }
 
+func TestRepositoryInspectReconcilesExplicitPushTarget(t *testing.T) {
+	s, root := repositoryTestServer(t)
+	repo := filepath.Join(root, "repo")
+	head := initFixtureRepo(t, repo)
+	fixtureGit(t, repo, "remote", "add", "origin", "https://example.com/acme/project.git")
+	s.workspaceHooks = &workspaceTestHooks{remoteHead: func(remoteURL, remoteRef string) (string, bool, error) {
+		if remoteRef != "refs/heads/pushed-branch" {
+			t.Fatalf("unexpected remote ref %q", remoteRef)
+		}
+		return head, true, nil
+	}}
+	resp := s.repositoryInspectContext(context.Background(), Request{
+		RepositoryPath: repo,
+		VerifyRemote:   true,
+		RemoteName:     "origin",
+		RemoteBranch:   "pushed-branch",
+	})
+	if !resp.OK || resp.Repository == nil {
+		t.Fatalf("explicit push reconciliation failed: %+v", resp)
+	}
+	proof := resp.Repository.RemoteVerification
+	if !proof.Attempted || !proof.Succeeded || !proof.Exists || !proof.MatchesHead || proof.Head != head || proof.Branch != "pushed-branch" {
+		t.Fatalf("unexpected explicit remote proof: %+v", proof)
+	}
+}
+
 func TestRemoteVerificationFailureIsExplicit(t *testing.T) {
 	s, root := repositoryTestServer(t)
 	repo := filepath.Join(root, "repo")

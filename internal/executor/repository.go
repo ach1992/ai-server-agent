@@ -510,6 +510,46 @@ func (s *Server) resolveRemoteHead(ctx context.Context, dir, remoteName, remoteB
 	return fields[0], true, ""
 }
 
+func repositoryHasRemote(remotes []RepositoryRemote, name string) bool {
+	for _, remote := range remotes {
+		if remote.Name == name {
+			return true
+		}
+	}
+	return false
+}
+
+func (s *Server) verifyRepositoryRemote(ctx context.Context, path string, state *RepositoryState, remote, remoteBranch string) {
+	state.RemoteVerification = RepositoryRemoteVerification{
+		Attempted: true,
+		Remote:    remote,
+		Branch:    remoteBranch,
+	}
+	if !repositoryHasRemote(state.Remotes, remote) {
+		state.RemoteVerification.ErrorCode = "remote_not_configured"
+		return
+	}
+	normalized, err := normalizeRemoteBranch(remoteBranch)
+	if err != nil {
+		state.RemoteVerification.ErrorCode = "invalid_remote_branch"
+		return
+	}
+	if err := validateBranchName(s, ctx, path, normalized); err != nil {
+		state.RemoteVerification.ErrorCode = "invalid_remote_branch"
+		return
+	}
+	state.RemoteVerification.Branch = normalized
+	remoteHead, exists, remoteCode := s.resolveRemoteHead(ctx, path, remote, normalized)
+	state.RemoteVerification.ErrorCode = remoteCode
+	if remoteCode != "" {
+		return
+	}
+	state.RemoteVerification.Succeeded = true
+	state.RemoteVerification.Exists = exists
+	state.RemoteVerification.Head = remoteHead
+	state.RemoteVerification.MatchesHead = exists && remoteHead == state.Head
+}
+
 func (s *Server) inspectRepository(ctx context.Context, inputPath string, verifyRemote bool) (RepositoryState, string, error) {
 	path, err := s.workspacePath(inputPath, true)
 	if err != nil {
@@ -627,21 +667,12 @@ func (s *Server) inspectRepository(ctx context.Context, inputPath string, verify
 		Worktrees:       worktrees,
 	}
 	if verifyRemote {
-		state.RemoteVerification.Attempted = true
 		remote, remoteBranch, ok := s.branchUpstreamConfig(ctx, path, branch)
 		if !ok {
+			state.RemoteVerification.Attempted = true
 			state.RemoteVerification.ErrorCode = "upstream_not_configured"
 		} else {
-			state.RemoteVerification.Remote = remote
-			state.RemoteVerification.Branch = remoteBranch
-			remoteHead, exists, remoteCode := s.resolveRemoteHead(ctx, path, remote, remoteBranch)
-			state.RemoteVerification.ErrorCode = remoteCode
-			if remoteCode == "" {
-				state.RemoteVerification.Succeeded = true
-				state.RemoteVerification.Exists = exists
-				state.RemoteVerification.Head = remoteHead
-				state.RemoteVerification.MatchesHead = exists && remoteHead == headBefore
-			}
+			s.verifyRepositoryRemote(ctx, path, &state, remote, remoteBranch)
 		}
 	}
 	headAfter, code, err := s.gitResult(ctx, path, "rev-parse", "--verify", "HEAD")
@@ -784,13 +815,29 @@ func (s *Server) repositoryInspectContext(parent context.Context, req Request) R
 	defer release()
 	ctx, cancel := context.WithTimeout(parent, repositoryOperationTimeout)
 	defer cancel()
-	state, code, err := s.inspectRepository(ctx, req.RepositoryPath, req.VerifyRemote)
+	customRemote := strings.TrimSpace(req.RemoteName) != "" || strings.TrimSpace(req.RemoteBranch) != ""
+	if customRemote && !req.VerifyRemote {
+		return repositoryError("invalid_remote_proof", "validation", "remote and remote_branch require verify_remote=true", false)
+	}
+	if customRemote && (strings.TrimSpace(req.RemoteName) == "" || strings.TrimSpace(req.RemoteBranch) == "") {
+		return repositoryError("invalid_remote_proof", "validation", "remote and remote_branch must be supplied together", false)
+	}
+	state, code, err := s.inspectRepository(ctx, req.RepositoryPath, req.VerifyRemote && !customRemote)
 	if err != nil {
 		resp := repositoryError(code, "state", err.Error(), code == "repository_changed")
 		if state.Head != "" {
 			resp.Repository = &state
 		}
 		return resp
+	}
+	if customRemote {
+		s.verifyRepositoryRemote(ctx, state.Path, &state, strings.TrimSpace(req.RemoteName), strings.TrimSpace(req.RemoteBranch))
+		headAfter, headCode, headErr := s.gitResult(ctx, state.Path, "rev-parse", "--verify", "HEAD")
+		if headErr != nil || headCode != 0 || headAfter != state.Head {
+			resp := repositoryError("repository_changed", "state", "repository HEAD changed during remote verification", true)
+			resp.Repository = &state
+			return resp
+		}
 	}
 	return Response{OK: true, Status: "complete", Repository: &state}
 }
