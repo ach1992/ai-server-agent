@@ -273,7 +273,7 @@ credential_status(){
 credential_issue(){ (
   acquire_management_lock
   need_cmd jq; need_cmd sha256sum; need_cmd curl
-  [ -r /dev/tty ] && [ -w /dev/tty ] || die "Credential issuance/rotation requires an interactive local terminal so the newly issued secret can be revealed exactly once."
+  [ -t 0 ] && [ -t 1 ] || die "Credential issuance/rotation requires an interactive local terminal so the newly issued secret can be revealed exactly once."
   local principal="$1" fields class name token verifier now created existed candidate backup
   fields="$(credential_principal_fields "$principal")" || die "Unknown MCP principal: $principal"
   IFS='|' read -r class name <<<"$fields"
