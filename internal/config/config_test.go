@@ -34,7 +34,8 @@ func TestAuthenticationConfigurationIsFailClosed(t *testing.T) {
 		{name: "empty auth mode", mutate: func(c *Config) { c.AuthMode = "" }},
 		{name: "no auth mode", mutate: func(c *Config) { c.AuthMode = "none" }},
 		{name: "unknown auth mode", mutate: func(c *Config) { c.AuthMode = "unexpected" }},
-		{name: "missing bearer token path", mutate: func(c *Config) { c.BearerTokenFile = "" }},
+		{name: "missing credential source", mutate: func(c *Config) { c.BearerTokenFile = ""; c.CredentialStoreFile = "" }},
+		{name: "ambiguous credential sources", mutate: func(c *Config) { c.CredentialStoreFile = "/tmp/mcp-credentials.json" }},
 		{name: "missing executor token path", mutate: func(c *Config) { c.ExecutorToken = "" }},
 	}
 	for _, tt := range tests {
@@ -45,5 +46,14 @@ func TestAuthenticationConfigurationIsFailClosed(t *testing.T) {
 				t.Fatal("expected invalid authentication configuration to be rejected")
 			}
 		})
+	}
+}
+
+func TestNamedCredentialStoreConfiguration(t *testing.T) {
+	c := Default()
+	c.BearerTokenFile = ""
+	c.CredentialStoreFile = "/etc/ai-server-agent/mcp-credentials.json"
+	if err := c.Validate(); err != nil {
+		t.Fatalf("named credential store config rejected: %v", err)
 	}
 }
