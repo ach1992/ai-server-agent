@@ -21,6 +21,8 @@ CONTROL_DIR="$CONFIG_DIR/control"
 INSTALL_STATE="$CONTROL_DIR/install-state.json"
 MANAGED_STATE="$CONFIG_DIR/managed.json"
 MCP_AUTH_HEADER_FILE="$CONFIG_DIR/mcp.authorization"
+MCP_CREDENTIAL_STORE="$CONFIG_DIR/mcp-credentials.json"
+LEGACY_MCP_TOKEN_FILE="$CONFIG_DIR/mcp.token"
 AGENT_USER="aiagent"
 WORKER_USER="aiworker"
 PORT="${AI_SERVER_AGENT_PORT:-3210}"
@@ -36,6 +38,10 @@ RESOLVE_REF_ONLY=0
 FRESH_INSTALL=1
 SETUP_INCOMPLETE=0
 RESOLVED_SOURCE_REF=""
+MCP_ACTIVATION_TOKEN=""
+MCP_CREDENTIAL_ORIGIN=""
+MCP_STORE_CREATED=0
+PREVIOUS_CONFIG_BACKUP=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-/dev/null}")" 2>/dev/null && pwd || true)"
 LIFECYCLE_LOCK_DIR=/run/lock/ai-server-agent
 LIFECYCLE_LOCK="$LIFECYCLE_LOCK_DIR/management.lock"
@@ -232,12 +238,41 @@ install -o "$AGENT_USER" -g "$AGENT_USER" -m 0640 /dev/null "$STATE_DIR/AI_ENVIR
 install -d -m 0755 -o root -g root "$LIB_DIR"
 
 random_hex(){ od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; printf '\n'; }
+token_verifier(){ printf '%s' "$1" | sha256sum | awk '{print $1}'; }
+verify_mcp_token_local(){
+  local token="$1" scheme=http url code
+  [ -n "$TLS_CERT_FILE" ] && scheme=https
+  url="$scheme://127.0.0.1:$PORT/mcp"
+  if [ "$scheme" = https ]; then
+    code="$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -ksS --config - -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' --data '{}' "$url" || true)"
+  else
+    code="$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -sS --config - -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' --data '{}' "$url" || true)"
+  fi
+  [ "$code" != "000" ] && [ "$code" != "401" ]
+}
 if [ ! -s "$CONFIG_DIR/executor.token" ]; then random_hex > "$CONFIG_DIR/executor.token"; fi
-if [ ! -s "$CONFIG_DIR/mcp.token" ]; then random_hex > "$CONFIG_DIR/mcp.token"; fi
-chown root:"$AGENT_USER" "$CONFIG_DIR"/*.token
-chmod 0640 "$CONFIG_DIR"/*.token
-printf 'Bearer %s\n' "$(cat "$CONFIG_DIR/mcp.token")" > "$MCP_AUTH_HEADER_FILE"
-chown root:"$AGENT_USER" "$MCP_AUTH_HEADER_FILE"; chmod 0640 "$MCP_AUTH_HEADER_FILE"
+chown root:"$AGENT_USER" "$CONFIG_DIR/executor.token"
+chmod 0640 "$CONFIG_DIR/executor.token"
+
+if [ ! -s "$MCP_CREDENTIAL_STORE" ]; then
+  if [ -s "$LEGACY_MCP_TOKEN_FILE" ]; then
+    MCP_ACTIVATION_TOKEN="$(tr -d '\r\n' < "$LEGACY_MCP_TOKEN_FILE")"
+    [[ "$MCP_ACTIVATION_TOKEN" =~ ^[0-9a-f]{64}$ ]] || die "Existing MCP bearer cannot be migrated safely because it does not match the supported 32-byte hex credential contract. Existing auth was left unchanged."
+    MCP_CREDENTIAL_ORIGIN=legacy
+  else
+    MCP_ACTIVATION_TOKEN="$(random_hex)"
+    MCP_CREDENTIAL_ORIGIN=fresh
+  fi
+  verifier="$(token_verifier "$MCP_ACTIVATION_TOKEN")"
+  created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  cred_tmp="$(mktemp "$CONFIG_DIR/.mcp-credentials.XXXXXX")"
+  jq -n --arg verifier "$verifier" --arg created_at "$created_at"     '{version:1,credentials:[{principal:{id:"direct-default",class:"direct",name:"direct/default"},verifier_algorithm:"sha256-v1",verifier:$verifier,created_at:$created_at,enabled:true}]}' > "$cred_tmp"
+  chown root:"$AGENT_USER" "$cred_tmp"; chmod 0640 "$cred_tmp"
+  mv -f "$cred_tmp" "$MCP_CREDENTIAL_STORE"
+  MCP_STORE_CREATED=1
+fi
+chown root:"$AGENT_USER" "$MCP_CREDENTIAL_STORE"
+chmod 0640 "$MCP_CREDENTIAL_STORE"
 
 install_helpers(){
   local root="$1"
@@ -326,13 +361,17 @@ fi
 BIND="127.0.0.1:$PORT"; AUTH_MODE="bearer"; SCHEME="http"
 if [ "$MODE" = "public" ]; then BIND="0.0.0.0:$PORT"; fi
 if [ -n "$TLS_CERT_FILE" ]; then SCHEME="https"; fi
+if [ "$FRESH_INSTALL" -eq 0 ]; then
+  PREVIOUS_CONFIG_BACKUP="$(mktemp)"
+  cp -a "$CONFIG_FILE" "$PREVIOUS_CONFIG_BACKUP"
+fi
 cat > "$CONFIG_FILE" <<JSON
 {
   "listen_address": "$BIND",
   "mcp_path": "/mcp",
   "health_path": "/healthz",
   "auth_mode": "$AUTH_MODE",
-  "bearer_token_file": "$CONFIG_DIR/mcp.token",
+  "credential_store_file": "$MCP_CREDENTIAL_STORE",
   "tls_cert_file": "$TLS_CERT_FILE",
   "tls_key_file": "$TLS_KEY_FILE",
   "executor_socket": "/run/ai-server-agent/executor.sock",
@@ -434,7 +473,33 @@ systemctl is-active --quiet ai-server-agent.service || die "MCP service did not 
 if [ "$SCHEME" = "https" ]; then curl -kfsS "https://127.0.0.1:$PORT/healthz" >/dev/null || die "TLS health check failed"
 else curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null || die "health check failed"; fi
 
+if [ -n "$MCP_ACTIVATION_TOKEN" ]; then
+  if ! verify_mcp_token_local "$MCP_ACTIVATION_TOKEN"; then
+    if [ "$MCP_CREDENTIAL_ORIGIN" = legacy ] && [ -n "$PREVIOUS_CONFIG_BACKUP" ]; then
+      install -o root -g "$AGENT_USER" -m 0640 "$PREVIOUS_CONFIG_BACKUP" "$CONFIG_FILE"
+      [ "$MCP_STORE_CREATED" -eq 0 ] || rm -f -- "$MCP_CREDENTIAL_STORE"
+      systemctl restart ai-server-agent-executor.service ai-server-agent.service || true
+      rm -f -- "$PREVIOUS_CONFIG_BACKUP"
+      die "Named-credential migration could not be verified; the previous legacy bearer configuration was restored and its plaintext token was preserved for recovery."
+    fi
+    die "New named MCP credential could not be verified after service activation; authentication remains fail-closed. Re-run repair and rotate the direct/default credential locally."
+  fi
+  rm -f -- "$LEGACY_MCP_TOKEN_FILE" "$MCP_AUTH_HEADER_FILE"
+fi
+[ -z "$PREVIOUS_CONFIG_BACKUP" ] || rm -f -- "$PREVIOUS_CONFIG_BACKUP"
+
 log "Core installation is healthy."
+
+if [ "$MCP_CREDENTIAL_ORIGIN" = fresh ] && [ "$NONINTERACTIVE" != "1" ] && [ -r /dev/tty ]; then
+  printf '\nA new direct/default MCP credential was issued. It is not stored in recoverable plaintext.\n' >/dev/tty
+  read -r -p 'Reveal the new Authorization value once in this terminal? [y/N] ' reveal_new </dev/tty
+  if [[ "$reveal_new" =~ ^[Yy]$ ]]; then
+    printf 'Authorization: Bearer %s\n' "$MCP_ACTIVATION_TOKEN" >/dev/tty
+  else
+    printf 'Not shown. If needed later, rotate direct/default locally to issue a replacement.\n' >/dev/tty
+  fi
+fi
+MCP_ACTIVATION_TOKEN=""
 
 if [ "$NONINTERACTIVE" = "1" ]; then
   case "$SETUP_MODE" in
