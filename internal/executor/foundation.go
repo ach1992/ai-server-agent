@@ -307,7 +307,7 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 		Mode:    map[bool]string{true: "root", false: "worker"}[req.Root],
 		Success: err == nil,
 		Detail:  dec.Category,
-	})
+		PrincipalID:    req.PrincipalID,\n\t\tPrincipalClass: req.PrincipalClass,\n\t\tPrincipalName:  req.PrincipalName,\n	})
 	resp := Response{
 		OK:         err == nil,
 		Error:      errorText,
