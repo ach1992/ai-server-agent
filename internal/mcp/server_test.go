@@ -322,7 +322,12 @@ func TestNamedCredentialAuthAttachesServerDerivedPrincipal(t *testing.T) {
 		t.Fatal(err)
 	}
 	storePath := filepath.Join(cfg.StateDir, "mcp-credentials.json")
-	storeJSON := `{"version":1,"credentials":[{"principal":{"id":"mcp-gateway","class":"gateway","name":"mcp-gateway"},"verifier_algorithm":"sha256-v1","verifier":"` + digest + `","created_at":"2026-10-08T00:00:00Z","enabled":true}]}`
+	directToken := strings.Repeat("c", credential.TokenHexLength)
+	directDigest, err := credential.VerifyToken(directToken)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storeJSON := `{"version":1,"credentials":[{"principal":{"id":"direct-default","class":"direct","name":"direct/default"},"verifier_algorithm":"sha256-v1","verifier":"` + directDigest + `","created_at":"2026-10-08T00:00:00Z","enabled":true},{"principal":{"id":"mcp-gateway","class":"gateway","name":"mcp-gateway"},"verifier_algorithm":"sha256-v1","verifier":"` + digest + `","created_at":"2026-10-08T00:00:00Z","enabled":true}]}`
 	if err := os.WriteFile(storePath, []byte(storeJSON), 0600); err != nil {
 		t.Fatal(err)
 	}
