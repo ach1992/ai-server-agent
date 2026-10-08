@@ -505,7 +505,9 @@ jobs:
           sudo test -e /srv/ai-workspace/lifecycle-workspace-sentinel
       - name: Legacy bearer migrates without forced rotation
         run: |
-          legacy='0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+          legacy="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
+          test "${#legacy}" -eq 64
+          command -v script >/dev/null
           sudo install -d -m 0750 -o root -g root /etc/ai-server-agent
           cat >/tmp/legacy-agent-config.json <<'EOF_LEGACY_CONFIG'
           {
@@ -552,6 +554,22 @@ jobs:
           test -n "$gateway_v2"
           test "$gateway_v1" != "$gateway_v2"
           test "$(sudo jq '[.credentials[] | select(.principal.id=="mcp-gateway")] | length' /etc/ai-server-agent/mcp-credentials.json)" -eq 1
+
+          # Force activation failure through the library path and prove the
+          # on-disk credential store is restored byte-for-byte.
+          store_before="$(sudo sha256sum /etc/ai-server-agent/mcp-credentials.json | awk '{print $1}')"
+          if sudo env AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1 bash -c '
+            source /usr/local/lib/ai-server-agent/manage.sh
+            systemctl(){ return 1; }
+            credential_revoke mcp-gateway
+          '; then
+            echo 'forced credential activation failure unexpectedly succeeded' >&2
+            exit 1
+          fi
+          store_after="$(sudo sha256sum /etc/ai-server-agent/mcp-credentials.json | awk '{print $1}')"
+          test "$store_before" = "$store_after"
+          test "$(sudo jq -r '.credentials[] | select(.principal.id=="mcp-gateway") | .enabled' /etc/ai-server-agent/mcp-credentials.json)" = true
+          sudo systemctl is-active --quiet ai-server-agent.service
 
           sudo ai-server-agent-manage credential-revoke mcp-gateway
           test "$(sudo jq -r '.credentials[] | select(.principal.id=="mcp-gateway") | .enabled' /etc/ai-server-agent/mcp-credentials.json)" = false
