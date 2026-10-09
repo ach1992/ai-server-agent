@@ -2,7 +2,7 @@
 
 > Status: **accepted target architecture; not yet fully shipped**.
 >
-> Current runtime behavior is documented by `README.md` and the current implementation. This document defines the accepted Developer Runtime target delivered by the relevant workstreams tracked under Issues #54-#66. Phase A architecture/documentation is integrated and its execution boundary was owner-accepted on 2026-10-07; optional/deferred workstreams in that range are explicitly non-blocking below.
+> Current runtime behavior is documented by `README.md` and the current implementation. This document defines the accepted Developer Runtime target delivered by the relevant workstreams tracked under Issues #54-#66 and the cross-cutting data-delivery Issue #99. Phase A architecture/documentation is integrated and its execution boundary was owner-accepted on 2026-10-07; optional/deferred workstreams in that range are explicitly non-blocking below.
 
 ## 1. Outcome
 
@@ -311,6 +311,22 @@ Browser traces/screenshots, debug logs/output, profiles, test artifacts and simi
 - do not copy raw artifacts into audit logs;
 - a local artifact path is runtime identity, not durable GitHub project identity.
 
+### AI-facing bounded data delivery
+
+Source-byte limits, encoded MCP response limits, and the AI client's usable context are three *different* budgets. The Agent must not assume that a successful large tool response means the model can see or interpret it. Issue #99 owns implementation and client-facing acceptance of this concern; #42's completed resource-governance contract remains authoritative for existing bounds.
+
+| Need | Preferred presentation |
+| --- | --- |
+| Small, focused text or structured facts | Compact inline content with source identity, type/encoding, and completeness metadata. |
+| Medium or searchable content | Prefer metadata-first workspace_stat on readable worker files, then a deliberately small workspace_read window with matching file_version or scoped search/selection. File size is not MIME detection or content interpretation. |
+| Large files or generated evidence | Keep data at the source; return bounded metadata/preview and use safe, authorized ranged access or an expiring artifact handle only where a concrete consumer justifies one. |
+| Binary, images, PDF, archives, audio or other formats | Represent the type accurately; use protocol-native typed content or a resource/optional extraction mechanism only when supported and authorized. Transporting base64 bytes is not equivalent to AI understanding a document or image. |
+| Streaming logs, PTY/LSP/DAP and browser events | Bounded incremental output with explicit cursor/sequence, retention gaps, truncation and reconnection semantics; never imply dropped bytes can be replayed. |
+
+Keep existing worker/root authority, current resource ceilings, per-principal authorization, workspace confinement, object-version checks, audit/retention and separate generated-artifact lifecycle. Prefer extending existing data/file paths, not adding a universal parser, object store, public download endpoint, alternative file writer or speculative upload framework. Any later binary-safe resumable upload must have a real consumer plus explicit integrity, admission, atomic publication and partial-completion controls.
+
+The current MCP implementation sends tool results through `structuredContent` and, when the serialized text fallback would exceed its 32 KiB budget, omits raw payload bytes from that fallback. When a client does not show structured content, the fallback must still provide bounded continuation/retention metadata and an actionable smaller read size; it must not silently claim that the AI saw the payload. This alone does not solve typed-artifact presentation, client token limits or missing historical job-log bytes. Issue #99 and the final integrated #59 acceptance must validate those boundaries using real direct MCP clients.
+
 ## 13. Optional and deferred capabilities
 
 Not Core-v1 requirements:
@@ -407,6 +423,7 @@ Do not promote capabilities merely because they are powerful, modern, or availab
 - #63 — Browser / Playwright;
 - #64 — environment/toolchain discovery;
 - #65 — optional evidence-triggered Incus;
-- #66 — internal stateful-session substrate.
+- #66 — internal stateful-session substrate;
+- #99 — AI-facing bounded data delivery and typed-artifact acceptance.
 
 After this document is integrated, use it for stable architecture and use Issues for active work/dependencies. Do not reconstruct these decisions from chat history.

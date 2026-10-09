@@ -128,7 +128,7 @@ func New(cfg config.Config) (*Server, error) {
 }
 
 func instructions(workspaceDir string) string {
-	return fmt.Sprintf("Dedicated AI-operated test-server control plane. Before host-wide package, firewall, network, service, disk, user, web-stack, or control-panel changes, call agent_environment and preserve all critical components it reports. The workspace at %s is persistent: use repository_discover/repository_inspect for repository identity, prefer git worktree for task isolation and use worktree_create/worktree_remove when structured lifecycle safety adds value, keep ordinary Git verbs in run_command/PTY, reuse existing repositories, worktrees, and task environments before creating duplicates, and never delete dirty, untracked, ambiguous, or unknown workspace state. The control plane intentionally does not own ports 80/443 and does not require nginx, Apache, PHP, MySQL, Docker, Node.js, Python, or aaPanel. Use run_command for ordinary bounded work and run_root_command only when host-level privileges are required. For code inspection, use workspace_search mode=text for bounded literal/regex text occurrences when trusted ripgrep and Landlock ABI v2 are available, workspace_search mode=structural for syntax-tree patterns, and LSP for semantic symbol/type/reference meaning. Use rg/git grep through run_command as the advanced/unstructured CLI fallback; run_command retains normal aiworker authority rather than the structured helper Landlock boundary. Use start_job from the beginning for installs, large builds/test suites, migrations, crawls, or other work expected to run long or produce substantial output, then continue with job_status/job_output. If a tool returns approval_required, explain the exact risk to the user and retry with approval=true only after explicit confirmation. Persistent jobs survive MCP/ChatGPT disconnects. Optional interactive terminal workflows may install and use tmux through root shell without making tmux a core dependency.", workspaceDir)
+	return fmt.Sprintf("Dedicated AI-operated test-server control plane. Before host-wide package, firewall, network, service, disk, user, web-stack, or control-panel changes, call agent_environment and preserve all critical components it reports. The workspace at %s is persistent: use repository_discover/repository_inspect for repository identity, prefer git worktree for task isolation and use worktree_create/worktree_remove when structured lifecycle safety adds value, keep ordinary Git verbs in run_command/PTY, reuse existing repositories, worktrees, and task environments before creating duplicates, and never delete dirty, untracked, ambiguous, or unknown workspace state. The control plane intentionally does not own ports 80/443 and does not require nginx, Apache, PHP, MySQL, Docker, Node.js, Python, or aaPanel. Use run_command for ordinary bounded work and run_root_command only when host-level privileges are required. For unknown/large source files, use workspace_stat to inspect size/version without content, then workspace_read with a small explicit limit and matching file_version; metadata is not file content. For code inspection, use workspace_search mode=text for bounded literal/regex text occurrences when trusted ripgrep and Landlock ABI v2 are available, workspace_search mode=structural for syntax-tree patterns, and LSP for semantic symbol/type/reference meaning. Use rg/git grep through run_command as the advanced/unstructured CLI fallback; run_command retains normal aiworker authority rather than the structured helper Landlock boundary. Use start_job from the beginning for installs, large builds/test suites, migrations, crawls, or other work expected to run long or produce substantial output, then continue with job_status/job_output. If a tool returns approval_required, explain the exact risk to the user and retry with approval=true only after explicit confirmation. Persistent jobs survive MCP/ChatGPT disconnects. Optional interactive terminal workflows may install and use tmux through root shell without making tmux a core dependency.", workspaceDir)
 }
 
 func annotations(readOnly, destructive, idempotent, openWorld bool) *mcpsdk.ToolAnnotations {
@@ -163,18 +163,48 @@ func textResult(text string, isError bool) *mcpsdk.CallToolResult {
 }
 
 func responseResult(resp executor.Response) (*mcpsdk.CallToolResult, executor.Response, error) {
-	const maxTextFallbackOutputBytes = 32 << 10
-	if len(resp.Output) <= maxTextFallbackOutputBytes {
+	const maxTextFallbackBytes = 32 << 10
+	if len(resp.Output) <= maxTextFallbackBytes {
 		b, err := json.MarshalIndent(resp, "", "  ")
 		if err != nil {
 			return nil, executor.Response{}, err
 		}
-		return textResult(string(b), !resp.OK), resp, nil
+		// Escape sequences can expand short raw text substantially (for
+		// example, NUL becomes \\u0000). Bound the serialized text result,
+		// not just the unencoded output field.
+		if len(b) <= maxTextFallbackBytes {
+			return textResult(string(b), !resp.OK), resp, nil
+		}
 	}
+	// A text-only MCP client may hide structuredContent. Keep this fallback
+	// bounded and free of payload bytes, but retain enough continuation and
+	// consistency metadata for the caller to request a smaller useful range.
 	summary := fmt.Sprintf(
-		"ok=%t status=%q error_code=%q exit_code=%d bytes_returned=%d truncated=%t; output omitted from text fallback, use structuredContent",
-		resp.OK, resp.Status, resp.ErrorCode, resp.ExitCode, resp.BytesReturned, resp.Truncated,
+		"ok=%t status=%q error_code=%q exit_code=%d bytes_seen=%d bytes_returned=%d output_encoding=%q truncated=%t omitted_bytes=%d",
+		resp.OK, resp.Status, resp.ErrorCode, resp.ExitCode, resp.BytesSeen, resp.BytesReturned, resp.OutputEncoding, resp.Truncated, resp.OmittedBytes,
 	)
+	if resp.FileSize != nil {
+		summary += fmt.Sprintf(" file_size=%d", *resp.FileSize)
+	}
+	if resp.FileVersion != "" {
+		summary += fmt.Sprintf(" file_version=%q", resp.FileVersion)
+	}
+	if resp.JobID != "" {
+		summary += fmt.Sprintf(" job_id=%q", resp.JobID)
+	}
+	if resp.NextOffset != nil {
+		summary += fmt.Sprintf(" requested_offset=%d next_offset=%d", resp.RequestedOffset, *resp.NextOffset)
+		if resp.EOF != nil {
+			summary += fmt.Sprintf(" eof=%t", *resp.EOF)
+		}
+		if resp.JobID != "" {
+			summary += fmt.Sprintf(" available_from_offset=%d current_end=%d retention_truncated=%t",
+				resp.AvailableFromOffset, resp.CurrentEnd, resp.RetentionTruncated)
+		}
+		summary += "; output omitted from text fallback: use structuredContent, or re-request the needed range starting at requested_offset with limit<=4096, then continue via next_offset (keep file_version for files)"
+	} else {
+		summary += "; output omitted from text fallback: use structuredContent; this output is not resumable, request focused output or use start_job for future high-output commands"
+	}
 	return textResult(summary, !resp.OK), resp, nil
 }
 
