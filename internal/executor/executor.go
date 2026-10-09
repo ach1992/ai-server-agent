@@ -295,7 +295,7 @@ func (s *Server) jobStop(req Request) Response {
 	cmd.Stderr = out
 	er := cmd.Run()
 	result := out.Result()
-	_ = s.audit.Write(audit.Entry{Action: "job_stop", Success: er == nil, Detail: id})
+	_ = s.audit.Write(audit.Entry{Action: "job_stop", Success: er == nil, Detail: id, PrincipalID: req.PrincipalID, PrincipalClass: req.PrincipalClass, PrincipalName: req.PrincipalName})
 	if er != nil {
 		resp := Response{Error: er.Error(), ReasonCode: "job_stop_failed", ErrorCode: "job_stop_failed", ErrorClass: "process", JobID: id}
 		applyOutputResult(&resp, result)

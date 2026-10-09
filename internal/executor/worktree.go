@@ -41,7 +41,7 @@ func branchInWorktree(worktrees []RepositoryWorktree, branch string) (Repository
 	return RepositoryWorktree{}, false
 }
 
-func (s *Server) auditRepositoryAction(action, path string, success bool, detail string) {
+func (s *Server) auditRepositoryAction(req Request, action, path string, success bool, detail string) {
 	if s.audit == nil {
 		return
 	}
@@ -51,7 +51,16 @@ func (s *Server) auditRepositoryAction(action, path string, success bool, detail
 			path = rel
 		}
 	}
-	_ = s.audit.Write(audit.Entry{Action: action, Mode: "worker", Command: path, Success: success, Detail: detail})
+	_ = s.audit.Write(audit.Entry{
+		Action:         action,
+		Mode:           "worker",
+		Command:        path,
+		Success:        success,
+		Detail:         detail,
+		PrincipalID:    req.PrincipalID,
+		PrincipalClass: req.PrincipalClass,
+		PrincipalName:  req.PrincipalName,
+	})
 }
 
 func (s *Server) commitUsesCheckoutFilter(ctx context.Context, repositoryPath, commitSHA string) (bool, error) {
@@ -192,22 +201,22 @@ func (s *Server) worktreeCreateContext(parent context.Context, req Request) Resp
 	_, exitCode, gitErr = s.gitResult(ctx, repo.Root, args...)
 	if gitErr != nil || exitCode != 0 {
 		if _, statErr := os.Lstat(target); statErr == nil {
-			s.auditRepositoryAction("worktree_create", target, false, "unknown_completion")
+			s.auditRepositoryAction(req, "worktree_create", target, false, "unknown_completion")
 			return repositoryError("unknown_completion", "state", "worktree creation failed after local state appeared; inspect before retrying", true)
 		}
-		s.auditRepositoryAction("worktree_create", target, false, "git_failed")
+		s.auditRepositoryAction(req, "worktree_create", target, false, "git_failed")
 		return repositoryError("worktree_create_failed", "process", "git worktree creation failed", false)
 	}
 	created, inspectCode, inspectErr := s.inspectRepository(ctx, target, false)
 	if inspectErr != nil || created.CommonGitDir != repo.CommonGitDir || created.Branch != req.Branch || created.Head != req.ExpectedSHA {
-		s.auditRepositoryAction("worktree_create", target, false, "verification_failed")
+		s.auditRepositoryAction(req, "worktree_create", target, false, "verification_failed")
 		message := "worktree creation completed but exact resulting identity could not be proven"
 		if inspectErr != nil && inspectCode != "" {
 			message += " (" + inspectCode + ")"
 		}
 		return repositoryError("unknown_completion", "state", message, true)
 	}
-	s.auditRepositoryAction("worktree_create", target, true, req.Branch)
+	s.auditRepositoryAction(req, "worktree_create", target, true, req.Branch)
 	return Response{OK: true, Status: "created", Repository: &created}
 }
 
@@ -304,28 +313,28 @@ func (s *Server) worktreeRemoveContext(parent context.Context, req Request) Resp
 
 	_, exitCode, gitErr := s.gitResult(ctx, repo.Root, "worktree", "remove", target)
 	if gitErr != nil || exitCode != 0 {
-		s.auditRepositoryAction("worktree_remove", target, false, "git_failed")
+		s.auditRepositoryAction(req, "worktree_remove", target, false, "git_failed")
 		return repositoryError("worktree_remove_failed", "process", "git worktree removal failed", false)
 	}
 	repoAfter, inspectCode, inspectErr := s.inspectRepository(ctx, repo.Root, false)
 	if inspectErr != nil {
-		s.auditRepositoryAction("worktree_remove", target, false, "verification_failed")
+		s.auditRepositoryAction(req, "worktree_remove", target, false, "verification_failed")
 		return repositoryError(inspectCode, "state", "worktree removal completed but repository verification failed", true)
 	}
 	if _, statErr := os.Lstat(target); statErr == nil {
-		s.auditRepositoryAction("worktree_remove", target, false, "path_remains")
+		s.auditRepositoryAction(req, "worktree_remove", target, false, "path_remains")
 		return repositoryError("unknown_completion", "state", "worktree removal returned success but target path still exists", true)
 	} else if !errors.Is(statErr, os.ErrNotExist) {
 		return repositoryError("unknown_completion", "state", "worktree target state is ambiguous after removal", true)
 	}
 	if _, listed := findWorktreeByPath(repoAfter.Worktrees, target); listed {
-		s.auditRepositoryAction("worktree_remove", target, false, "registration_remains")
+		s.auditRepositoryAction(req, "worktree_remove", target, false, "registration_remains")
 		return repositoryError("unknown_completion", "state", "worktree removal returned success but Git still records the worktree", true)
 	}
 	detail := "remote_durable"
 	if req.Disposable {
 		detail = "disposable"
 	}
-	s.auditRepositoryAction("worktree_remove", target, true, detail)
+	s.auditRepositoryAction(req, "worktree_remove", target, true, detail)
 	return Response{OK: true, Status: "removed"}
 }

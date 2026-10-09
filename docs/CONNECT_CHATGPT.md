@@ -54,7 +54,7 @@ Then show the current MCP URL/auth guidance:
 sudo ai-server-agent-manage chatgpt-setup
 ```
 
-The protected Authorization value is revealed only after explicit confirmation in the terminal. Do not paste it into chat, issue comments, documentation, screenshots, shell history or source control. Provide it only to the trusted ChatGPT app-connection UI when configuring the MCP app.
+Existing Authorization plaintext is not retained for later display. When a new direct credential is needed, run `sudo ai-server-agent-manage credential-rotate direct-default`; the replacement value is revealed once in the protected local terminal after verified cutover. Do not paste it into chat, issue comments, documentation, screenshots, shell history or source control. Provide it only to the trusted ChatGPT app-connection UI.
 
 ## Create and test the custom MCP server/plugin in ChatGPT
 
@@ -88,7 +88,7 @@ The default Agent installation is bearer-authenticated and loopback-only at `127
 
 ChatGPT does not connect directly to a local/private MCP server. An operator may use OpenAI Secure MCP Tunnel according to the current OpenAI instructions to carry that local endpoint without exposing it directly to the internet. Today this is an **external integration**, not an Agent-managed connection mode: `ai-server-agent-manage` does not install/manage the Tunnel runtime, its service, Tunnel credentials, or Tunnel status/repair lifecycle. First-class Agent-managed Tunnel support is tracked by parked Issue #35.
 
-The Agent's local MCP endpoint remains bearer-authenticated. Use the protected Authorization value from the server only where the trusted tunnel/client setup requires it, and follow current OpenAI guidance for protected header/secret handling.
+The Agent's local MCP endpoint remains bearer-authenticated. Use a currently issued named Agent credential only where the trusted tunnel/client setup requires it, and follow current OpenAI guidance for protected header/secret handling.
 
 ## End-to-end validation
 

@@ -10,6 +10,9 @@ type Request struct {
 	Approval       bool     `json:"approval,omitempty"`
 	TimeoutMS      int64    `json:"timeout_ms,omitempty"`
 	OperationID    string   `json:"operation_id,omitempty"`
+	PrincipalID    string   `json:"principal_id,omitempty"`
+	PrincipalClass string   `json:"principal_class,omitempty"`
+	PrincipalName  string   `json:"principal_name,omitempty"`
 	JobID          string   `json:"job_id,omitempty"`
 	Offset         int64    `json:"offset,omitempty"`
 	Limit          int      `json:"limit,omitempty"`

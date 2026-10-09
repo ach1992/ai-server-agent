@@ -1099,3 +1099,15 @@ func TestStalePrelaunchClaimRetiresProtectedHandoff(t *testing.T) {
 		t.Fatalf("stale claim state = %q, want failed", got.State)
 	}
 }
+
+func TestOperationClaimNameIsPrincipalScoped(t *testing.T) {
+	const operationID = "shared-operation"
+	direct := operationClaimName(operationID, "direct-default")
+	gateway := operationClaimName(operationID, "mcp-gateway")
+	if direct == gateway {
+		t.Fatal("different authenticated principals share an idempotency claim name")
+	}
+	if direct == legacyOperationClaimName(operationID) {
+		t.Fatal("new direct/default claims must not reuse the legacy unscoped namespace")
+	}
+}

@@ -119,11 +119,22 @@ func (s *Server) startJobBounded(req Request) Response {
 	fingerprint := s.jobFingerprint(req)
 	var claimPath string
 	if req.OperationID != "" {
-		claimPath = filepath.Join(claimsDir, operationClaimName(req.OperationID))
+		claimPath = filepath.Join(claimsDir, operationClaimName(req.OperationID, req.PrincipalID))
 		if claim, found, err := readJobClaim(claimPath); err != nil {
 			return jobStateError("job_state_unavailable", err)
 		} else if found {
 			return s.resumeClaimedJob(req, jobsDir, claimPath, claim, fingerprint)
+		}
+		// Before named principals, direct/default idempotency claims were keyed
+		// only by operation_id. Preserve those claims for the migrated direct
+		// principal while keeping every newly created claim principal-scoped.
+		if req.PrincipalID == "direct-default" {
+			legacyClaimPath := filepath.Join(claimsDir, legacyOperationClaimName(req.OperationID))
+			if claim, found, err := readJobClaim(legacyClaimPath); err != nil {
+				return jobStateError("job_state_unavailable", err)
+			} else if found {
+				return s.resumeClaimedJob(req, jobsDir, legacyClaimPath, claim, fingerprint)
+			}
 		}
 		if err := cleanupFailedJobClaims(jobsDir, claimsDir); err != nil {
 			return jobStateError("job_state_unavailable", err)
@@ -208,10 +219,13 @@ func (s *Server) startJobBounded(req Request) Response {
 	}
 
 	_ = s.audit.Write(audit.Entry{
-		Action:  "start_job",
-		Mode:    map[bool]string{true: "root", false: "worker"}[req.Root],
-		Success: resp.OK,
-		Detail:  dec.Category,
+		Action:         "start_job",
+		Mode:           map[bool]string{true: "root", false: "worker"}[req.Root],
+		Success:        resp.OK,
+		Detail:         dec.Category,
+		PrincipalID:    req.PrincipalID,
+		PrincipalClass: req.PrincipalClass,
+		PrincipalName:  req.PrincipalName,
 	})
 	return resp
 }
@@ -565,7 +579,16 @@ func validateOperationID(id string) error {
 	return nil
 }
 
-func operationClaimName(operationID string) string {
+func operationClaimName(operationID string, principalID ...string) string {
+	principal := ""
+	if len(principalID) > 0 {
+		principal = principalID[0]
+	}
+	sum := sha256.Sum256([]byte(principal + "\x00" + operationID))
+	return hex.EncodeToString(sum[:]) + ".json"
+}
+
+func legacyOperationClaimName(operationID string) string {
 	sum := sha256.Sum256([]byte(operationID))
 	return hex.EncodeToString(sum[:]) + ".json"
 }

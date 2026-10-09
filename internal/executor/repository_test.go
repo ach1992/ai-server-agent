@@ -9,6 +9,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/ach1992/ai-server-agent/internal/audit"
 	"github.com/ach1992/ai-server-agent/internal/config"
 )
 
@@ -643,5 +644,31 @@ func TestRepositoryPathsCannotEscapeWorkspace(t *testing.T) {
 	})
 	if resp.ErrorCode != "invalid_worktree_path" {
 		t.Fatalf("outside worktree path accepted: %+v", resp)
+	}
+}
+
+func TestRepositoryMutationAuditIncludesServerDerivedPrincipal(t *testing.T) {
+	s, root := repositoryTestServer(t)
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
+	s.audit = audit.New(auditPath)
+	req := Request{
+		PrincipalID:    "mcp-gateway",
+		PrincipalClass: "gateway",
+		PrincipalName:  "mcp-gateway",
+	}
+	s.auditRepositoryAction(req, "worktree_create", filepath.Join(root, "task-worktree"), true, "task-branch")
+	b, err := os.ReadFile(auditPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, want := range []string{
+		`"action":"worktree_create"`,
+		`"principal_id":"mcp-gateway"`,
+		`"principal_class":"gateway"`,
+		`"principal_name":"mcp-gateway"`,
+	} {
+		if !strings.Contains(string(b), want) {
+			t.Fatalf("repository mutation audit missing %s: %s", want, b)
+		}
 	}
 }

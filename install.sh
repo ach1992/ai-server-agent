@@ -21,6 +21,8 @@ CONTROL_DIR="$CONFIG_DIR/control"
 INSTALL_STATE="$CONTROL_DIR/install-state.json"
 MANAGED_STATE="$CONFIG_DIR/managed.json"
 MCP_AUTH_HEADER_FILE="$CONFIG_DIR/mcp.authorization"
+MCP_CREDENTIAL_STORE="$CONFIG_DIR/mcp-credentials.json"
+LEGACY_MCP_TOKEN_FILE="$CONFIG_DIR/mcp.token"
 AGENT_USER="aiagent"
 WORKER_USER="aiworker"
 PORT="${AI_SERVER_AGENT_PORT:-3210}"
@@ -36,15 +38,40 @@ RESOLVE_REF_ONLY=0
 FRESH_INSTALL=1
 SETUP_INCOMPLETE=0
 RESOLVED_SOURCE_REF=""
+MCP_ACTIVATION_TOKEN=""
+MCP_CREDENTIAL_ORIGIN=""
+MCP_STORE_CREATED=0
+MCP_MIGRATION_SWITCHED=0
+MCP_MIGRATION_RECOVERING=0
+PREVIOUS_CONFIG_BACKUP=""
+PREVIOUS_INSTALL_STATE_BACKUP=""
+PREVIOUS_INSTALL_STATE_PRESENT=0
+PREVIOUS_CREDENTIAL_STORE=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-/dev/null}")" 2>/dev/null && pwd || true)"
 LIFECYCLE_LOCK_DIR=/run/lock/ai-server-agent
 LIFECYCLE_LOCK="$LIFECYCLE_LOCK_DIR/management.lock"
 
-trap 'echo "[ERROR] Installation failed at line $LINENO. Review the output above; existing project files were not intentionally modified." >&2' ERR
+installation_error_recovery(){
+  local failed_line="$1"
+  trap - ERR
+  if [ "$MCP_MIGRATION_SWITCHED" -eq 1 ] && [ "$MCP_MIGRATION_RECOVERING" -eq 0 ]; then
+    MCP_MIGRATION_RECOVERING=1
+    rollback_legacy_mcp_migration "installation error at line $failed_line"
+  fi
+  printf '[ERROR] Installation failed at line %s. Review the output above.\n' "$failed_line" >&2
+}
+trap 'installation_error_recovery "$LINENO"' ERR
 
 log(){ printf '[ai-server-agent] %s\n' "$*"; }
 warn(){ printf '[ai-server-agent] WARNING: %s\n' "$*" >&2; }
-die(){ printf '[ai-server-agent] ERROR: %s\n' "$*" >&2; exit 1; }
+die(){
+  if [ "$MCP_MIGRATION_SWITCHED" -eq 1 ] && [ "$MCP_MIGRATION_RECOVERING" -eq 0 ]; then
+    MCP_MIGRATION_RECOVERING=1
+    rollback_legacy_mcp_migration "$*"
+  fi
+  printf '[ai-server-agent] ERROR: %s\n' "$*" >&2
+  exit 1
+}
 need_root(){ [ "$(id -u)" -eq 0 ] || die "Run this installer as root (for example: sudo bash install.sh)."; }
 UBUNTU_MIN_VERSION=22.04
 DEBIAN_MIN_VERSION=11
@@ -166,6 +193,7 @@ apt-get install -y -qq ca-certificates curl git jq openssl tar xz-utils >/dev/nu
 
 # Preserve an existing connection unless explicit environment variables override it.
 if [ "$FRESH_INSTALL" -eq 0 ]; then
+  PREVIOUS_CREDENTIAL_STORE="$(json_string_value credential_store_file)"
   existing_listen="$(json_string_value listen_address)"
   if [ -z "${AI_SERVER_AGENT_BIND_MODE+x}" ]; then case "$existing_listen" in 0.0.0.0:*) MODE=public ;; *) MODE=local ;; esac; fi
   if [ -z "${AI_SERVER_AGENT_PORT+x}" ]; then existing_port="${existing_listen##*:}"; [[ "$existing_port" =~ ^[0-9]+$ ]] && PORT="$existing_port"; fi
@@ -232,12 +260,62 @@ install -o "$AGENT_USER" -g "$AGENT_USER" -m 0640 /dev/null "$STATE_DIR/AI_ENVIR
 install -d -m 0755 -o root -g root "$LIB_DIR"
 
 random_hex(){ od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; printf '\n'; }
+token_verifier(){ printf '%s' "$1" | sha256sum | awk '{print $1}'; }
+verify_mcp_token_local(){
+  local token="$1" scheme=http url code response
+  [ -n "$TLS_CERT_FILE" ] && scheme=https
+  url="$scheme://127.0.0.1:$PORT/agent-environment.json"
+  response="$(mktemp)"
+  if [ "$scheme" = https ]; then
+    code="$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -ksS --max-time 5 --config - -o "$response" -w '%{http_code}' "$url")" || { rm -f "$response"; return 1; }
+  else
+    code="$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -sS --max-time 5 --config - -o "$response" -w '%{http_code}' "$url")" || { rm -f "$response"; return 1; }
+  fi
+  if [ "$code" = 200 ] && jq -e '.schema_version == 1 and (.critical_components | type == "array") and (.purpose | type == "string")' "$response" >/dev/null 2>&1; then
+    rm -f "$response"
+    return 0
+  fi
+  rm -f "$response"
+  return 1
+}
+
+rollback_legacy_mcp_migration(){
+  local reason="$1" config_restore rollback_ok=1
+  [ "$MCP_CREDENTIAL_ORIGIN" = legacy ] && [ -n "$PREVIOUS_CONFIG_BACKUP" ] || return 1
+  config_restore="$(mktemp "$CONFIG_DIR/.config.restore.XXXXXX")"
+  cp -a "$PREVIOUS_CONFIG_BACKUP" "$config_restore"
+  chown root:"$AGENT_USER" "$config_restore"; chmod 0640 "$config_restore"
+  mv -f "$config_restore" "$CONFIG_FILE"
+  [ "$MCP_STORE_CREATED" -eq 0 ] || rm -f -- "$MCP_CREDENTIAL_STORE"
+  if [ "$PREVIOUS_INSTALL_STATE_PRESENT" -eq 1 ] && [ -n "$PREVIOUS_INSTALL_STATE_BACKUP" ]; then
+    cp -a "$PREVIOUS_INSTALL_STATE_BACKUP" "$INSTALL_STATE"
+    rm -f -- "$PREVIOUS_INSTALL_STATE_BACKUP"
+    PREVIOUS_INSTALL_STATE_BACKUP=""
+  elif [ "$PREVIOUS_INSTALL_STATE_PRESENT" -eq 0 ]; then
+    rm -f -- "$INSTALL_STATE"
+  fi
+  if ! systemctl restart ai-server-agent-executor.service ai-server-agent.service; then
+    rollback_ok=0
+  else
+    sleep 1
+    systemctl is-active --quiet ai-server-agent-executor.service || rollback_ok=0
+    systemctl is-active --quiet ai-server-agent.service || rollback_ok=0
+    if [ "$rollback_ok" -eq 1 ]; then
+      if [ "$SCHEME" = https ]; then curl -kfsS "https://127.0.0.1:$PORT/healthz" >/dev/null || rollback_ok=0
+      else curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null || rollback_ok=0
+      fi
+    fi
+  fi
+  rm -f -- "$PREVIOUS_CONFIG_BACKUP"
+  PREVIOUS_CONFIG_BACKUP=""
+  if [ "$rollback_ok" -eq 1 ]; then
+    die "Named-credential migration failed ($reason); the previous legacy bearer configuration was restored and verified, and its plaintext token was preserved for recovery."
+  fi
+  die "Named-credential migration failed ($reason); the previous config was restored on disk but service recovery could not be verified. The legacy plaintext token was preserved for manual recovery."
+}
 if [ ! -s "$CONFIG_DIR/executor.token" ]; then random_hex > "$CONFIG_DIR/executor.token"; fi
-if [ ! -s "$CONFIG_DIR/mcp.token" ]; then random_hex > "$CONFIG_DIR/mcp.token"; fi
-chown root:"$AGENT_USER" "$CONFIG_DIR"/*.token
-chmod 0640 "$CONFIG_DIR"/*.token
-printf 'Bearer %s\n' "$(cat "$CONFIG_DIR/mcp.token")" > "$MCP_AUTH_HEADER_FILE"
-chown root:"$AGENT_USER" "$MCP_AUTH_HEADER_FILE"; chmod 0640 "$MCP_AUTH_HEADER_FILE"
+chown root:"$AGENT_USER" "$CONFIG_DIR/executor.token"
+chmod 0640 "$CONFIG_DIR/executor.token"
 
 install_helpers(){
   local root="$1"
@@ -323,29 +401,57 @@ else
   download_release
 fi
 
+[ ! -L "$MCP_CREDENTIAL_STORE" ] || die "Refusing symlinked MCP credential store: $MCP_CREDENTIAL_STORE"
+if [ -e "$MCP_CREDENTIAL_STORE" ] && [ ! -f "$MCP_CREDENTIAL_STORE" ]; then die "MCP credential store is not a regular file: $MCP_CREDENTIAL_STORE"; fi
+
+if [ -s "$LEGACY_MCP_TOKEN_FILE" ]; then
+  MCP_ACTIVATION_TOKEN="$(tr -d '\r\n' < "$LEGACY_MCP_TOKEN_FILE")"
+  [[ "$MCP_ACTIVATION_TOKEN" =~ ^[0-9a-f]{64}$ ]] || die "Existing MCP bearer cannot be migrated safely because it does not match the supported 32-byte hex credential contract. Existing auth was left unchanged."
+  MCP_CREDENTIAL_ORIGIN=legacy
+  verifier="$(token_verifier "$MCP_ACTIVATION_TOKEN")"
+  if [ -s "$MCP_CREDENTIAL_STORE" ]; then
+    existing_verifier="$(jq -r '.credentials[]? | select(.principal.id=="direct-default") | .verifier' "$MCP_CREDENTIAL_STORE" 2>/dev/null || true)"
+    [ "$existing_verifier" = "$verifier" ] || die "A named credential store and legacy bearer both exist but do not represent the same direct/default credential. Refusing ambiguous migration; previous auth files were left unchanged."
+    if [ -z "$PREVIOUS_CREDENTIAL_STORE" ]; then
+      MCP_STORE_CREATED=1
+    fi
+  else
+    created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    cred_tmp="$(mktemp "$CONFIG_DIR/.mcp-credentials.XXXXXX")"
+    jq -n --arg verifier "$verifier" --arg created_at "$created_at" '{version:1,credentials:[{principal:{id:"direct-default",class:"direct",name:"direct/default"},verifier_algorithm:"sha256-v1",verifier:$verifier,created_at:$created_at,enabled:true}]}' > "$cred_tmp"
+    chown root:"$AGENT_USER" "$cred_tmp"; chmod 0640 "$cred_tmp"
+    mv -f "$cred_tmp" "$MCP_CREDENTIAL_STORE"
+    MCP_STORE_CREATED=1
+  fi
+elif [ ! -s "$MCP_CREDENTIAL_STORE" ]; then
+  if [ "$FRESH_INSTALL" -eq 0 ] && [ -n "$PREVIOUS_CREDENTIAL_STORE" ]; then
+    die "Configured named MCP credential store is missing or empty. Refusing implicit credential regeneration; restore the preserved store or use explicit local credential recovery."
+  fi
+  MCP_ACTIVATION_TOKEN="$(random_hex)"
+  MCP_CREDENTIAL_ORIGIN=fresh
+  verifier="$(token_verifier "$MCP_ACTIVATION_TOKEN")"
+  created_at="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+  cred_tmp="$(mktemp "$CONFIG_DIR/.mcp-credentials.XXXXXX")"
+  jq -n --arg verifier "$verifier" --arg created_at "$created_at" '{version:1,credentials:[{principal:{id:"direct-default",class:"direct",name:"direct/default"},verifier_algorithm:"sha256-v1",verifier:$verifier,created_at:$created_at,enabled:true}]}' > "$cred_tmp"
+  chown root:"$AGENT_USER" "$cred_tmp"; chmod 0640 "$cred_tmp"
+  mv -f "$cred_tmp" "$MCP_CREDENTIAL_STORE"
+  MCP_STORE_CREATED=1
+fi
+chown root:"$AGENT_USER" "$MCP_CREDENTIAL_STORE"
+chmod 0640 "$MCP_CREDENTIAL_STORE"
+
 BIND="127.0.0.1:$PORT"; AUTH_MODE="bearer"; SCHEME="http"
 if [ "$MODE" = "public" ]; then BIND="0.0.0.0:$PORT"; fi
 if [ -n "$TLS_CERT_FILE" ]; then SCHEME="https"; fi
-cat > "$CONFIG_FILE" <<JSON
-{
-  "listen_address": "$BIND",
-  "mcp_path": "/mcp",
-  "health_path": "/healthz",
-  "auth_mode": "$AUTH_MODE",
-  "bearer_token_file": "$CONFIG_DIR/mcp.token",
-  "tls_cert_file": "$TLS_CERT_FILE",
-  "tls_key_file": "$TLS_KEY_FILE",
-  "executor_socket": "/run/ai-server-agent/executor.sock",
-  "executor_token_file": "$CONFIG_DIR/executor.token",
-  "state_dir": "$STATE_DIR",
-  "log_dir": "$LOG_DIR",
-  "workspace_dir": "$WORKSPACE_DIR",
-  "worker_user": "$WORKER_USER",
-  "agent_user": "$AGENT_USER"
-}
-JSON
-chown root:"$AGENT_USER" "$CONFIG_FILE"; chmod 0640 "$CONFIG_FILE"
-
+if [ "$FRESH_INSTALL" -eq 0 ]; then
+  PREVIOUS_CONFIG_BACKUP="$(mktemp)"
+  cp -a "$CONFIG_FILE" "$PREVIOUS_CONFIG_BACKUP"
+  if [ -e "$INSTALL_STATE" ]; then
+    PREVIOUS_INSTALL_STATE_PRESENT=1
+    PREVIOUS_INSTALL_STATE_BACKUP="$(mktemp)"
+    cp -a "$INSTALL_STATE" "$PREVIOUS_INSTALL_STATE_BACKUP"
+  fi
+fi
 if [ "$AGENT_VERSION" = "source" ]; then
   STATE_CHANNEL=source; STATE_VERSION=source; STATE_REF="${RESOLVED_SOURCE_REF:-$REF}"
 else
@@ -361,6 +467,29 @@ else
   [ "$STATE_VERSION" = source ] || die "Source install metadata must use version=source."
   [[ "$STATE_REF" =~ ^([0-9a-f]{40}|binary)$ ]] || die "Source install metadata must use an immutable commit SHA or binary marker."
 fi
+config_tmp="$(mktemp "$CONFIG_DIR/.config.XXXXXX")"
+cat > "$config_tmp" <<JSON
+{
+  "listen_address": "$BIND",
+  "mcp_path": "/mcp",
+  "health_path": "/healthz",
+  "auth_mode": "$AUTH_MODE",
+  "credential_store_file": "$MCP_CREDENTIAL_STORE",
+  "tls_cert_file": "$TLS_CERT_FILE",
+  "tls_key_file": "$TLS_KEY_FILE",
+  "executor_socket": "/run/ai-server-agent/executor.sock",
+  "executor_token_file": "$CONFIG_DIR/executor.token",
+  "state_dir": "$STATE_DIR",
+  "log_dir": "$LOG_DIR",
+  "workspace_dir": "$WORKSPACE_DIR",
+  "worker_user": "$WORKER_USER",
+  "agent_user": "$AGENT_USER"
+}
+JSON
+chown root:"$AGENT_USER" "$config_tmp"; chmod 0640 "$config_tmp"
+mv -f "$config_tmp" "$CONFIG_FILE"
+if [ "$MCP_CREDENTIAL_ORIGIN" = legacy ]; then MCP_MIGRATION_SWITCHED=1; fi
+
 state_tmp="$(mktemp "$CONTROL_DIR/.install-state.XXXXXX")"
 jq -n \
   --arg channel "$STATE_CHANNEL" \
@@ -427,12 +556,32 @@ EOF_UNIT
 
 systemctl daemon-reload
 systemctl enable ai-server-agent-executor.service ai-server-agent.service
-systemctl restart ai-server-agent-executor.service ai-server-agent.service
-sleep 1
-systemctl is-active --quiet ai-server-agent-executor.service || die "privileged executor did not start"
-systemctl is-active --quiet ai-server-agent.service || die "MCP service did not start"
-if [ "$SCHEME" = "https" ]; then curl -kfsS "https://127.0.0.1:$PORT/healthz" >/dev/null || die "TLS health check failed"
-else curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null || die "health check failed"; fi
+activation_error=""
+if ! systemctl restart ai-server-agent-executor.service ai-server-agent.service; then
+  activation_error="service restart failed"
+else
+  sleep 1
+  if ! systemctl is-active --quiet ai-server-agent-executor.service; then activation_error="privileged executor did not start"
+  elif ! systemctl is-active --quiet ai-server-agent.service; then activation_error="MCP service did not start"
+  elif [ "$SCHEME" = "https" ] && ! curl -kfsS "https://127.0.0.1:$PORT/healthz" >/dev/null; then activation_error="TLS health check failed"
+  elif [ "$SCHEME" != "https" ] && ! curl -fsS "http://127.0.0.1:$PORT/healthz" >/dev/null; then activation_error="health check failed"
+  fi
+fi
+if [ -n "$activation_error" ]; then
+  MCP_MIGRATION_RECOVERING=1
+  rollback_legacy_mcp_migration "$activation_error" || die "$activation_error"
+fi
+
+if [ -n "$MCP_ACTIVATION_TOKEN" ]; then
+  if ! verify_mcp_token_local "$MCP_ACTIVATION_TOKEN"; then
+    MCP_MIGRATION_RECOVERING=1
+    rollback_legacy_mcp_migration "new credential verification failed" || die "New named MCP credential could not be verified after service activation; authentication remains fail-closed. Re-run repair and rotate the direct/default credential locally."
+  fi
+  rm -f -- "$LEGACY_MCP_TOKEN_FILE" "$MCP_AUTH_HEADER_FILE"
+fi
+MCP_MIGRATION_SWITCHED=0
+[ -z "$PREVIOUS_CONFIG_BACKUP" ] || rm -f -- "$PREVIOUS_CONFIG_BACKUP"
+[ -z "$PREVIOUS_INSTALL_STATE_BACKUP" ] || rm -f -- "$PREVIOUS_INSTALL_STATE_BACKUP"
 
 log "Core installation is healthy."
 
@@ -451,6 +600,18 @@ elif [ "$FRESH_INSTALL" -eq 1 ] && [ -r /dev/tty ] && [ -z "${AI_SERVER_AGENT_BI
     warn "Resume setup with: sudo ai-server-agent-manage"
   fi
 fi
+
+if [ "$MCP_CREDENTIAL_ORIGIN" = fresh ] && [ "$NONINTERACTIVE" != "1" ] && [ -r /dev/tty ]; then
+  printf '\nA new direct/default MCP credential was issued. It is not stored in recoverable plaintext.\n' >/dev/tty
+  reveal_new=n
+  read -r -p 'Reveal the new Authorization value once in this terminal? [y/N] ' reveal_new </dev/tty || true
+  if [[ "$reveal_new" =~ ^[Yy]$ ]]; then
+    printf 'Authorization: Bearer %s\n' "$MCP_ACTIVATION_TOKEN" >/dev/tty
+  else
+    printf 'Not shown. If needed later, rotate direct/default locally to issue a replacement.\n' >/dev/tty
+  fi
+fi
+MCP_ACTIVATION_TOKEN=""
 
 if [ "$SETUP_INCOMPLETE" -eq 1 ]; then
   cat <<EOF_SUMMARY

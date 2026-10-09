@@ -180,13 +180,21 @@ After public setup succeeds:
 sudo ai-server-agent-manage chatgpt-setup
 ```
 
-The manager prints the MCP URL and the protected bearer-auth setup guidance. The Authorization value is stored on the server and is revealed only after explicit terminal confirmation.
+The manager prints the MCP URL and bearer-auth setup guidance. Active bearer plaintext is **not** retained for generic re-display: the server stores a versioned one-way verifier plus non-secret principal metadata. Use `sudo ai-server-agent-manage credential-rotate direct-default` to issue a replacement direct credential and reveal it once in the protected terminal at issuance.
 
 ChatGPT full MCP/custom-app support is an evolving client-side feature. For managed workspaces, creation and administration currently use the available Plugins/custom-MCP surfaces and workspace controls; exact labels and navigation can change independently of the Agent. Use the current OpenAI product guidance and live UI at connection time rather than treating a historical `Developer mode`, `Apps -> Create`, screenshot, or menu sequence as a protocol contract.
 
 See [docs/CONNECT_CHATGPT.md](docs/CONNECT_CHATGPT.md) for connection topologies and the validation checklist. When that document's client-side UI wording differs from the current ChatGPT product, current OpenAI guidance and the live UI are authoritative for the client-side steps; the Agent-side endpoint/auth/tool contract remains the durable part documented here.
 
 The public endpoint remains bearer-authenticated. Treat the bearer credential as a privileged server-control credential and provide it only to the trusted ChatGPT connection UI when configuring the app.
+
+### MCP credential lifecycle
+
+The Agent keeps a bounded named-principal credential set. `direct/default` is the normal direct-client principal; `mcp-gateway` is an optional separately managed principal for a future Gateway connection and does not make Gateway a runtime dependency. The server derives principal ID/class/name from the matched verifier and attaches it to request context; callers cannot select or override that identity.
+
+Use `sudo ai-server-agent-manage credential-status` for non-secret state, `credential-rotate direct-default|mcp-gateway` to issue or rotate a credential, and `credential-revoke direct-default|mcp-gateway` to revoke one. Rotation is immediate after verified service cutover: there is no grace overlap. Revoking the last active credential is refused. Safe uninstall preserves the credential store; update/repair preserve it; purge removes Agent-owned credential state so a later fresh install gets fresh credentials.
+
+Existing installations migrate the current bearer into `direct/default` without forced rotation. Migration activates and verifies the verifier-backed store before the legacy plaintext token/header file is removed; on failed activation the previous known-good legacy configuration is restored for recovery.
 
 ## MCP capability surface
 
@@ -375,6 +383,7 @@ Purge does **not** silently delete Cloudflare resources. If recorded Cloudflare 
 Key boundaries:
 
 - public MCP access requires bearer authentication;
+- MCP bearer credentials are named principals (`direct/default` and optional `mcp-gateway`) with independently revocable/rotatable verifier records; bearer plaintext is not retained after issuance/migration;
 - direct public mode requires native TLS;
 - ordinary commands run as `aiworker`;
 - root commands are intentional capabilities evaluated by executor policy/approval guardrails;
@@ -388,7 +397,7 @@ Key boundaries:
 - stable install/update/release identity must remain immutable and must not drift to `main`;
 - release installer bytes must be authenticated before privileged execution through a bootstrap source anchored to an immutable release tag;
 - optional browser binaries are root-owned and browser profile/session data is isolated under Agent state;
-- secrets such as the Agent bearer and Cloudflare token must never be persisted in repository content, issue comments, screenshots, chat transcripts or ordinary shell history.
+- secrets such as an issued Agent bearer and Cloudflare token must never be persisted in repository content, issue comments, screenshots, chat transcripts or ordinary shell history; the installed MCP credential store contains verifier digests and non-secret principal metadata only.
 
 See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for details.
 

@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/ach1992/ai-server-agent/internal/audit"
+	"github.com/ach1992/ai-server-agent/internal/credential"
 	"github.com/ach1992/ai-server-agent/internal/policy"
 )
 
@@ -320,10 +321,13 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 	}
 
 	_ = s.audit.Write(audit.Entry{
-		Action:  "run",
-		Mode:    map[bool]string{true: "root", false: "worker"}[req.Root],
-		Success: err == nil,
-		Detail:  dec.Category,
+		Action:         "run",
+		Mode:           map[bool]string{true: "root", false: "worker"}[req.Root],
+		Success:        err == nil,
+		Detail:         dec.Category,
+		PrincipalID:    req.PrincipalID,
+		PrincipalClass: req.PrincipalClass,
+		PrincipalName:  req.PrincipalName,
 	})
 	resp := Response{
 		OK:         err == nil,
@@ -352,6 +356,14 @@ func encodeExecutorResponse(resp Response) []byte {
 }
 
 func ClientCallContext(ctx context.Context, socket, token string, req Request) (Response, error) {
+	req.PrincipalID = ""
+	req.PrincipalClass = ""
+	req.PrincipalName = ""
+	if principal, ok := credential.PrincipalFromContext(ctx); ok {
+		req.PrincipalID = principal.ID
+		req.PrincipalClass = principal.Class
+		req.PrincipalName = principal.Name
+	}
 	req.Token = token
 	dialer := net.Dialer{Timeout: 5 * time.Second}
 	c, err := dialer.DialContext(ctx, "unix", socket)

@@ -15,6 +15,7 @@ import (
 
 	"github.com/ach1992/ai-server-agent/internal/audit"
 	"github.com/ach1992/ai-server-agent/internal/config"
+	"github.com/ach1992/ai-server-agent/internal/credential"
 	"github.com/ach1992/ai-server-agent/internal/policy"
 )
 
@@ -279,5 +280,110 @@ func TestClientCallContextClosesSocketOnCancellation(t *testing.T) {
 	}
 	if err := <-serverDone; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestClientCallContextOverridesCallerPrincipalFromAuthenticatedContext(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "executor.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	reqCh := make(chan Request, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			errCh <- err
+			return
+		}
+		defer conn.Close()
+		var req Request
+		if err := json.NewDecoder(conn).Decode(&req); err != nil {
+			errCh <- err
+			return
+		}
+		reqCh <- req
+		if err := json.NewEncoder(conn).Encode(Response{OK: true, Status: "ok"}); err != nil {
+			errCh <- err
+		}
+	}()
+
+	ctx := credential.WithPrincipal(context.Background(), credential.Principal{
+		ID: "mcp-gateway", Class: "gateway", Name: "mcp-gateway",
+	})
+	_, err = ClientCallContext(ctx, socket, "executor-secret", Request{
+		Action:         "run",
+		Command:        "true",
+		PrincipalID:    "caller-controlled",
+		PrincipalClass: "caller",
+		PrincipalName:  "caller",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatal(err)
+	case req := <-reqCh:
+		if req.PrincipalID != "mcp-gateway" || req.PrincipalClass != "gateway" || req.PrincipalName != "mcp-gateway" {
+			t.Fatalf("executor request principal was not server-derived: %+v", req)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for executor request")
+	}
+}
+
+func TestClientCallContextClearsPrincipalWithoutAuthenticatedContext(t *testing.T) {
+	socket := filepath.Join(t.TempDir(), "executor.sock")
+	listener, err := net.Listen("unix", socket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer listener.Close()
+
+	reqCh := make(chan Request, 1)
+	errCh := make(chan error, 1)
+	go func() {
+		conn, err := listener.Accept()
+		if err != nil {
+			errCh <- err
+			return
+		}
+		defer conn.Close()
+		var req Request
+		if err := json.NewDecoder(conn).Decode(&req); err != nil {
+			errCh <- err
+			return
+		}
+		reqCh <- req
+		if err := json.NewEncoder(conn).Encode(Response{OK: true, Status: "ok"}); err != nil {
+			errCh <- err
+		}
+	}()
+
+	_, err = ClientCallContext(context.Background(), socket, "executor-secret", Request{
+		Action:         "run",
+		Command:        "true",
+		PrincipalID:    "caller-controlled",
+		PrincipalClass: "caller",
+		PrincipalName:  "caller",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	select {
+	case err := <-errCh:
+		t.Fatal(err)
+	case req := <-reqCh:
+		if req.PrincipalID != "" || req.PrincipalClass != "" || req.PrincipalName != "" {
+			t.Fatalf("unauthenticated context preserved caller principal: %+v", req)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("timed out waiting for executor request")
 	}
 }
