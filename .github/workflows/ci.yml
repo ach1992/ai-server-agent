@@ -158,7 +158,7 @@ jobs:
           grep -qF 'ReadWritePaths=$STATE_DIR/AI_ENVIRONMENT.json' install.sh
           grep -qF 'DEFAULT_INSTALL_STATE="/etc/ai-server-agent/control/install-state.json"' update.sh
           grep -qF 'CF_TXN_STATE="$CONTROL_DIR/cloudflare-transaction.json"' manage.sh
-          grep -qF 'MANAGEMENT_LOCK="$CONTROL_DIR/management.lock"' manage.sh
+          grep -qF 'MANAGEMENT_LOCK="/run/lock/ai-server-agent/management.lock"' manage.sh
           grep -qF 'flock -n "$MANAGEMENT_LOCK_FD"' manage.sh
           grep -qF 'dns_record_fingerprint' manage.sh
           grep -qF 'origin_rule_fingerprint' manage.sh
