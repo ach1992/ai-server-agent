@@ -16,7 +16,7 @@ type WorkspaceSearchInput struct {
 	Pattern   string   `json:"pattern" jsonschema:"Text regex/literal or structural ast-grep pattern; maximum 65536 bytes"`
 	Literal   bool     `json:"literal,omitempty" jsonschema:"For mode=text, treat pattern as an exact literal rather than a regex"`
 	Paths     []string `json:"paths,omitempty" jsonschema:"Optional relative files/directories within workspace; default searches the workspace root; maximum 32"`
-	Globs     []string `json:"globs,omitempty" jsonschema:"Optional ast-grep include/exclude globs; prefix exclusions with !; maximum 32"`
+	Globs     []string `json:"globs,omitempty" jsonschema:"Optional text/structural include/exclude globs; prefix exclusions with !; maximum 32"`
 	Limit     int      `json:"limit,omitempty" jsonschema:"Maximum matches returned; default 100, maximum 1000"`
 	TimeoutMS int64    `json:"timeout_ms,omitempty" jsonschema:"Search timeout in milliseconds; default 30000, maximum 120000"`
 }

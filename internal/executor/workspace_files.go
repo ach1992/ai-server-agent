@@ -42,7 +42,13 @@ type workspaceFileOperation struct {
 	TimeoutMS     int64               `json:"timeout_ms,omitempty"`
 }
 
-const workerWorkspaceTimeout = 30 * time.Second
+const (
+	workerWorkspaceTimeout = 30 * time.Second
+	// Same bounded wire-budget as the executor request. The parent must
+	// serialize/check before audit admission and helper process launch.
+	// JSON escaping can turn 1 MiB of valid UTF-8 content into >2 MiB.
+	maxWorkspaceHelperRequestBytes = maxExecutorRequestBytes
+)
 
 func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp Response) {
 	write := req.Action == "workspace_write" || req.Action == "workspace_apply_edits"
@@ -82,6 +88,25 @@ func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp 
 			return fileError("invalid_path", "validation", err)
 		}
 	}
+	// Serialize and validate the exact helper wire frame BEFORE worker slot,
+	// required intent audit, or any subprocess side effect. The public
+	// content limits refer to raw bytes, but JSON escaping can be much larger.
+	op := workspaceFileOperation{
+		Action: req.Action, WorkspaceRoot: s.cfg.WorkspaceDir,
+		Workspace: req.Workspace, Path: req.Path,
+		Offset: req.Offset, Limit: req.Limit, Content: req.Content,
+		FileVersion: req.FileVersion, MustNotExist: req.MustNotExist,
+		Edits: req.WorkspaceEdits, Pattern: req.Pattern, SearchLimit: req.SearchLimit,
+		SearchPaths: req.SearchPaths, Globs: req.Globs, Literal: req.Literal,
+		TimeoutMS: req.TimeoutMS,
+	}
+	payload, err := json.Marshal(op)
+	if err != nil {
+		return fileError("invalid_request", "validation", err)
+	}
+	if len(payload) > maxWorkspaceHelperRequestBytes {
+		return fileError("input_too_large", "resource", fmt.Errorf("serialized workspace helper request exceeds %d-byte frame", maxWorkspaceHelperRequestBytes))
+	}
 	// Keep a single bounded read/write in the established worker command slot.
 	release, admitted := s.runs.acquire(false)
 	if !admitted {
@@ -98,17 +123,6 @@ func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp 
 		}()
 	}
 
-	op := workspaceFileOperation{
-		Action: req.Action, WorkspaceRoot: s.cfg.WorkspaceDir,
-		Workspace: req.Workspace, Path: req.Path,
-		Offset: req.Offset, Limit: req.Limit, Content: req.Content,
-		FileVersion: req.FileVersion, MustNotExist: req.MustNotExist,
-		Edits: req.WorkspaceEdits, Pattern: req.Pattern, SearchLimit: req.SearchLimit, SearchPaths: req.SearchPaths, Globs: req.Globs, Literal: req.Literal, TimeoutMS: req.TimeoutMS,
-	}
-	payload, err := json.Marshal(op)
-	if err != nil {
-		return fileError("invalid_request", "validation", err)
-	}
 	exe, err := os.Executable()
 	if err != nil {
 		return fileError("workspace_helper_unavailable", "state", err)
@@ -187,9 +201,15 @@ func safeWorkspaceRelativeFile(path string) (string, error) {
 // Security comes from the actual aiworker OS identity and Openat2 containment,
 // not from a privileged in-process filesystem prefix check.
 func RunWorkspaceFileHelper() int {
-	raw, err := io.ReadAll(io.LimitReader(os.Stdin, (2<<20)+1))
-	if err != nil || len(raw) > 2<<20 {
+	raw, err := io.ReadAll(io.LimitReader(os.Stdin, maxWorkspaceHelperRequestBytes+1))
+	if err != nil {
 		return 2
+	}
+	if len(raw) > maxWorkspaceHelperRequestBytes {
+		// This is a known pre-execution rejection, not an unknown filesystem
+		// completion. The parent validates the same bound before auditing.
+		_ = json.NewEncoder(os.Stdout).Encode(fileError("input_too_large", "resource", errors.New("workspace helper wire frame exceeds limit")))
+		return 0
 	}
 	var op workspaceFileOperation
 	if err := json.Unmarshal(raw, &op); err != nil {

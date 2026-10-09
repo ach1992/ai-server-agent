@@ -233,14 +233,14 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			if tool.Annotations.OpenWorldHint == nil || *tool.Annotations.OpenWorldHint {
 				t.Fatal("workspace_search must remain local-only")
 			}
-			if !strings.Contains(tool.Description, "never applies rewrites") || !strings.Contains(tool.Description, "rg/git grep") || !strings.Contains(tool.Description, "LSP") {
+			if !strings.Contains(tool.Description, "never applies rewrites") || !strings.Contains(tool.Description, "rg/git grep") || !strings.Contains(tool.Description, "LSP") || !strings.Contains(tool.Description, "mode=text") || !strings.Contains(tool.Description, "mode=structural") {
 				t.Fatalf("workspace_search description must preserve inspection responsibility ladder: %q", tool.Description)
 			}
 			in, err := json.Marshal(tool.InputSchema)
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, field := range []string{"mode", "workspace", "language", "pattern", "paths", "globs", "limit", "timeout_ms"} {
+			for _, field := range []string{"mode", "workspace", "language", "pattern", "literal", "paths", "globs", "limit", "timeout_ms"} {
 				if !strings.Contains(string(in), `"`+field+`"`) {
 					t.Fatalf("workspace_search input schema missing %q: %s", field, in)
 				}
@@ -386,9 +386,11 @@ func TestInstructionsDescribePersistentWorkspace(t *testing.T) {
 		"task environments",
 		"prefer git worktree",
 		"never delete dirty, untracked, ambiguous, or unknown workspace state",
-		"rg/git grep through run_command for text occurrences",
-		"workspace_search for structural syntax-tree patterns",
-		"do not treat structural matches as semantic symbol/type/reference resolution",
+		"workspace_search mode=text for bounded literal/regex text occurrences",
+		"workspace_search mode=structural for syntax-tree patterns",
+		"LSP for semantic symbol/type/reference meaning",
+		"rg/git grep through run_command as the advanced/unstructured CLI fallback",
+		"Landlock ABI v2",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("instructions missing %q", want)

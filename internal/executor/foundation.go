@@ -369,6 +369,20 @@ func ClientCallContext(ctx context.Context, socket, token string, req Request) (
 		return Response{}, err
 	}
 	req.Token = token
+	// The internal executor socket also has an 8 MiB request-frame limit.
+	// Large escaped workspace edits must fail deterministically BEFORE
+	// connecting; otherwise the decoder would reject a valid raw-size batch
+	// with a transport error rather than a bounded resource result.
+	if req.Action == "workspace_write" || req.Action == "workspace_apply_edits" ||
+		req.Action == "workspace_read" || req.Action == "workspace_text_search" {
+		wire, err := json.Marshal(req)
+		if err != nil {
+			return fileError("invalid_request", "validation", err), nil
+		}
+		if len(wire)+1 > maxExecutorRequestBytes {
+			return fileError("input_too_large", "resource", fmt.Errorf("serialized workspace executor request exceeds %d-byte frame", maxExecutorRequestBytes)), nil
+		}
+	}
 	dialer := net.Dialer{Timeout: 5 * time.Second}
 	c, err := dialer.DialContext(ctx, "unix", socket)
 	if err != nil {
