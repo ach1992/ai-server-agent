@@ -831,7 +831,9 @@ jobs:
 
   debian-compatibility:
     needs: change-scope
-    if: ${{ always() }}
+    # Required per-Debian PR checks still run. On a proven identical main
+    # squash, omit the entire three-runner matrix rather than starting empty VMs.
+    if: ${{ always() && needs.change-scope.outputs.reuse_validated_pr != 'true' }}
     name: Debian ${{ matrix.version }} stable compatibility
     runs-on: ubuntu-24.04
     strategy:
@@ -848,9 +850,9 @@ jobs:
       - name: Require successful change classification
         run: test "${{ needs.change-scope.result }}" = success
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        if: needs.change-scope.outputs.platform_changed != 'false' && needs.change-scope.outputs.reuse_validated_pr != 'true'
+        if: needs.change-scope.outputs.platform_changed != 'false'
       - name: Verify supported Debian host contract
-        if: needs.change-scope.outputs.platform_changed != 'false' && needs.change-scope.outputs.reuse_validated_pr != 'true'
+        if: needs.change-scope.outputs.platform_changed != 'false'
         env:
           DEBIAN_MAINTAINED: ${{ matrix.maintained }}
         run: |
