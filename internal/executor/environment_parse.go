@@ -40,6 +40,8 @@ func (b *environmentBuilder) discover(ctx context.Context) error {
 			if manager, version := parsePackageManager(pkg.PackageManager); manager != "" {
 				nodeManagers[manager] = true
 				b.addTool(manager, manager, "package_manager", true, repositoryRequirement(version, "exact", "package.json"))
+			} else if strings.TrimSpace(pkg.PackageManager) != "" {
+				b.warnings = append(b.warnings, "package.json declares an unsupported packageManager value; it was not probed")
 			}
 			names := make([]string, 0, len(pkg.Scripts))
 			for name := range pkg.Scripts {
@@ -47,7 +49,7 @@ func (b *environmentBuilder) discover(ctx context.Context) error {
 			}
 			sort.Strings(names)
 			for _, name := range names {
-				b.addEntrypoint(name, "package_script", "package.json", pkg.Scripts[name])
+				b.addEntrypoint(name, "package_script", "package.json", "")
 			}
 		} else {
 			b.addTool("Node.js", "node", "language", true, nil)
@@ -233,11 +235,15 @@ func parsePackageManager(value string) (string, string) {
 		return "", ""
 	}
 	at := strings.LastIndex(value, "@")
-	if at <= 0 {
-		return value, ""
+	name, version := value, ""
+	if at > 0 {
+		name, version = value[:at], value[at+1:]
 	}
-	name := value[:at]
-	version := value[at+1:]
+	switch name {
+	case "npm", "pnpm", "yarn", "bun":
+	default:
+		return "", ""
+	}
 	if plus := strings.Index(version, "+"); plus >= 0 {
 		version = version[:plus]
 	}

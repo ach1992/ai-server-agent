@@ -102,7 +102,7 @@ func hasEnvironmentMechanism(summary RepositoryEnvironmentSummary, name string) 
 	return EnvironmentMechanism{}, false
 }
 
-func TestRepositoryEnvironmentFreshGoRepoReusesWorkerCache(t *testing.T) {
+func TestRepositoryEnvironmentFreshGoRepoSurfacesWorkerCacheWithoutTrustingIt(t *testing.T) {
 	s, root := environmentTestServer(t)
 	repo, head := initEnvironmentFixture(t, root, map[string]string{
 		"go.mod":   "module example.invalid/project\n\ngo 1.26.0\n",
@@ -118,12 +118,12 @@ func TestRepositoryEnvironmentFreshGoRepoReusesWorkerCache(t *testing.T) {
 	if err != nil {
 		t.Fatalf("inspect: code=%s err=%v", code, err)
 	}
-	if summary.RepositoryHead != head || summary.HostStatus != "ready" || !hasEnvironmentLanguage(summary, "go") {
+	if summary.RepositoryHead != head || summary.HostStatus != "unknown" || !hasEnvironmentLanguage(summary, "go") {
 		t.Fatalf("unexpected summary: %+v", summary)
 	}
 	tool, ok := environmentToolByExecutable(summary, "go")
-	if !ok || !tool.Available || tool.Compatibility != "compatible" || tool.Source != "worker_cache" || tool.Path != fakeGo {
-		t.Fatalf("Go cache was not safely reused: %+v", tool)
+	if !ok || !tool.Available || tool.Compatibility != "unknown" || tool.Reason != "worker_cache_version_hint_not_verified" || tool.Source != "worker_cache" || tool.Path != fakeGo || tool.Version != "1.27.1" {
+		t.Fatalf("Go cache candidate was not surfaced safely: %+v", tool)
 	}
 	if len(summary.Entrypoints) == 0 || summary.Entrypoints[0].Command != "make test" {
 		t.Fatalf("Makefile entrypoint not discovered: %+v", summary.Entrypoints)
@@ -137,7 +137,7 @@ func TestRepositoryEnvironmentFreshGoRepoReusesWorkerCache(t *testing.T) {
 	}
 }
 
-func TestRepositoryEnvironmentReportsIncompatibleToolClearly(t *testing.T) {
+func TestRepositoryEnvironmentWorkerCacheHintRemainsUnverified(t *testing.T) {
 	s, root := environmentTestServer(t)
 	repo, _ := initEnvironmentFixture(t, root, map[string]string{
 		"go.mod": "module example.invalid/project\n\ngo 1.26.0\n",
@@ -149,8 +149,12 @@ func TestRepositoryEnvironmentReportsIncompatibleToolClearly(t *testing.T) {
 		t.Fatalf("inspect: code=%s err=%v", code, err)
 	}
 	tool, ok := environmentToolByExecutable(summary, "go")
-	if !ok || tool.Compatibility != "incompatible" || summary.HostStatus != "unsatisfied" {
-		t.Fatalf("incompatible Go was not explicit: tool=%+v summary=%+v", tool, summary)
+	if !ok || tool.Compatibility != "unknown" || tool.Reason != "worker_cache_version_hint_not_verified" || tool.Version != "1.25.0" || summary.HostStatus != "unknown" {
+		t.Fatalf("worker-cache hint was over-trusted: tool=%+v summary=%+v", tool, summary)
+	}
+	compatibility, reason := evaluateEnvironmentRequirements("go version go1.25.0 linux/amd64", tool.Requirements)
+	if compatibility != "incompatible" || reason != "host_version_does_not_satisfy_repository_requirement" {
+		t.Fatalf("known version incompatibility was not explicit: compatibility=%s reason=%s", compatibility, reason)
 	}
 }
 
@@ -207,6 +211,11 @@ func TestRepositoryEnvironmentReportsPackageManagerAmbiguityAndScriptsWithoutExe
 	if len(summary.Entrypoints) != 2 {
 		t.Fatalf("package scripts were not reported: %+v", summary.Entrypoints)
 	}
+	for _, entrypoint := range summary.Entrypoints {
+		if entrypoint.Command != "" {
+			t.Fatalf("package script body leaked into environment summary: %+v", entrypoint)
+		}
+	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("repository script executed during discovery: %v", err)
 	}
@@ -258,7 +267,7 @@ func TestRepositoryEnvironmentConflictingExactPinsFailClearly(t *testing.T) {
 		t.Fatalf("inspect: code=%s err=%v", code, err)
 	}
 	tool, ok := environmentToolByExecutable(summary, "go")
-	if !ok || tool.Compatibility != "conflict" || summary.HostStatus != "unsatisfied" {
+	if !ok || tool.Compatibility != "conflict" || summary.HostStatus != "unsatisfied" || !summary.SelectionRequired {
 		t.Fatalf("conflicting repository pins were not fail-closed: tool=%+v summary=%+v", tool, summary)
 	}
 }
@@ -368,7 +377,7 @@ func TestRepositoryEnvironmentWithoutKnownDeclarationsIsUnknown(t *testing.T) {
 	}
 }
 
-func TestRepositoryEnvironmentSelectsCompatibleWorkerCacheWithoutExecutingIt(t *testing.T) {
+func TestRepositoryEnvironmentSurfacesWorkerCacheHintWithoutExecutingIt(t *testing.T) {
 	s, root := environmentTestServer(t)
 	repo, _ := initEnvironmentFixture(t, root, map[string]string{
 		".python-version": "99.0.0\n",
@@ -387,8 +396,8 @@ func TestRepositoryEnvironmentSelectsCompatibleWorkerCacheWithoutExecutingIt(t *
 		t.Fatalf("inspect: code=%s err=%v", code, err)
 	}
 	tool, ok := environmentToolByExecutable(summary, "python3")
-	if !ok || tool.Source != "worker_cache" || tool.Version != "99.0.0" || tool.Compatibility != "compatible" {
-		t.Fatalf("compatible worker cache was not selected: %+v", tool)
+	if !ok || tool.Source != "worker_cache" || tool.Version != "99.0.0" || tool.Compatibility != "unknown" || tool.Reason != "worker_cache_version_hint_not_verified" {
+		t.Fatalf("worker cache hint was not surfaced safely: %+v", tool)
 	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("worker-cache executable ran during read-only discovery: %v", err)
@@ -434,5 +443,24 @@ func TestTrustedSystemExecutableRejectsWorkerOwnedBinary(t *testing.T) {
 	}
 	if trustedSystemExecutable(path) {
 		t.Fatal("worker-owned executable was treated as trusted system tooling")
+	}
+}
+
+func TestRepositoryEnvironmentDoesNotExposeOpaqueRequirementValue(t *testing.T) {
+	s, root := environmentTestServer(t)
+	repo, _ := initEnvironmentFixture(t, root, map[string]string{
+		"mise.toml": "[tools]\nnode = \"https://user:secret@example.invalid/node.tar.gz?token=hidden\"\n",
+	})
+	summary, code, err := s.inspectRepositoryEnvironment(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("inspect: code=%s err=%v", code, err)
+	}
+	tool, ok := environmentToolByExecutable(summary, "node")
+	if !ok || len(tool.Requirements) != 1 || tool.Requirements[0].Value != "[not_exposed]" || tool.Requirements[0].Mode != "opaque" {
+		t.Fatalf("opaque requirement was not safely represented: %+v", tool)
+	}
+	joined := strings.Join([]string{summary.SelectionReason, strings.Join(summary.Warnings, "\n"), tool.Requirements[0].Value}, "\n")
+	if strings.Contains(joined, "secret") || strings.Contains(joined, "token=hidden") {
+		t.Fatalf("opaque requirement leaked sensitive-looking source value: %s", joined)
 	}
 }

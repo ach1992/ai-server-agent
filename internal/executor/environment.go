@@ -12,6 +12,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"regexp"
 	"sort"
 	"strings"
 	"sync"
@@ -26,6 +27,9 @@ const (
 	maxEnvironmentOutputBytes   = 512 << 10
 	maxEnvironmentEntrypoints   = 64
 )
+
+var environmentExecutableNameRe = regexp.MustCompile(`^[A-Za-z0-9._+-]+$`)
+var environmentRequirementValueRe = regexp.MustCompile(`^[A-Za-z0-9._*+<>=^~|,!/ -]+$`)
 
 type environmentBuilder struct {
 	server           *Server
@@ -247,7 +251,11 @@ func (b *environmentBuilder) readDeclaration(ctx context.Context, rel, kind stri
 }
 
 func (s *Server) readEnvironmentFileAsWorker(ctx context.Context, path string) ([]byte, error) {
-	cmd := exec.CommandContext(ctx, "/bin/cat", "--", path)
+	catPath, err := filepath.EvalSymlinks("/bin/cat")
+	if err != nil || !trustedSystemExecutable(catPath) {
+		return nil, errors.New("trusted cat executable is unavailable")
+	}
+	cmd := exec.CommandContext(ctx, catPath, "--", path)
 	cmd.Dir = s.cfg.WorkspaceDir
 	cmd.Env = []string{"HOME=/nonexistent", "PATH=" + safeCommandPath, "LANG=C.UTF-8", "LC_ALL=C.UTF-8", "AI_SERVER_AGENT=1"}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -304,6 +312,11 @@ func (b *environmentBuilder) addLanguage(name, declaredBy string) {
 }
 
 func (b *environmentBuilder) addTool(name, executable, role string, required bool, requirement *EnvironmentRequirement) {
+	executable = strings.TrimSpace(executable)
+	if !environmentExecutableNameRe.MatchString(executable) {
+		b.warnings = append(b.warnings, "repository declaration referenced an unsupported executable name; it was not probed")
+		return
+	}
 	key := strings.ToLower(executable)
 	tool := b.tools[key]
 	if tool == nil {
@@ -330,6 +343,9 @@ func repositoryRequirement(value, mode, declaredBy string) *EnvironmentRequireme
 	value = strings.TrimSpace(value)
 	if value == "" {
 		return nil
+	}
+	if len(value) > 128 || !environmentRequirementValueRe.MatchString(value) {
+		return &EnvironmentRequirement{Value: "[not_exposed]", Mode: "opaque", DeclaredBy: declaredBy, Ownership: "repository"}
 	}
 	return &EnvironmentRequirement{Value: value, Mode: mode, DeclaredBy: declaredBy, Ownership: "repository"}
 }
@@ -390,6 +406,17 @@ func (b *environmentBuilder) probeTools(ctx context.Context) {
 	for _, key := range keys {
 		tool := b.tools[key]
 		candidates := b.server.environmentExecutableCandidates(b.root, tool.Executable)
+		if environmentExactRequirementsConflict(tool.Requirements) {
+			tool.Compatibility = "conflict"
+			tool.Reason = "conflicting_exact_repository_requirements"
+			if len(candidates) > 0 {
+				tool.Available = true
+				tool.Path = candidates[0].path
+				tool.Source = candidates[0].source
+				tool.Version = candidates[0].versionHint
+			}
+			continue
+		}
 		if len(candidates) == 0 {
 			tool.Available = false
 			tool.Compatibility = "missing"
@@ -415,9 +442,9 @@ func (b *environmentBuilder) probeTools(ctx context.Context) {
 				}
 			}
 			if compatibility == "compatible" {
-				if candidate.source == "worker_cache" && version == "" && len(tool.Requirements) > 0 {
+				if candidate.source == "worker_cache" {
 					compatibility = "unknown"
-					reason = "worker_cache_version_not_verified"
+					reason = "worker_cache_version_hint_not_verified"
 				} else {
 					compatibility, reason = evaluateEnvironmentRequirements(version, tool.Requirements)
 				}

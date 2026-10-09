@@ -4,7 +4,7 @@ type EnvironmentDeclaration struct {
 	Path        string `json:"path"`
 	Kind        string `json:"kind"`
 	Tracked     bool   `json:"tracked"`
-	MatchesHead bool   `json:"matches_head,omitempty"`
+	MatchesHead bool   `json:"matches_head"`
 	SHA256      string `json:"sha256,omitempty"`
 }
 

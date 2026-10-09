@@ -59,6 +59,20 @@ func sameEnvironmentPrefix(host, required environmentVersion) bool {
 	return true
 }
 
+func environmentExactRequirementsConflict(requirements []EnvironmentRequirement) bool {
+	exact := map[string]bool{}
+	for _, requirement := range requirements {
+		if requirement.Mode != "exact" {
+			continue
+		}
+		if v, ok := parseEnvironmentVersion(requirement.Value); ok {
+			key := strconv.Itoa(v.parts[0]) + "." + strconv.Itoa(v.parts[1]) + "." + strconv.Itoa(v.parts[2])
+			exact[key] = true
+		}
+	}
+	return len(exact) > 1
+}
+
 func evaluateEnvironmentRequirements(hostVersion string, requirements []EnvironmentRequirement) (string, string) {
 	if len(requirements) == 0 {
 		return "compatible", ""
@@ -68,17 +82,8 @@ func evaluateEnvironmentRequirements(hostVersion string, requirements []Environm
 		return "unknown", "host_version_unrecognized"
 	}
 
-	exact := map[string]bool{}
 	unknown := false
-	for _, requirement := range requirements {
-		if requirement.Mode == "exact" {
-			if v, ok := parseEnvironmentVersion(requirement.Value); ok {
-				key := strconv.Itoa(v.parts[0]) + "." + strconv.Itoa(v.parts[1]) + "." + strconv.Itoa(v.parts[2])
-				exact[key] = true
-			}
-		}
-	}
-	if len(exact) > 1 {
+	if environmentExactRequirementsConflict(requirements) {
 		return "conflict", "conflicting_exact_repository_requirements"
 	}
 
