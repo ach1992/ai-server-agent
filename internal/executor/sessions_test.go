@@ -302,4 +302,7 @@ func TestWorkerStdioSessionReadCursorNeverSkipsEarlierEvent(t *testing.T) {
 	if len(second.Events) != 1 || second.Events[0].Sequence != 2 {
 		t.Fatalf("event skipped by read limit: %+v", second)
 	}
+	if _, err := s.sessions.read(owner, entry.id, first.Latest+1, maxStdioEventBytes); !errors.Is(err, errSessionCursor) {
+		t.Fatalf("future cursor must fail rather than appear caught up: %v", err)
+	}
 }

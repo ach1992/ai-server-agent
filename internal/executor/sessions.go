@@ -30,6 +30,7 @@ var (
 	errSessionNotFound = errors.New("session_not_found")
 	errSessionBusy     = errors.New("session_resource_limit")
 	errSessionStopped  = errors.New("session_stopped")
+	errSessionCursor   = errors.New("session_invalid_cursor")
 )
 
 type stdioSessionEvent struct {
@@ -270,6 +271,11 @@ func (b *stdioSessionBroker) read(req Request, id string, after uint64, byteLimi
 	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
+	if after > e.lastSeq {
+		// A caller with a stale or malformed future cursor must not receive
+		// a misleading empty result indefinitely and silently lose events.
+		return stdioSessionRead{}, fmt.Errorf("%w: latest=%d", errSessionCursor, e.lastSeq)
+	}
 	out := stdioSessionRead{Latest: e.lastSeq, Earliest: e.lastSeq + 1, Running: !e.exited && !e.closed, ExitCode: e.exitCode, BytesRetained: e.bytes}
 	if len(e.events) != 0 {
 		out.Earliest = e.events[0].Sequence
