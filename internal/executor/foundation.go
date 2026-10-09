@@ -89,13 +89,31 @@ func connectionContext(c net.Conn) (context.Context, context.CancelFunc) {
 }
 
 func (s *Server) dispatchContext(ctx context.Context, req Request) Response {
-	if req.Action == "run" {
+	switch req.Action {
+	case "run", "workspace_search", "repository_environment", "repository_discover", "repository_inspect", "worktree_create", "worktree_remove":
 		if !s.auth(req.Token) {
 			return Response{Error: "unauthorized"}
 		}
-		return s.runContext(ctx, req)
+		switch req.Action {
+		case "run":
+			return s.runContext(ctx, req)
+		case "workspace_search":
+			return s.workspaceSearchContext(ctx, req)
+		case "repository_environment":
+			return s.repositoryEnvironmentContext(ctx, req)
+		case "repository_discover":
+			return s.repositoryDiscoverContext(ctx, req)
+		case "repository_inspect":
+			return s.repositoryInspectContext(ctx, req)
+		case "worktree_create":
+			return s.worktreeCreateContext(ctx, req)
+		case "worktree_remove":
+			return s.worktreeRemoveContext(ctx, req)
+		}
+	default:
+		return s.dispatch(req)
 	}
-	return s.dispatch(req)
+	return Response{Error: "unknown action"}
 }
 
 func processGroupExists(pgid int) (bool, error) {

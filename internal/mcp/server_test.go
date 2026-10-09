@@ -86,6 +86,12 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 	foundJobStatus := false
 	foundReadFile := false
 	foundWriteFile := false
+	foundRepositoryEnvironment := false
+	foundRepositoryDiscover := false
+	foundRepositoryInspect := false
+	foundWorktreeCreate := false
+	foundWorktreeRemove := false
+	foundWorkspaceSearch := false
 	for _, tool := range res.Tools {
 		switch tool.Name {
 		case "agent_environment":
@@ -174,6 +180,122 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 					t.Fatalf("write_file input schema missing %q: %s", field, in)
 				}
 			}
+		case "workspace_search":
+			foundWorkspaceSearch = true
+			if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint || !tool.Annotations.IdempotentHint {
+				t.Fatal("workspace_search must advertise read-only/idempotent hints")
+			}
+			if tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint {
+				t.Fatal("workspace_search must remain non-destructive")
+			}
+			if tool.Annotations.OpenWorldHint == nil || *tool.Annotations.OpenWorldHint {
+				t.Fatal("workspace_search must remain local-only")
+			}
+			if !strings.Contains(tool.Description, "never applies rewrites") || !strings.Contains(tool.Description, "rg/git grep") || !strings.Contains(tool.Description, "LSP") {
+				t.Fatalf("workspace_search description must preserve inspection responsibility ladder: %q", tool.Description)
+			}
+			in, err := json.Marshal(tool.InputSchema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"mode", "workspace", "language", "pattern", "paths", "globs", "limit", "timeout_ms"} {
+				if !strings.Contains(string(in), `"`+field+`"`) {
+					t.Fatalf("workspace_search input schema missing %q: %s", field, in)
+				}
+			}
+			if strings.Contains(string(in), `"rewrite"`) || strings.Contains(string(in), `"update_all"`) {
+				t.Fatalf("workspace_search must not expose automatic rewrite/apply inputs: %s", in)
+			}
+			out, err := json.Marshal(tool.OutputSchema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"engine_version", "matches", "complete", "truncated", "truncation_reason", "timed_out", "duration_ms", "file", "range", "captures"} {
+				if !strings.Contains(string(out), `"`+field+`"`) {
+					t.Fatalf("workspace_search output schema missing %q: %s", field, out)
+				}
+			}
+		case "repository_discover":
+			foundRepositoryDiscover = true
+			if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint || !tool.Annotations.IdempotentHint {
+				t.Fatal("repository_discover must advertise read-only/idempotent hints")
+			}
+			if tool.Annotations.OpenWorldHint == nil || *tool.Annotations.OpenWorldHint {
+				t.Fatal("repository_discover must remain local-only")
+			}
+			in, _ := json.Marshal(tool.InputSchema)
+			if !strings.Contains(string(in), "\"remote_identity\"") {
+				t.Fatalf("repository_discover input schema missing remote_identity: %s", in)
+			}
+		case "repository_inspect":
+			foundRepositoryInspect = true
+			if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint || !tool.Annotations.IdempotentHint {
+				t.Fatal("repository_inspect must advertise read-only/idempotent hints")
+			}
+			if tool.Annotations.OpenWorldHint == nil || !*tool.Annotations.OpenWorldHint {
+				t.Fatal("repository_inspect must disclose optional remote verification")
+			}
+			in, _ := json.Marshal(tool.InputSchema)
+			for _, field := range []string{"path", "verify_remote", "remote", "remote_branch"} {
+				if !strings.Contains(string(in), "\""+field+"\"") {
+					t.Fatalf("repository_inspect input schema missing %q: %s", field, in)
+				}
+			}
+		case "worktree_create":
+			foundWorktreeCreate = true
+			if tool.Annotations == nil || tool.Annotations.ReadOnlyHint || !tool.Annotations.IdempotentHint {
+				t.Fatal("worktree_create must advertise mutating/idempotent semantics")
+			}
+			if tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint {
+				t.Fatal("worktree_create is reversible and must not advertise destructiveHint")
+			}
+			in, _ := json.Marshal(tool.InputSchema)
+			for _, field := range []string{"repository_path", "worktree_path", "branch", "start_ref", "expected_start_sha"} {
+				if !strings.Contains(string(in), "\""+field+"\"") {
+					t.Fatalf("worktree_create input schema missing %q: %s", field, in)
+				}
+			}
+		case "worktree_remove":
+			foundWorktreeRemove = true
+			if tool.Annotations == nil || tool.Annotations.ReadOnlyHint || !tool.Annotations.IdempotentHint {
+				t.Fatal("worktree_remove must advertise mutating/idempotent semantics")
+			}
+			if tool.Annotations.DestructiveHint == nil || !*tool.Annotations.DestructiveHint || tool.Annotations.OpenWorldHint == nil || !*tool.Annotations.OpenWorldHint {
+				t.Fatal("worktree_remove must disclose destructive/remote-verification semantics")
+			}
+			in, _ := json.Marshal(tool.InputSchema)
+			for _, field := range []string{"repository_path", "worktree_path", "expected_head", "remote", "remote_branch", "disposable"} {
+				if !strings.Contains(string(in), "\""+field+"\"") {
+					t.Fatalf("worktree_remove input schema missing %q: %s", field, in)
+				}
+			}
+		case "repository_environment":
+			foundRepositoryEnvironment = true
+			if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint || !tool.Annotations.IdempotentHint {
+				t.Fatal("repository_environment must advertise read-only/idempotent hints")
+			}
+			if tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint {
+				t.Fatal("repository_environment must remain non-destructive")
+			}
+			if tool.Annotations.OpenWorldHint == nil || *tool.Annotations.OpenWorldHint {
+				t.Fatal("repository_environment discovery must remain local-only")
+			}
+			in, err := json.Marshal(tool.InputSchema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !strings.Contains(string(in), `"path"`) {
+				t.Fatalf("repository_environment input schema missing explicit path: %s", in)
+			}
+			out, err := json.Marshal(tool.OutputSchema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"repository_root", "repository_head", "declarations", "languages", "mechanisms", "tools", "entrypoints", "host_status", "selection_required", "isolation_requirement"} {
+				if !strings.Contains(string(out), `"`+field+`"`) {
+					t.Fatalf("repository_environment output schema missing %q: %s", field, out)
+				}
+			}
 		case "browser_status":
 			foundBrowserStatus = true
 			if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint || !tool.Annotations.IdempotentHint {
@@ -210,8 +332,8 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			}
 		}
 	}
-	if !foundEnvironment || !foundRoot || !foundStartJob || !foundJobStatus || !foundReadFile || !foundWriteFile || !foundBrowserStatus || !foundBrowser {
-		t.Fatalf("required tools missing: environment=%v root=%v start_job=%v job_status=%v read_file=%v write_file=%v browser_status=%v browser=%v", foundEnvironment, foundRoot, foundStartJob, foundJobStatus, foundReadFile, foundWriteFile, foundBrowserStatus, foundBrowser)
+	if !foundEnvironment || !foundRoot || !foundStartJob || !foundJobStatus || !foundReadFile || !foundWriteFile || !foundWorkspaceSearch || !foundRepositoryEnvironment || !foundRepositoryDiscover || !foundRepositoryInspect || !foundWorktreeCreate || !foundWorktreeRemove || !foundBrowserStatus || !foundBrowser {
+		t.Fatalf("required tools missing: environment=%v root=%v start_job=%v job_status=%v read_file=%v write_file=%v workspace_search=%v repository_environment=%v repository_discover=%v repository_inspect=%v worktree_create=%v worktree_remove=%v browser_status=%v browser=%v", foundEnvironment, foundRoot, foundStartJob, foundJobStatus, foundReadFile, foundWriteFile, foundWorkspaceSearch, foundRepositoryEnvironment, foundRepositoryDiscover, foundRepositoryInspect, foundWorktreeCreate, foundWorktreeRemove, foundBrowserStatus, foundBrowser)
 	}
 }
 
@@ -222,6 +344,9 @@ func TestInstructionsDescribePersistentWorkspace(t *testing.T) {
 		"task environments",
 		"prefer git worktree",
 		"never delete dirty, untracked, ambiguous, or unknown workspace state",
+		"rg/git grep through run_command for text occurrences",
+		"workspace_search for structural syntax-tree patterns",
+		"do not treat structural matches as semantic symbol/type/reference resolution",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("instructions missing %q", want)
