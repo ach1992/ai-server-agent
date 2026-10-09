@@ -37,6 +37,7 @@ SETUP_MODE="${AI_SERVER_AGENT_SETUP_MODE:-}"
 CHECK_ONLY=0
 RESOLVE_REF_ONLY=0
 FRESH_INSTALL=1
+INSTANCE_ID=""
 SETUP_INCOMPLETE=0
 RESOLVED_SOURCE_REF=""
 MCP_ACTIVATION_TOKEN=""
@@ -191,6 +192,21 @@ export DEBIAN_FRONTEND=noninteractive
 log "Installing minimal setup utilities (ca-certificates, curl, git, jq, openssl, tar, xz-utils)..."
 apt-get update -qq
 apt-get install -y -qq ca-certificates curl git jq openssl tar xz-utils >/dev/null
+
+# An instance has one non-secret identity for its entire state-preserving lifecycle.
+# A legacy installation migrates once; an already issued ID must never change
+# implicitly during update/repair/reinstall or due to host/network changes.
+if [ "$FRESH_INSTALL" -eq 0 ]; then
+  jq -e 'type == "object"' "$CONFIG_FILE" >/dev/null || die "Existing Agent config is invalid. Refusing implicit identity replacement."
+  if jq -e 'has("instance_id")' "$CONFIG_FILE" >/dev/null; then
+    INSTANCE_ID="$(jq -er '.instance_id | select(type == "string")' "$CONFIG_FILE")" || die "Existing instance_id must be a string. Refusing implicit identity replacement."
+    [[ "$INSTANCE_ID" =~ ^asa_[0-9a-f]{32}$ ]] || die "Existing instance_id is invalid. Refusing implicit identity replacement."
+  fi
+fi
+if [ -z "$INSTANCE_ID" ]; then
+  INSTANCE_ID="asa_$(od -An -N16 -tx1 /dev/urandom | tr -d ' \n')"
+fi
+[[ "$INSTANCE_ID" =~ ^asa_[0-9a-f]{32}$ ]] || die "Could not generate a valid random instance_id."
 
 # Preserve an existing connection unless explicit environment variables override it.
 if [ "$FRESH_INSTALL" -eq 0 ]; then
@@ -496,7 +512,8 @@ cat > "$config_tmp" <<JSON
   "log_dir": "$LOG_DIR",
   "workspace_dir": "$WORKSPACE_DIR",
   "worker_user": "$WORKER_USER",
-  "agent_user": "$AGENT_USER"
+  "agent_user": "$AGENT_USER",
+  "instance_id": "$INSTANCE_ID"
 }
 JSON
 chown root:"$AGENT_USER" "$config_tmp"; chmod 0640 "$config_tmp"

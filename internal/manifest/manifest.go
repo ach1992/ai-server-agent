@@ -36,6 +36,7 @@ type FilesystemInfo struct {
 
 type Manifest struct {
 	SchemaVersion       int            `json:"schema_version"`
+	InstanceID          string         `json:"instance_id,omitempty"`
 	GeneratedAt         string         `json:"generated_at"`
 	Purpose             string         `json:"purpose"`
 	WorkerUser          string         `json:"worker_user"`
@@ -52,6 +53,7 @@ func Build(c config.Config) Manifest {
 	browserData := filepath.Join(c.StateDir, "runtime/browser")
 	return Manifest{
 		SchemaVersion:       1,
+		InstanceID:          c.InstanceID,
 		GeneratedAt:         time.Now().UTC().Format(time.RFC3339),
 		Purpose:             "This server is dedicated to AI-operated development, deployment validation, diagnostics, and testing. Preserve the AI Server Agent control plane while changing the rest of the host as required.",
 		WorkerUser:          c.WorkerUser,
