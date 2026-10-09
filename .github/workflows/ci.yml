@@ -431,6 +431,24 @@ jobs:
           sudo /tmp/ai-server-agent-start-job-probe
           rm -f /tmp/ai-server-agent-start-job-probe
 
+          audit_log=/var/log/ai-server-agent/audit.jsonl
+          sudo test -s "$audit_log"
+          test "$(sudo stat -c '%U:%G:%a' "$audit_log")" = "root:aiagent:640"
+          if sudo grep -qF 'sleep 30' "$audit_log"; then
+            echo 'raw persistent-job command leaked into audit log' >&2
+            exit 1
+          fi
+          sudo jq -s -e '
+            [.[] | select(.operation_id=="ci-post-volatile-runtime-recovery")] as $events
+            | ($events | length) == 2
+            and ($events | map(.schema_version == 2) | all)
+            and ($events | map(.request_id | type == "string" and length > 0) | all)
+            and ($events | map(.command_fingerprint | type == "string" and length == 64) | all)
+            and ($events | map(.fingerprint_key_version == 1) | all)
+            and ($events | map(.fingerprint_key_id | type == "string" and length > 0) | all)
+            and ($events | map(.phase) | sort) == ["complete","start"]
+          ' "$audit_log" >/dev/null
+
           # Unsafe volatile state must fail closed; startup must not follow or
           # repair a symlink supplied at the lifecycle-lock path.
           sudo systemctl stop ai-server-agent.service ai-server-agent-executor.service

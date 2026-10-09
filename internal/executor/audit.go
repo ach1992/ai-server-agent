@@ -23,9 +23,16 @@ func WithNewRequestCorrelation(ctx context.Context) (context.Context, string, er
 	return context.WithValue(ctx, requestCorrelationContextKey{}, id), id, nil
 }
 
-func requestCorrelationFromContext(ctx context.Context) (string, bool) {
+func RequestCorrelationID(ctx context.Context) (string, bool) {
 	id, ok := ctx.Value(requestCorrelationContextKey{}).(string)
 	return id, ok && id != ""
+}
+
+func EnsureRequestCorrelationContext(ctx context.Context) (context.Context, string, error) {
+	if id, ok := RequestCorrelationID(ctx); ok {
+		return ctx, id, nil
+	}
+	return WithNewRequestCorrelation(ctx)
 }
 
 func newCorrelationID(prefix string) (string, error) {

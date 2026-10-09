@@ -412,7 +412,7 @@ func (m *Manager) Setup(ctx context.Context, approval bool) (executor.Response, 
 		return browserBusy("browser setup"), nil
 	}
 	defer m.mu.Unlock()
-	correlatedCtx, _, err := executor.WithNewRequestCorrelation(ctx)
+	correlatedCtx, _, err := executor.EnsureRequestCorrelationContext(ctx)
 	if err != nil {
 		return browserUnknown("browser setup correlation", err, false), nil
 	}
@@ -483,7 +483,7 @@ func (m *Manager) Run(ctx context.Context, opts RunOptions) (executor.Response, 
 	if status := m.inspectStatus(ctx, true); !status.Ready {
 		return browserError("browser_runtime_not_ready", "state", "browser runtime is not ready: "+status.Reason+"; call browser_setup"), nil
 	}
-	correlatedCtx, _, err := executor.WithNewRequestCorrelation(ctx)
+	correlatedCtx, _, err := executor.EnsureRequestCorrelationContext(ctx)
 	if err != nil {
 		return browserUnknown("browser execution correlation", err, false), nil
 	}

@@ -122,6 +122,7 @@ func New(cfg config.Config) (*Server, error) {
 			Capabilities: &mcpsdk.ServerCapabilities{},
 		},
 	)
+	s.mcp.AddReceivingMiddleware(requestCorrelationMiddleware())
 	s.registerTools()
 	return s, nil
 }
@@ -136,6 +137,21 @@ func annotations(readOnly, destructive, idempotent, openWorld bool) *mcpsdk.Tool
 		DestructiveHint: &destructive,
 		IdempotentHint:  idempotent,
 		OpenWorldHint:   &openWorld,
+	}
+}
+
+func requestCorrelationMiddleware() mcpsdk.Middleware {
+	return func(next mcpsdk.MethodHandler) mcpsdk.MethodHandler {
+		return func(ctx context.Context, method string, req mcpsdk.Request) (mcpsdk.Result, error) {
+			if method == "tools/call" {
+				correlated, _, err := executor.EnsureRequestCorrelationContext(ctx)
+				if err != nil {
+					return nil, fmt.Errorf("create MCP request correlation: %w", err)
+				}
+				ctx = correlated
+			}
+			return next(ctx, method, req)
+		}
 	}
 }
 

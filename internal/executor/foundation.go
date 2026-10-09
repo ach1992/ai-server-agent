@@ -359,7 +359,7 @@ func ClientCallContext(ctx context.Context, socket, token string, req Request) (
 		req.PrincipalName = principal.Name
 	}
 	if req.RequestID == "" {
-		if requestID, ok := requestCorrelationFromContext(ctx); ok {
+		if requestID, ok := RequestCorrelationID(ctx); ok {
 			req.RequestID = requestID
 		}
 	}
