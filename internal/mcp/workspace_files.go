@@ -14,6 +14,11 @@ type WorkspaceReadInput struct {
 	FileVersion string `json:"file_version,omitempty" jsonschema:"Optional consistency precondition from a previous read"`
 }
 
+type WorkspaceApplyEditsInput struct {
+	Workspace string                       `json:"workspace" jsonschema:"Explicit workspace/worktree directory inside configured Agent workspace root"`
+	Edits     []executor.WorkspaceFileEdit `json:"edits" jsonschema:"Ordered bounded versioned file edits; all preflight before first mutation, per-file commits may partially succeed"`
+}
+
 type WorkspaceWriteInput struct {
 	Workspace    string `json:"workspace" jsonschema:"Explicit workspace/worktree directory inside configured Agent workspace root"`
 	Path         string `json:"path" jsonschema:"Relative ordinary file path inside workspace; parent must exist; symlinks and Git admin paths are not followed"`
@@ -23,6 +28,16 @@ type WorkspaceWriteInput struct {
 }
 
 func (s *Server) registerWorkspaceFileTools() {
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
+		Name: "workspace_apply_edits", Description: "Apply up to 12 bounded aiworker source-file edits in one explicit workspace after preflighting EVERY path, expected version and exact replacement context. Each file commits atomically but the batch is NOT an all-or-nothing transaction: structured result reports exact applied, failed and unattempted paths, including possible unknown completion. No Git staging/commit, code execution or implicit rollback.",
+		Annotations: annotations(false, true, false, false),
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input WorkspaceApplyEditsInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "workspace_apply_edits", Workspace: input.Workspace, WorkspaceEdits: input.Edits})
+		if err != nil {
+			return executorTransportErrorResult(err)
+		}
+		return responseResult(resp)
+	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name: "workspace_read", Description: "Read a bounded raw-byte range from a regular source file inside one explicit workspace as aiworker, not root. No symlinks, traversal or implicit Git administrative reads; returns a file_version for optimistic edits. Does not execute project code.",
 		Annotations: annotations(true, false, true, false),

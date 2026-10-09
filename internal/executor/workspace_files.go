@@ -24,22 +24,23 @@ import (
 // executor. A purpose-specific child is necessary: Go cannot safely switch
 // per-goroutine Unix credentials inside the concurrent root executor.
 type workspaceFileOperation struct {
-	Action        string `json:"action"`
-	WorkspaceRoot string `json:"workspace_root"`
-	Workspace     string `json:"workspace"`
-	Path          string `json:"path"`
-	Offset        int64  `json:"offset,omitempty"`
-	Limit         int    `json:"limit,omitempty"`
-	Content       string `json:"content,omitempty"`
-	FileVersion   string `json:"file_version,omitempty"`
-	MustNotExist  bool   `json:"must_not_exist,omitempty"`
+	Action        string              `json:"action"`
+	WorkspaceRoot string              `json:"workspace_root"`
+	Workspace     string              `json:"workspace"`
+	Path          string              `json:"path"`
+	Offset        int64               `json:"offset,omitempty"`
+	Limit         int                 `json:"limit,omitempty"`
+	Content       string              `json:"content,omitempty"`
+	FileVersion   string              `json:"file_version,omitempty"`
+	MustNotExist  bool                `json:"must_not_exist,omitempty"`
+	Edits         []WorkspaceFileEdit `json:"edits,omitempty"`
 }
 
 const workerWorkspaceTimeout = 30 * time.Second
 
 func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp Response) {
-	write := req.Action == "workspace_write"
-	if req.Action != "workspace_read" && !write {
+	write := req.Action == "workspace_write" || req.Action == "workspace_apply_edits"
+	if req.Action != "workspace_read" && req.Action != "workspace_write" && req.Action != "workspace_apply_edits" {
 		return fileError("invalid_action", "validation", errors.New("unsupported worker workspace action"))
 	}
 	if strings.TrimSpace(req.Workspace) == "" || strings.TrimSpace(req.Path) == "" {
@@ -48,7 +49,11 @@ func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp 
 	if req.Root || req.Approval || req.Mode != 0 {
 		return fileError("invalid_request", "validation", errors.New("workspace files always use worker authority without privilege/mode override"))
 	}
-	if write {
+	if req.Action == "workspace_apply_edits" {
+		if len(req.WorkspaceEdits) == 0 || len(req.WorkspaceEdits) > maxWorkspaceBatchFiles {
+			return fileError("invalid_edit_count", "validation", errors.New("invalid multi-file edit count"))
+		}
+	} else if write {
 		if !utf8.ValidString(req.Content) {
 			return fileError("invalid_content", "validation", errors.New("workspace write content must be valid UTF-8"))
 		}
@@ -61,8 +66,10 @@ func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp 
 	} else if req.Offset < 0 || req.Limit < 0 || req.Limit > maxFileReadBytes {
 		return fileError("invalid_range", "validation", errors.New("invalid bounded read offset or limit"))
 	}
-	if _, err := safeWorkspaceRelativeFile(req.Path); err != nil {
-		return fileError("invalid_path", "validation", err)
+	if req.Action != "workspace_apply_edits" {
+		if _, err := safeWorkspaceRelativeFile(req.Path); err != nil {
+			return fileError("invalid_path", "validation", err)
+		}
 	}
 	// Keep a single bounded read/write in the established worker command slot.
 	release, admitted := s.runs.acquire(false)
@@ -72,11 +79,11 @@ func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp 
 	defer release()
 	auditStart := time.Now()
 	if write {
-		if blocked := s.beginActionAudit(req, "workspace_write", "worker", req.Workspace+"\x00"+req.Path, "workspace"); blocked != nil {
+		if blocked := s.beginActionAudit(req, req.Action, "worker", req.Workspace+"\x00"+req.Path, "workspace"); blocked != nil {
 			return *blocked
 		}
 		defer func() {
-			resp = s.finishActionAudit(req, "workspace_write", "worker", req.Workspace+"\x00"+req.Path, "workspace", auditStart, resp)
+			resp = s.finishActionAudit(req, req.Action, "worker", req.Workspace+"\x00"+req.Path, "workspace", auditStart, resp)
 		}()
 	}
 
@@ -85,6 +92,7 @@ func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp 
 		Workspace: req.Workspace, Path: req.Path,
 		Offset: req.Offset, Limit: req.Limit, Content: req.Content,
 		FileVersion: req.FileVersion, MustNotExist: req.MustNotExist,
+		Edits: req.WorkspaceEdits,
 	}
 	payload, err := json.Marshal(op)
 	if err != nil {
@@ -159,11 +167,21 @@ func RunWorkspaceFileHelper() int {
 	if err := json.Unmarshal(raw, &op); err != nil {
 		return 2
 	}
+	// No workspace path is opened before the kernel sandbox is in place.
+	// Fail closed if this host cannot enforce the per-request boundary.
+	unlock, sandboxErr := workerLandlockRestrict(op.WorkspaceRoot, op.Workspace)
+	if sandboxErr != nil {
+		_ = json.NewEncoder(os.Stdout).Encode(fileError("workspace_sandbox_unavailable", "security", sandboxErr))
+		return 0
+	}
+	defer unlock()
 	var resp Response
 	if op.Action == "workspace_read" {
 		resp = readWorkerWorkspaceFile(op)
 	} else if op.Action == "workspace_write" {
 		resp = writeWorkerWorkspaceFile(op)
+	} else if op.Action == "workspace_apply_edits" {
+		resp = applyWorkerWorkspaceEdits(op)
 	} else {
 		return 2
 	}
