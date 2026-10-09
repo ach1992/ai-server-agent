@@ -307,6 +307,12 @@ recover exact repository/worktree
 -> recover again from GitHub evidence
 ```
 
+### Structural search
+
+`internal/executor/workspace_search_test.go` keeps the first-class `workspace_search` surface bounded and read-only. Tests cover explicit workspace/path containment including symlink escape rejection, structured zero-based file/range/capture output, no-match exit semantics, result-limit and timeout partial-state reporting, malformed/out-of-workspace engine output rejection, engine/version validation, repository-config isolation through `--config /dev/null`, and process cancellation when enough results have been collected. MCP discovery tests preserve the text -> structural -> semantic responsibility ladder and prevent rewrite/apply inputs from entering the public schema.
+
+A gated real-engine acceptance (`AST_GREP_ACCEPTANCE_BIN`) runs the same production wrapper against an explicitly supplied ast-grep binary. The #62 candidate evidence exercised both the minimum-supported 0.40.5 contract and 0.45.3 with release-asset SHA-256 verification before execution. A separate rewrite-plan evaluation proves ast-grep can calculate a replacement while the source checksum remains unchanged; the first-class tool exposes no automatic apply path. Managed installation is intentionally not performed merely to satisfy a read-only search call.
+
 ### Value evidence
 
 For each Layer-1 surface, prove the reason it was promoted above direct CLI use:
