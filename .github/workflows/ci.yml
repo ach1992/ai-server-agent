@@ -73,6 +73,9 @@ jobs:
       - name: Shell syntax
         if: ${{ needs.change-scope.outputs.shell_changed != 'false' }}
         run: bash -n install.sh update.sh uninstall.sh manage.sh ensure-lifecycle-lock.sh scripts/build-release.sh scripts/install-stable.sh scripts/ci-change-scope.sh scripts/dev-check.sh tests/*.sh
+
+      - name: Validate authenticated credential activation response
+        run: bash tests/credential_activation_response.sh
       - name: GitHub Actions immutable pinning contract
         run: |
           bad=0

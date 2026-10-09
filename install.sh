@@ -41,17 +41,35 @@ RESOLVED_SOURCE_REF=""
 MCP_ACTIVATION_TOKEN=""
 MCP_CREDENTIAL_ORIGIN=""
 MCP_STORE_CREATED=0
+MCP_MIGRATION_SWITCHED=0
+MCP_MIGRATION_RECOVERING=0
 PREVIOUS_CONFIG_BACKUP=""
 PREVIOUS_CREDENTIAL_STORE=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-/dev/null}")" 2>/dev/null && pwd || true)"
 LIFECYCLE_LOCK_DIR=/run/lock/ai-server-agent
 LIFECYCLE_LOCK="$LIFECYCLE_LOCK_DIR/management.lock"
 
-trap 'echo "[ERROR] Installation failed at line $LINENO. Review the output above; existing project files were not intentionally modified." >&2' ERR
+installation_error_recovery(){
+  local failed_line="$1"
+  trap - ERR
+  if [ "$MCP_MIGRATION_SWITCHED" -eq 1 ] && [ "$MCP_MIGRATION_RECOVERING" -eq 0 ]; then
+    MCP_MIGRATION_RECOVERING=1
+    rollback_legacy_mcp_migration "installation error at line $failed_line"
+  fi
+  printf '[ERROR] Installation failed at line %s. Review the output above.\n' "$failed_line" >&2
+}
+trap 'installation_error_recovery "$LINENO"' ERR
 
 log(){ printf '[ai-server-agent] %s\n' "$*"; }
 warn(){ printf '[ai-server-agent] WARNING: %s\n' "$*" >&2; }
-die(){ printf '[ai-server-agent] ERROR: %s\n' "$*" >&2; exit 1; }
+die(){
+  if [ "$MCP_MIGRATION_SWITCHED" -eq 1 ] && [ "$MCP_MIGRATION_RECOVERING" -eq 0 ]; then
+    MCP_MIGRATION_RECOVERING=1
+    rollback_legacy_mcp_migration "$*"
+  fi
+  printf '[ai-server-agent] ERROR: %s\n' "$*" >&2
+  exit 1
+}
 need_root(){ [ "$(id -u)" -eq 0 ] || die "Run this installer as root (for example: sudo bash install.sh)."; }
 UBUNTU_MIN_VERSION=22.04
 DEBIAN_MIN_VERSION=11
@@ -242,15 +260,21 @@ install -d -m 0755 -o root -g root "$LIB_DIR"
 random_hex(){ od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; printf '\n'; }
 token_verifier(){ printf '%s' "$1" | sha256sum | awk '{print $1}'; }
 verify_mcp_token_local(){
-  local token="$1" scheme=http url code
+  local token="$1" scheme=http url code response
   [ -n "$TLS_CERT_FILE" ] && scheme=https
-  url="$scheme://127.0.0.1:$PORT/mcp"
+  url="$scheme://127.0.0.1:$PORT/agent-environment.json"
+  response="$(mktemp)"
   if [ "$scheme" = https ]; then
-    code="$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -ksS --config - -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' --data '{}' "$url" || true)"
+    code="$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -ksS --max-time 5 --config - -o "$response" -w '%{http_code}' "$url")" || { rm -f "$response"; return 1; }
   else
-    code="$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -sS --config - -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' --data '{}' "$url" || true)"
+    code="$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -sS --max-time 5 --config - -o "$response" -w '%{http_code}' "$url")" || { rm -f "$response"; return 1; }
   fi
-  [ "$code" != "000" ] && [ "$code" != "401" ]
+  if [ "$code" = 200 ] && jq -e '.schema_version == 1 and (.critical_components | type == "array") and (.purpose | type == "string")' "$response" >/dev/null 2>&1; then
+    rm -f "$response"
+    return 0
+  fi
+  rm -f "$response"
+  return 1
 }
 
 rollback_legacy_mcp_migration(){
@@ -414,6 +438,21 @@ if [ "$FRESH_INSTALL" -eq 0 ]; then
   PREVIOUS_CONFIG_BACKUP="$(mktemp)"
   cp -a "$CONFIG_FILE" "$PREVIOUS_CONFIG_BACKUP"
 fi
+if [ "$AGENT_VERSION" = "source" ]; then
+  STATE_CHANNEL=source; STATE_VERSION=source; STATE_REF="${RESOLVED_SOURCE_REF:-$REF}"
+else
+  STATE_CHANNEL=stable; STATE_VERSION="$AGENT_VERSION"; STATE_REF="$REF"; TRACK_REF="$AGENT_VERSION"
+fi
+case "$STATE_CHANNEL" in stable|source) ;; *) die "invalid install channel" ;; esac
+[[ "$STATE_VERSION" =~ ^(source|v[0-9]+\.[0-9]+\.[0-9]+)$ ]] || die "invalid install version metadata"
+[[ "$STATE_REF" =~ ^([0-9a-f]{40}|v[0-9]+\.[0-9]+\.[0-9]+|binary)$ ]] || die "invalid install ref metadata: $STATE_REF"
+[[ "$TRACK_REF" =~ ^[A-Za-z0-9._/-]+$|^[0-9a-fA-F]{40}$ ]] || die "invalid install tracking ref metadata: $TRACK_REF"
+if [ "$STATE_CHANNEL" = stable ]; then
+  [ "$STATE_REF" = "$STATE_VERSION" ] && [ "$TRACK_REF" = "$STATE_VERSION" ] || die "Stable install metadata must pin version/ref/track_ref to the same tag."
+else
+  [ "$STATE_VERSION" = source ] || die "Source install metadata must use version=source."
+  [[ "$STATE_REF" =~ ^([0-9a-f]{40}|binary)$ ]] || die "Source install metadata must use an immutable commit SHA or binary marker."
+fi
 config_tmp="$(mktemp "$CONFIG_DIR/.config.XXXXXX")"
 cat > "$config_tmp" <<JSON
 {
@@ -435,22 +474,8 @@ cat > "$config_tmp" <<JSON
 JSON
 chown root:"$AGENT_USER" "$config_tmp"; chmod 0640 "$config_tmp"
 mv -f "$config_tmp" "$CONFIG_FILE"
+if [ "$MCP_CREDENTIAL_ORIGIN" = legacy ]; then MCP_MIGRATION_SWITCHED=1; fi
 
-if [ "$AGENT_VERSION" = "source" ]; then
-  STATE_CHANNEL=source; STATE_VERSION=source; STATE_REF="${RESOLVED_SOURCE_REF:-$REF}"
-else
-  STATE_CHANNEL=stable; STATE_VERSION="$AGENT_VERSION"; STATE_REF="$REF"; TRACK_REF="$AGENT_VERSION"
-fi
-case "$STATE_CHANNEL" in stable|source) ;; *) die "invalid install channel" ;; esac
-[[ "$STATE_VERSION" =~ ^(source|v[0-9]+\.[0-9]+\.[0-9]+)$ ]] || die "invalid install version metadata"
-[[ "$STATE_REF" =~ ^([0-9a-f]{40}|v[0-9]+\.[0-9]+\.[0-9]+|binary)$ ]] || die "invalid install ref metadata: $STATE_REF"
-[[ "$TRACK_REF" =~ ^[A-Za-z0-9._/-]+$|^[0-9a-fA-F]{40}$ ]] || die "invalid install tracking ref metadata: $TRACK_REF"
-if [ "$STATE_CHANNEL" = stable ]; then
-  [ "$STATE_REF" = "$STATE_VERSION" ] && [ "$TRACK_REF" = "$STATE_VERSION" ] || die "Stable install metadata must pin version/ref/track_ref to the same tag."
-else
-  [ "$STATE_VERSION" = source ] || die "Source install metadata must use version=source."
-  [[ "$STATE_REF" =~ ^([0-9a-f]{40}|binary)$ ]] || die "Source install metadata must use an immutable commit SHA or binary marker."
-fi
 state_tmp="$(mktemp "$CONTROL_DIR/.install-state.XXXXXX")"
 jq -n \
   --arg channel "$STATE_CHANNEL" \
@@ -529,15 +554,18 @@ else
   fi
 fi
 if [ -n "$activation_error" ]; then
+  MCP_MIGRATION_RECOVERING=1
   rollback_legacy_mcp_migration "$activation_error" || die "$activation_error"
 fi
 
 if [ -n "$MCP_ACTIVATION_TOKEN" ]; then
   if ! verify_mcp_token_local "$MCP_ACTIVATION_TOKEN"; then
+    MCP_MIGRATION_RECOVERING=1
     rollback_legacy_mcp_migration "new credential verification failed" || die "New named MCP credential could not be verified after service activation; authentication remains fail-closed. Re-run repair and rotate the direct/default credential locally."
   fi
   rm -f -- "$LEGACY_MCP_TOKEN_FILE" "$MCP_AUTH_HEADER_FILE"
 fi
+MCP_MIGRATION_SWITCHED=0
 [ -z "$PREVIOUS_CONFIG_BACKUP" ] || rm -f -- "$PREVIOUS_CONFIG_BACKUP"
 
 log "Core installation is healthy."

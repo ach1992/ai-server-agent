@@ -28,7 +28,7 @@ CF_PENDING_FINGERPRINT=""
 CF_TXN_PHASE="prepared"
 CF_TXN_BACKUP_DIR="$CONTROL_DIR/cloudflare-transaction-backup"
 CF_TXN_BACKUP_READY=false
-MANAGEMENT_LOCK="$CONTROL_DIR/management.lock"
+MANAGEMENT_LOCK="/run/lock/ai-server-agent/management.lock"
 MANAGEMENT_LOCK_FD=""
 CF_RESULT_DNS_FINGERPRINT=""
 CF_RESULT_ORIGIN_FINGERPRINT=""
@@ -57,15 +57,25 @@ need_cmd(){ command -v "$1" >/dev/null 2>&1 || die "$1 is required. Run the inst
 acquire_management_lock(){
   [ -n "${MANAGEMENT_LOCK_FD:-}" ] && return 0
   need_cmd flock
-  install -d -o root -g root -m 0700 "$CONTROL_DIR" || die "Could not secure the management control directory."
-  [ ! -L "$MANAGEMENT_LOCK" ] || die "Refusing symlinked management lock: $MANAGEMENT_LOCK"
-  ( umask 077; : >> "$MANAGEMENT_LOCK" ) || die "Could not create the management lock."
-  [ -f "$MANAGEMENT_LOCK" ] && [ ! -L "$MANAGEMENT_LOCK" ] || die "Management lock is not a regular file."
-  chown root:root "$MANAGEMENT_LOCK" || die "Could not secure the management lock owner."
-  chmod 0600 "$MANAGEMENT_LOCK" || die "Could not secure the management lock mode."
-  [ "$(stat -c '%u:%g:%a' "$MANAGEMENT_LOCK" 2>/dev/null)" = "0:0:600" ] || die "Management lock ownership/mode is unsafe."
-  exec {MANAGEMENT_LOCK_FD}>>"$MANAGEMENT_LOCK" || die "Could not open the management lock."
-  flock -n "$MANAGEMENT_LOCK_FD" || die "Another AI Server Agent connection-management operation is already active. Retry after it finishes."
+  local lock_dir
+  lock_dir="$(dirname "$MANAGEMENT_LOCK")"
+  [ ! -L "$lock_dir" ] || die "Refusing symlinked lifecycle lock directory."
+  install -d -o root -g root -m 0700 "$lock_dir" || die "Could not secure lifecycle lock directory."
+  [ "$(stat -c '%u:%g:%a' "$lock_dir")" = "0:0:700" ] || die "Unsafe lifecycle lock directory."
+  [ ! -L "$MANAGEMENT_LOCK" ] || die "Refusing symlinked management lock."
+  ( umask 077; : >> "$MANAGEMENT_LOCK" ) || die "Could not create lifecycle lock."
+  [ -f "$MANAGEMENT_LOCK" ] && [ ! -L "$MANAGEMENT_LOCK" ] || die "Unsafe lifecycle lock file."
+  chown root:root "$MANAGEMENT_LOCK" || die "Could not secure lifecycle lock owner."
+  chmod 0600 "$MANAGEMENT_LOCK" || die "Could not secure lifecycle lock mode."
+  [ "$(stat -c '%u:%g:%a' "$MANAGEMENT_LOCK")" = "0:0:600" ] || die "Unsafe lifecycle lock mode."
+  if [ "$(readlink /proc/$$/fd/9 2>/dev/null || true)" = "$MANAGEMENT_LOCK" ]; then
+    MANAGEMENT_LOCK_FD=9
+    flock -n 9 || die "Another lifecycle operation is active."
+    return 0
+  fi
+  exec {MANAGEMENT_LOCK_FD}>>"$MANAGEMENT_LOCK" || die "Could not open lifecycle lock."
+  flock -n "$MANAGEMENT_LOCK_FD" || die "Another lifecycle operation is active."
+
 }
 
 if [ -t 1 ]; then
@@ -238,17 +248,23 @@ validate_credential_store_file(){
 }
 
 verify_mcp_token_local(){
-  local token="$1" port scheme url code
+  local token="$1" port scheme url code response
   port="$(current_port)"
   scheme=http
   [ -n "$(config_get tls_cert_file)" ] && scheme=https
-  url="$scheme://127.0.0.1:$port$(config_get mcp_path)"
+  url="$scheme://127.0.0.1:$port/agent-environment.json"
+  response="$(mktemp)"
   if [ "$scheme" = https ]; then
-    code="$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -ksS --config - -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' --data '{}' "$url" || true)"
+    code="$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -ksS --max-time 5 --config - -o "$response" -w '%{http_code}' "$url")" || { rm -f "$response"; return 1; }
   else
-    code="$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -sS --config - -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' --data '{}' "$url" || true)"
+    code="$(printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -sS --max-time 5 --config - -o "$response" -w '%{http_code}' "$url")" || { rm -f "$response"; return 1; }
   fi
-  [ "$code" != "000" ] && [ "$code" != "401" ]
+  if [ "$code" = 200 ] && jq -e '.schema_version == 1 and (.critical_components | type == "array") and (.purpose | type == "string")' "$response" >/dev/null 2>&1; then
+    rm -f "$response"
+    return 0
+  fi
+  rm -f "$response"
+  return 1
 }
 
 credential_health(){
