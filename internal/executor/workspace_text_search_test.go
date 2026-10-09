@@ -18,6 +18,7 @@ func TestWorkerLandlockedTextSearchResultsAndBounds(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("worker helper black-box test runs with ordinary worker authority")
 	}
+	requireWorkerLandlockV2(t)
 	if _, err := os.Stat("/usr/bin/rg"); err != nil {
 		t.Skip("ripgrep not installed in optional development host")
 	}

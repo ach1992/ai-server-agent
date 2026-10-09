@@ -140,6 +140,7 @@ func TestWorkspaceFileHelperRunsWithWorkerIdentityAndAudit(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("ordinary worker bridge fixture runs without root; privileged service coverage belongs to high assurance CI")
 	}
+	requireWorkerLandlockV2(t)
 	root, repo, op := workspaceFixture(t)
 	binary := filepath.Join(t.TempDir(), "ai-server-agent")
 	build := exec.Command("go", "build", "-o", binary, "./cmd/ai-server-agent")

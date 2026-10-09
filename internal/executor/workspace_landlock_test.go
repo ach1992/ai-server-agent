@@ -11,6 +11,14 @@ import (
 	"testing"
 )
 
+func requireWorkerLandlockV2(t *testing.T) {
+	t.Helper()
+	abi, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, 0, 0, uintptr(unix.LANDLOCK_CREATE_RULESET_VERSION))
+	if errno != 0 || abi < 2 {
+		t.Skip("Landlock ABI v2 unavailable; helper fails closed on this kernel")
+	}
+}
+
 func TestWorkerLandlockFailsClosedOutside(t *testing.T) {
 	if os.Getenv("ASA_LANDLOCK_PROBE") == "1" {
 		root, repo, outside := os.Getenv("ASA_LANDLOCK_ROOT"), os.Getenv("ASA_LANDLOCK_REPO"), os.Getenv("ASA_LANDLOCK_OUTSIDE")
