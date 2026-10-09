@@ -394,3 +394,45 @@ func TestRepositoryEnvironmentSelectsCompatibleWorkerCacheWithoutExecutingIt(t *
 		t.Fatalf("worker-cache executable ran during read-only discovery: %v", err)
 	}
 }
+
+func TestRepositoryEnvironmentMarksTrackedModifiedDeclarationAsNonDurable(t *testing.T) {
+	s, root := environmentTestServer(t)
+	repo, _ := initEnvironmentFixture(t, root, map[string]string{
+		"go.mod": "module example.invalid/project\n\ngo 1.26.0\n",
+	})
+	installFakeEnvironmentTool(t, root, "go1.27", "go", "go version go1.27.0 linux/amd64")
+	if err := os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module example.invalid/project\n\ngo 1.27.0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+
+	summary, code, err := s.inspectRepositoryEnvironment(context.Background(), repo)
+	if err != nil {
+		t.Fatalf("inspect: code=%s err=%v", code, err)
+	}
+	found := false
+	for _, declaration := range summary.Declarations {
+		if declaration.Path != "go.mod" {
+			continue
+		}
+		found = true
+		if !declaration.Tracked || declaration.MatchesHead {
+			t.Fatalf("modified tracked declaration durability wrong: %+v", declaration)
+		}
+	}
+	if !found {
+		t.Fatal("go.mod declaration missing")
+	}
+	if !strings.Contains(strings.Join(summary.Warnings, "\n"), "differs from HEAD") {
+		t.Fatalf("tracked modification durability warning missing: %v", summary.Warnings)
+	}
+}
+
+func TestTrustedSystemExecutableRejectsWorkerOwnedBinary(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "tool")
+	if err := os.WriteFile(path, []byte("#!/bin/sh\nexit 0\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if trustedSystemExecutable(path) {
+		t.Fatal("worker-owned executable was treated as trusted system tooling")
+	}
+}

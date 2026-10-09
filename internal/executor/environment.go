@@ -150,8 +150,9 @@ func pathWithin(root, path string) bool {
 func (s *Server) environmentGit(ctx context.Context, dir string, args ...string) (string, int, error) {
 	gitPath := ""
 	for _, candidate := range []string{"/usr/bin/git", "/usr/local/bin/git", "/bin/git"} {
-		if info, err := os.Stat(candidate); err == nil && info.Mode().IsRegular() && info.Mode().Perm()&0111 != 0 {
-			gitPath = candidate
+		resolved, err := filepath.EvalSymlinks(candidate)
+		if err == nil && trustedSystemExecutable(resolved) {
+			gitPath = resolved
 			break
 		}
 	}
@@ -188,11 +189,11 @@ func (s *Server) environmentGit(ctx context.Context, dir string, args ...string)
 	} else if uint32(os.Geteuid()) != s.workerUID {
 		return "", -1, errors.New("executor cannot assume configured worker identity")
 	}
-	var stdout bytes.Buffer
-	cmd.Stdout = &stdout
+	stdout := &environmentLimitedBuffer{limit: maxEnvironmentOutputBytes}
+	cmd.Stdout = stdout
 	cmd.Stderr = io.Discard
 	err := cmd.Run()
-	if stdout.Len() > maxEnvironmentOutputBytes {
+	if errors.Is(err, errEnvironmentOutputLimit) {
 		return "", -1, errors.New("git metadata output exceeded environment discovery limit")
 	}
 	if err == nil {
@@ -227,30 +228,72 @@ func (b *environmentBuilder) readDeclaration(ctx context.Context, rel, kind stri
 		b.warnings = append(b.warnings, fmt.Sprintf("%s is not a regular non-symlink declaration file and was ignored", rel))
 		return nil, false
 	}
+	tracked, matchesHead := b.declarationDurability(ctx, rel)
 	if info.Size() > maxEnvironmentFileBytes {
-		tracked := false
-		if _, code, err := b.server.environmentGit(ctx, b.root, "ls-files", "--error-unmatch", "--", rel); err == nil && code == 0 {
-			tracked = true
-		}
-		b.declarations = append(b.declarations, EnvironmentDeclaration{Path: rel, Kind: kind, Tracked: tracked})
+		b.declarations = append(b.declarations, EnvironmentDeclaration{Path: rel, Kind: kind, Tracked: tracked, MatchesHead: matchesHead})
+		b.appendDeclarationDurabilityWarning(rel, tracked, matchesHead)
 		b.warnings = append(b.warnings, fmt.Sprintf("%s exceeds the bounded parse size; presence was recorded but content was not parsed", rel))
 		return nil, true
 	}
-	data, err := os.ReadFile(full)
+	data, err := b.server.readEnvironmentFileAsWorker(ctx, full)
 	if err != nil {
-		b.warnings = append(b.warnings, fmt.Sprintf("%s could not be read", rel))
+		b.warnings = append(b.warnings, fmt.Sprintf("%s could not be read with worker authority", rel))
 		return nil, false
 	}
-	tracked := false
-	if _, code, err := b.server.environmentGit(ctx, b.root, "ls-files", "--error-unmatch", "--", rel); err == nil && code == 0 {
-		tracked = true
-	}
 	hash := sha256.Sum256(data)
-	b.declarations = append(b.declarations, EnvironmentDeclaration{Path: rel, Kind: kind, Tracked: tracked, SHA256: hex.EncodeToString(hash[:])})
-	if !tracked {
-		b.warnings = append(b.warnings, fmt.Sprintf("%s is not Git-tracked; it is visible working state but not durable repository truth", rel))
-	}
+	b.declarations = append(b.declarations, EnvironmentDeclaration{Path: rel, Kind: kind, Tracked: tracked, MatchesHead: matchesHead, SHA256: hex.EncodeToString(hash[:])})
+	b.appendDeclarationDurabilityWarning(rel, tracked, matchesHead)
 	return data, true
+}
+
+func (s *Server) readEnvironmentFileAsWorker(ctx context.Context, path string) ([]byte, error) {
+	cmd := exec.CommandContext(ctx, "/bin/cat", "--", path)
+	cmd.Dir = s.cfg.WorkspaceDir
+	cmd.Env = []string{"HOME=/nonexistent", "PATH=" + safeCommandPath, "LANG=C.UTF-8", "LC_ALL=C.UTF-8", "AI_SERVER_AGENT=1"}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		_, err := terminateProcessGroup(cmd.Process.Pid)
+		return err
+	}
+	cmd.WaitDelay = processGroupTerminateGrace
+	if os.Geteuid() == 0 {
+		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: s.workerUID, Gid: s.workerGID, Groups: []uint32{s.workerGID}}
+	} else if uint32(os.Geteuid()) != s.workerUID {
+		return nil, errors.New("executor cannot assume configured worker identity")
+	}
+	output := &environmentLimitedBuffer{limit: maxEnvironmentFileBytes}
+	cmd.Stdout = output
+	cmd.Stderr = io.Discard
+	if err := cmd.Run(); err != nil {
+		if errors.Is(err, errEnvironmentOutputLimit) {
+			return nil, errEnvironmentOutputLimit
+		}
+		return nil, err
+	}
+	return []byte(output.String()), nil
+}
+
+func (b *environmentBuilder) declarationDurability(ctx context.Context, rel string) (tracked, matchesHead bool) {
+	if _, code, err := b.server.environmentGit(ctx, b.root, "ls-files", "--error-unmatch", "--", rel); err != nil || code != 0 {
+		return false, false
+	}
+	tracked = true
+	if _, code, err := b.server.environmentGit(ctx, b.root, "diff", "--quiet", "HEAD", "--", rel); err == nil && code == 0 {
+		matchesHead = true
+	}
+	return tracked, matchesHead
+}
+
+func (b *environmentBuilder) appendDeclarationDurabilityWarning(rel string, tracked, matchesHead bool) {
+	switch {
+	case !tracked:
+		b.warnings = append(b.warnings, fmt.Sprintf("%s is not Git-tracked; it is visible working state but not durable repository truth", rel))
+	case !matchesHead:
+		b.warnings = append(b.warnings, fmt.Sprintf("%s is Git-tracked but differs from HEAD; current working state is not durable repository truth until committed", rel))
+	}
 }
 
 func (b *environmentBuilder) addLanguage(name, declaredBy string) {
@@ -359,7 +402,10 @@ func (b *environmentBuilder) probeTools(ctx context.Context) {
 			version := candidate.versionHint
 			compatibility := "compatible"
 			reason := ""
-			if candidate.source == "system_path" {
+			if candidate.source == "system_path_unverified" {
+				compatibility = "unknown"
+				reason = "system_executable_not_trusted_for_read_only_probe"
+			} else if candidate.source == "system_path" {
 				probed, err := b.server.environmentToolVersion(ctx, candidate.path, tool.Executable)
 				if err != nil {
 					compatibility = "unknown"
@@ -428,6 +474,9 @@ func (s *Server) environmentExecutableCandidates(repositoryRoot, name string) []
 		if err != nil || pathWithin(repositoryRoot, resolved) || !executableFile(resolved) || seen[resolved] {
 			return
 		}
+		if source == "system_path" && !trustedSystemExecutable(resolved) {
+			source = "system_path_unverified"
+		}
 		seen[resolved] = true
 		candidates = append(candidates, environmentExecutableCandidate{path: resolved, source: source, versionHint: hint})
 	}
@@ -471,6 +520,15 @@ func environmentCacheVersionHint(workspace, candidate string) string {
 		values = append(values, fmt.Sprintf("%d", version.parts[2]))
 	}
 	return strings.Join(values, ".")
+}
+
+func trustedSystemExecutable(path string) bool {
+	info, err := os.Stat(path)
+	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 || info.Mode().Perm()&0022 != 0 {
+		return false
+	}
+	stat, ok := info.Sys().(*syscall.Stat_t)
+	return ok && stat.Uid == 0
 }
 
 func executableFile(path string) bool {
