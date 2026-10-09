@@ -171,10 +171,35 @@ func responseResult(resp executor.Response) (*mcpsdk.CallToolResult, executor.Re
 		}
 		return textResult(string(b), !resp.OK), resp, nil
 	}
+	// A text-only MCP client may hide structuredContent. Keep this fallback
+	// bounded and free of payload bytes, but retain enough continuation and
+	// consistency metadata for the caller to request a smaller useful range.
 	summary := fmt.Sprintf(
-		"ok=%t status=%q error_code=%q exit_code=%d bytes_returned=%d truncated=%t; output omitted from text fallback, use structuredContent",
-		resp.OK, resp.Status, resp.ErrorCode, resp.ExitCode, resp.BytesReturned, resp.Truncated,
+		"ok=%t status=%q error_code=%q exit_code=%d bytes_seen=%d bytes_returned=%d output_encoding=%q truncated=%t omitted_bytes=%d",
+		resp.OK, resp.Status, resp.ErrorCode, resp.ExitCode, resp.BytesSeen, resp.BytesReturned, resp.OutputEncoding, resp.Truncated, resp.OmittedBytes,
 	)
+	if resp.FileSize != nil {
+		summary += fmt.Sprintf(" file_size=%d", *resp.FileSize)
+	}
+	if resp.FileVersion != "" {
+		summary += fmt.Sprintf(" file_version=%q", resp.FileVersion)
+	}
+	if resp.JobID != "" {
+		summary += fmt.Sprintf(" job_id=%q", resp.JobID)
+	}
+	if resp.NextOffset != nil {
+		summary += fmt.Sprintf(" requested_offset=%d next_offset=%d", resp.RequestedOffset, *resp.NextOffset)
+		if resp.EOF != nil {
+			summary += fmt.Sprintf(" eof=%t", *resp.EOF)
+		}
+		if resp.JobID != "" {
+			summary += fmt.Sprintf(" available_from_offset=%d current_end=%d retention_truncated=%t",
+				resp.AvailableFromOffset, resp.CurrentEnd, resp.RetentionTruncated)
+		}
+		summary += "; output omitted from text fallback: use structuredContent, or re-request the needed range starting at requested_offset with limit<=16384, then continue via next_offset (keep file_version for files)"
+	} else {
+		summary += "; output omitted from text fallback: use structuredContent; this output is not resumable, request focused output or use start_job for future high-output commands"
+	}
 	return textResult(summary, !resp.OK), resp, nil
 }
 
