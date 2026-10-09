@@ -44,7 +44,9 @@ case "$path" in
     jq -n --arg main "$TEST_MAIN" --arg head "$TEST_HEAD" --arg base "$base" --arg repo "$repo" \
       '[{number:91,state:"closed",merged_at:"2026-10-09T05:33:15Z",merge_commit_sha:$main,
           base:{ref:"main",sha:$base},head:{sha:$head,ref:"candidate",repo:{full_name:$repo}}}]' |
-      if [ "${MOCK_CASE:-}" = ambiguous_pr ];then jq '. + .';else cat;fi
+      if [ "${MOCK_CASE:-}" = ambiguous_pr ]; then jq '. + .'
+      elif [ "${MOCK_CASE:-}" = missing_pr_number ]; then jq '.[0] |= del(.number)'
+      else cat;fi
     ;;
   "repos/$GITHUB_REPOSITORY/git/commits/$TEST_HEAD")
     [ "${MOCK_CASE:-}" != failed_tree_lookup ] || exit 6
@@ -59,27 +61,65 @@ case "$path" in
       jq -n --arg base "$TEST_BASE" '{status:"ahead",behind_by:0,merge_base_commit:{sha:$base}}'
     fi
     ;;
-  "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?"*)
-    if [ "${MOCK_CASE:-}" = missing_ci ];then echo '{"workflow_runs":[]}';exit 0;fi
+  "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?"*|"repos/$GITHUB_REPOSITORY/actions/workflows/security.yml/runs?"*)
+    case "$path" in
+      */ci.yml/*) kind=CI; key=ci;;
+      */security.yml/*) kind=Security; key=security;;
+    esac
+    [ "${MOCK_CASE:-}" != "failed_${key}_lookup" ] || exit 7
+    if [ "${MOCK_CASE:-}" = "missing_${key}" ]; then echo '{"total_count":0,"workflow_runs":[]}';exit 0;fi
     conclusion=success
-    if [ "${MOCK_CASE:-}" = failed_ci ];then conclusion=failure;fi
-    jq -n --arg sha "$TEST_HEAD" --arg repo "$GITHUB_REPOSITORY" --arg result "$conclusion" \
-      '{workflow_runs:[{event:"pull_request",head_sha:$sha,head_branch:"candidate",head_repository:{full_name:$repo},repository:{full_name:$repo},path:".github/workflows/ci.yml",created_at:"2026-10-09T05:16:57Z",updated_at:"2026-10-09T05:20:51Z",status:"completed",conclusion:$result,run_attempt:1}]}' |
-      if [ "${MOCK_CASE:-}" = latest_ci_failure ]; then
-        jq '.workflow_runs += [(.workflow_runs[0]|.created_at="2026-10-09T05:23:00Z"|.updated_at="2026-10-09T05:25:51Z"|.conclusion="failure") ]'
-      elif [ "${MOCK_CASE:-}" = latest_ci_pending ]; then
-        jq '.workflow_runs += [(.workflow_runs[0]|.created_at="2026-10-09T05:23:00Z"|.updated_at="2026-10-09T05:35:51Z"|.status="in_progress"|.conclusion=null) ]'
-      elif [ "${MOCK_CASE:-}" = missing_ci_timestamp ]; then
-        jq '.workflow_runs[0] |= del(.updated_at)'
-      else cat;fi
-    ;;
-  "repos/$GITHUB_REPOSITORY/actions/workflows/security.yml/runs?"*)
-    [ "${MOCK_CASE:-}" != failed_security_lookup ] || exit 6
-    if [ "${MOCK_CASE:-}" = missing_security ];then echo '{"workflow_runs":[]}';exit 0;fi
-    conclusion=success
-    if [ "${MOCK_CASE:-}" = failed_security ];then conclusion=failure;fi
-    jq -n --arg sha "$TEST_HEAD" --arg repo "$GITHUB_REPOSITORY" --arg result "$conclusion" \
-      '{workflow_runs:[{event:"pull_request",head_sha:$sha,head_branch:"candidate",head_repository:{full_name:$repo},repository:{full_name:$repo},path:".github/workflows/security.yml",created_at:"2026-10-09T05:16:57Z",updated_at:"2026-10-09T05:20:51Z",status:"completed",conclusion:$result,run_attempt:1}]}'
+    [ "${MOCK_CASE:-}" != "failed_${key}" ] || conclusion=failure
+    jq -n --arg sha "$TEST_HEAD" --arg base "$TEST_BASE" --arg repo "$GITHUB_REPOSITORY" --arg result "$conclusion" \
+      --arg kind "$kind" --arg key "$key" \
+      '{total_count:1,workflow_runs:[{
+        event:"pull_request",head_sha:$sha,head_branch:"candidate",
+        head_repository:{full_name:$repo},repository:{full_name:$repo},
+        path:(".github/workflows/"+$key+".yml"),
+        display_title:($kind+" pull_request PR:91 REF:main BASE:"+$base+" HEAD:"+$sha),
+        pull_requests:[{number:91,head:{sha:$sha,ref:"candidate"},base:{sha:$base,ref:"main"}}],
+        created_at:"2026-10-09T05:16:57Z",updated_at:"2026-10-09T05:20:51Z",
+        status:"completed",conclusion:$result,run_attempt:1
+      }]}' |
+      case "${MOCK_CASE:-}" in
+        latest_ci_failure)
+          jq '.workflow_runs += [(.workflow_runs[0]|.created_at="2026-10-09T05:23:00Z"|.updated_at="2026-10-09T05:25:51Z"|.conclusion="failure")] | .total_count=2';;
+        latest_ci_pending)
+          jq '.workflow_runs += [(.workflow_runs[0]|.created_at="2026-10-09T05:23:00Z"|.updated_at="2026-10-09T05:35:51Z"|.status="in_progress"|.conclusion=null)] | .total_count=2';;
+        missing_ci_timestamp)
+          jq '.workflow_runs[0] |= del(.updated_at)';;
+        missing_ci_link|missing_security_link)
+          jq '.workflow_runs[0] |= del(.pull_requests,.display_title)';;
+        empty_ci_link_without_name|empty_security_link_without_name)
+          jq '.workflow_runs[0].pull_requests=[] | .workflow_runs[0].display_title="PR title without canonical identity"';;
+        empty_ci_link_valid_title|empty_security_link_valid_title|both_cleared)
+          jq '.workflow_runs[0].pull_requests=[]';;
+        ambiguous_ci_link|ambiguous_security_link)
+          jq '.workflow_runs[0].pull_requests += [(.workflow_runs[0].pull_requests[0]|.number=92)]';;
+        wrong_number_ci|wrong_number_security)
+          jq '.workflow_runs[0].pull_requests[0].number=92';;
+        wrong_base_ci|wrong_base_security)
+          jq --arg sha "$TEST_HEAD" '.workflow_runs[0].pull_requests[0].base.sha=$sha';;
+        wrong_base_ref_ci|wrong_base_ref_security)
+          jq '.workflow_runs[0].pull_requests[0].base.ref="not-main"';;
+        wrong_head_ci|wrong_head_security)
+          jq --arg sha "$TEST_BASE" '.workflow_runs[0].pull_requests[0].head.sha=$sha';;
+        foreign_ci_only|foreign_security_only)
+          jq '.workflow_runs[0].pull_requests[0].number=92 | .workflow_runs[0].display_title |= sub("PR:91";"PR:92")';;
+        foreign_ci_masks_failure|foreign_security_masks_failure)
+          jq '.workflow_runs[0].conclusion="failure" | .workflow_runs += [(.workflow_runs[0]|.pull_requests[0].number=92|.display_title |= sub("PR:91";"PR:92")|.created_at="2026-10-09T05:23:00Z"|.updated_at="2026-10-09T05:25:51Z"|.conclusion="success")] | .total_count=2';;
+        foreign_ci_newer|foreign_security_newer)
+          jq '.workflow_runs += [(.workflow_runs[0]|.pull_requests[0].number=92|.display_title |= sub("PR:91";"PR:92")|.created_at="2026-10-09T05:23:00Z"|.updated_at="2026-10-09T05:25:51Z")] | .total_count=2';;
+        foreign_ci_cleared|foreign_security_cleared)
+          jq '.workflow_runs[0].pull_requests=[] | .workflow_runs[0].display_title |= sub("PR:91";"PR:92")';;
+        ambiguous_ci_cleared|ambiguous_security_cleared)
+          jq '.workflow_runs[0].pull_requests=[] | .workflow_runs[0].display_title |= sub("BASE:[0-9a-f]+";"BASE:other")';;
+        wrong_ref_ci_cleared|wrong_ref_security_cleared)
+          jq '.workflow_runs[0].pull_requests=[] | .workflow_runs[0].display_title |= sub("REF:main";"REF:develop")';;
+        truncated_ci_list|truncated_security_list)
+          jq '.total_count=101';;
+        *) cat;;
+      esac
     ;;
   *) echo "unexpected gh mock request $path" >&2; exit 3;;
 esac
@@ -113,7 +153,27 @@ grep -qF "needs.change-scope.outputs.reuse_validated_pr != 'true'" "$ROOT/.githu
 grep -qF "needs.change-scope.outputs.reuse_validated_pr != 'true'" "$ROOT/.github/workflows/security.yml"
 grep -qF "needs.change-scope.outputs.reuse_validated_pr == 'true'" "$ROOT/.github/workflows/ci.yml"
 grep -qF 'gh run download "$run_id"' "$ROOT/.github/workflows/release.yml"
-for scenario in no_pr api_error fork ambiguous_pr stale_base changed_tree failed_tree_lookup bad_ancestry missing_ci failed_ci latest_ci_failure latest_ci_pending missing_ci_timestamp missing_security failed_security failed_security_lookup;do
+# Ensure the fallback's trusted GitHub-event run-name contract remains in both
+# workflows. No editable PR title, free-form workflow input, or user text.
+grep -qF 'run-name: "CI ${{ github.event_name }} PR:${{ github.event.pull_request.number || '"'"'none'"'"' }} REF:${{ github.event.pull_request.base.ref || '"'"'none'"'"' }} BASE:${{ github.event.pull_request.base.sha || '"'"'none'"'"' }} HEAD:${{ github.event.pull_request.head.sha || github.sha }}"' "$ROOT/.github/workflows/ci.yml"
+grep -qF 'run-name: "Security ${{ github.event_name }} PR:${{ github.event.pull_request.number || '"'"'none'"'"' }} REF:${{ github.event.pull_request.base.ref || '"'"'none'"'"' }} BASE:${{ github.event.pull_request.base.sha || '"'"'none'"'"' }} HEAD:${{ github.event.pull_request.head.sha || github.sha }}"' "$ROOT/.github/workflows/security.yml"
+# Distinguish foreign PRs sharing the SAME head SHA/branch/workflow from the
+# actual merged PR. Later foreign green must not mask failed/missing matching.
+check empty_ci_link_valid_title true
+check empty_security_link_valid_title true
+check both_cleared true
+check foreign_ci_newer true
+check foreign_security_newer true
+for scenario in no_pr api_error fork ambiguous_pr missing_pr_number stale_base changed_tree failed_tree_lookup bad_ancestry \
+  missing_ci failed_ci latest_ci_failure latest_ci_pending missing_ci_timestamp \
+  missing_security failed_security failed_security_lookup \
+  foreign_ci_only foreign_security_only foreign_ci_masks_failure foreign_security_masks_failure \
+  missing_ci_link missing_security_link empty_ci_link_without_name empty_security_link_without_name \
+  ambiguous_ci_link ambiguous_security_link wrong_number_ci wrong_number_security \
+  wrong_base_ci wrong_base_security wrong_base_ref_ci wrong_base_ref_security \
+  wrong_head_ci wrong_head_security foreign_ci_cleared foreign_security_cleared \
+  ambiguous_ci_cleared ambiguous_security_cleared wrong_ref_ci_cleared wrong_ref_security_cleared \
+  truncated_ci_list truncated_security_list;do
   check "$scenario" false
 done
 

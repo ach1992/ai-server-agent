@@ -45,6 +45,7 @@ pr="$(jq -er --arg repo "$repo" --arg sha "$sha" --arg base "$before" '
      and (.head.ref|type) == "string")]
   | select(length == 1) | .[0]
 ' <<< "$prs" 2>/dev/null)" || refuse 'no unambiguous merged PR for this main parent'
+pr_number="$(jq -er '.number | select(type == "number" and . > 0)' <<< "$pr" 2>/dev/null)" || refuse 'missing exact merged PR number'
 head="$(jq -r '.head.sha' <<< "$pr")"
 branch="$(jq -r '.head.ref' <<< "$pr")"
 merged_at="$(jq -r '.merged_at' <<< "$pr")"
@@ -64,23 +65,49 @@ jq -e --arg base "$before" '
   and (.status == "ahead" or .status == "identical")
 ' <<< "$compare" >/dev/null 2>&1 || refuse 'PR head not verified against merged main parent'
 
-# Verify latest PR event runs for BOTH entire workflows, not merely isolated
-# required jobs. Inspect the last run that STARTED before the merge, even if
-# it was still running then: a past green must not hide a newer pending or
-# failing attempt. Any ambiguity forces original full main validation.
+# Bind BOTH workflow runs to the exact *numbered* merged PR, never just the
+# reusable branch/SHA shared across different pull requests. GitHub's API can
+# clear run.pull_requests AFTER merge, so new PR runs also persist immutable
+# GitHub-generated event identity in display_title using a workflow run-name
+# expression. Accept that fallback ONLY for an explicitly empty association;
+# missing/malformed or contradictory nonempty metadata always fails closed.
+# A pre-optimization run without durable identity cannot be reused after
+# GitHub clears its PR array: ordinary full main checks then run safely.
 for workflow in ci.yml security.yml; do
+  if [ "$workflow" = ci.yml ]; then kind=CI; else kind=Security; fi
+  expected_title="$kind pull_request PR:$pr_number REF:main BASE:$before HEAD:$head"
   runs="$(gh api "repos/$repo/actions/workflows/$workflow/runs?head_sha=$head&event=pull_request&per_page=100" 2>/dev/null)" || refuse "$workflow PR run lookup failed"
-  jq -e --arg repo "$repo" --arg head "$head" --arg branch "$branch" --arg merged "$merged_at" --arg path ".github/workflows/$workflow" '
-    [.workflow_runs[]?
-     | select(.event == "pull_request" and .head_sha == $head and .head_branch == $branch
-         and .head_repository.full_name == $repo and .repository.full_name == $repo
-         and .path == $path and (.created_at | type) == "string"
-         and .created_at <= $merged)]
-    | sort_by(.created_at, .run_attempt) | last
-    | (.updated_at | type) == "string" and .updated_at <= $merged
-      and .status == "completed" and .conclusion == "success"
-  ' <<< "$runs" >/dev/null 2>&1 || refuse "$workflow has no completed successful exact-head PR evidence"
+  jq -e --arg repo "$repo" --arg head "$head" --arg branch "$branch" --arg base "$before" \
+    --argjson number "$pr_number" --arg title "$expected_title" --arg merged "$merged_at" --arg path ".github/workflows/$workflow" '
+      (.total_count | type) == "number"
+      and (.workflow_runs | type) == "array"
+      and (.total_count <= (.workflow_runs | length))
+      and (
+        [.workflow_runs[]
+         | select(
+            .event == "pull_request" and .head_sha == $head and .head_branch == $branch
+            and .head_repository.full_name == $repo and .repository.full_name == $repo
+            and .path == $path and (.created_at | type) == "string"
+            and .created_at <= $merged
+            and (
+              if (.pull_requests | type) != "array" then false
+              elif (.pull_requests | length) == 1 then
+                .pull_requests[0].number == $number
+                and .pull_requests[0].head.sha == $head
+                and .pull_requests[0].head.ref == $branch
+                and .pull_requests[0].base.ref == "main"
+                and .pull_requests[0].base.sha == $base
+              elif (.pull_requests | length) == 0 then
+                .display_title == $title
+              else false end
+            )
+          )]
+        | sort_by(.created_at, .run_attempt) | last
+        | (.updated_at | type) == "string" and .updated_at <= $merged
+          and .status == "completed" and .conclusion == "success"
+      )
+  ' <<< "$runs" >/dev/null 2>&1 || refuse "$workflow lacks successful PR-number/base/head-bound pre-merge evidence"
 done
 
 printf 'reuse_validated_pr=true\n'
-printf 'CI reuse: verified exact code tree, main parent, PR and successful CI/Security runs.\n' >&2
+printf 'CI reuse: verified exact Git tree, merged PR number/base/head, and successful CI/Security runs.\n' >&2
