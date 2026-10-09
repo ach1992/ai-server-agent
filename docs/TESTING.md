@@ -49,6 +49,21 @@ Within the normal CI job, Go format/vet/race/build work is selected for Go surfa
 
 This is validation selection, not risk classification: a task that is HIGH/HIGH_ASSURANCE still follows its accepted review/evidence contract even when one unrelated suite is provably irrelevant. Existing job/check names stay stable; a skipped irrelevant job is not evidence for a required high-risk surface.
 
+### Avoid repeated tests after an identical squash merge
+
+Pull requests remain the **normal evidence owner**: required Go/race, security, host/architecture and lifecycle tests run as selected by the existing fail-closed path classifier. Those check names and branch protection still gate merging. `push` to `main` remains enabled because an explicitly dispatched immutable stable release requires successful **main-SHA** CI and High Assurance Security workflow runs and an exact-main-SHA release candidate artifact from that CI run.
+
+On a main push, both workflows first execute the small, read-only `scripts/ci-reuse-pr-validation.sh` proof. To safely reuse the PR result, the script requires all of the following:
+
+- A single normal non-force/non-creation main commit with the exact pushed parent; a uniquely associated merged same-repository PR whose recorded pre-merge base equals that parent;
+- The merged commit's **Git tree** exactly equals the tested PR head's Git tree, and that PR head contains the parent, so the PR synthetic merge could not introduce untested base changes;
+- The latest relevant pre-merge `pull_request` runs of **both** complete CI and High Assurance Security workflows for that exact PR head/repository/branch completed successfully, rather than accepting a successful earlier run after a later failure;
+- Trusted GitHub API and local Git evidence are available and unambiguous. Any missing, failed, stale, nonmatching or unavailable evidence returns `reuse_validated_pr=false`, so the original main checks run rather than silently accepting unproven reuse.
+
+With complete proof, expensive Go/race/system lifecycle/architecture and privileged security jobs **do not repeat** on the same code. The main CI still **builds, checks and uploads** the uniquely named main-SHA release artifact in the `main-release-artifact` job; the main Security workflow's change-scope job records the successful proof, and the Release workflow retains its existing dual-main-workflow and exact-artifact gates. Docs-only main changes also use the artifact-only job as before. A direct push, force/multiple-commit push, stale PR base, changed tree, failed PR workflow, or API error continues through full main validation. This is no bypass of PR required checks or review authority. CI owns the deterministic selector regression test (`tests/ci_pr_validation_reuse.sh`); the Security change-scope job only syntax-checks and runs that shared selector rather than duplicating the entire classifier test suite.
+
+This distinction does **not** waive a security-sensitive change's author-separated HIGH_ASSURANCE review, a new candidate's exact-head CI, the Release workflow's publication controls, or tests whose actual assumptions changed.
+
 ### Native lifecycle integration
 
 The main CI workflow performs a real privileged lifecycle on an Ubuntu 22.04 amd64 GitHub runner, and the dedicated arm64 job performs native build/install/systemd/root-boundary validation on an Ubuntu 24.04 arm64 GitHub runner. The deep amd64 lifecycle covers:
