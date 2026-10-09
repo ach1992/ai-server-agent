@@ -25,6 +25,7 @@ type Config struct {
 	WorkerUser          string `json:"worker_user"`
 	AgentUser           string `json:"agent_user"`
 	PublicBaseURL       string `json:"public_base_url,omitempty"`
+	InstanceID          string `json:"instance_id,omitempty"`
 }
 
 func Default() Config {
@@ -54,6 +55,16 @@ func (c Config) Validate() error {
 	}
 	if (c.BearerTokenFile == "") == (c.CredentialStoreFile == "") {
 		return errors.New("config must select exactly one MCP credential source")
+	}
+	if c.InstanceID != "" {
+		if len(c.InstanceID) != len("asa_")+32 || c.InstanceID[:len("asa_")] != "asa_" {
+			return errors.New("instance_id must be asa_ followed by 32 lowercase hexadecimal characters")
+		}
+		for _, ch := range c.InstanceID[len("asa_"):] {
+			if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
+				return errors.New("instance_id must be asa_ followed by 32 lowercase hexadecimal characters")
+			}
+		}
 	}
 	if c.AuthMode != "bearer" {
 		return fmt.Errorf("unsupported auth_mode %q: bearer authentication is required", c.AuthMode)

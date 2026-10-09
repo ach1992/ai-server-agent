@@ -502,3 +502,34 @@ func TestNamedCredentialStoreFailsClosedOnDuplicateVerifier(t *testing.T) {
 		t.Fatalf("New() error = %v, want duplicate verifier rejection", err)
 	}
 }
+
+func TestAuthenticatedAgentEnvironmentIncludesStableInstanceID(t *testing.T) {
+	cfg := testConfig(t, "bearer")
+	cfg.InstanceID = "asa_0123456789abcdef0123456789abcdef"
+	s, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	unauthorized := httptest.NewRequest(http.MethodGet, "/agent-environment.json", nil)
+	unauthorizedRecorder := httptest.NewRecorder()
+	s.Handler().ServeHTTP(unauthorizedRecorder, unauthorized)
+	if unauthorizedRecorder.Code != http.StatusUnauthorized {
+		t.Fatalf("unauthenticated identity read returned HTTP %d", unauthorizedRecorder.Code)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/agent-environment.json", nil)
+	request.Header.Set("Authorization", "Bearer mcp-token")
+	response := httptest.NewRecorder()
+	s.Handler().ServeHTTP(response, request)
+	if response.Code != http.StatusOK {
+		t.Fatalf("authenticated identity read returned HTTP %d", response.Code)
+	}
+	var environment struct {
+		InstanceID string `json:"instance_id"`
+	}
+	if err := json.Unmarshal(response.Body.Bytes(), &environment); err != nil {
+		t.Fatal(err)
+	}
+	if environment.InstanceID != cfg.InstanceID {
+		t.Fatalf("authenticated instance_id = %q, want %q", environment.InstanceID, cfg.InstanceID)
+	}
+}
