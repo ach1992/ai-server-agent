@@ -88,9 +88,16 @@ func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp 
 			return fileError("invalid_path", "validation", err)
 		}
 	}
-	// Serialize and validate the exact helper wire frame BEFORE worker slot,
-	// required intent audit, or any subprocess side effect. The public
-	// content limits refer to raw bytes, but JSON escaping can be much larger.
+	// Acquire the existing worker slot BEFORE serializing a potentially
+	// multi-megabyte request: do not let concurrent authenticated calls consume
+	// unbounded executor memory bypassing the command capacity limiter.
+	release, admitted := s.runs.acquire(false)
+	if !admitted {
+		return runCapacityResponse(false)
+	}
+	defer release()
+	// Validate the exact serialized helper frame BEFORE required intent audit
+	// and subprocess side effects. Raw UTF-8 content may expand in JSON.
 	op := workspaceFileOperation{
 		Action: req.Action, WorkspaceRoot: s.cfg.WorkspaceDir,
 		Workspace: req.Workspace, Path: req.Path,
@@ -107,12 +114,6 @@ func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp 
 	if len(payload) > maxWorkspaceHelperRequestBytes {
 		return fileError("input_too_large", "resource", fmt.Errorf("serialized workspace helper request exceeds %d-byte frame", maxWorkspaceHelperRequestBytes))
 	}
-	// Keep a single bounded read/write in the established worker command slot.
-	release, admitted := s.runs.acquire(false)
-	if !admitted {
-		return runCapacityResponse(false)
-	}
-	defer release()
 	auditStart := time.Now()
 	if write {
 		if blocked := s.beginActionAudit(req, req.Action, "worker", req.Workspace+"\x00"+req.Path, "workspace"); blocked != nil {
