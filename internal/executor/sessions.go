@@ -12,6 +12,8 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 // This broker is an executor-private building block for LSP/DAP. It is not a
@@ -58,11 +60,13 @@ type stdioSession struct {
 	ownerClass string
 	workspace  string
 	pid        int
+	pidPin     *os.File // Linux pidfd pins the process-group leader PID across Wait/reaping.
 	cmd        *exec.Cmd
 	stdin      *os.File
 	closed     bool
 	exited     bool
 	exitCode   int
+	cleanupErr error
 	completed  time.Time
 	lastSeq    uint64
 	events     []stdioSessionEvent
@@ -100,7 +104,7 @@ func (b *stdioSessionBroker) reserve(session *stdioSession) error {
 	now := time.Now()
 	for id, entry := range b.sessions {
 		entry.mu.Lock()
-		outdated := entry.exited && now.Sub(entry.completed) >= completedSessionRetain
+		outdated := entry.exited && entry.cleanupErr == nil && entry.pidPin == nil && now.Sub(entry.completed) >= completedSessionRetain
 		if outdated && entry.expiry != nil {
 			entry.expiry.Stop()
 		}
@@ -193,9 +197,25 @@ func (s *Server) workerStdioSession(req Request, kind, workspace, binary string,
 		s.finishActionAudit(req, "session_create", "worker", kind+"\x00"+cwd+"\x00"+binary, "developer_session", start, Response{Error: err.Error()})
 		return "", err
 	}
+	// The process is not reaped until cmd.Wait; pin its PID now so a
+	// later process-group signal can never target an unrelated, recycled
+	// PID after the leader exits. Supported Linux targets have pidfd.
+	pidfd, pinErr := unix.PidfdOpen(cmd.Process.Pid, 0)
+	if pinErr != nil {
+		_ = stdin.Close()
+		_, stopErr := terminateProcessGroup(cmd.Process.Pid)
+		_ = cmd.Wait()
+		failure := fmt.Errorf("session_pid_identity_unavailable: %w", pinErr)
+		if stopErr != nil {
+			failure = fmt.Errorf("%w; session_stop_outcome_unknown: %v", failure, stopErr)
+		}
+		s.finishActionAudit(req, "session_create", "worker", kind+"\x00"+cwd+"\x00"+binary, "developer_session", start, Response{Error: failure.Error()})
+		return "", failure
+	}
 	entry.mu.Lock()
 	entry.cmd = cmd
 	entry.pid = cmd.Process.Pid
+	entry.pidPin = os.NewFile(uintptr(pidfd), "session-pidfd")
 	entry.mu.Unlock()
 	removeOnFailure = false
 	go entry.wait()
@@ -213,10 +233,21 @@ func (s *Server) workerStdioSession(req Request, kind, workspace, binary string,
 
 func (e *stdioSession) wait() {
 	err := e.cmd.Wait()
-	// A child may exit while descendants keep stdout/stderr pipes open.
-	// WaitDelay bounds that case; clean up the still-live process group.
-	if errors.Is(err, exec.ErrWaitDelay) {
-		_, _ = terminateProcessGroup(e.pid)
+
+	// Cmd.Wait reaps the leader; child processes may still occupy its
+	// process group even when they closed stdout/stderr. The open pidfd
+	// prevents reuse of the group ID between reaping and cleanup.
+	// Serialize group signals with close/expiry, then mark completion
+	// before releasing the pin.
+	e.stopMu.Lock()
+	e.mu.Lock()
+	pid, pin := e.pid, e.pidPin
+	e.mu.Unlock()
+	var cleanupErr error
+	if pid <= 0 || pin == nil {
+		cleanupErr = errors.New("session_pid_identity_unavailable")
+	} else {
+		_, cleanupErr = terminateProcessGroup(pid)
 	}
 	e.mu.Lock()
 	e.exited = true
@@ -228,9 +259,15 @@ func (e *stdioSession) wait() {
 			e.exitCode = exit.ExitCode()
 		}
 	}
+	e.cleanupErr = cleanupErr
 	_ = e.stdin.Close()
+	if cleanupErr == nil && e.pidPin != nil {
+		_ = e.pidPin.Close()
+		e.pidPin = nil
+	}
 	close(e.done)
 	e.mu.Unlock()
+	e.stopMu.Unlock()
 }
 
 type sessionEventWriter struct {
@@ -331,30 +368,54 @@ func (b *stdioSessionBroker) remove(entry *stdioSession) {
 
 func (b *stdioSessionBroker) removeAndStop(entry *stdioSession) error {
 	entry.stopMu.Lock()
-	defer entry.stopMu.Unlock()
 	entry.mu.Lock()
 	entry.closed = true
 	if entry.expiry != nil {
 		entry.expiry.Stop()
 	}
-	pid := entry.pid
-	exited := entry.exited
+	pid, pin := entry.pid, entry.pidPin
+	exited, cleanupErr := entry.exited, entry.cleanupErr
 	if entry.stdin != nil {
 		_ = entry.stdin.Close()
 	}
 	entry.mu.Unlock()
-	if !exited {
-		if pid <= 0 {
+
+	// The leader may have exited and been reaped. Never signal a naked
+	// process-group number; the pidfd must still pin that identity.
+	if !exited || cleanupErr != nil {
+		if pid <= 0 || pin == nil {
+			entry.stopMu.Unlock()
 			return errors.New("session_stop_outcome_unknown: process identity unavailable")
 		}
 		if _, err := terminateProcessGroup(pid); err != nil {
+			entry.stopMu.Unlock()
 			return fmt.Errorf("session_stop_outcome_unknown: %w", err)
 		}
+		if exited {
+			// A previously failed cleanup has now been reconciled.
+			entry.mu.Lock()
+			entry.cleanupErr = nil
+			_ = entry.pidPin.Close()
+			entry.pidPin = nil
+			entry.mu.Unlock()
+		}
+	}
+	entry.stopMu.Unlock()
+
+	if !exited {
 		select {
 		case <-entry.done:
 		case <-time.After(processGroupTerminateGrace + time.Second):
 			return errors.New("session_stop_outcome_unknown: child wait not reconciled")
 		}
+	}
+	entry.mu.Lock()
+	finalErr := entry.cleanupErr
+	entry.mu.Unlock()
+	if finalErr != nil {
+		// Keep this session addressable and its PID pinned; deletion would
+		// turn an uncertain cleanup into an unauditable orphan.
+		return fmt.Errorf("session_stop_outcome_unknown: %w", finalErr)
 	}
 	b.remove(entry)
 	return nil

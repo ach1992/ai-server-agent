@@ -204,6 +204,8 @@ Session identity is opaque runtime identity, not authority by itself. Session op
 
 Stateful protocols can emit asynchronous events between MCP calls. Preserve bounded ordered sequence/cursor state where needed rather than exposing unbounded raw protocol streams.
 
+Stdio-session process-group cleanup must remain tied to a **pinned Linux child PID identity**, including after the process leader is reaped; a bare numeric PID/PGID is not sufficient for delayed stop/expiry decisions. Same-group descendants must be reconciled after ordinary adapter exit, not only after a timeout. When process identity or group-cleanup completion cannot be verified, fail closed and retain enough bounded runtime identity for explicit reconciliation rather than claiming clean shutdown. Linux pidfd support is required for that implemented stdio mode. This does not promise that stdio survives executor restart or that a descendant deliberately escaping its process group is stopped by process-group cleanup. The #66 implementation and review must validate these behaviors before claiming the capability is shipped.
+
 ## 9. Interactive terminal
 
 Interactive terminal is first-class because prompts, REPLs, TUIs, debugger consoles and TTY-sensitive tools cannot be modeled reliably as one-shot commands.

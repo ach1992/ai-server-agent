@@ -306,3 +306,78 @@ func TestWorkerStdioSessionReadCursorNeverSkipsEarlierEvent(t *testing.T) {
 		t.Fatalf("future cursor must fail rather than appear caught up: %v", err)
 	}
 }
+
+// A language server can exit while helpers it launched are still running in
+// its process group and have closed all pipes. Wait() alone is not cleanup.
+func TestWorkerStdioSessionExitStopsSameGroupDescendants(t *testing.T) {
+	s, owner, workspace := testStdioBroker(t)
+	marker := filepath.Join(workspace, "orphan-wrote-file")
+	command := "(sleep 0.75; printf orphan > " + shellQuote(marker) + ") >/dev/null 2>&1 & exit 0"
+	id, err := s.workerStdioSession(owner, "lsp", workspace, "/bin/sh", "-c", command)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := s.sessions.get(owner, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.sessions.close(owner, id)
+	waitForStdioExit(t, entry)
+	entry.mu.Lock()
+	cleanupErr, pidPinned := entry.cleanupErr, entry.pidPin != nil
+	entry.mu.Unlock()
+	if cleanupErr != nil || pidPinned {
+		t.Fatalf("normal process exit did not release pinned group identity: err=%v pinned=%t", cleanupErr, pidPinned)
+	}
+	// Any orphaned same-group helper would write the marker after exit.
+	time.Sleep(900 * time.Millisecond)
+	if _, err := os.Stat(marker); !os.IsNotExist(err) {
+		t.Fatalf("same-group descendant survived parent exit: %v", err)
+	}
+}
+
+// Unknown cleanup cannot be turned into a recovered/expired session merely
+// to free admission capacity; the pinned process identity must be retained
+// until reconciliation succeeds.
+func TestStdioSessionFailedGroupCleanupSurvivesRetentionPrune(t *testing.T) {
+	s, owner, workspace := testStdioBroker(t)
+	entry := &stdioSession{
+		id: "stdio_uncertain", ownerID: owner.PrincipalID,
+		ownerClass: owner.PrincipalClass, workspace: workspace,
+		exited: true, completed: time.Now().Add(-2 * completedSessionRetain),
+		cleanupErr: errors.New("group cleanup not verified"),
+	}
+	if err := s.sessions.reserve(entry); err != nil {
+		t.Fatal(err)
+	}
+	defer s.sessions.remove(entry)
+	second := &stdioSession{id: "stdio_new", ownerID: owner.PrincipalID, ownerClass: owner.PrincipalClass, workspace: workspace}
+	if err := s.sessions.reserve(second); err != nil {
+		t.Fatal(err)
+	}
+	defer s.sessions.remove(second)
+	if _, err := s.sessions.get(owner, entry.id); err != nil {
+		t.Fatalf("expired but unreconciled session was lost: %v", err)
+	}
+	if err := s.sessions.close(owner, entry.id); err == nil || !strings.Contains(err.Error(), "outcome_unknown") {
+		t.Fatalf("uncertain cleanup was reported as complete: %v", err)
+	}
+	if _, err := s.sessions.get(owner, entry.id); err != nil {
+		t.Fatalf("unknown-outcome session identity was removed: %v", err)
+	}
+}
+
+func TestStdioSessionIDDoesNotSurviveBrokerRestart(t *testing.T) {
+	s, owner, workspace := testStdioBroker(t)
+	id, err := s.workerStdioSession(owner, "lsp", workspace, "/bin/cat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.sessions.close(owner, id)
+	// In-memory stdio sessions are not durable; a new executor generation
+	// must never silently map a previous ID to any different process.
+	restarted := newStdioSessionBroker()
+	if _, err := restarted.read(owner, id, 0, maxStdioEventBytes); !errors.Is(err, errSessionNotFound) {
+		t.Fatalf("restarted broker accepted stale session identity: %v", err)
+	}
+}
