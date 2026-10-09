@@ -44,6 +44,11 @@ CI validates the established installer, updater, uninstaller, management, releas
 
 CI change scope is fail-closed and path-aware. Changes limited to `README.md`, `AGENTS.md`, `SECURITY.md`, `LICENSE`, `.gitignore`, or `docs/**` do not re-run runtime/OS/security suites that cannot validate those files. The always-run change-scope job validates the exact base-to-head diff with `git diff --check`; required non-matrix jobs are conditionally skipped (GitHub reports a skipped job as successful), while the Debian matrix keeps lightweight per-matrix checks present and skips only its expensive host validation. Any classifier failure forces the required validation jobs to fail rather than silently skip; a missing/unknown classifier output also falls back to the full suite and only explicit `runtime_changed=false` may skip heavy validation. Runtime, test, script, workflow, dependency or other unrecognized paths fail safe to the full suite. A docs-only `main` push still builds and uploads the exact-SHA release candidate artifact because the release workflow promotes CI-produced artifacts for the selected main SHA.
 
+The classifier also emits conservative validation-surface flags consumed by both local development and CI. Known ordinary Go-only paths keep normal Go/race and native arm64 build/test coverage while avoiding unrelated privileged suites. Debian host validation is selected only for platform/install-support surfaces; the native arm64 lifecycle step is selected only for lifecycle-relevant surfaces. High Assurance jobs are selected independently for Cloudflare transaction, root-trust, stable provenance, and stable-update surfaces. Security/auth/policy/privilege wiring, dependency changes, workflow changes, classifier/self-test changes, and unknown/new paths fail closed to broader coverage. `README.md` is runtime-light but still selects stable-provenance validation because stable bootstrap acceptance parses its documented immutable install path.
+Within the normal CI job, Go format/vet/race/build work is selected for Go surfaces, shell syntax for shell surfaces, and the heavier installer/Cloudflare/root-trust/update/release/lifecycle steps use the same relevant flags. Main-branch release-candidate artifact production remains exact-SHA and is not weakened by PR fast-path selection.
+
+This is validation selection, not risk classification: a task that is HIGH/HIGH_ASSURANCE still follows its accepted review/evidence contract even when one unrelated suite is provably irrelevant. Existing job/check names stay stable; a skipped irrelevant job is not evidence for a required high-risk surface.
+
 ### Native lifecycle integration
 
 The main CI workflow performs a real privileged lifecycle on an Ubuntu 22.04 amd64 GitHub runner, and the dedicated arm64 job performs native build/install/systemd/root-boundary validation on an Ubuntu 24.04 arm64 GitHub runner. The deep amd64 lifecycle covers:
@@ -244,13 +249,21 @@ Do not replace these gaps with grep tests that merely search for reassuring stri
 
 ## 8. Developer checks
 
-On a compatible development host, a useful pre-push sequence is:
+On a compatible development host, after coherent local commits, prefer the shared planner:
+
+```bash
+bash scripts/dev-check.sh --base origin/main --head HEAD
+# or inspect selection without running local checks:
+bash scripts/dev-check.sh --base origin/main --head HEAD --plan
+```
+
+Use the actual integration base for stacked/alternate-target work. The helper validates the committed base-to-head range, runs the safe local Go/shell checks selected by `scripts/ci-change-scope.sh`, and prints the remaining CI/dedicated-environment obligations. When the host has no C compiler, it runs ordinary Go tests locally and leaves race detection explicitly to CI rather than forcing a host-wide compiler install for the fast path. During active editing, keep using the narrowest discriminating test first. For a deliberately full local sweep, use:
 
 ```bash
 test -z "$(gofmt -l .)"
 go vet ./...
 go test -race -vet=off ./...
-bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh scripts/install-stable.sh scripts/ci-change-scope.sh tests/*.sh
+bash -n install.sh update.sh uninstall.sh manage.sh ensure-lifecycle-lock.sh scripts/build-release.sh scripts/install-stable.sh scripts/ci-change-scope.sh scripts/dev-check.sh tests/*.sh
 bash tests/stable_bootstrap.sh
 ```
 
@@ -259,6 +272,8 @@ For privileged/cloudflare/root-boundary changes, run the applicable security tes
 ## 9. Candidate review and release validation
 
 Independent HIGH_ASSURANCE review is an integration/release gate for a frozen candidate, not an iterative lint service for a moving implementation. During active development, use self-review, targeted behavioral tests and current CI to converge. When the accepted feature scope is complete, freeze an exact base/HEAD and obtain independent review if the risk/profile requires it. If a BLOCKER/REQUIRED finding changes the candidate, that review identity is obsolete; fix the root cause, revalidate and refreeze before another independent gate review.
+
+Waiting for an independent review is not a reason to idle unrelated development. Safe independent work may continue from the appropriate current base in a separate worktree while a candidate is frozen. Do not modify the frozen candidate, merge work ahead of it, or move an exact reviewed integration target when that would invalidate the review envelope; serialize only the affected final integration/review path.
 
 GitHub Copilot pull-request review is not part of this project's review model. Do not request, enable, or use Copilot review for iterative review, project review evidence, or an independent HIGH_ASSURANCE gate. Historical Copilot review results may be retained as past finding context, but they do not satisfy a current review requirement.
 
@@ -312,6 +327,17 @@ recover exact repository/worktree
 `internal/executor/workspace_search_test.go` keeps the first-class `workspace_search` surface bounded and read-only. Tests cover explicit workspace/path containment including symlink escape rejection, structured zero-based file/range/capture output, no-match exit semantics, result-limit and timeout partial-state reporting, malformed/out-of-workspace engine output rejection, engine/version validation, repository-config isolation through `--config /dev/null`, and process cancellation when enough results have been collected. MCP discovery tests preserve the text -> structural -> semantic responsibility ladder and prevent rewrite/apply inputs from entering the public schema.
 
 A gated real-engine acceptance (`AST_GREP_ACCEPTANCE_BIN`) runs the same production wrapper against an explicitly supplied ast-grep binary. The #62 candidate evidence exercised both the minimum-supported 0.40.5 contract and 0.45.3 with release-asset SHA-256 verification before execution. A separate rewrite-plan evaluation proves ast-grep can calculate a replacement while the source checksum remains unchanged; the first-class tool exposes no automatic apply path. Managed installation is intentionally not performed merely to satisfy a read-only search call.
+
+### Repository environment/toolchain discovery
+
+`internal/executor/environment_test.go` validates the lightweight #64 discovery/reuse boundary against real temporary Git repositories. Coverage includes fresh-repository recovery from tracked manifests, compatible/incompatible worker-cache toolchain reuse, native language and package-manager declarations, package scripts without execution, mise/devenv/Dev Container/Dagger detection without automatic provisioning, explicit multi-mechanism/package-manager selection state, conflicting exact pins, untracked declaration durability warnings, workspace path-escape/symlink rejection, and bounded tool-version output. `internal/mcp/server_test.go` also keeps the public tool read-only, idempotent, local-only and bound to an explicit repository path with a typed output schema.
+
+These tests deliberately do not install environment managers or run repository tasks. Managed provisioning for a concrete mechanism requires its own scope/evidence; this slice proves discovery/reuse and clear failure/unknown states only. Repository-owned dependencies/toolchains remain distinct from Agent-managed capability tooling.
+### Repository/worktree lifecycle
+
+`internal/executor/repository_test.go` exercises the first repository/worktree Layer-1 slice against real temporary Git repositories. Coverage includes clean and staged/unstaged/untracked state, detached HEAD, upstream ahead/behind divergence, merge-conflict/in-progress state, remote-identity discovery independent of directory names, linked-worktree deduplication, branch-already-in-use rejection, exact-start-SHA staleness, fresh-clone recovery from a durable remote branch, explicit remote-verification failure, main-worktree protection, and removal only after clean exact-HEAD plus remote-durability proof or an explicit disposable decision. Regression tests also prove structured Git does not execute repository hooks/external fsmonitor configuration, refuses checkout-filter execution, keeps working-tree and Git/common metadata inside the configured workspace, and rejects optimistic removal when HEAD changes before the final mutation.
+
+The structured surface intentionally does not wrap ordinary Git verbs. Push/commit/fetch/diff/log remain CLI operations; remote reconciliation uses `repository_inspect` when exact remote-HEAD proof is required. CI remains the authoritative Go-version/race/platform validation when the local development host cannot faithfully provide the repository-declared environment.
 
 ### Value evidence
 

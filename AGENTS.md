@@ -40,13 +40,29 @@ Primary language/tooling:
 
 Before proposing a substantive change, inspect the relevant production path and its tests. Use the narrowest discriminating checks first, then the applicable broader checks.
 
+### Development flow
+
+- Implement from a real local repository/worktree. GitHub remains durable project truth, but when a writable checkout is available do not use the GitHub Contents API as the normal per-file editor; edit locally, inspect the full diff, create logical commits, and push the branch.
+- Inspect and reuse existing repositories/worktrees before creating another. Use a separate worktree for genuinely independent concurrent work and preserve dirty, untracked, conflicting, or ambiguous state.
+- A frozen exact candidate under independent review blocks only mutations that would invalidate its review envelope. Continue safe independent implementation/research in separate worktrees, but serialize integration when moving the target/base would stale required review evidence.
+- Keep persisted task contracts compact. Increment Contract Revision only when outcome, scope, acceptance, validation, dependencies, risk, or release expectations materially change; status/evidence/wording updates do not earn a revision.
+- Keep validation risk-proportional. HIGH_ASSURANCE remains mandatory for the high-risk surfaces that require it; do not apply its full cost to unrelated bounded work.
+
+After a coherent local commit, prefer the shared validation planner (pass the actual integration base when it is not `origin/main`):
+
+```bash
+bash scripts/dev-check.sh --base origin/main --head HEAD
+```
+
+It uses the same fail-closed path classifier as CI, runs safe local checks, and reports the privileged/platform/security suites that still belong to CI or a dedicated test environment.
+
 Typical local checks on a compatible development host:
 
 ```bash
 test -z "$(gofmt -l .)"
 go vet ./...
 go test -race -vet=off ./...
-bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh scripts/install-stable.sh scripts/ci-change-scope.sh tests/*.sh
+bash -n install.sh update.sh uninstall.sh manage.sh ensure-lifecycle-lock.sh scripts/build-release.sh scripts/install-stable.sh scripts/ci-change-scope.sh scripts/dev-check.sh tests/*.sh
 ```
 
 High-risk changes to privileged execution, Cloudflare recovery, installer/updater trust, or release provenance require the corresponding High Assurance Security coverage. Static/grep contracts are secondary guardrails; do not treat them as substitutes for behavioral tests of the production path.
@@ -75,6 +91,7 @@ The governing optimization is **maximum practical AI-development leverage per un
 - Promote a capability to first-class only when structured integration materially improves recurring correctness, state, reliability, semantic fidelity or AI efficiency.
 - Preserve general worker/root shell and PTY escape hatches for uncommon work instead of implementing dedicated APIs for every tool.
 - Keep Git CLI as the ordinary Git operation path; first-class repository logic owns identity/worktree/lifecycle correctness.
+- Keep repository environment discovery descriptive: repository declarations own project toolchain/task intent, conflicts get no hidden precedence, no discovery call provisions tooling, and Agent-managed capability tools remain separate from project dependencies.
 - Keep the code-inspection ladder distinct: text search -> structural ast-grep search -> LSP semantics.
 - Keep one structured mutation path: LSP WorkspaceEdit and structural rewrite plans apply through the safe workspace edit/precondition layer.
 - DAP and Playwright-backed Browser are Core-v1 capabilities, but their public surfaces stay focused on common high-value workflows rather than protocol/API completeness.

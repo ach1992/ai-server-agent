@@ -34,6 +34,7 @@ type Server struct {
 	jobsMu                 sync.Mutex
 	lifecycleLockPath      string
 	fileWriteHooks         *fileWriteTestHooks
+	workspaceHooks         *workspaceTestHooks
 	structuralSearchBinary string // test-only override; production resolves trusted ast-grep paths
 }
 
@@ -130,6 +131,16 @@ func (s *Server) dispatch(req Request) Response {
 		return s.writeFile(req)
 	case "workspace_search":
 		return s.workspaceSearchContext(context.Background(), req)
+	case "repository_environment":
+		return s.repositoryEnvironmentContext(context.Background(), req)
+	case "repository_discover":
+		return s.repositoryDiscoverContext(context.Background(), req)
+	case "repository_inspect":
+		return s.repositoryInspectContext(context.Background(), req)
+	case "worktree_create":
+		return s.worktreeCreateContext(context.Background(), req)
+	case "worktree_remove":
+		return s.worktreeRemoveContext(context.Background(), req)
 	default:
 		return Response{Error: "unknown action"}
 	}
