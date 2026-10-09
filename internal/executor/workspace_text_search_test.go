@@ -88,6 +88,68 @@ func TestWorkerLandlockedTextSearchResultsAndBounds(t *testing.T) {
 	if !regex.Complete || len(regex.Matches) != 2 {
 		t.Fatalf("regex mode did not match expected content: %+v", regex)
 	}
+	// Caller globs must never turn source search into a read of Git's
+	// administrative entries. Exercise both .git directories (including
+	// nested repositories) and .git pointer files used by linked worktrees.
+	for path, content := range map[string]string{
+		".git/config":                  "hello_private_git_config",
+		".git/worktrees/linked/HEAD":   "hello_private_common_git_dir",
+		"src/nested/.git/config":       "hello_private_nested_git_dir",
+		"src/worktree/.git":            "hello_private_worktree_pointer",
+		"src/.gitkeep":                 "hello_public_gitkeep",
+		"src/.github/workflows/ci.yml": "hello_public_github_workflow",
+	} {
+		full := filepath.Join(repo, path)
+		if err := os.MkdirAll(filepath.Dir(full), 0755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(full, []byte(content+"\n"), 0644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		name  string
+		globs []string
+		paths []string
+		want  []string
+	}{
+		{name: "positive glob reincludes git directories", globs: []string{"**/*", "**/.git/**", "**/.git", "**/*"}, want: []string{"src/one.go", "src/two.go", "src/.gitkeep", "src/.github/workflows/ci.yml"}},
+		{name: "specific nested git inclusion", globs: []string{"**/.git/**", "**/.git", "**/config"}},
+		{name: "ordinary positive source glob", globs: []string{"**/*.go"}, want: []string{"src/one.go", "src/two.go"}},
+		{name: "ordinary negative source glob", globs: []string{"**/*.go", "!**/two.go"}, want: []string{"src/one.go"}},
+		{name: "path-scoped nested git inclusion", paths: []string{"src"}, globs: []string{"**/*.go", "**/.git/**", "**/.git"}, want: []string{"src/one.go", "src/two.go"}},
+		{name: "legitimate hidden source file", globs: []string{"**/.gitkeep"}, want: []string{"src/.gitkeep"}},
+		{name: "legitimate github workflow", globs: []string{"**/.github", "**/.github/**"}, want: []string{"src/.github/workflows/ci.yml"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			result := search(Request{Pattern: "hello_", Globs: tc.globs, SearchPaths: tc.paths})
+			if !result.Complete || result.Truncated || len(result.Matches) != len(tc.want) {
+				t.Fatalf("unsafe, incomplete or overrestricted search: %+v (want %v)", result, tc.want)
+			}
+			want := make(map[string]bool, len(tc.want))
+			for _, path := range tc.want {
+				want[path] = true
+			}
+			for _, match := range result.Matches {
+				if !want[match.File] || !strings.HasPrefix(match.Text, "hello_") {
+					t.Fatalf("unexpected match from Git metadata or wrong source: %+v", match)
+				}
+				delete(want, match.File)
+			}
+			if len(want) != 0 {
+				t.Fatalf("ordinary source paths were lost: %v", want)
+			}
+		})
+	}
+	// An explicit search path must not bypass the same Git metadata policy.
+	for _, path := range []string{".git/config", "src/nested/.git/config", "src/worktree/.git"} {
+		blocked := server.workerWorkspaceFile(t.Context(), Request{
+			Action: "workspace_text_search", Workspace: repo, Pattern: "hello_", SearchPaths: []string{path},
+		})
+		if blocked.OK || blocked.ErrorCode != "invalid_text_search" {
+			t.Fatalf("explicit Git metadata path %q accepted: %+v", path, blocked)
+		}
+	}
 	invalidTimeout := server.workerWorkspaceFile(t.Context(), Request{Action: "workspace_text_search", Workspace: repo, Pattern: "hello_", TimeoutMS: int64(maxWorkspaceSearchTimeout/time.Millisecond) + 1})
 	if invalidTimeout.OK || invalidTimeout.ErrorCode != "invalid_text_search" {
 		t.Fatalf("excessive timeout accepted: %+v", invalidTimeout)

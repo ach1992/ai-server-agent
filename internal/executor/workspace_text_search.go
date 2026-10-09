@@ -85,8 +85,16 @@ func workerTextSearch(op workspaceFileOperation) Response {
 	if op.Literal {
 		args = append(args, "--fixed-strings")
 	}
-	for _, glob := range append([]string{"!.git", "!**/.git/**"}, op.Globs...) {
+	for _, glob := range op.Globs {
 		args = append(args, "-g", glob)
+	}
+	// ripgrep gives later -g rules precedence. Keep protected Git metadata
+	// exclusions LAST so a caller's positive globs cannot re-include .git
+	// directories or linked-worktree .git files (at any depth). The separate
+	// safeWorkspaceRelativeFile check on every returned match remains a
+	// fail-closed defense if the engine's selection semantics ever change.
+	for _, protected := range []string{"!.git", "!**/.git", "!**/.git/**"} {
+		args = append(args, "-g", protected)
 	}
 	args = append(args, "-e", op.Pattern, "--")
 	if len(op.SearchPaths) == 0 {
