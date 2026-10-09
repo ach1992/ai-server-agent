@@ -158,6 +158,8 @@ LSP owns diagnostics, symbols, definitions, references, hover, rename and relate
 
 v1 reference path: Go with gopls. Additional language servers are added only from real consumer need.
 
+The initial Go read-only MCP operations (`code_definition`, `code_references`, `code_symbols`, `code_diagnostics`) require an explicit, resolved workspace, a workspace-relative `.go` source path and the exact `file_version` returned by `workspace_stat`/`workspace_read`. The executor obtains complete, bounded UTF-8 source through the existing sandboxed `aiworker` file helper and rechecks the file version after gopls responds; stale, binary or oversized source is rejected rather than silently analyzed as a truncated document. The reference adapter intentionally handles sources below 32 KiB, bounded result JSON and root-owned system gopls installations at conventional paths. Broader documents/providers, reuse and paginated semantic results remain explicit expansion points, not implied support.
+
 ## 7. One structured mutation path
 
 Structured tools must not each become independent file writers.
@@ -222,6 +224,10 @@ v1 backend: **tmux Control Mode**.
 - native PTY is an evidence-triggered fallback if tmux cannot satisfy a concrete acceptance requirement.
 
 Worker terminal HOME/config/cache is Agent-managed state separate from project worktrees; cwd identifies the selected project/worktree.
+
+The first-class terminal surface opens an explicit worker/root tmux session and returns an opaque `session_id` plus a per-attachment `session_epoch`. All subsequent reads/inputs/resize/interrupt/close calls must preserve the authenticated principal, original workspace, authority mode and epoch. Text input is encoded as literal tmux hex key events; output is binary-safe base64, with ordered cursors, retention gaps and per-pane event identities, never an unbounded terminal transcript. `terminal_reconnect` attaches to a verified surviving tmux pane after executor restart without creating a new shell; an epoch change explicitly invalidates previous output cursors. This runtime record is protected Agent state, not Git/project truth. Only user-approved privileged use may request the real root session, and the root socket remains executor-owned and root-only.
+
+The external `tmux` package is optional, not bundled or silently installed. Without it the terminal tools report unavailability and existing one-shot/job tools continue working. A disconnected tmux backend may require explicit reconciliation, and root-TUI/soak/host-migration claims require the separate HIGH_ASSURANCE validation recorded in Issue #60 before stable release.
 
 ## 10. DAP debugging
 

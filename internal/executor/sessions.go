@@ -73,6 +73,7 @@ type stdioSession struct {
 	bytes      int
 	done       chan struct{}
 	expiry     *time.Timer
+	terminal   *tmuxTerminalState // consumer-specific Control Mode state; broker owns its process
 }
 
 type stdioSessionBroker struct {
@@ -85,13 +86,13 @@ func newStdioSessionBroker() *stdioSessionBroker {
 }
 
 func (b *stdioSessionBroker) get(req Request, id string) (*stdioSession, error) {
-	if b == nil || id == "" || req.PrincipalID == "" || req.PrincipalClass == "" || req.Root || req.Approval {
+	if b == nil || id == "" || req.PrincipalID == "" || req.PrincipalClass == "" {
 		return nil, errSessionNotFound
 	}
 	b.mu.Lock()
 	session := b.sessions[id]
 	b.mu.Unlock()
-	if session == nil || session.ownerID != req.PrincipalID || session.ownerClass != req.PrincipalClass || filepath.Clean(req.Workspace) != session.workspace {
+	if session == nil || session.ownerID != req.PrincipalID || session.ownerClass != req.PrincipalClass || filepath.Clean(req.Workspace) != session.workspace || (session.terminal != nil && session.terminal.root != req.Root) || (session.terminal == nil && (req.Root || req.Approval)) || (session.terminal != nil && req.Approval != req.Root) {
 		// Do not reveal whether another principal's opaque session exists.
 		return nil, errSessionNotFound
 	}
@@ -113,7 +114,7 @@ func (b *stdioSessionBroker) reserve(session *stdioSession) error {
 			delete(b.sessions, id)
 		}
 	}
-	if len(b.sessions) >= maxStdioSessions {
+	if len(b.sessions) >= maxStdioSessions || b.sessions[session.id] != nil {
 		return errSessionBusy
 	}
 	b.sessions[session.id] = session
@@ -123,11 +124,36 @@ func (b *stdioSessionBroker) reserve(session *stdioSession) error {
 // workerStdioSession starts an explicitly selected language/debug adapter.
 // Caller-facing capability handlers must validate their own allowed binaries
 // and semantics. The executor never grants root execution through this path.
-func (s *Server) workerStdioSession(req Request, kind, workspace, binary string, args ...string) (id string, err error) {
-	if s.sessions == nil || req.PrincipalID == "" || req.PrincipalClass == "" || req.Root || req.Approval {
+func (s *Server) workerStdioSession(req Request, kind, workspace, binary string, args ...string) (string, error) {
+	if req.Root || req.Approval {
+		return "", errors.New("worker stdio sessions cannot be privileged")
+	}
+	return s.workerProcessSession(req, kind, workspace, binary, nil, args...)
+}
+
+func (s *Server) workerProcessSession(req Request, kind, workspace, binary string, terminal *tmuxTerminalState, args ...string) (string, error) {
+	if req.Root || req.Approval {
+		return "", errors.New("worker process cannot be privileged")
+	}
+	return s.startProcessSession(req, kind, workspace, binary, terminal, args...)
+}
+
+func (s *Server) rootTmuxProcessSession(req Request, workspace, binary string, terminal *tmuxTerminalState, args ...string) (string, error) {
+	if !req.Root || !req.Approval || terminal == nil || !terminal.root || os.Geteuid() != 0 {
+		return "", errors.New("root_terminal_authorization_required")
+	}
+	return s.startProcessSession(req, "terminal", workspace, binary, terminal, args...)
+}
+
+func (s *Server) startProcessSession(req Request, kind, workspace, binary string, terminal *tmuxTerminalState, args ...string) (string, error) {
+	return s.startProcessSessionWithID(req, kind, workspace, binary, terminal, "", args...)
+}
+
+func (s *Server) startProcessSessionWithID(req Request, kind, workspace, binary string, terminal *tmuxTerminalState, priorID string, args ...string) (id string, err error) {
+	if s.sessions == nil || req.PrincipalID == "" || req.PrincipalClass == "" || req.Root != (terminal != nil && terminal.root) || req.Approval != req.Root {
 		return "", errors.New("session requires authenticated worker authority")
 	}
-	if kind != "lsp" && kind != "dap" {
+	if kind != "lsp" && kind != "dap" && (kind != "terminal" || terminal == nil) {
 		return "", errors.New("unsupported session kind")
 	}
 	if !filepath.IsAbs(binary) || len(binary) > 4096 || len(args) > 64 {
@@ -145,17 +171,27 @@ func (s *Server) workerStdioSession(req Request, kind, workspace, binary string,
 	if filepath.Clean(req.Workspace) != cwd {
 		return "", errors.New("session workspace does not match request identity")
 	}
-	if os.Geteuid() != 0 && uint32(os.Geteuid()) != s.workerUID {
+	if req.Root && os.Geteuid() != 0 {
+		return "", errors.New("root executor unavailable")
+	}
+	if !req.Root && os.Geteuid() != 0 && uint32(os.Geteuid()) != s.workerUID {
 		return "", errors.New("worker identity unavailable")
 	}
 	var nonce [16]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
 		return "", err
 	}
+	if priorID != "" {
+		if !validTerminalID(priorID) || terminal == nil {
+			return "", errors.New("invalid recovered session id")
+		}
+	} else {
+		priorID = "stdio_" + hex.EncodeToString(nonce[:])
+	}
 	entry := &stdioSession{
-		id: "stdio_" + hex.EncodeToString(nonce[:]), kind: kind,
+		id: priorID, kind: kind,
 		ownerID: req.PrincipalID, ownerClass: req.PrincipalClass,
-		workspace: cwd, done: make(chan struct{}), exitCode: -1,
+		workspace: cwd, done: make(chan struct{}), exitCode: -1, terminal: terminal,
 	}
 	if err := s.sessions.reserve(entry); err != nil {
 		return "", err
@@ -166,22 +202,33 @@ func (s *Server) workerStdioSession(req Request, kind, workspace, binary string,
 			s.sessions.remove(entry)
 		}
 	}()
-	if blocked := s.beginActionAudit(req, "session_create", "worker", kind+"\x00"+cwd+"\x00"+binary, "developer_session"); blocked != nil {
+	if blocked := s.beginActionAudit(req, "session_create", auditMode(req.Root), kind+"\x00"+cwd+"\x00"+binary, "developer_session"); blocked != nil {
 		return "", fmt.Errorf("%s: %s", blocked.ReasonCode, blocked.Error)
 	}
 	start := time.Now()
 	// The dedicated worker HOME/cache lives outside the selected worktree.
 	cmd := exec.Command(binary, args...)
 	cmd.Dir = cwd
-	cmd.Env = sanitizedCommandEnv(s.cfg.WorkspaceDir)
+	home := s.cfg.WorkspaceDir
+	if req.Root {
+		home = "/root"
+	}
+	cmd.Env = sanitizedCommandEnv(home)
+	if terminal != nil {
+		cmd.Env = append(cmd.Env, "TERM=xterm-256color")
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 	cmd.WaitDelay = processGroupTerminateGrace
 	if os.Geteuid() == 0 {
-		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: s.workerUID, Gid: s.workerGID, Groups: []uint32{s.workerGID}}
+		if req.Root {
+			cmd.SysProcAttr.Credential = &syscall.Credential{Uid: 0, Gid: 0, Groups: []uint32{0}}
+		} else {
+			cmd.SysProcAttr.Credential = &syscall.Credential{Uid: s.workerUID, Gid: s.workerGID, Groups: []uint32{s.workerGID}}
+		}
 	}
 	stdin, pipeErr := cmd.StdinPipe()
 	if pipeErr != nil {
-		s.finishActionAudit(req, "session_create", "worker", kind+"\x00"+cwd+"\x00"+binary, "developer_session", start, Response{Error: pipeErr.Error()})
+		s.finishActionAudit(req, "session_create", auditMode(req.Root), kind+"\x00"+cwd+"\x00"+binary, "developer_session", start, Response{Error: pipeErr.Error()})
 		return "", pipeErr
 	}
 	f, ok := stdin.(*os.File)
@@ -194,7 +241,7 @@ func (s *Server) workerStdioSession(req Request, kind, workspace, binary string,
 	cmd.Stderr = sessionEventWriter{entry: entry, stream: "stderr"}
 	if err := cmd.Start(); err != nil {
 		_ = stdin.Close()
-		s.finishActionAudit(req, "session_create", "worker", kind+"\x00"+cwd+"\x00"+binary, "developer_session", start, Response{Error: err.Error()})
+		s.finishActionAudit(req, "session_create", auditMode(req.Root), kind+"\x00"+cwd+"\x00"+binary, "developer_session", start, Response{Error: err.Error()})
 		return "", err
 	}
 	// The process is not reaped until cmd.Wait; pin its PID now so a
@@ -209,7 +256,7 @@ func (s *Server) workerStdioSession(req Request, kind, workspace, binary string,
 		if stopErr != nil {
 			failure = fmt.Errorf("%w; session_stop_outcome_unknown: %v", failure, stopErr)
 		}
-		s.finishActionAudit(req, "session_create", "worker", kind+"\x00"+cwd+"\x00"+binary, "developer_session", start, Response{Error: failure.Error()})
+		s.finishActionAudit(req, "session_create", auditMode(req.Root), kind+"\x00"+cwd+"\x00"+binary, "developer_session", start, Response{Error: failure.Error()})
 		return "", failure
 	}
 	entry.mu.Lock()
@@ -221,9 +268,9 @@ func (s *Server) workerStdioSession(req Request, kind, workspace, binary string,
 	go entry.wait()
 	// A forgotten or disconnected session cannot run indefinitely.
 	entry.mu.Lock()
-	entry.expiry = time.AfterFunc(maxStdioSessionAge, func() { _ = s.sessions.removeAndStop(entry) })
+	entry.expiry = time.AfterFunc(maxStdioSessionAge, func() { s.expireProcessSession(entry) })
 	entry.mu.Unlock()
-	audited := s.finishActionAudit(req, "session_create", "worker", kind+"\x00"+cwd+"\x00"+binary, "developer_session", start, Response{OK: true})
+	audited := s.finishActionAudit(req, "session_create", auditMode(req.Root), kind+"\x00"+cwd+"\x00"+binary, "developer_session", start, Response{OK: true})
 	if audited.AuditDegraded {
 		// The session already started. Return its identity for reconciliation.
 		return entry.id, errors.New("session_started_audit_degraded")
@@ -279,6 +326,10 @@ func (w sessionEventWriter) Write(p []byte) (int, error) {
 	total := len(p)
 	w.entry.mu.Lock()
 	defer w.entry.mu.Unlock()
+	if w.entry.terminal != nil && w.stream == "stdout" {
+		w.entry.terminal.accept(p)
+		return total, nil
+	}
 	for len(p) > 0 {
 		n := len(p)
 		if n > maxStdioEventBytes {

@@ -68,6 +68,7 @@ func Build(c config.Config) Manifest {
 		Optional: []Component{
 			{Name: "download-utilities", Required: false, Installed: fileExists("/usr/bin/curl") && fileExists("/usr/bin/tar"), Paths: []string{"/usr/bin/curl", "/usr/bin/tar", "/usr/bin/xz"}, Notes: "Used for updates and optional browser setup. Safe to remove without stopping the running MCP core, but update/browser installation will need them restored."},
 			{Name: "terminal", Required: false, Installed: fileExists("/usr/bin/tmux"), Paths: []string{"/usr/bin/tmux"}, Notes: "Optional. AI may install tmux only when an interactive persistent terminal is needed; the MCP core does not depend on it."},
+			{Name: "go-language-server", Required: false, Installed: executableFileExists("/usr/local/bin/gopls") || executableFileExists("/usr/bin/gopls"), Paths: []string{"/usr/local/bin/gopls", "/usr/bin/gopls"}, Notes: "Optional Go semantic-code intelligence. code_* requires exact aiworker file_version and does not install gopls or a Go toolchain."},
 			{Name: "browser", Required: false, Installed: fileExists(filepath.Join(browserEngine, "node/bin/node")), Paths: []string{browserEngine, browserData}, Notes: "Optional Playwright/Chromium capability. The executable engine is root-owned under /opt; writable browser profile data is isolated under agent state. Removing it disables browser tools but does not stop the MCP core."},
 		},
 		Rules: []string{
@@ -117,6 +118,11 @@ func filesystemInfo(path string, blocks, availableBlocks, blockSize uint64) File
 }
 
 func fileExists(path string) bool { _, err := os.Stat(path); return err == nil }
+
+func executableFileExists(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.Mode().IsRegular() && fi.Mode().Perm()&0111 != 0
+}
 
 func Write(path string, m Manifest) error {
 	b, err := json.MarshalIndent(m, "", "  ")

@@ -40,6 +40,8 @@ type Server struct {
 	workspaceHooks            *workspaceTestHooks
 	structuralSearchBinary    string // test-only override; production resolves trusted ast-grep paths
 	workspaceHelperBinary     string // test-only compiled Agent binary; production self-executes
+	terminalBinary            string // test-only isolated tmux fixture; production uses /usr/bin/tmux
+	goplsBinary               string // test-only Go language server fixture
 }
 
 func NewServer(cfg config.Config, token string) (*Server, error) {
@@ -161,6 +163,10 @@ func (s *Server) dispatch(req Request) Response {
 		return s.worktreeCreateContext(context.Background(), req)
 	case "worktree_remove":
 		return s.worktreeRemoveContext(context.Background(), req)
+	case "code_inspect":
+		return s.codeInspect(context.Background(), req)
+	case "terminal_open", "terminal_read", "terminal_write", "terminal_interrupt", "terminal_resize", "terminal_close", "terminal_reconnect":
+		return s.terminalAction(req)
 	default:
 		return Response{Error: "unknown action"}
 	}

@@ -20,8 +20,11 @@ func testStdioBroker(t *testing.T) (*Server, Request, string) {
 	if err := os.Mkdir(workspace, 0700); err != nil {
 		t.Fatal(err)
 	}
+	if err := os.Mkdir(filepath.Join(root, "state"), 0700); err != nil {
+		t.Fatal(err)
+	}
 	s := &Server{
-		cfg:       config.Config{WorkspaceDir: root},
+		cfg:       config.Config{WorkspaceDir: root, StateDir: filepath.Join(root, "state")},
 		workerUID: uint32(os.Geteuid()), workerGID: uint32(os.Getegid()),
 		sessions: newStdioSessionBroker(),
 	}
