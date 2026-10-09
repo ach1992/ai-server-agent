@@ -23,6 +23,7 @@ MANAGED_STATE="$CONFIG_DIR/managed.json"
 MCP_AUTH_HEADER_FILE="$CONFIG_DIR/mcp.authorization"
 MCP_CREDENTIAL_STORE="$CONFIG_DIR/mcp-credentials.json"
 LEGACY_MCP_TOKEN_FILE="$CONFIG_DIR/mcp.token"
+AUDIT_FINGERPRINT_KEY="$CONFIG_DIR/audit-fingerprint.key"
 AGENT_USER="aiagent"
 WORKER_USER="aiworker"
 PORT="${AI_SERVER_AGENT_PORT:-3210}"
@@ -316,6 +317,18 @@ rollback_legacy_mcp_migration(){
 if [ ! -s "$CONFIG_DIR/executor.token" ]; then random_hex > "$CONFIG_DIR/executor.token"; fi
 chown root:"$AGENT_USER" "$CONFIG_DIR/executor.token"
 chmod 0640 "$CONFIG_DIR/executor.token"
+
+[ ! -L "$AUDIT_FINGERPRINT_KEY" ] || die "Refusing symlinked audit fingerprint key: $AUDIT_FINGERPRINT_KEY"
+if [ ! -e "$AUDIT_FINGERPRINT_KEY" ]; then
+  audit_key_tmp="$(mktemp "$CONFIG_DIR/.audit-fingerprint-key.XXXXXX")"
+  printf 'v1:%s\n' "$(random_hex)" > "$audit_key_tmp"
+  chown root:root "$audit_key_tmp"; chmod 0600 "$audit_key_tmp"
+  mv -f "$audit_key_tmp" "$AUDIT_FINGERPRINT_KEY"
+fi
+[ -f "$AUDIT_FINGERPRINT_KEY" ] && [ ! -L "$AUDIT_FINGERPRINT_KEY" ] || die "Audit fingerprint key is not a regular file."
+chown root:root "$AUDIT_FINGERPRINT_KEY"; chmod 0600 "$AUDIT_FINGERPRINT_KEY"
+[ "$(stat -c '%u:%g:%a' "$AUDIT_FINGERPRINT_KEY" 2>/dev/null)" = "0:0:600" ] || die "Audit fingerprint key ownership/mode is unsafe."
+grep -Eq '^v1:[0-9a-f]{64}$' "$AUDIT_FINGERPRINT_KEY" || die "Audit fingerprint key format is invalid."
 
 install_helpers(){
   local root="$1"

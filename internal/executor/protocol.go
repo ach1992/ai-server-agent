@@ -9,7 +9,10 @@ type Request struct {
 	Root           bool     `json:"root,omitempty"`
 	Approval       bool     `json:"approval,omitempty"`
 	TimeoutMS      int64    `json:"timeout_ms,omitempty"`
+	RequestID      string   `json:"request_id,omitempty"`
 	OperationID    string   `json:"operation_id,omitempty"`
+	ApprovalID     string   `json:"approval_id,omitempty"`
+	AuditAction    string   `json:"audit_action,omitempty"`
 	PrincipalID    string   `json:"principal_id,omitempty"`
 	PrincipalClass string   `json:"principal_class,omitempty"`
 	PrincipalName  string   `json:"principal_name,omitempty"`
@@ -47,6 +50,10 @@ type Response struct {
 	ErrorCode           string                     `json:"error_code"`
 	ErrorClass          string                     `json:"error_class"`
 	Retryable           bool                       `json:"retryable,omitempty"`
+	AuditDegraded       bool                       `json:"audit_degraded,omitempty"`
+	AuditError          string                     `json:"audit_error,omitempty"`
+	RequestID           string                     `json:"request_id,omitempty"`
+	OperationID         string                     `json:"operation_id,omitempty"`
 	Output              string                     `json:"output"`
 	OutputEncoding      string                     `json:"output_encoding"`
 	BytesSeen           int64                      `json:"bytes_seen"`

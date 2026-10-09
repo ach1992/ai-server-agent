@@ -28,6 +28,7 @@ type Server struct {
 	token                  string
 	guard                  *policy.Guard
 	audit                  *audit.Logger
+	auditWriteHook         func(string) error // test-only failure injection
 	workerUID              uint32
 	workerGID              uint32
 	runs                   *runLimiter
@@ -54,7 +55,7 @@ func NewServer(cfg config.Config, token string) (*Server, error) {
 		cfg:               cfg,
 		token:             token,
 		guard:             policy.New(protected),
-		audit:             audit.New(filepath.Join(cfg.LogDir, "audit.jsonl")),
+		audit:             audit.NewWithKeyAndReserve(filepath.Join(cfg.LogDir, "audit.jsonl"), filepath.Join(filepath.Dir(cfg.ExecutorToken), "audit-fingerprint.key"), jobStateSafetyReserveBytes),
 		workerUID:         uint32(uid64),
 		workerGID:         uint32(gid64),
 		runs:              newRunLimiter(),
@@ -99,7 +100,20 @@ func (s *Server) handle(c net.Conn) {
 	}
 	ctx, cancel := connectionContext(c)
 	defer cancel()
+	if req.Action != "start_job" {
+		req.OperationID = ""
+	}
+	if err := ensureRequestCorrelation(&req); err != nil {
+		_, _ = c.Write(encodeExecutorResponse(Response{Error: "invalid correlation metadata: " + err.Error(), ReasonCode: "invalid_correlation", ErrorCode: "invalid_correlation", ErrorClass: "validation", GeneratedAt: time.Now().UTC()}))
+		return
+	}
 	resp := s.dispatchContext(ctx, req)
+	if resp.RequestID == "" {
+		resp.RequestID = req.RequestID
+	}
+	if resp.OperationID == "" {
+		resp.OperationID = req.OperationID
+	}
 	resp.GeneratedAt = time.Now().UTC()
 	_, _ = c.Write(encodeExecutorResponse(resp))
 }
@@ -284,24 +298,32 @@ func (s *Server) jobStatus(req Request) Response {
 	applyOutputResult(&resp, result)
 	return resp
 }
-func (s *Server) jobStop(req Request) Response {
+func (s *Server) jobStop(req Request) (resp Response) {
 	id, err := safeID(req.JobID)
 	if err != nil {
 		return Response{Error: err.Error(), ReasonCode: "invalid_job_id", ErrorCode: "invalid_job_id", ErrorClass: "validation"}
 	}
+	req.JobID = id
+	auditStarted := time.Now()
+	if blocked := s.beginActionAudit(req, "job_stop", "root", "", ""); blocked != nil {
+		return *blocked
+	}
+	defer func() {
+		resp = s.finishActionAudit(req, "job_stop", "root", "", "", auditStarted, resp)
+	}()
+
 	out := newBoundedOutputCollector(systemdOutputLimit)
 	cmd := exec.Command("systemctl", "stop", "ai-job-"+id)
 	cmd.Stdout = out
 	cmd.Stderr = out
 	er := cmd.Run()
 	result := out.Result()
-	_ = s.audit.Write(audit.Entry{Action: "job_stop", Success: er == nil, Detail: id, PrincipalID: req.PrincipalID, PrincipalClass: req.PrincipalClass, PrincipalName: req.PrincipalName})
 	if er != nil {
-		resp := Response{Error: er.Error(), ReasonCode: "job_stop_failed", ErrorCode: "job_stop_failed", ErrorClass: "process", JobID: id}
+		resp = Response{Error: er.Error(), ReasonCode: "job_stop_failed", ErrorCode: "job_stop_failed", ErrorClass: "process", JobID: id}
 		applyOutputResult(&resp, result)
 		return resp
 	}
-	resp := Response{OK: true, JobID: id, Status: "stop_requested"}
+	resp = Response{OK: true, JobID: id, Status: "stop_requested"}
 	applyOutputResult(&resp, result)
 	return resp
 }

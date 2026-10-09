@@ -20,8 +20,6 @@ import (
 	"sync"
 	"syscall"
 	"time"
-
-	"github.com/ach1992/ai-server-agent/internal/audit"
 )
 
 const (
@@ -75,7 +73,7 @@ type completedJobArtifact struct {
 	modTime time.Time
 }
 
-func (s *Server) startJobBounded(req Request) Response {
+func (s *Server) startJobBounded(req Request) (resp Response) {
 	if bad := commandInputError(req.Command); bad != nil {
 		return *bad
 	}
@@ -104,6 +102,13 @@ func (s *Server) startJobBounded(req Request) Response {
 	if req.OperationID == "" {
 		req.OperationID = "@internal-" + strconv.FormatInt(time.Now().UnixNano(), 10)
 	}
+	auditStarted := time.Now()
+	if blocked := s.beginActionAudit(req, "start_job", auditMode(req.Root), req.Command, dec.Category); blocked != nil {
+		return *blocked
+	}
+	defer func() {
+		resp = s.finishActionAudit(req, "start_job", auditMode(req.Root), req.Command, dec.Category, auditStarted, resp)
+	}()
 
 	jobsDir, claimsDir, err := s.ensureJobState()
 	if err != nil {
@@ -197,7 +202,7 @@ func (s *Server) startJobBounded(req Request) Response {
 		}
 	}
 
-	resp := s.launchPreparedJob(req, paths, id)
+	resp = s.launchPreparedJob(req, paths, id)
 	if resp.OK {
 		claim.State = "started"
 		if claimPath != "" {
@@ -218,15 +223,6 @@ func (s *Server) startJobBounded(req Request) Response {
 		}
 	}
 
-	_ = s.audit.Write(audit.Entry{
-		Action:         "start_job",
-		Mode:           map[bool]string{true: "root", false: "worker"}[req.Root],
-		Success:        resp.OK,
-		Detail:         dec.Category,
-		PrincipalID:    req.PrincipalID,
-		PrincipalClass: req.PrincipalClass,
-		PrincipalName:  req.PrincipalName,
-	})
 	return resp
 }
 

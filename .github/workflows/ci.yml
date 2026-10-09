@@ -168,6 +168,10 @@ jobs:
           grep -qF 'syscall.O_NOFOLLOW' internal/executor/executor.go
           grep -qF 'trustedDir(jobsDir)' internal/executor/jobs.go
           grep -qF 'job path is not a regular file' internal/executor/executor.go
+          grep -qF 'AUDIT_FINGERPRINT_KEY="$CONFIG_DIR/audit-fingerprint.key"' install.sh
+          grep -qF 'chmod 0600 "$AUDIT_FINGERPRINT_KEY"' install.sh
+          grep -qF 'NewWithKeyAndReserve' internal/executor/executor.go
+          grep -qF 'os.O_WRONLY|os.O_CREATE|os.O_APPEND|syscall.O_NOFOLLOW' internal/audit/audit.go
           grep -qF 'Refusing symlinked browser data directory' internal/browser/browser.go
       - name: Cloudflare guided setup safety contract
         if: ${{ needs.change-scope.outputs.cloudflare_security_changed != 'false' }}
@@ -494,6 +498,8 @@ jobs:
             exit 1
           fi
 
+          audit_key_before="$(sudo sha256sum /etc/ai-server-agent/audit-fingerprint.key | awk '{print $1}')"
+          test "$(sudo stat -c '%U:%G:%a' /etc/ai-server-agent/audit-fingerprint.key)" = "root:root:600"
           sudo env AI_SERVER_AGENT_YES=1 bash uninstall.sh
           test ! -e /usr/local/bin/ai-server-agent
           test ! -e /usr/local/sbin/ai-server-agent-manage
@@ -507,6 +513,8 @@ jobs:
           sudo test -s /etc/ai-server-agent/mcp-credentials.json
           sudo test ! -e /etc/ai-server-agent/mcp.token
           sudo test ! -e /etc/ai-server-agent/mcp.authorization
+          sudo test -s /etc/ai-server-agent/audit-fingerprint.key
+          test "$(sudo sha256sum /etc/ai-server-agent/audit-fingerprint.key | awk '{print $1}')" = "$audit_key_before"
           sudo test -e /srv/ai-workspace/lifecycle-workspace-sentinel
           id aiagent >/dev/null
           getent group aiagent >/dev/null
@@ -516,6 +524,8 @@ jobs:
           sudo env AI_SERVER_AGENT_BINARY=/tmp/ai-server-agent AI_SERVER_AGENT_NONINTERACTIVE=1 bash install.sh
           sudo systemctl is-active --quiet ai-server-agent.service
           sudo systemctl is-active --quiet ai-server-agent-executor.service
+          sudo test -s /etc/ai-server-agent/audit-fingerprint.key
+          test "$(sudo sha256sum /etc/ai-server-agent/audit-fingerprint.key | awk '{print $1}')" = "$audit_key_before"
           sudo test -e /srv/ai-workspace/lifecycle-workspace-sentinel
 
           sudo env AI_SERVER_AGENT_YES=1 bash uninstall.sh --purge

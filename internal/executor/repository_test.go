@@ -649,20 +649,34 @@ func TestRepositoryPathsCannotEscapeWorkspace(t *testing.T) {
 
 func TestRepositoryMutationAuditIncludesServerDerivedPrincipal(t *testing.T) {
 	s, root := repositoryTestServer(t)
+	repo := filepath.Join(root, "repo-audit")
+	head := initFixtureRepo(t, repo)
 	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
 	s.audit = audit.New(auditPath)
 	req := Request{
+		RepositoryPath: repo,
+		WorktreePath:   filepath.Join(root, "task-worktree-audit"),
+		Branch:         "audit-task",
+		StartRef:       "main",
+		ExpectedSHA:    head,
+		RequestID:      "req-repository-audit",
 		PrincipalID:    "mcp-gateway",
 		PrincipalClass: "gateway",
 		PrincipalName:  "mcp-gateway",
 	}
-	s.auditRepositoryAction(req, "worktree_create", filepath.Join(root, "task-worktree"), true, "task-branch")
+	resp := s.worktreeCreateContext(context.Background(), req)
+	if !resp.OK {
+		t.Fatalf("audited worktree creation failed: %+v", resp)
+	}
 	b, err := os.ReadFile(auditPath)
 	if err != nil {
 		t.Fatal(err)
 	}
 	for _, want := range []string{
+		`"phase":"start"`,
+		`"phase":"complete"`,
 		`"action":"worktree_create"`,
+		`"request_id":"req-repository-audit"`,
 		`"principal_id":"mcp-gateway"`,
 		`"principal_class":"gateway"`,
 		`"principal_name":"mcp-gateway"`,
@@ -670,5 +684,8 @@ func TestRepositoryMutationAuditIncludesServerDerivedPrincipal(t *testing.T) {
 		if !strings.Contains(string(b), want) {
 			t.Fatalf("repository mutation audit missing %s: %s", want, b)
 		}
+	}
+	if strings.Contains(string(b), req.WorktreePath) || strings.Contains(string(b), req.Branch) {
+		t.Fatalf("raw repository mutation identity leaked instead of keyed fingerprint: %s", b)
 	}
 }
