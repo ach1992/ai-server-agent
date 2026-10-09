@@ -616,6 +616,36 @@ jobs:
           test "$code" != 000
           test "$code" != 401
 
+          # Credential operations and update/uninstall must share the same
+          # root lifecycle lock, including direct library invocation.
+          lock_ready="$(mktemp)"
+          rm -f "$lock_ready"
+          sudo bash -c '
+            exec 8>>/run/lock/ai-server-agent/management.lock
+            flock -x 8
+            touch "$1"
+            sleep 3
+          ' _ "$lock_ready" &
+          lock_holder=$!
+          for attempt in $(seq 1 30); do
+            [ -e "$lock_ready" ] && break
+            sleep 0.1
+          done
+          test -e "$lock_ready"
+          if sudo env AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1 bash -c '
+            source /usr/local/lib/ai-server-agent/manage.sh
+            acquire_management_lock
+          '; then
+            echo 'credential manager bypassed active lifecycle lock' >&2
+            exit 1
+          fi
+          wait "$lock_holder"
+          rm -f "$lock_ready"
+          sudo env AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1 bash -c '
+            source /usr/local/lib/ai-server-agent/manage.sh
+            acquire_management_lock
+          '
+
           # Rotation is an interactive root-only one-time reveal. Allocate a
           # local pseudo-TTY but discard its transcript/stdout so CI never logs
           # the newly issued bearer. The command itself verifies the new bearer
