@@ -162,7 +162,18 @@ func (s *Server) environmentGit(ctx context.Context, dir string, args ...string)
 	safeArgs = append(safeArgs, args...)
 	cmd := exec.CommandContext(ctx, gitPath, safeArgs...)
 	cmd.Dir = dir
-	cmd.Env = append(sanitizedCommandEnv(s.cfg.WorkspaceDir), "GIT_TERMINAL_PROMPT=0")
+	cmd.Env = []string{
+		"HOME=/nonexistent",
+		"XDG_CONFIG_HOME=/nonexistent",
+		"XDG_CACHE_HOME=/nonexistent",
+		"PATH=" + safeCommandPath,
+		"LANG=C.UTF-8",
+		"LC_ALL=C.UTF-8",
+		"AI_SERVER_AGENT=1",
+		"GIT_TERMINAL_PROMPT=0",
+		"GIT_CONFIG_GLOBAL=/dev/null",
+		"GIT_CONFIG_NOSYSTEM=1",
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
@@ -497,9 +508,43 @@ func (s *Server) environmentToolVersion(parent context.Context, path, executable
 	}
 	ctx, cancel := context.WithTimeout(parent, environmentProbeTimeout)
 	defer cancel()
+	probeHome, err := os.MkdirTemp("", "ai-server-agent-env-probe-")
+	if err != nil {
+		return "", err
+	}
+	defer os.RemoveAll(probeHome)
+	if err := os.Chown(probeHome, int(s.workerUID), int(s.workerGID)); err != nil {
+		return "", err
+	}
+	if err := os.Chmod(probeHome, 0700); err != nil {
+		return "", err
+	}
+	cacheDir := filepath.Join(probeHome, ".cache")
+	configDir := filepath.Join(probeHome, ".config")
+	if err := os.MkdirAll(cacheDir, 0700); err != nil {
+		return "", err
+	}
+	if err := os.MkdirAll(configDir, 0700); err != nil {
+		return "", err
+	}
+	if err := os.Chown(cacheDir, int(s.workerUID), int(s.workerGID)); err != nil {
+		return "", err
+	}
+	if err := os.Chown(configDir, int(s.workerUID), int(s.workerGID)); err != nil {
+		return "", err
+	}
+
 	cmd := exec.CommandContext(ctx, path, args...)
-	cmd.Dir = s.cfg.WorkspaceDir
-	cmd.Env = sanitizedCommandEnv(s.cfg.WorkspaceDir)
+	cmd.Dir = probeHome
+	cmd.Env = []string{
+		"HOME=" + probeHome,
+		"XDG_CACHE_HOME=" + cacheDir,
+		"XDG_CONFIG_HOME=" + configDir,
+		"PATH=" + safeCommandPath,
+		"LANG=C.UTF-8",
+		"LC_ALL=C.UTF-8",
+		"AI_SERVER_AGENT=1",
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
