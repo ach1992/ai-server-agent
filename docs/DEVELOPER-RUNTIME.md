@@ -421,6 +421,7 @@ Do not promote capabilities merely because they are powerful, modern, or availab
 - #63 — Browser / Playwright;
 - #64 — environment/toolchain discovery;
 - #65 — optional evidence-triggered Incus;
-- #66 — internal stateful-session substrate.
+- #66 — internal stateful-session substrate;
+- #99 — AI-facing bounded data delivery and typed-artifact acceptance.
 
 After this document is integrated, use it for stable architecture and use Issues for active work/dependencies. Do not reconstruct these decisions from chat history.
