@@ -196,6 +196,7 @@ Once a supported MCP client is connected, the Agent exposes a compact tool surfa
 | --- | --- |
 | `agent_environment` | read the current self-preservation manifest before host-wide changes |
 | `run_command` | run ordinary Bash as `aiworker` in `/srv/ai-workspace` |
+| `repository_environment` | inspect repository-owned language/toolchain/environment declarations and current host compatibility without installing or running project tasks |
 | `repository_discover` / `repository_inspect` | discover or prove exact Git repository/worktree identity, HEAD, branch/upstream, dirty/conflict state and linked worktrees without trusting directory names |
 | `worktree_create` / `worktree_remove` | create exact-SHA task worktrees and safely remove only clean linked worktrees after durability/disposable-state checks |
 | `run_root_command` | run Bash as root, subject to executor policy/approval guardrails |
@@ -212,6 +213,11 @@ Use `run_command` for normal development work, builds, tests, Git, project packa
 
 `/srv/ai-workspace` is persistent. Connected models are instructed to inspect and reuse existing repositories, worktrees and task environments before creating duplicates, prefer `git worktree` when another checkout of the same repository is appropriate, and never treat dirty, untracked, ambiguous or unknown workspace state as safe to delete.
 
+### Repository environment discovery
+
+`repository_environment` takes an explicit repository/worktree path inside the configured workspace and returns a bounded structured summary of repository-owned development intent. It recognizes common native manifests/lockfiles and toolchain pins plus declared mise, devenv, Dev Container and Dagger mechanisms, reports repository-owned setup/test/build entrypoint identities where they are explicitly declared without returning package-script bodies, and compares required tools/versions with compatible host/system or worker-cache executables. Git-tracked declarations are distinguished from both untracked state and tracked-but-uncommitted changes so server-local state does not silently become durable project truth.
+
+Discovery is descriptive only. It does not install packages/toolchains, execute repository tasks/scripts, choose a hidden precedence between conflicting environment/package-manager declarations, or create an Agent-owned environment database/provider abstraction. Multiple declared mechanisms or conflicting pins return explicit selection/conflict state. Agent-managed capability tools such as tmux/LSP/DAP/ast-grep/Playwright remain a separate ownership class from repository dependencies. Declaration content is read with worker authority. System-tool version probes run only for trusted root-owned, non-writable system executables; probes are bounded and run as the worker outside the project checkout. Worker-cache candidates are not executed merely for discovery; a recognizable cache path may supply a version hint, but compatibility remains unknown until a later intentional execution/verification path proves it. Repository declaration paths that escape through symlinks are ignored.
 ### Repository and worktree lifecycle
 
 The structured repository tools solve checkout **identity and lifecycle correctness**; they do not replace Git. `repository_discover` finds bounded Git identities under the configured workspace and can filter by canonical remote identity without contacting the remote. `repository_inspect` reports the exact repository/worktree path, common Git directory, HEAD, branch or detached state, upstream divergence, staged/unstaged/untracked/conflict counts, in-progress Git operations, remotes and linked worktrees. Optional `verify_remote=true` checks either an explicitly selected configured remote/branch or the current upstream with `git ls-remote` without fetching or moving local refs; this is the structured reconciliation step after an ordinary CLI push. Credential-bearing URL userinfo/query data is not returned.

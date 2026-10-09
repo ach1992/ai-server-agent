@@ -128,6 +128,8 @@ func (s *Server) dispatch(req Request) Response {
 		return s.readFile(req)
 	case "write_file":
 		return s.writeFile(req)
+	case "repository_environment":
+		return s.repositoryEnvironmentContext(context.Background(), req)
 	case "repository_discover":
 		return s.repositoryDiscoverContext(context.Background(), req)
 	case "repository_inspect":

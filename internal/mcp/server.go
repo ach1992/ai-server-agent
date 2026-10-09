@@ -279,6 +279,7 @@ func (s *Server) registerTools() {
 			return responseResult(resp)
 		})
 
+	s.registerRepositoryEnvironmentTool()
 	s.registerRepositoryTools()
 }
 

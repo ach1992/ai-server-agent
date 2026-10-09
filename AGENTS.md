@@ -91,6 +91,7 @@ The governing optimization is **maximum practical AI-development leverage per un
 - Promote a capability to first-class only when structured integration materially improves recurring correctness, state, reliability, semantic fidelity or AI efficiency.
 - Preserve general worker/root shell and PTY escape hatches for uncommon work instead of implementing dedicated APIs for every tool.
 - Keep Git CLI as the ordinary Git operation path; first-class repository logic owns identity/worktree/lifecycle correctness.
+- Keep repository environment discovery descriptive: repository declarations own project toolchain/task intent, conflicts get no hidden precedence, no discovery call provisions tooling, and Agent-managed capability tools remain separate from project dependencies.
 - Keep the code-inspection ladder distinct: text search -> structural ast-grep search -> LSP semantics.
 - Keep one structured mutation path: LSP WorkspaceEdit and structural rewrite plans apply through the safe workspace edit/precondition layer.
 - DAP and Playwright-backed Browser are Core-v1 capabilities, but their public surfaces stay focused on common high-value workflows rather than protocol/API completeness.

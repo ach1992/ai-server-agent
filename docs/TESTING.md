@@ -322,6 +322,11 @@ recover exact repository/worktree
 -> recover again from GitHub evidence
 ```
 
+### Repository environment/toolchain discovery
+
+`internal/executor/environment_test.go` validates the lightweight #64 discovery/reuse boundary against real temporary Git repositories. Coverage includes fresh-repository recovery from tracked manifests, compatible/incompatible worker-cache toolchain reuse, native language and package-manager declarations, package scripts without execution, mise/devenv/Dev Container/Dagger detection without automatic provisioning, explicit multi-mechanism/package-manager selection state, conflicting exact pins, untracked declaration durability warnings, workspace path-escape/symlink rejection, and bounded tool-version output. `internal/mcp/server_test.go` also keeps the public tool read-only, idempotent, local-only and bound to an explicit repository path with a typed output schema.
+
+These tests deliberately do not install environment managers or run repository tasks. Managed provisioning for a concrete mechanism requires its own scope/evidence; this slice proves discovery/reuse and clear failure/unknown states only. Repository-owned dependencies/toolchains remain distinct from Agent-managed capability tooling.
 ### Repository/worktree lifecycle
 
 `internal/executor/repository_test.go` exercises the first repository/worktree Layer-1 slice against real temporary Git repositories. Coverage includes clean and staged/unstaged/untracked state, detached HEAD, upstream ahead/behind divergence, merge-conflict/in-progress state, remote-identity discovery independent of directory names, linked-worktree deduplication, branch-already-in-use rejection, exact-start-SHA staleness, fresh-clone recovery from a durable remote branch, explicit remote-verification failure, main-worktree protection, and removal only after clean exact-HEAD plus remote-durability proof or an explicit disposable decision. Regression tests also prove structured Git does not execute repository hooks/external fsmonitor configuration, refuses checkout-filter execution, keeps working-tree and Git/common metadata inside the configured workspace, and rejects optimistic removal when HEAD changes before the final mutation.
