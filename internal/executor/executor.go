@@ -33,6 +33,7 @@ type Server struct {
 	workerUID                 uint32
 	workerGID                 uint32
 	runs                      *runLimiter
+	sessions                  *stdioSessionBroker
 	jobsMu                    sync.Mutex
 	lifecycleLockPath         string
 	fileWriteHooks            *fileWriteTestHooks
@@ -61,6 +62,7 @@ func NewServer(cfg config.Config, token string) (*Server, error) {
 		workerUID:         uint32(uid64),
 		workerGID:         uint32(gid64),
 		runs:              newRunLimiter(),
+		sessions:          newStdioSessionBroker(),
 		lifecycleLockPath: lifecycleManagementLockPath,
 	}, nil
 }
