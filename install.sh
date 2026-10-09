@@ -45,6 +45,7 @@ MCP_MIGRATION_SWITCHED=0
 MCP_MIGRATION_RECOVERING=0
 PREVIOUS_CONFIG_BACKUP=""
 PREVIOUS_INSTALL_STATE_BACKUP=""
+PREVIOUS_INSTALL_STATE_PRESENT=0
 PREVIOUS_CREDENTIAL_STORE=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-/dev/null}")" 2>/dev/null && pwd || true)"
 LIFECYCLE_LOCK_DIR=/run/lock/ai-server-agent
@@ -286,10 +287,12 @@ rollback_legacy_mcp_migration(){
   chown root:"$AGENT_USER" "$config_restore"; chmod 0640 "$config_restore"
   mv -f "$config_restore" "$CONFIG_FILE"
   [ "$MCP_STORE_CREATED" -eq 0 ] || rm -f -- "$MCP_CREDENTIAL_STORE"
-  if [ -n "$PREVIOUS_INSTALL_STATE_BACKUP" ]; then
+  if [ "$PREVIOUS_INSTALL_STATE_PRESENT" -eq 1 ] && [ -n "$PREVIOUS_INSTALL_STATE_BACKUP" ]; then
     cp -a "$PREVIOUS_INSTALL_STATE_BACKUP" "$INSTALL_STATE"
     rm -f -- "$PREVIOUS_INSTALL_STATE_BACKUP"
     PREVIOUS_INSTALL_STATE_BACKUP=""
+  elif [ "$PREVIOUS_INSTALL_STATE_PRESENT" -eq 0 ]; then
+    rm -f -- "$INSTALL_STATE"
   fi
   if ! systemctl restart ai-server-agent-executor.service ai-server-agent.service; then
     rollback_ok=0
@@ -444,6 +447,7 @@ if [ "$FRESH_INSTALL" -eq 0 ]; then
   PREVIOUS_CONFIG_BACKUP="$(mktemp)"
   cp -a "$CONFIG_FILE" "$PREVIOUS_CONFIG_BACKUP"
   if [ -e "$INSTALL_STATE" ]; then
+    PREVIOUS_INSTALL_STATE_PRESENT=1
     PREVIOUS_INSTALL_STATE_BACKUP="$(mktemp)"
     cp -a "$INSTALL_STATE" "$PREVIOUS_INSTALL_STATE_BACKUP"
   fi
