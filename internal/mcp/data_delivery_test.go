@@ -43,7 +43,7 @@ func TestLargeTextFallbackKeepsFileContinuation(t *testing.T) {
 	for _, token := range []string{
 		"file_size=536870912", `file_version="f1-0123456789"`,
 		"requested_offset=0", "next_offset=65536", "eof=false", "re-request",
-		`output_encoding="utf-8"`, "limit<=16384",
+		`output_encoding="utf-8"`, "limit<=4096",
 		"structuredContent",
 	} {
 		if !strings.Contains(summary, token) {
@@ -112,7 +112,7 @@ func TestSmallTextFallbackKeepsExistingResponseJSON(t *testing.T) {
 	}
 }
 
-func TestRecommendedChunkFitsTextOnlyFallback(t *testing.T) {
+func TestTypicalChunkFitsTextOnlyFallback(t *testing.T) {
 	cases := []struct {
 		name     string
 		output   string
@@ -133,5 +133,35 @@ func TestRecommendedChunkFitsTextOnlyFallback(t *testing.T) {
 				t.Fatal("recommended chunk missing or corrupted")
 			}
 		})
+	}
+}
+
+func TestTextFallbackBoundsJSONEscapeExpansion(t *testing.T) {
+	// 16 KiB of UTF-8 control bytes would expand to more than 96 KiB
+	// once escaped as JSON; no client should get that entire text fallback.
+	raw := strings.Repeat(string([]byte{0}), 16<<10)
+	next, size := int64(len(raw)), int64(len(raw)*2)
+	summary, structured := fallbackText(t, executor.Response{
+		OK: true, Output: raw, OutputEncoding: "utf-8",
+		BytesReturned: int64(len(raw)), NextOffset: &next, FileSize: &size,
+		FileVersion: "f1-test",
+	})
+	if len(summary) > 1024 || strings.Contains(summary, "\\u0000") {
+		t.Fatalf("expanded raw bytes escaped into text fallback, len=%d", len(summary))
+	}
+	if !strings.Contains(summary, "limit<=4096") || structured.Output != raw {
+		t.Fatal("escaped result lost structured payload or text-only recovery guidance")
+	}
+
+	// Even worst-case JSON escaping of a deliberately small 4 KiB range
+	// stays inside the presentation budget and remains fully recoverable.
+	chunk := strings.Repeat(string([]byte{0}), 4096)
+	text, _ := fallbackText(t, executor.Response{OK: true, Output: chunk, OutputEncoding: "utf-8", BytesReturned: 4096})
+	if len(text) > 32<<10 {
+		t.Fatalf("serialized small range exceeds fallback budget: %d", len(text))
+	}
+	var decoded executor.Response
+	if err := json.Unmarshal([]byte(text), &decoded); err != nil || decoded.Output != chunk {
+		t.Fatalf("small escaped range not fully recoverable: %v", err)
 	}
 }

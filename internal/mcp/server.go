@@ -163,13 +163,18 @@ func textResult(text string, isError bool) *mcpsdk.CallToolResult {
 }
 
 func responseResult(resp executor.Response) (*mcpsdk.CallToolResult, executor.Response, error) {
-	const maxTextFallbackOutputBytes = 32 << 10
-	if len(resp.Output) <= maxTextFallbackOutputBytes {
+	const maxTextFallbackBytes = 32 << 10
+	if len(resp.Output) <= maxTextFallbackBytes {
 		b, err := json.MarshalIndent(resp, "", "  ")
 		if err != nil {
 			return nil, executor.Response{}, err
 		}
-		return textResult(string(b), !resp.OK), resp, nil
+		// Escape sequences can expand short raw text substantially (for
+		// example, NUL becomes \\u0000). Bound the serialized text result,
+		// not just the unencoded output field.
+		if len(b) <= maxTextFallbackBytes {
+			return textResult(string(b), !resp.OK), resp, nil
+		}
 	}
 	// A text-only MCP client may hide structuredContent. Keep this fallback
 	// bounded and free of payload bytes, but retain enough continuation and
@@ -196,7 +201,7 @@ func responseResult(resp executor.Response) (*mcpsdk.CallToolResult, executor.Re
 			summary += fmt.Sprintf(" available_from_offset=%d current_end=%d retention_truncated=%t",
 				resp.AvailableFromOffset, resp.CurrentEnd, resp.RetentionTruncated)
 		}
-		summary += "; output omitted from text fallback: use structuredContent, or re-request the needed range starting at requested_offset with limit<=16384, then continue via next_offset (keep file_version for files)"
+		summary += "; output omitted from text fallback: use structuredContent, or re-request the needed range starting at requested_offset with limit<=4096, then continue via next_offset (keep file_version for files)"
 	} else {
 		summary += "; output omitted from text fallback: use structuredContent; this output is not resumable, request focused output or use start_job for future high-output commands"
 	}
