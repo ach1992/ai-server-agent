@@ -187,6 +187,9 @@ func (s *Server) readTerminalRecord(req Request) (terminalRecord, error) {
 		return rec, errors.New("terminal_runtime_untrusted")
 	}
 	sock := filepath.Join(rec.SocketDir, "socket")
+	if len(sock) > terminalMaxUnixSocketPath {
+		return rec, errors.New("terminal_socket_path_too_long")
+	}
 	info, err = os.Lstat(sock)
 	if err != nil {
 		return rec, errors.New("terminal_backend_missing")

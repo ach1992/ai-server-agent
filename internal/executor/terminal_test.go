@@ -6,6 +6,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -478,5 +479,29 @@ func TestWorkerTmuxCloseKillsAllPrivateServerSessions(t *testing.T) {
 	// orphan "extra" session may be silently retained outside it.
 	if out, err := exec.Command(bin, "-S", socket, "list-sessions").CombinedOutput(); err == nil {
 		t.Fatalf("orphan private session still running: %s", out)
+	}
+}
+
+func TestWorkerTerminalUnixSocketPathFailsBeforeSpawn(t *testing.T) {
+	s, owner, _ := testStdioBroker(t)
+	root := filepath.Join(s.cfg.WorkspaceDir, strings.Repeat("long-namespace-", 8))
+	workspace := filepath.Join(root, "worktree")
+	if err := os.MkdirAll(workspace, 0700); err != nil {
+		t.Fatal(err)
+	}
+	s.cfg.WorkspaceDir = root
+	owner.Workspace = workspace
+	owner.Action = "terminal_open"
+	owner.Columns = 80
+	owner.Rows = 24
+	result := s.terminalAction(owner)
+	if result.OK || result.ErrorCode != "terminal_socket_path_too_long" || result.SessionID != "" {
+		t.Fatalf("unusable long socket path should fail before broker spawn: %+v", result)
+	}
+	s.sessions.mu.Lock()
+	n := len(s.sessions.sessions)
+	s.sessions.mu.Unlock()
+	if n != 0 {
+		t.Fatalf("unstarted long-socket session leaked into broker: %d", n)
 	}
 }

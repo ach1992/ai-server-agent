@@ -18,10 +18,11 @@ import (
 // broker, not a second process supervisor. All tmux commands travel over the
 // same bounded authenticated executor/stdio path used by other consumers.
 const (
-	terminalMaxInput       = 4096
-	terminalMaxOutput      = 32 << 10
-	terminalMaxLine        = 128 << 10
-	terminalCommandTimeout = 3 * time.Second
+	terminalMaxInput          = 4096
+	terminalMaxOutput         = 32 << 10
+	terminalMaxLine           = 128 << 10
+	terminalCommandTimeout    = 3 * time.Second
+	terminalMaxUnixSocketPath = 107 // Linux sockaddr_un.sun_path includes trailing NUL
 )
 
 type terminalChunk struct {
@@ -256,6 +257,10 @@ func (s *Server) terminalOpen(req Request) Response {
 		return terminalError("terminal_runtime_unavailable", err)
 	}
 	socket := filepath.Join(dir, "socket")
+	if len(socket) > terminalMaxUnixSocketPath {
+		_ = os.Remove(dir)
+		return terminalError("terminal_socket_path_too_long", fmt.Errorf("private tmux socket path exceeds Linux %d-byte bound", terminalMaxUnixSocketPath))
+	}
 	epoch, err := terminalEpoch()
 	if err != nil {
 		_ = os.Remove(dir)
