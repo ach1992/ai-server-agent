@@ -204,7 +204,9 @@ Once a supported MCP client is connected, the Agent exposes a compact tool surfa
 | --- | --- |
 | `agent_environment` | read the current self-preservation manifest before host-wide changes |
 | `run_command` | run ordinary Bash as `aiworker` in `/srv/ai-workspace` |
-| `workspace_search` | run bounded read-only structural AST search with `ast-grep`; text search remains `rg`/`git grep`, semantic meaning remains LSP-owned |
+| `workspace_search` | run bounded read-only `text` regex/literal searches with trusted `ripgrep` under worker authority, or `structural` AST searches with `ast-grep`; LSP continues to own semantic meaning |
+| `workspace_read` / `workspace_write` | bounded regular source-file I/O as `aiworker`, not root; explicit workspace, symlink-safe containment, version-aware replacement and must-not-exist creation |
+| `workspace_apply_edits` | preflight up to 12 versioned create/replace/exact-text edits before any mutation; report each committed, failed, unknown or unattempted file without claiming a multi-file transaction |
 | `repository_environment` | inspect repository-owned language/toolchain/environment declarations and current host compatibility without installing or running project tasks |
 | `repository_discover` / `repository_inspect` | discover or prove exact Git repository/worktree identity, HEAD, branch/upstream, dirty/conflict state and linked worktrees without trusting directory names |
 | `worktree_create` / `worktree_remove` | create exact-SHA task worktrees and safely remove only clean linked worktrees after durability/disposable-state checks |
@@ -215,6 +217,12 @@ Once a supported MCP client is connected, the Agent exposes a compact tool surfa
 | `write_file` | write complete host-file content through the privileged root executor; this is root-capable host mutation, and protected Agent state may additionally require approval |
 | `browser_setup` | install the optional private Node.js + Playwright + Chromium runtime and required shared libraries |
 | `browser_run` | run Playwright JavaScript in server-side headless Chromium using a persistent browser profile |
+
+### Structured worker workspace editing
+
+`workspace_read`, `workspace_write`, `workspace_apply_edits`, and `workspace_search` in `text` mode use a separate worker-credential helper. This is **not** a general sandbox for worker shell access: `run_command` and intentional worker tools retain their documented Linux authority. The helper uses descriptor-relative `openat2` access and a per-request Landlock filesystem boundary; it fails closed with `workspace_sandbox_unavailable` when the kernel does not expose Landlock ABI v2 or when a container disables it. This kernel capability is not present in every stock Ubuntu 22.04 or Debian 11 installation; Agent core/platform support does not imply these optional structured worker tools are available on that kernel. Text search also needs a trusted `/usr/bin/rg` binary, but the core installer does not automatically install it.
+
+Ordinary project reads/writes remain limited to a chosen workspace and regular files, and never automatically stage or commit Git changes. Existing privileged `read_file` / `write_file` retain **root-host-file** authority and are not silently rewritten into worker operations. Batch edits require explicit version/must-not-exist preconditions, validate every path and replacement before the first mutation, and report per-file outcomes when later writes race or fail. They do not silently discard unrelated changes or claim filesystem-wide atomicity. LSP WorkspaceEdit and future structural rewrite application must reuse this same edit/precondition layer rather than introduce a second writer.
 
 ### Ordinary commands and root commands
 

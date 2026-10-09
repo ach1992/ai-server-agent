@@ -41,6 +41,7 @@ type Request struct {
 	SearchPaths    []string            `json:"search_paths,omitempty"`
 	Globs          []string            `json:"globs,omitempty"`
 	SearchLimit    int                 `json:"search_limit,omitempty"`
+	Literal        bool                `json:"literal,omitempty"`
 	WorkspaceEdits []WorkspaceFileEdit `json:"workspace_edits,omitempty"`
 }
 

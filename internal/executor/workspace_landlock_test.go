@@ -14,7 +14,7 @@ import (
 func TestWorkerLandlockFailsClosedOutside(t *testing.T) {
 	if os.Getenv("ASA_LANDLOCK_PROBE") == "1" {
 		root, repo, outside := os.Getenv("ASA_LANDLOCK_ROOT"), os.Getenv("ASA_LANDLOCK_REPO"), os.Getenv("ASA_LANDLOCK_OUTSIDE")
-		unlock, err := workerLandlockRestrict(root, repo)
+		unlock, err := workerLandlockRestrict(root, repo, false)
 		if err != nil {
 			fmt.Println("LANDLOCK_UNAVAILABLE")
 			return
@@ -63,7 +63,7 @@ func TestWorkerLandlockFailsClosedOutside(t *testing.T) {
 func TestWorkerLandlockReparentedParent(t *testing.T) {
 	if os.Getenv("ASA_LANDLOCK_REPARENT") == "1" {
 		root, repo := os.Getenv("ASA_LANDLOCK_ROOT"), os.Getenv("ASA_LANDLOCK_REPO")
-		unlock, err := workerLandlockRestrict(root, repo)
+		unlock, err := workerLandlockRestrict(root, repo, false)
 		if err != nil {
 			fmt.Println("UNAVAILABLE")
 			return

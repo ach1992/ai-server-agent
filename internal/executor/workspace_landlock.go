@@ -3,6 +3,7 @@ package executor
 import (
 	"errors"
 	"fmt"
+	"os"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -31,7 +32,7 @@ type landlockPathBeneathAttr struct {
 	ParentFD      int32
 }
 
-func workerLandlockRestrict(workspaceRoot, selectedWorkspace string) (unlock func(), err error) {
+func workerLandlockRestrict(workspaceRoot, selectedWorkspace string, textSearch bool) (unlock func(), err error) {
 	// Landlock scopes the calling thread, not arbitrary goroutines. All
 	// subsequent file operations must run on this same locked OS thread.
 	runtime.LockOSThread()
@@ -104,6 +105,38 @@ func workerLandlockRestrict(workspaceRoot, selectedWorkspace string) (unlock fun
 	_, _, errno = unix.Syscall6(unix.SYS_LANDLOCK_ADD_RULE, ruleset, uintptr(unix.LANDLOCK_RULE_PATH_BENEATH), uintptr(unsafe.Pointer(&rule)), 0, 0, 0)
 	if errno != 0 {
 		return nil, fmt.Errorf("restrict worker filesystem rule: %w", errno)
+	}
+	if textSearch {
+		// Ripgrep uses a system-owned executable and shared libraries. Grant
+		// only system read access for its runtime, never write permission;
+		// all source-file reads remain restricted to the selected workspace.
+		for _, candidate := range []string{"/usr/bin/rg", "/lib", "/lib64", "/usr/lib"} {
+			resolved, evalErr := filepath.EvalSymlinks(candidate)
+			if evalErr != nil {
+				continue
+			}
+			if candidate == "/usr/bin/rg" && !trustedWorkspaceSearchExecutable(resolved) {
+				return nil, errors.New("system ripgrep executable is not trusted")
+			}
+			info, statErr := os.Stat(resolved)
+			if statErr != nil {
+				continue
+			}
+			pathFD, openErr := unix.Open(resolved, unix.O_PATH|unix.O_CLOEXEC, 0)
+			if openErr != nil {
+				return nil, fmt.Errorf("open trusted search runtime: %w", openErr)
+			}
+			allowed := uint64(unix.LANDLOCK_ACCESS_FS_READ_FILE)
+			if info.IsDir() {
+				allowed |= unix.LANDLOCK_ACCESS_FS_READ_DIR
+			}
+			rule := landlockPathBeneathAttr{AllowedAccess: allowed, ParentFD: int32(pathFD)}
+			_, _, ruleErr := unix.Syscall6(unix.SYS_LANDLOCK_ADD_RULE, ruleset, uintptr(unix.LANDLOCK_RULE_PATH_BENEATH), uintptr(unsafe.Pointer(&rule)), 0, 0, 0)
+			unix.Close(pathFD)
+			if ruleErr != 0 {
+				return nil, fmt.Errorf("limit trusted search runtime: %w", ruleErr)
+			}
+		}
 	}
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return nil, fmt.Errorf("prevent privilege escalation in worker helper: %w", err)

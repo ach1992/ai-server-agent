@@ -34,22 +34,33 @@ type workspaceFileOperation struct {
 	FileVersion   string              `json:"file_version,omitempty"`
 	MustNotExist  bool                `json:"must_not_exist,omitempty"`
 	Edits         []WorkspaceFileEdit `json:"edits,omitempty"`
+	Pattern       string              `json:"pattern,omitempty"`
+	SearchLimit   int                 `json:"search_limit,omitempty"`
+	SearchPaths   []string            `json:"search_paths,omitempty"`
+	Globs         []string            `json:"globs,omitempty"`
+	Literal       bool                `json:"literal,omitempty"`
+	TimeoutMS     int64               `json:"timeout_ms,omitempty"`
 }
 
 const workerWorkspaceTimeout = 30 * time.Second
 
 func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp Response) {
 	write := req.Action == "workspace_write" || req.Action == "workspace_apply_edits"
-	if req.Action != "workspace_read" && req.Action != "workspace_write" && req.Action != "workspace_apply_edits" {
+	if req.Action != "workspace_read" && req.Action != "workspace_write" && req.Action != "workspace_apply_edits" && req.Action != "workspace_text_search" {
 		return fileError("invalid_action", "validation", errors.New("unsupported worker workspace action"))
 	}
-	if strings.TrimSpace(req.Workspace) == "" || strings.TrimSpace(req.Path) == "" {
+	if strings.TrimSpace(req.Workspace) == "" || (req.Action != "workspace_text_search" && req.Action != "workspace_apply_edits" && strings.TrimSpace(req.Path) == "") {
 		return fileError("invalid_workspace", "validation", errors.New("workspace and relative file path are required"))
 	}
 	if req.Root || req.Approval || req.Mode != 0 {
 		return fileError("invalid_request", "validation", errors.New("workspace files always use worker authority without privilege/mode override"))
 	}
-	if req.Action == "workspace_apply_edits" {
+	if req.Action == "workspace_text_search" {
+		probe := workspaceFileOperation{Action: req.Action, Pattern: req.Pattern, SearchLimit: req.SearchLimit, SearchPaths: req.SearchPaths, Globs: req.Globs, Literal: req.Literal, TimeoutMS: req.TimeoutMS}
+		if err := validateWorkerTextSearch(probe); err != nil {
+			return fileError("invalid_text_search", "validation", err)
+		}
+	} else if req.Action == "workspace_apply_edits" {
 		if len(req.WorkspaceEdits) == 0 || len(req.WorkspaceEdits) > maxWorkspaceBatchFiles {
 			return fileError("invalid_edit_count", "validation", errors.New("invalid multi-file edit count"))
 		}
@@ -66,7 +77,7 @@ func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp 
 	} else if req.Offset < 0 || req.Limit < 0 || req.Limit > maxFileReadBytes {
 		return fileError("invalid_range", "validation", errors.New("invalid bounded read offset or limit"))
 	}
-	if req.Action != "workspace_apply_edits" {
+	if req.Action != "workspace_apply_edits" && req.Action != "workspace_text_search" {
 		if _, err := safeWorkspaceRelativeFile(req.Path); err != nil {
 			return fileError("invalid_path", "validation", err)
 		}
@@ -92,7 +103,7 @@ func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp 
 		Workspace: req.Workspace, Path: req.Path,
 		Offset: req.Offset, Limit: req.Limit, Content: req.Content,
 		FileVersion: req.FileVersion, MustNotExist: req.MustNotExist,
-		Edits: req.WorkspaceEdits,
+		Edits: req.WorkspaceEdits, Pattern: req.Pattern, SearchLimit: req.SearchLimit, SearchPaths: req.SearchPaths, Globs: req.Globs, Literal: req.Literal, TimeoutMS: req.TimeoutMS,
 	}
 	payload, err := json.Marshal(op)
 	if err != nil {
@@ -105,12 +116,29 @@ func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp 
 	if s.workspaceHelperBinary != "" {
 		exe = s.workspaceHelperBinary
 	}
-	ctx, cancel := context.WithTimeout(parent, workerWorkspaceTimeout)
+	helperTimeout := workerWorkspaceTimeout
+	if req.Action == "workspace_text_search" {
+		helperTimeout = defaultWorkspaceSearchTimeout + 5*time.Second
+		if req.TimeoutMS > 0 {
+			helperTimeout = time.Duration(req.TimeoutMS)*time.Millisecond + 5*time.Second
+		}
+	}
+	ctx, cancel := context.WithTimeout(parent, helperTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, exe, "workspace-helper")
 	cmd.Stdin = bytes.NewReader(payload)
 	cmd.Env = sanitizedCommandEnv(s.cfg.WorkspaceDir)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// The helper may run ripgrep. Cancel the entire worker process group,
+	// not just its leader, on disconnect/timeout to avoid orphaned search.
+	cmd.Cancel = func() error {
+		if cmd.Process == nil {
+			return os.ErrProcessDone
+		}
+		_, err := terminateProcessGroup(cmd.Process.Pid)
+		return err
+	}
+	cmd.WaitDelay = processGroupTerminateGrace
 	if os.Geteuid() == 0 {
 		cmd.SysProcAttr.Credential = &syscall.Credential{Uid: s.workerUID, Gid: s.workerGID, Groups: []uint32{s.workerGID}}
 	} else if uint32(os.Geteuid()) != s.workerUID {
@@ -130,7 +158,7 @@ func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp 
 		// Read-only audit is diagnostic, never an authorization gate.
 		// The pathname is fingerprinted; source content is not recorded.
 		_ = s.audit.Write(audit.Entry{
-			Phase: "complete", Action: "workspace_read", Mode: "worker",
+			Phase: "complete", Action: req.Action, Mode: "worker",
 			Command: req.Workspace + "\x00" + req.Path, Success: audit.Bool(true),
 			RequestID: req.RequestID, PrincipalID: req.PrincipalID,
 			PrincipalClass: req.PrincipalClass, PrincipalName: req.PrincipalName,
@@ -169,7 +197,7 @@ func RunWorkspaceFileHelper() int {
 	}
 	// No workspace path is opened before the kernel sandbox is in place.
 	// Fail closed if this host cannot enforce the per-request boundary.
-	unlock, sandboxErr := workerLandlockRestrict(op.WorkspaceRoot, op.Workspace)
+	unlock, sandboxErr := workerLandlockRestrict(op.WorkspaceRoot, op.Workspace, op.Action == "workspace_text_search")
 	if sandboxErr != nil {
 		_ = json.NewEncoder(os.Stdout).Encode(fileError("workspace_sandbox_unavailable", "security", sandboxErr))
 		return 0
@@ -182,6 +210,8 @@ func RunWorkspaceFileHelper() int {
 		resp = writeWorkerWorkspaceFile(op)
 	} else if op.Action == "workspace_apply_edits" {
 		resp = applyWorkerWorkspaceEdits(op)
+	} else if op.Action == "workspace_text_search" {
+		resp = workerTextSearch(op)
 	} else {
 		return 2
 	}
