@@ -28,6 +28,10 @@ expect_denied(){
 }
 
 assert_owner_mode /etc/ai-server-agent root aiagent 750
+assert_owner_mode /etc/ai-server-agent/config.json root aiagent 640
+instance_id="$(jq -er '.instance_id' /etc/ai-server-agent/config.json)"
+[[ "$instance_id" =~ ^asa_[0-9a-f]{32}$ ]] || { echo 'instance_id is invalid' >&2; exit 1; }
+test "$(jq -er '.instance_id' "$STATE_DIR/AI_ENVIRONMENT.json")" = "$instance_id"
 assert_owner_mode "$CONTROL_DIR" root root 700
 assert_owner_mode "$INSTALL_STATE" root root 600
 assert_owner_mode "$STATE_DIR" root root 711
@@ -58,6 +62,7 @@ state_hash="$(sha256sum "$INSTALL_STATE" | awk '{print $1}')"
 for user in aiagent aiworker; do
   expect_denied "$user" cat "$AUDIT_FINGERPRINT_KEY"
   expect_denied "$user" sh -c "printf attacker > '$AUDIT_FINGERPRINT_KEY'"
+  expect_denied "$user" sh -c "printf attacker > /etc/ai-server-agent/config.json"
   expect_denied "$user" rm -f "$INSTALL_STATE"
   expect_denied "$user" mv "$INSTALL_STATE" "$CONTROL_DIR/install-state.replaced"
   expect_denied "$user" ln -sfn /tmp/attacker "$INSTALL_STATE"

@@ -262,6 +262,7 @@ The manifest identifies, among other things:
 - the configured MCP listen endpoint/port;
 - required host primitives such as Bash, systemd and `systemd-run`;
 - read-only capacity for the filesystem backing the configured workspace, including an advisory warning when available space is below 2 GiB or 10%; filesystem telemetry never performs cleanup and a telemetry read failure does not make `agent_environment` fail.
+- a non-secret random `instance_id` (`asa_` plus 128 random bits) in the root-managed Agent config, included in authenticated `agent_environment` and `/agent-environment.json`. Normal update, repair, reinstall, credential rotation, hostname/IP changes and state-preserving VM copies retain the same ID; explicit purge and fresh installation generate a new one. A copied VM cannot register as a distinct Gateway Target until its Agent undergoes explicit fresh-state initialization; duplicate binding checks belong to #47.
 
 The executor separately protects Agent names/paths/socket/listen address and known connection-risk/destructive command patterns. The intent is that ChatGPT both **knows what must survive** and is **server-side gated** when a command directly threatens those resources.
 

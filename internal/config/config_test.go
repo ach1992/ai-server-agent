@@ -3,6 +3,7 @@ package config
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 )
 
@@ -87,5 +88,44 @@ func TestLoadNamedCredentialStoreDoesNotRetainLegacyDefault(t *testing.T) {
 	}
 	if cfg.BearerTokenFile != "" || cfg.CredentialStoreFile == "" {
 		t.Fatalf("unexpected credential sources: bearer=%q store=%q", cfg.BearerTokenFile, cfg.CredentialStoreFile)
+	}
+}
+
+func TestInstanceIDFormatAndCopyRoundTrip(t *testing.T) {
+	good := "asa_" + strings.Repeat("a", 32)
+	for _, id := range []string{"asa_", "asa_" + strings.Repeat("G", 32), "asa_" + strings.Repeat("0", 31), "not-asa_" + strings.Repeat("a", 32)} {
+		cfg := Default()
+		cfg.InstanceID = id
+		if err := cfg.Validate(); err == nil {
+			t.Fatalf("accepted malformed instance_id %q", id)
+		}
+	}
+	cfg := Default()
+	cfg.InstanceID = good
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if loaded.InstanceID != good {
+		t.Fatalf("instance_id changed on load: %q", loaded.InstanceID)
+	}
+	clonePath := filepath.Join(t.TempDir(), "cloned.json")
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(clonePath, data, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cloned, err := Load(clonePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cloned.InstanceID != good {
+		t.Fatalf("state-preserving clone changed identity: %q", cloned.InstanceID)
 	}
 }

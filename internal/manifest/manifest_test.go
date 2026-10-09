@@ -63,7 +63,11 @@ func TestWorkspaceFilesystemInfoFailureIsAdvisory(t *testing.T) {
 func TestBuildReportsWorkspaceFilesystemAndWorkspaceHygiene(t *testing.T) {
 	cfg := config.Default()
 	cfg.WorkspaceDir = t.TempDir()
+	cfg.InstanceID = "asa_0123456789abcdef0123456789abcdef"
 	m := Build(cfg)
+	if m.InstanceID != cfg.InstanceID {
+		t.Fatalf("manifest instance_id = %q, want %q", m.InstanceID, cfg.InstanceID)
+	}
 	if m.WorkspaceFilesystem.Path != cfg.WorkspaceDir {
 		t.Fatalf("workspace filesystem path = %q, want %q", m.WorkspaceFilesystem.Path, cfg.WorkspaceDir)
 	}
