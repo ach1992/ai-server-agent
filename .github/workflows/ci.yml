@@ -668,7 +668,7 @@ jobs:
             exit 1
           fi
           wait "$lock_holder"
-          rm -f "$lock_ready"
+          sudo rm -f "$lock_ready"
           sudo env AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1 bash -c '
             source /usr/local/lib/ai-server-agent/manage.sh
             acquire_management_lock
