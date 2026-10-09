@@ -15,11 +15,13 @@ import (
 	"github.com/ach1992/ai-server-agent/internal/audit"
 )
 
-func TestRealGoDelveDebugLoopWorker(t *testing.T) { runRealGoDelveDebugLoopWorker(t, false) }
+func TestRealGoDelveDebugLoopWorker(t *testing.T) { runRealGoDelveDebugLoopWorker(t, "manual") }
 
-func TestRealGoDelveTTLStopsDebuggee(t *testing.T) { runRealGoDelveDebugLoopWorker(t, true) }
+func TestRealGoDelveTTLStopsDebuggee(t *testing.T) { runRealGoDelveDebugLoopWorker(t, "expiry") }
 
-func runRealGoDelveDebugLoopWorker(t *testing.T, expire bool) {
+func TestRealGoDelveCrashKillsDebuggee(t *testing.T) { runRealGoDelveDebugLoopWorker(t, "crash") }
+
+func runRealGoDelveDebugLoopWorker(t *testing.T, shutdown string) {
 	dlv := os.Getenv("AGENT_DLV_PROOF_BIN")
 	if dlv == "" {
 		t.Skip("Delve reference fixture not provided")
@@ -220,17 +222,53 @@ func main(){
 		t.Fatalf("source changed during debugger session was not detected: %+v", x)
 	}
 	owner.Action = "debug_stop"
-	if expire {
+	switch shutdown {
+	case "expiry":
 		e, err := s.sessions.get(owner, opened.SessionID)
 		if err != nil {
 			t.Fatal(err)
 		}
 		s.expireProcessSession(e)
-	} else {
+	case "crash":
+		e, err := s.sessions.get(owner, opened.SessionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		e.mu.Lock()
+		adapterPID, pin := e.pid, e.pidPin
+		e.mu.Unlock()
+		if pin == nil || adapterPID <= 0 {
+			t.Fatal("adapter process identity not pinned")
+		}
+		if err := syscall.Kill(debuggeePID, 0); err != nil {
+			t.Fatalf("debuggee not live at crash proof start: %v", err)
+		}
+		// Simulate an abrupt Delve crash, with no DAP disconnect handshake.
+		// Only this newly created, pidfd-pinned disposable adapter is killed.
+		if err := syscall.Kill(adapterPID, syscall.SIGKILL); err != nil {
+			t.Fatal(err)
+		}
+		select {
+		case <-e.done:
+		case <-time.After(5 * time.Second):
+			t.Fatal("broker did not reconcile adapter SIGKILL")
+		}
+		e.mu.Lock()
+		cleanupErr := e.cleanupErr
+		e.mu.Unlock()
+		if cleanupErr != nil {
+			t.Fatalf("crashed Delve left cleanup unverified: %v", cleanupErr)
+		}
+		if err := s.workerStdioClose(owner, opened.SessionID); err != nil {
+			t.Fatalf("crash session cleanup: %v", err)
+		}
+	case "manual":
 		stop := s.debugAction(ctx, owner)
 		if !stop.OK {
 			t.Fatalf("debug terminate and cleanup: %+v", stop)
 		}
+	default:
+		t.Fatalf("unexpected test shutdown mode %q", shutdown)
 	}
 	if _, err := os.Lstat(privateSocketDir); !os.IsNotExist(err) {
 		t.Fatalf("DAP socket directory remained after verified cleanup: %v", err)
@@ -261,7 +299,11 @@ func main(){
 	if strings.Contains(string(data), "1+2") || strings.Contains(string(data), "ANSWER") {
 		t.Fatal("DAP expression or debuggee values leaked into audit")
 	}
-	for _, action := range []string{"debug_launch", "debug_action", "debug_status", "debug_stop"} {
+	expectedActions := []string{"debug_launch", "debug_action", "debug_status"}
+	if shutdown != "crash" {
+		expectedActions = append(expectedActions, "debug_stop")
+	}
+	for _, action := range expectedActions {
 		if strings.Count(string(data), `"action":"`+action+`"`) < 2 {
 			t.Fatalf("DAP audit missing start/completion for %s", action)
 		}

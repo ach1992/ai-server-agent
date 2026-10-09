@@ -118,3 +118,18 @@ func TestDAPDisconnectedFailsClosed(t *testing.T) {
 		t.Fatalf("disconnected DAP request: %v", err)
 	}
 }
+
+// The debugger-reported systemProcessId is not itself a capability to send
+// signals. Reject even a valid same-UID process unless it is the *actual*
+// verified child and executable for the current pinned Delve session.
+func TestDAPRejectsForgedDebuggeeIdentity(t *testing.T) {
+	d := &dapState{adapterPID: os.Getpid(), workerUID: uint32(os.Geteuid()), workspace: t.TempDir(), program: "demo"}
+	body, _ := json.Marshal(map[string]any{"isLocalProcess": true, "systemProcessId": os.Getpid()})
+	d.acceptEvent(dapPacket{Type: "event", Event: "process", Body: body})
+	if d.pinError == "" || d.debuggeePin != nil || d.debuggeePID != 0 {
+		t.Fatalf("unverified debugger-reported PID became a signal target: pid=%d err=%q", d.debuggeePID, d.pinError)
+	}
+	if err := d.stopPinnedDebuggee(); err == nil {
+		t.Fatal("failed PID provenance silently considered clean cleanup")
+	}
+}

@@ -297,6 +297,17 @@ func (e *stdioSession) wait() {
 	} else {
 		_, cleanupErr = terminateProcessGroup(pid)
 	}
+	// Delve's debuggee is NOT in the adapter's process group. Its separate,
+	// verified pidfd-pinned process group must be stopped after any adapter
+	// exit, including SIGKILL/crash, not only after explicit DAP disconnect.
+	e.mu.Lock()
+	d := e.dap
+	e.mu.Unlock()
+	if d != nil {
+		d.mu.Lock()
+		cleanupErr = errors.Join(cleanupErr, d.stopPinnedDebuggee())
+		d.mu.Unlock()
+	}
 	e.mu.Lock()
 	e.exited = true
 	e.completed = time.Now()
@@ -451,7 +462,18 @@ func (b *stdioSessionBroker) removeAndStop(entry *stdioSession) error {
 			return fmt.Errorf("session_stop_outcome_unknown: %w", err)
 		}
 		if exited {
-			// A previously failed cleanup has now been reconciled.
+			// Retry the pinned debuggee cleanup as part of reconciliation;
+			// a prior failure is never turned into clean termination merely
+			// because the Delve adapter's group has disappeared.
+			if entry.dap != nil {
+				entry.dap.mu.Lock()
+				targetErr := entry.dap.stopPinnedDebuggee()
+				entry.dap.mu.Unlock()
+				if targetErr != nil {
+					entry.stopMu.Unlock()
+					return fmt.Errorf("session_stop_outcome_unknown: %w", targetErr)
+				}
+			}
 			entry.mu.Lock()
 			entry.cleanupErr = nil
 			_ = entry.pidPin.Close()

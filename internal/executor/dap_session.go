@@ -239,7 +239,7 @@ func (s *Server) debugLaunch(ctx context.Context, req Request) (response Respons
 		_ = conn.Close()
 	}
 	_ = listener.Close()
-	d := &dapState{conn: stream, workspace: workspace, adapter: "go/delve", program: relative, sourceVersion: req.FileVersion, stage: "starting", socketDir: dir}
+	d := &dapState{conn: stream, workspace: workspace, adapter: "go/delve", adapterPID: pid, workerUID: s.workerUID, program: relative, sourceVersion: req.FileVersion, stage: "starting", socketDir: dir}
 	e.mu.Lock()
 	e.dap = d
 	e.mu.Unlock()
@@ -252,6 +252,22 @@ func (s *Server) debugLaunch(ctx context.Context, req Request) (response Respons
 	_, err = d.call(initCtx, "launch", map[string]any{"mode": "exec", "program": filename, "stopOnEntry": req.DebugStopOnEntry, "outputMode": "remote"})
 	if err != nil {
 		return fileError("debug_launch_failed", "runtime", err)
+	}
+	// Delve executes the debuggee in a different process group. Do not give
+	// callers a working debugger session until the child's own process
+	// identity has been pinned. Otherwise a Delve crash could orphan it.
+	pinCtx, pinCancel := context.WithTimeout(ctx, 2*time.Second)
+	defer pinCancel()
+	for {
+		if pinErr := d.pinnedDebuggeeError(); pinErr == nil {
+			break
+		} else if pinErr.Error() != "dap_debuggee_identity_not_observed" {
+			return fileError("debug_debuggee_identity_invalid", "state", pinErr)
+		}
+		if err := pinCtx.Err(); err != nil {
+			return fileError("debug_debuggee_identity_unavailable", "state", err)
+		}
+		d.drain(pinCtx)
 	}
 	latest := s.workerWorkspaceFile(ctx, statReq)
 	if !latest.OK || latest.FileVersion != req.FileVersion {

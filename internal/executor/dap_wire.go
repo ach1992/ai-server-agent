@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net"
+	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -32,6 +33,11 @@ type dapState struct {
 	workspace      string
 	adapter        string
 	program        string
+	adapterPID     int
+	workerUID      uint32
+	debuggeePID    int
+	debuggeePin    *os.File
+	pinError       string
 	sourceVersion  string
 	sourceVersions map[string]string // workspace-relative breakpoint source identities
 	seq            int
@@ -110,6 +116,12 @@ type dapPacket struct {
 }
 
 func (d *dapState) acceptEvent(packet dapPacket) {
+	if packet.Event == "process" {
+		if err := d.pinDebuggeeProcess(packet.Body); err != nil {
+			d.pinError = err.Error()
+			d.stage = "failed"
+		}
+	}
 	if packet.Event == "stopped" {
 		d.stage = "stopped"
 	}
