@@ -39,19 +39,22 @@ main_tree="$(git rev-parse "$sha^{tree}" 2>/dev/null)" || refuse 'unreadable mai
 # source branches are later deleted. Refuse ambiguous or cross-repository PRs.
 prs="$(gh api "repos/$repo/commits/$sha/pulls" 2>/dev/null)" || refuse 'merged PR lookup failed'
 pr="$(jq -er --arg repo "$repo" --arg sha "$sha" --arg base "$before" '
-  [.[] | select(.merged_at != null and .state == "closed"
-     and .merge_commit_sha == $sha and .base.ref == "main" and .base.sha == $base
-     and .head.repo.full_name == $repo and (.head.sha|type) == "string"
-     and (.head.ref|type) == "string")]
+  select(type == "array")
+  | [.[] | select(.merge_commit_sha == $sha)]
   | select(length == 1) | .[0]
-' <<< "$prs" 2>/dev/null)" || refuse 'no unambiguous merged PR for this main parent'
-pr_number="$(jq -er '.number | select(type == "number" and . > 0)' <<< "$pr" 2>/dev/null)" || refuse 'missing exact merged PR number'
+  | select(.merged_at != null and .state == "closed"
+       and .base.ref == "main" and .base.sha == $base
+       and .head.repo.full_name == $repo
+       and (.head.sha | type) == "string"
+       and (.head.ref | type) == "string")
+' <<< "$prs" 2>/dev/null)" || refuse 'no uniquely linked merged PR matching the main parent'
+pr_number="$(jq -er '.number | select(type == "number" and . > 0 and . == floor)' <<< "$pr" 2>/dev/null)" || refuse 'missing exact merged PR number'
 head="$(jq -r '.head.sha' <<< "$pr")"
 branch="$(jq -r '.head.ref' <<< "$pr")"
 merged_at="$(jq -r '.merged_at' <<< "$pr")"
 [[ "$head" =~ ^[0-9a-f]{40}$ ]] || refuse 'invalid PR head'
 [ -n "$branch" ] && [ "$branch" != null ] || refuse 'invalid PR branch'
-[[ "$merged_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T ]] || refuse 'missing merge time'
+[[ "$merged_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || refuse 'missing or invalid merge time'
 
 head_tree="$(gh api "repos/$repo/git/commits/$head" --jq '.tree.sha' 2>/dev/null)" || refuse 'PR head tree lookup failed'
 [ "$head_tree" = "$main_tree" ] || refuse 'main tree differs from validated PR head'
@@ -65,48 +68,97 @@ jq -e --arg base "$before" '
   and (.status == "ahead" or .status == "identical")
 ' <<< "$compare" >/dev/null 2>&1 || refuse 'PR head not verified against merged main parent'
 
-# Bind BOTH workflow runs to the exact *numbered* merged PR, never just the
-# reusable branch/SHA shared across different pull requests. GitHub's API can
-# clear run.pull_requests AFTER merge, so new PR runs also persist immutable
-# GitHub-generated event identity in display_title using a workflow run-name
-# expression. Accept that fallback ONLY for an explicitly empty association;
-# missing/malformed or contradictory nonempty metadata always fails closed.
-# A pre-optimization run without durable identity cannot be reused after
-# GitHub clears its PR array: ordinary full main checks then run safely.
+# The trust decision has three states, not a Boolean filter:
+#   exact      -- a run provably belongs to the uniquely merged PR;
+#   foreign    -- a different, positively identified PR using this SHA/ref;
+#   unresolved -- missing, malformed, ambiguous or contradictory evidence.
+#
+# IMPORTANT: classify ALL otherwise-relevant pre-merge runs BEFORE choosing
+# the latest exact-PR attempt. Never drop an unresolved newer run: otherwise
+# an older green would incorrectly masquerade as latest valid evidence.
+# GitHub clears pull_requests metadata on some merged PR runs. In that one
+# known case (an explicitly empty array), the canonical GitHub-event run-name
+# provides the persisted PR/base/head identity; an absent array does not.
 for workflow in ci.yml security.yml; do
   if [ "$workflow" = ci.yml ]; then kind=CI; else kind=Security; fi
   expected_title="$kind pull_request PR:$pr_number REF:main BASE:$before HEAD:$head"
   runs="$(gh api "repos/$repo/actions/workflows/$workflow/runs?head_sha=$head&event=pull_request&per_page=100" 2>/dev/null)" || refuse "$workflow PR run lookup failed"
   jq -e --arg repo "$repo" --arg head "$head" --arg branch "$branch" --arg base "$before" \
-    --argjson number "$pr_number" --arg title "$expected_title" --arg merged "$merged_at" --arg path ".github/workflows/$workflow" '
+    --argjson number "$pr_number" --arg title "$expected_title" --arg kind "$kind" \
+    --arg merged "$merged_at" --arg path ".github/workflows/$workflow" '
+      def is_sha: type == "string" and test("^[0-9a-f]{40}$");
+      def timestamp_ok:
+        type == "string" and test("^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$");
+      def canonical_prefix: $kind + " pull_request PR:";
+      def valid_attempt:
+        (.run_attempt | type) == "number"
+        and .run_attempt > 0
+        and .run_attempt == (.run_attempt | floor);
+      # The workflow/head/event query itself must not yield partially
+      # identified records; those cannot be safely excluded as unrelated.
+      def api_record_complete:
+        .event == "pull_request" and .head_sha == $head
+        and .head_repository.full_name == $repo and .repository.full_name == $repo
+        and .path == $path and (.head_branch | type) == "string";
+      def coarse_run: .head_branch == $branch;
+      def classify:
+        if (.pull_requests | type) != "array" then "unresolved"
+        elif (.pull_requests | length) == 0 then
+          if .display_title == $title then "exact" else "unresolved" end
+        elif (.pull_requests | length) == 1 then
+          .pull_requests[0] as $link
+          | if ($link.number | type) != "number"
+             or $link.number <= 0 or $link.number != ($link.number | floor)
+             or $link.head.sha != $head or $link.head.ref != $branch
+             or ($link.base.sha | is_sha | not)
+             or ($link.base.ref | type) != "string"
+             or ($link.base.ref | length) == 0
+            then "unresolved"
+            else
+              # Any visible canonical title contradicting structured linkage
+              # is unresolved. Legacy noncanonical PR titles are permitted
+              # only when structured metadata proves the PR identity.
+              ($kind + " pull_request PR:" + ($link.number | tostring)
+                + " REF:" + $link.base.ref
+                + " BASE:" + $link.base.sha
+                + " HEAD:" + $link.head.sha) as $linked_title
+              | if (.display_title | type) == "string"
+                   and (.display_title | startswith(canonical_prefix))
+                   and .display_title != $linked_title
+                then "unresolved"
+                elif $link.number == $number then
+                  if $link.base.ref == "main" and $link.base.sha == $base
+                  then "exact" else "unresolved" end
+                else "foreign" end
+            end
+        else "unresolved" end;
       (.total_count | type) == "number"
+      and (.total_count | floor) == .total_count
+      and (.total_count >= 0)
       and (.workflow_runs | type) == "array"
-      and (.total_count <= (.workflow_runs | length))
+      and (.total_count == (.workflow_runs | length))
+      and all(.workflow_runs[]; api_record_complete)
       and (
-        [.workflow_runs[]
-         | select(
-            .event == "pull_request" and .head_sha == $head and .head_branch == $branch
-            and .head_repository.full_name == $repo and .repository.full_name == $repo
-            and .path == $path and (.created_at | type) == "string"
-            and .created_at <= $merged
-            and (
-              if (.pull_requests | type) != "array" then false
-              elif (.pull_requests | length) == 1 then
-                .pull_requests[0].number == $number
-                and .pull_requests[0].head.sha == $head
-                and .pull_requests[0].head.ref == $branch
-                and .pull_requests[0].base.ref == "main"
-                and .pull_requests[0].base.sha == $base
-              elif (.pull_requests | length) == 0 then
-                .display_title == $title
-              else false end
-            )
-          )]
-        | sort_by(.created_at, .run_attempt) | last
-        | (.updated_at | type) == "string" and .updated_at <= $merged
-          and .status == "completed" and .conclusion == "success"
+        (.workflow_runs | map(select(coarse_run))) as $same
+        | all($same[]; (.created_at | timestamp_ok) and valid_attempt)
+          and (
+            ($same | map(select(.created_at <= $merged) | . + {pr_identity: classify})) as $prior
+            | ([$prior[] | select(.pr_identity == "unresolved")] | length) == 0
+              and (
+                ([$prior[] | select(.pr_identity == "exact")]
+                | sort_by(.created_at, .run_attempt)) as $exact
+                | ($exact | length) > 0
+                  and ($exact[-1] as $latest
+                    | ([$exact[] | select(.created_at == $latest.created_at
+                           and .run_attempt == $latest.run_attempt)] | length) == 1
+                      and ($latest.updated_at | timestamp_ok)
+                      and $latest.updated_at <= $merged
+                      and $latest.status == "completed"
+                      and $latest.conclusion == "success")
+              )
+          )
       )
-  ' <<< "$runs" >/dev/null 2>&1 || refuse "$workflow lacks successful PR-number/base/head-bound pre-merge evidence"
+  ' <<< "$runs" >/dev/null 2>&1 || refuse "$workflow has unresolved or unsuccessful exact-PR workflow evidence"
 done
 
 printf 'reuse_validated_pr=true\n'

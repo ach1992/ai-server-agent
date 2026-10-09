@@ -45,6 +45,8 @@ case "$path" in
       '[{number:91,state:"closed",merged_at:"2026-10-09T05:33:15Z",merge_commit_sha:$main,
           base:{ref:"main",sha:$base},head:{sha:$head,ref:"candidate",repo:{full_name:$repo}}}]' |
       if [ "${MOCK_CASE:-}" = ambiguous_pr ]; then jq '. + .'
+      elif [ "${MOCK_CASE:-}" = second_same_merge_wrong_base ]; then
+        jq '. + [ (.[0] | .number=92 | .base.sha="0000000000000000000000000000000000000000") ]'
       elif [ "${MOCK_CASE:-}" = missing_pr_number ]; then jq '.[0] |= del(.number)'
       else cat;fi
     ;;
@@ -116,6 +118,67 @@ case "$path" in
           jq '.workflow_runs[0].pull_requests=[] | .workflow_runs[0].display_title |= sub("BASE:[0-9a-f]+";"BASE:other")';;
         wrong_ref_ci_cleared|wrong_ref_security_cleared)
           jq '.workflow_runs[0].pull_requests=[] | .workflow_runs[0].display_title |= sub("REF:main";"REF:develop")';;
+        # All these cases begin with a real completed/successful merged-PR
+        # run. A newer same-head run has unresolved evidence. The older green
+        # MUST NOT win merely because the uncertainty got filtered out.
+        newer_ci_missing_link|newer_security_missing_link)
+          jq '.workflow_runs += [(.workflow_runs[0] | del(.pull_requests,.display_title)
+            | .created_at="2026-10-09T05:23:00Z" | .updated_at="2026-10-09T05:26:00Z")]
+            | .total_count=2';;
+        newer_ci_malformed_link|newer_security_malformed_link)
+          jq '.workflow_runs += [(.workflow_runs[0] | .pull_requests="not-an-array"
+            | .created_at="2026-10-09T05:23:00Z" | .updated_at="2026-10-09T05:26:00Z")]
+            | .total_count=2';;
+        newer_ci_ambiguous_link|newer_security_ambiguous_link)
+          jq '.workflow_runs += [(.workflow_runs[0] | .pull_requests += [(.pull_requests[0]|.number=92)]
+            | .created_at="2026-10-09T05:23:00Z" | .updated_at="2026-10-09T05:26:00Z")]
+            | .total_count=2';;
+        newer_ci_noncanonical_title|newer_security_noncanonical_title)
+          jq '.workflow_runs += [(.workflow_runs[0] | .pull_requests=[] | .display_title="untrusted free-form title"
+            | .created_at="2026-10-09T05:23:00Z" | .updated_at="2026-10-09T05:26:00Z")]
+            | .total_count=2';;
+        newer_ci_contradictory_title|newer_security_contradictory_title)
+          jq '.workflow_runs += [(.workflow_runs[0] | .pull_requests[0].number=92
+            | .created_at="2026-10-09T05:23:00Z" | .updated_at="2026-10-09T05:26:00Z")]
+            | .total_count=2';;
+        newer_ci_mismatched_base|newer_security_mismatched_base)
+          jq '.workflow_runs += [(.workflow_runs[0] | .pull_requests[0].base.sha="0000000000000000000000000000000000000000"
+            | .created_at="2026-10-09T05:23:00Z" | .updated_at="2026-10-09T05:26:00Z")]
+            | .total_count=2';;
+        newer_ci_missing_creation|newer_security_missing_creation)
+          jq '.workflow_runs += [(.workflow_runs[0] | del(.created_at)
+            | .updated_at="2026-10-09T05:26:00Z")] | .total_count=2';;
+        newer_ci_bad_attempt|newer_security_bad_attempt)
+          jq '.workflow_runs += [(.workflow_runs[0] | .run_attempt="bad"
+            | .created_at="2026-10-09T05:23:00Z" | .updated_at="2026-10-09T05:26:00Z")]
+            | .total_count=2';;
+        newer_ci_exact_failed_attempt|newer_security_exact_failed_attempt)
+          jq '.workflow_runs += [(.workflow_runs[0] | .run_attempt=2 | .conclusion="failure"
+            | .created_at="2026-10-09T05:16:57Z" | .updated_at="2026-10-09T05:26:00Z")]
+            | .total_count=2';;
+        newer_ci_missing_branch|newer_security_missing_branch)
+          jq '.workflow_runs += [(.workflow_runs[0] | del(.head_branch)
+            | .created_at="2026-10-09T05:23:00Z" | .updated_at="2026-10-09T05:26:00Z")]
+            | .total_count=2';;
+        newer_ci_missing_repo|newer_security_missing_repo)
+          jq '.workflow_runs += [(.workflow_runs[0] | del(.head_repository)
+            | .created_at="2026-10-09T05:23:00Z" | .updated_at="2026-10-09T05:26:00Z")]
+            | .total_count=2';;
+        newer_ci_missing_path|newer_security_missing_path)
+          jq '.workflow_runs += [(.workflow_runs[0] | del(.path)
+            | .created_at="2026-10-09T05:23:00Z" | .updated_at="2026-10-09T05:26:00Z")]
+            | .total_count=2';;
+        newer_ci_same_timestamp_tie|newer_security_same_timestamp_tie)
+          jq '.workflow_runs = [(.workflow_runs[0]|.conclusion="failure"), .workflow_runs[0]]
+            | .total_count=2';;
+        newer_ci_other_branch|newer_security_other_branch)
+          jq '.workflow_runs += [(.workflow_runs[0] | .head_branch="different-source-branch"
+            | .created_at="2026-10-09T05:23:00Z" | .updated_at="2026-10-09T05:26:00Z")]
+            | .total_count=2';;
+        newer_ci_postmerge|newer_security_postmerge)
+          jq '.workflow_runs += [(.workflow_runs[0] | .created_at="2026-10-09T05:40:00Z"
+            | .updated_at="2026-10-09T05:45:00Z" | .conclusion="failure")]
+            | .total_count=2';;
         truncated_ci_list|truncated_security_list)
           jq '.total_count=101';;
         *) cat;;
@@ -133,8 +196,10 @@ export PATH="$tmp/fakebin:$PATH" GITHUB_EVENT_PATH="$tmp/push.json"
 jq -n --arg before "$base" --arg after "$merged" --arg repo "$GITHUB_REPOSITORY" \
   '{before:$before,after:$after,ref:"refs/heads/main",repository:{full_name:$repo},forced:false,deleted:false,created:false}' > "$GITHUB_EVENT_PATH"
 
+cases_checked=0
 check(){
   local what="$1" want="$2" got
+  ((cases_checked += 1))
   export MOCK_CASE="$what"
   got="$(bash "$SCRIPT" 2>"$tmp/last-stderr")" || { echo "reuse proof unexpectedly failed: $what" >&2;cat "$tmp/last-stderr" >&2;exit 1; }
   [ "$got" = "reuse_validated_pr=$want" ] || {
@@ -164,7 +229,11 @@ check empty_security_link_valid_title true
 check both_cleared true
 check foreign_ci_newer true
 check foreign_security_newer true
-for scenario in no_pr api_error fork ambiguous_pr missing_pr_number stale_base changed_tree failed_tree_lookup bad_ancestry \
+check newer_ci_postmerge true
+check newer_security_postmerge true
+check newer_ci_other_branch true
+check newer_security_other_branch true
+for scenario in no_pr api_error fork ambiguous_pr second_same_merge_wrong_base missing_pr_number stale_base changed_tree failed_tree_lookup bad_ancestry \
   missing_ci failed_ci latest_ci_failure latest_ci_pending missing_ci_timestamp \
   missing_security failed_security failed_security_lookup \
   foreign_ci_only foreign_security_only foreign_ci_masks_failure foreign_security_masks_failure \
@@ -173,7 +242,20 @@ for scenario in no_pr api_error fork ambiguous_pr missing_pr_number stale_base c
   wrong_base_ci wrong_base_security wrong_base_ref_ci wrong_base_ref_security \
   wrong_head_ci wrong_head_security foreign_ci_cleared foreign_security_cleared \
   ambiguous_ci_cleared ambiguous_security_cleared wrong_ref_ci_cleared wrong_ref_security_cleared \
-  truncated_ci_list truncated_security_list;do
+  truncated_ci_list truncated_security_list \
+  newer_ci_missing_link newer_security_missing_link \
+  newer_ci_malformed_link newer_security_malformed_link \
+  newer_ci_ambiguous_link newer_security_ambiguous_link \
+  newer_ci_noncanonical_title newer_security_noncanonical_title \
+  newer_ci_contradictory_title newer_security_contradictory_title \
+  newer_ci_mismatched_base newer_security_mismatched_base \
+  newer_ci_missing_creation newer_security_missing_creation \
+  newer_ci_bad_attempt newer_security_bad_attempt \
+  newer_ci_exact_failed_attempt newer_security_exact_failed_attempt \
+  newer_ci_missing_branch newer_security_missing_branch \
+  newer_ci_missing_repo newer_security_missing_repo \
+  newer_ci_missing_path newer_security_missing_path \
+  newer_ci_same_timestamp_tie newer_security_same_timestamp_tie;do
   check "$scenario" false
 done
 
@@ -199,4 +281,4 @@ GITHUB_REPOSITORY=wrong/repo check matching_squash false
 
 # A historical valid squash, checked from the actual public GitHub API in
 # developer smoke checks, provides a non-mock confirmation of API semantics.
-echo 'CI PR evidence reuse tests passed (valid squash and fail-closed cases).'
+echo "CI PR evidence reuse tests passed ($cases_checked valid, adversarial and fail-closed scenarios)."
