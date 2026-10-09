@@ -16,6 +16,14 @@ jobs:
     runs-on: ubuntu-22.04
     outputs:
       runtime_changed: ${{ steps.scope.outputs.runtime_changed }}
+      go_changed: ${{ steps.scope.outputs.go_changed }}
+      shell_changed: ${{ steps.scope.outputs.shell_changed }}
+      cloudflare_security_changed: ${{ steps.scope.outputs.cloudflare_security_changed }}
+      root_trust_security_changed: ${{ steps.scope.outputs.root_trust_security_changed }}
+      stable_provenance_changed: ${{ steps.scope.outputs.stable_provenance_changed }}
+      stable_update_trust_changed: ${{ steps.scope.outputs.stable_update_trust_changed }}
+      platform_changed: ${{ steps.scope.outputs.platform_changed }}
+      arm64_lifecycle_changed: ${{ steps.scope.outputs.arm64_lifecycle_changed }}
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
@@ -41,6 +49,7 @@ jobs:
           go-version: '1.26.x'
           cache: false
       - name: Format
+        if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
         run: |
           unformatted="$(gofmt -l .)"
           if [ -n "$unformatted" ]; then
@@ -53,13 +62,17 @@ jobs:
             exit 1
           fi
       - name: Vet
+        if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
         run: go vet ./...
       - name: Unit tests
+        if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
         run: go test -race -vet=off ./...
       - name: Build static binary
+        if: ${{ needs.change-scope.outputs.go_changed != 'false' || needs.change-scope.outputs.root_trust_security_changed != 'false' }}
         run: CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
       - name: Shell syntax
-        run: bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh scripts/install-stable.sh scripts/ci-change-scope.sh tests/*.sh
+        if: ${{ needs.change-scope.outputs.shell_changed != 'false' }}
+        run: bash -n install.sh update.sh uninstall.sh manage.sh ensure-lifecycle-lock.sh scripts/build-release.sh scripts/install-stable.sh scripts/ci-change-scope.sh scripts/dev-check.sh tests/*.sh
       - name: GitHub Actions immutable pinning contract
         run: |
           bad=0
@@ -74,6 +87,7 @@ jobs:
           done < <(sed -nE 's/^[[:space:]]*- uses:[[:space:]]+([^[:space:]#]+).*/\1/p' .github/workflows/*.yml)
           test "$bad" -eq 0
       - name: Root shell execution boundary
+        if: ${{ needs.change-scope.outputs.root_trust_security_changed != 'false' }}
         run: |
           if grep -nE 'exec.Command\("/bin/bash", "-lc"|"/bin/bash", "-lc", shell|--setenv=HOME=' internal/executor/executor.go internal/executor/foundation.go internal/executor/jobs.go; then
             echo 'executor must not use login shells or inherited workspace HOME for privileged execution' >&2
@@ -97,10 +111,13 @@ jobs:
           grep -qF 'removeTerminalCommandHandoff' internal/executor/jobs.go
           grep -Eq 'OperationID[[:space:]]+string' internal/executor/protocol.go
       - name: Installer compatibility check
+        if: ${{ needs.change-scope.outputs.platform_changed != 'false' || needs.change-scope.outputs.root_trust_security_changed != 'false' || needs.change-scope.outputs.stable_provenance_changed != 'false' }}
         run: sudo bash install.sh --check
       - name: Supported platform policy
+        if: ${{ needs.change-scope.outputs.platform_changed != 'false' }}
         run: bash tests/platform_compatibility.sh
       - name: Guided installer and management contract
+        if: ${{ needs.change-scope.outputs.root_trust_security_changed != 'false' || needs.change-scope.outputs.cloudflare_security_changed != 'false' }}
         run: |
           grep -qF 'MANAGE_BIN="/usr/local/sbin/ai-server-agent-manage"' install.sh
           grep -qF 'AI_SERVER_AGENT_SETUP_MODE' install.sh
@@ -124,7 +141,11 @@ jobs:
           grep -qF 'Safe uninstall (preserve data)' manage.sh
           grep -qF 'Purge Agent-owned server data' manage.sh
           grep -qF 'Remove recorded Cloudflare resources' manage.sh
+      - name: Browser trust-boundary static contract
+        if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
+        run: grep -qF 'Refusing symlinked browser data directory' internal/browser/browser.go
       - name: Root trust-boundary static contract
+        if: ${{ needs.change-scope.outputs.root_trust_security_changed != 'false' }}
         run: |
           grep -qF 'install -d -m 0700 -o root -g root "$CONTROL_DIR"' install.sh
           grep -qF 'install -d -m 0711 -o root -g root "$STATE_DIR"' install.sh
@@ -146,6 +167,7 @@ jobs:
           grep -qF 'job path is not a regular file' internal/executor/executor.go
           grep -qF 'Refusing symlinked browser data directory' internal/browser/browser.go
       - name: Cloudflare guided setup safety contract
+        if: ${{ needs.change-scope.outputs.cloudflare_security_changed != 'false' }}
         run: |
           grep -qF 'read -r -s CF_TOKEN' manage.sh
           grep -qF 'Cloudflare API token (input hidden; not stored)' manage.sh
@@ -203,8 +225,10 @@ jobs:
             exit 1
           fi
       - name: Cloudflare Rulesets pagination contract
+        if: ${{ needs.change-scope.outputs.cloudflare_security_changed != 'false' }}
         run: bash tests/cloudflare_rulesets_pagination.sh
       - name: Stable update channel contract
+        if: ${{ needs.change-scope.outputs.stable_update_trust_changed != 'false' }}
         run: |
           state="$(mktemp)"
           cat > "$state" <<'STATE'
@@ -222,6 +246,7 @@ jobs:
             exit 1
           fi
       - name: Installer restart contract
+        if: ${{ needs.change-scope.outputs.root_trust_security_changed != 'false' }}
         run: |
           daemon_line="$(grep -nF 'systemctl daemon-reload' install.sh | cut -d: -f1 | head -n1)"
           enable_line="$(grep -nF 'systemctl enable ai-server-agent-executor.service ai-server-agent.service' install.sh | cut -d: -f1 | head -n1)"
@@ -235,6 +260,7 @@ jobs:
           test "$restart_line" -gt "$enable_line"
           test "$active_line" -gt "$restart_line"
       - name: Local MCP authentication contract
+        if: ${{ needs.change-scope.outputs.root_trust_security_changed != 'false' }}
         run: |
           grep -qF 'AUTH_MODE="bearer"' install.sh
           grep -qF 'MCP_AUTH_HEADER_FILE="$CONFIG_DIR/mcp.authorization"' install.sh
@@ -244,6 +270,7 @@ jobs:
             exit 1
           fi
       - name: Generated token formatting contract
+        if: ${{ needs.change-scope.outputs.root_trust_security_changed != 'false' }}
         run: |
           token_file="$(mktemp)"
           trap 'rm -f "$token_file"' EXIT
@@ -255,6 +282,7 @@ jobs:
           test "$(tr -cd '\n' < "$token_file" | wc -c)" -eq 1
           test "$(tail -c 1 "$token_file" | od -An -tu1 | tr -d '[:space:]')" = "10"
       - name: Native TLS public-mode contract
+        if: ${{ needs.change-scope.outputs.root_trust_security_changed != 'false' }}
         run: |
           grep -qF 'Public mode requires native TLS.' install.sh || grep -qF 'Public mode requires native TLS' install.sh
           grep -qF '"tls_cert_file": "$TLS_CERT_FILE"' install.sh
@@ -272,6 +300,7 @@ jobs:
             exit 1
           fi
       - name: Source ref resolution contract
+        if: ${{ needs.change-scope.outputs.stable_update_trust_changed != 'false' || needs.change-scope.outputs.stable_provenance_changed != 'false' }}
         run: |
           branch_sha="$(sudo AI_SERVER_AGENT_REF='main' bash install.sh --resolve-ref)"
           [[ "$branch_sha" =~ ^[0-9a-f]{40}$ ]]
@@ -284,6 +313,7 @@ jobs:
             exit 1
           fi
       - name: Release artifact installer contract
+        if: ${{ github.event_name == 'push' || needs.change-scope.outputs.stable_provenance_changed != 'false' }}
         run: |
           rm -rf dist
           bash scripts/build-release.sh "$RELEASE_VERSION"
@@ -315,6 +345,7 @@ jobs:
           sudo bash dist/install.sh --check
           git diff --exit-code -- internal/mcp/server.go
       - name: Ubuntu 22.04 amd64 lifecycle validation
+        if: ${{ needs.change-scope.outputs.root_trust_security_changed != 'false' }}
         run: |
           test "$(uname -m)" = 'x86_64'
           grep -qF 'Ubuntu 22.04' /etc/os-release
@@ -500,6 +531,7 @@ jobs:
           getent group aiworker >/dev/null
           sudo test -e /srv/ai-workspace/lifecycle-workspace-sentinel
       - name: First-run deferral is not an installation failure
+        if: ${{ needs.change-scope.outputs.root_trust_security_changed != 'false' }}
         run: |
           command -v script >/dev/null
           printf '0\n' | script -qefc "sudo env AI_SERVER_AGENT_BINARY=/tmp/ai-server-agent bash install.sh" /tmp/first-run.out
@@ -570,9 +602,9 @@ jobs:
       - name: Require successful change classification
         run: test "${{ needs.change-scope.result }}" = success
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        if: needs.change-scope.outputs.runtime_changed != 'false'
+        if: needs.change-scope.outputs.platform_changed != 'false'
       - name: Verify supported Debian host contract
-        if: needs.change-scope.outputs.runtime_changed != 'false'
+        if: needs.change-scope.outputs.platform_changed != 'false'
         env:
           DEBIAN_MAINTAINED: ${{ matrix.maintained }}
         run: |
@@ -598,7 +630,7 @@ jobs:
 
   arm64-lifecycle:
     needs: change-scope
-    if: ${{ always() && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed != 'false') }}
+    if: ${{ always() && (needs.change-scope.result != 'success' || needs.change-scope.outputs.go_changed != 'false' || needs.change-scope.outputs.platform_changed != 'false' || needs.change-scope.outputs.arm64_lifecycle_changed != 'false') }}
     runs-on: ubuntu-24.04-arm
     steps:
       - name: Require successful change classification
@@ -616,6 +648,7 @@ jobs:
           bash tests/platform_compatibility.sh
           sudo bash install.sh --check
       - name: Native arm64 lifecycle validation
+        if: needs.change-scope.outputs.arm64_lifecycle_changed != 'false'
         run: |
           sudo env AI_SERVER_AGENT_BINARY=/tmp/ai-server-agent AI_SERVER_AGENT_NONINTERACTIVE=1 bash install.sh
           sudo systemctl is-active --quiet ai-server-agent.service
@@ -623,5 +656,5 @@ jobs:
           sudo jq -e '.channel == "source" and .version == "source"' /etc/ai-server-agent/control/install-state.json >/dev/null
           sudo bash tests/root_trust_boundary.sh
       - name: Cleanup arm64 test installation
-        if: always()
+        if: ${{ always() && needs.change-scope.result == 'success' && needs.change-scope.outputs.arm64_lifecycle_changed != 'false' }}
         run: sudo env AI_SERVER_AGENT_YES=1 bash uninstall.sh --purge || true
