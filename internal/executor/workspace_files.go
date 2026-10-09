@@ -52,7 +52,7 @@ const (
 
 func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp Response) {
 	write := req.Action == "workspace_write" || req.Action == "workspace_apply_edits"
-	if req.Action != "workspace_read" && req.Action != "workspace_write" && req.Action != "workspace_apply_edits" && req.Action != "workspace_text_search" {
+	if req.Action != "workspace_stat" && req.Action != "workspace_read" && req.Action != "workspace_write" && req.Action != "workspace_apply_edits" && req.Action != "workspace_text_search" {
 		return fileError("invalid_action", "validation", errors.New("unsupported worker workspace action"))
 	}
 	if strings.TrimSpace(req.Workspace) == "" || (req.Action != "workspace_text_search" && req.Action != "workspace_apply_edits" && strings.TrimSpace(req.Path) == "") {
@@ -79,6 +79,11 @@ func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp 
 		}
 		if req.MustNotExist == (req.FileVersion != "") {
 			return fileError("invalid_precondition", "validation", errors.New("write requires exactly one of must_not_exist or file_version"))
+		}
+	} else if req.Action == "workspace_stat" {
+		// The stat operation never accepts source bytes or range parameters.
+		if req.Offset != 0 || req.Limit != 0 || req.Content != "" || req.MustNotExist {
+			return fileError("invalid_request", "validation", errors.New("workspace_stat is metadata-only"))
 		}
 	} else if req.Offset < 0 || req.Limit < 0 || req.Limit > maxFileReadBytes {
 		return fileError("invalid_range", "validation", errors.New("invalid bounded read offset or limit"))
@@ -225,7 +230,7 @@ func RunWorkspaceFileHelper() int {
 	}
 	defer unlock()
 	var resp Response
-	if op.Action == "workspace_read" {
+	if op.Action == "workspace_read" || op.Action == "workspace_stat" {
 		resp = readWorkerWorkspaceFile(op)
 	} else if op.Action == "workspace_write" {
 		resp = writeWorkerWorkspaceFile(op)
@@ -283,7 +288,16 @@ func openWorkerParent(workspaceFD int, relative string) (*os.File, string, error
 }
 
 func readWorkerWorkspaceFile(op workspaceFileOperation) Response {
-	if op.Offset < 0 || op.Limit < 0 || op.Limit > maxFileReadBytes {
+	if op.Action != "" && op.Action != "workspace_read" && op.Action != "workspace_stat" {
+		// Empty Action remains an internal read-only helper convention
+		// used by versioned batch-edit preflight, not an accepted wire
+		// action: RunWorkspaceFileHelper dispatches only named actions.
+		return fileError("invalid_action", "validation", errors.New("unsupported worker file inspection action"))
+	}
+	if op.Action == "workspace_stat" && (op.Offset != 0 || op.Limit != 0 || op.Content != "" || op.MustNotExist) {
+		return fileError("invalid_request", "validation", errors.New("workspace_stat is metadata-only"))
+	}
+	if op.Action != "workspace_stat" && (op.Offset < 0 || op.Limit < 0 || op.Limit > maxFileReadBytes) {
 		return fileError("invalid_range", "validation", errors.New("invalid worker read range"))
 	}
 	workspace, err := openWorkerWorkspace(op)
@@ -327,6 +341,14 @@ func readWorkerWorkspaceFile(op workspaceFileOperation) Response {
 	version := fileVersion(before)
 	if op.FileVersion != "" && op.FileVersion != version {
 		return fileError("file_changed", "conflict", errors.New("file changed before read"))
+	}
+	if op.Action == "workspace_stat" {
+		// Check a second inode snapshot on the opened, read-authorized file.
+		// No Pread, content decoding, MIME guesswork or byte allocation.
+		if version != fileVersion(reopened) {
+			return fileError("file_changed", "conflict", errors.New("file changed during metadata inspection"))
+		}
+		return Response{OK: true, Status: "metadata_only", OutputEncoding: "none", FileSize: int64Ptr(before.Size), FileVersion: version}
 	}
 	limit := op.Limit
 	if limit == 0 {
