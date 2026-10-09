@@ -125,15 +125,10 @@ func (s *Server) finishActionAudit(req Request, action, mode, command, policyCat
 		PrincipalClass: req.PrincipalClass,
 		PrincipalName:  req.PrincipalName,
 	}
-	var auditErr error
-	if s.auditWriteHook != nil {
-		auditErr = s.auditWriteHook("complete")
+	if s.auditBeforeCompletionHook != nil {
+		s.auditBeforeCompletionHook()
 	}
-	if auditErr == nil {
-		auditErr = s.audit.Write(entry)
-	}
-	if auditErr != nil {
-		s.audit.MarkDegraded()
+	if auditErr := s.audit.WriteCompletion(entry); auditErr != nil {
 		resp.AuditDegraded = true
 		resp.AuditError = "audit completion could not be durably recorded; further action-capable operations are blocked until the audit path is repaired and the executor is restarted"
 	}

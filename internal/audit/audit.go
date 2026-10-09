@@ -39,6 +39,9 @@ type Logger struct {
 	mu       sync.Mutex
 	key      []byte
 	degraded bool
+
+	beforeLockHook func(Entry)       // test-only interleaving observation
+	writeHook      func(Entry) error // test-only failure/interleaving injection
 }
 
 type Entry struct {
@@ -98,18 +101,45 @@ func NewWithKeyAndReserve(path, keyPath string, safetyReserve int64) *Logger {
 	return logger
 }
 
-func (l *Logger) MarkDegraded() {
-	l.mu.Lock()
-	l.degraded = true
-	l.mu.Unlock()
-}
-
 func (l *Logger) Write(e Entry) error {
+	if l.beforeLockHook != nil {
+		l.beforeLockHook(e)
+	}
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
 	if l.degraded {
 		return ErrDegraded
+	}
+	return l.writeLocked(e)
+}
+
+// WriteCompletion durably appends a completion event. If any stage of the
+// completion write fails, degraded state is latched before the logger mutex is
+// released. This makes the failed completion and the safety latch one atomic
+// admission boundary for concurrent action-start writes.
+func (l *Logger) WriteCompletion(e Entry) error {
+	if l.beforeLockHook != nil {
+		l.beforeLockHook(e)
+	}
+	l.mu.Lock()
+	defer l.mu.Unlock()
+
+	if l.degraded {
+		return ErrDegraded
+	}
+	if err := l.writeLocked(e); err != nil {
+		l.degraded = true
+		return err
+	}
+	return nil
+}
+
+func (l *Logger) writeLocked(e Entry) error {
+	if l.writeHook != nil {
+		if err := l.writeHook(e); err != nil {
+			return err
+		}
 	}
 	if err := l.ensureKeyLocked(); err != nil {
 		return err

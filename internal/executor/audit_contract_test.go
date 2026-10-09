@@ -15,21 +15,22 @@ import (
 	"github.com/ach1992/ai-server-agent/internal/policy"
 )
 
-func newAuditContractServer(t *testing.T) (*Server, string) {
+func newAuditContractServer(t *testing.T) (*Server, string, string) {
 	t.Helper()
 	workspace := t.TempDir()
+	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
 	return &Server{
 		cfg:       config.Config{WorkspaceDir: workspace, StateDir: t.TempDir()},
 		guard:     policy.New(nil),
-		audit:     audit.New(filepath.Join(t.TempDir(), "audit.jsonl")),
+		audit:     audit.New(auditPath),
 		workerUID: uint32(os.Geteuid()),
 		workerGID: uint32(os.Getegid()),
 		runs:      newRunLimiterWith(1, 1),
-	}, workspace
+	}, workspace, auditPath
 }
 
 func TestPreActionAuditFailureBlocksRunSideEffect(t *testing.T) {
-	s, workspace := newAuditContractServer(t)
+	s, workspace, _ := newAuditContractServer(t)
 	s.auditWriteHook = func(phase string) error {
 		if phase == "start" {
 			return errors.New("forced pre-action audit failure")
@@ -47,15 +48,23 @@ func TestPreActionAuditFailureBlocksRunSideEffect(t *testing.T) {
 }
 
 func TestCompletionAuditFailureSurfacesOutcomeAndBlocksNextMutation(t *testing.T) {
-	s, workspace := newAuditContractServer(t)
-	s.auditWriteHook = func(phase string) error {
-		if phase == "complete" {
-			return errors.New("forced completion audit failure")
+	s, workspace, auditPath := newAuditContractServer(t)
+	var sabotageErr error
+	s.auditBeforeCompletionHook = func() {
+		if sabotageErr != nil {
+			return
 		}
-		return nil
+		if err := os.Remove(auditPath); err != nil {
+			sabotageErr = err
+			return
+		}
+		sabotageErr = os.Symlink(auditPath+".invalid-target", auditPath)
 	}
 	first := filepath.Join(workspace, "first.txt")
 	resp := s.writeFile(Request{Path: first, Content: "committed", Root: true, RequestID: "req-complete-fail"})
+	if sabotageErr != nil {
+		t.Fatalf("completion sabotage failed: %v", sabotageErr)
+	}
 	if !resp.OK || !resp.AuditDegraded || resp.AuditError == "" {
 		t.Fatalf("real operation outcome was not preserved with explicit audit degradation: %+v", resp)
 	}
@@ -63,7 +72,11 @@ func TestCompletionAuditFailureSurfacesOutcomeAndBlocksNextMutation(t *testing.T
 		t.Fatalf("first mutation result missing: %q err=%v", got, err)
 	}
 
-	s.auditWriteHook = nil
+	// Repair the audit path, but keep the same logger/executor instance.
+	s.auditBeforeCompletionHook = nil
+	if err := os.Remove(auditPath); err != nil {
+		t.Fatalf("remove sabotage symlink: %v", err)
+	}
 	second := filepath.Join(workspace, "second.txt")
 	blocked := s.writeFile(Request{Path: second, Content: "must not be written", Root: true, RequestID: "req-after-degrade"})
 	if blocked.OK || blocked.ErrorCode != "audit_unavailable" || blocked.Status != "degraded_safety" {
@@ -72,10 +85,22 @@ func TestCompletionAuditFailureSurfacesOutcomeAndBlocksNextMutation(t *testing.T
 	if _, err := os.Stat(second); !os.IsNotExist(err) {
 		t.Fatalf("subsequent mutation ran after audit degradation; err=%v", err)
 	}
+
+	// Reconstructing the logger models executor restart and clears only the
+	// in-memory latch after the path itself has been repaired.
+	s.audit = audit.New(auditPath)
+	third := filepath.Join(workspace, "third.txt")
+	recovered := s.writeFile(Request{Path: third, Content: "after restart", Root: true, RequestID: "req-after-restart"})
+	if !recovered.OK || recovered.AuditDegraded {
+		t.Fatalf("fresh logger did not recover after restart: %+v", recovered)
+	}
+	if got, err := os.ReadFile(third); err != nil || string(got) != "after restart" {
+		t.Fatalf("post-restart mutation result missing: %q err=%v", got, err)
+	}
 }
 
 func TestPreActionAuditFailureBlocksFileWrite(t *testing.T) {
-	s, workspace := newAuditContractServer(t)
+	s, workspace, _ := newAuditContractServer(t)
 	s.auditWriteHook = func(phase string) error {
 		if phase == "start" {
 			return errors.New("forced pre-action audit failure")
@@ -93,7 +118,7 @@ func TestPreActionAuditFailureBlocksFileWrite(t *testing.T) {
 }
 
 func TestPreActionAuditFailureBlocksPersistentJobStateMutation(t *testing.T) {
-	s, _ := newAuditContractServer(t)
+	s, _, _ := newAuditContractServer(t)
 	s.auditWriteHook = func(phase string) error {
 		if phase == "start" {
 			return errors.New("forced pre-action audit failure")

@@ -24,19 +24,20 @@ import (
 )
 
 type Server struct {
-	cfg                    config.Config
-	token                  string
-	guard                  *policy.Guard
-	audit                  *audit.Logger
-	auditWriteHook         func(string) error // test-only failure injection
-	workerUID              uint32
-	workerGID              uint32
-	runs                   *runLimiter
-	jobsMu                 sync.Mutex
-	lifecycleLockPath      string
-	fileWriteHooks         *fileWriteTestHooks
-	workspaceHooks         *workspaceTestHooks
-	structuralSearchBinary string // test-only override; production resolves trusted ast-grep paths
+	cfg                       config.Config
+	token                     string
+	guard                     *policy.Guard
+	audit                     *audit.Logger
+	auditWriteHook            func(string) error // test-only pre-action failure injection
+	auditBeforeCompletionHook func()             // test-only completion-path failure/interleaving injection
+	workerUID                 uint32
+	workerGID                 uint32
+	runs                      *runLimiter
+	jobsMu                    sync.Mutex
+	lifecycleLockPath         string
+	fileWriteHooks            *fileWriteTestHooks
+	workspaceHooks            *workspaceTestHooks
+	structuralSearchBinary    string // test-only override; production resolves trusted ast-grep paths
 }
 
 func NewServer(cfg config.Config, token string) (*Server, error) {

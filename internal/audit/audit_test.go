@@ -2,6 +2,7 @@ package audit
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -80,17 +81,6 @@ func TestSameCommandHasStableKeyedFingerprint(t *testing.T) {
 	}
 	if first.CommandFingerprint == "" || first.CommandFingerprint != second.CommandFingerprint {
 		t.Fatalf("fingerprints differ: %q %q", first.CommandFingerprint, second.CommandFingerprint)
-	}
-}
-
-func TestDegradedLoggerBlocksFurtherWrites(t *testing.T) {
-	logger := New(filepath.Join(t.TempDir(), "audit.jsonl"))
-	if err := logger.Write(Entry{Phase: "start", Action: "run"}); err != nil {
-		t.Fatal(err)
-	}
-	logger.MarkDegraded()
-	if err := logger.Write(Entry{Phase: "start", Action: "run"}); err != ErrDegraded {
-		t.Fatalf("got %v, want ErrDegraded", err)
 	}
 }
 
@@ -275,5 +265,95 @@ func TestDiskReserveFailsBeforeAuditAppend(t *testing.T) {
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
 		t.Fatalf("audit file was created despite disk-pressure rejection; err=%v", err)
+	}
+}
+
+func TestCompletionFailureAtomicallyLatchesBeforeConcurrentStartAdmission(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	logger := New(path)
+	logger.safetyReserve = 0
+
+	if err := logger.Write(Entry{Phase: "start", Action: "write_file", RequestID: "req-a"}); err != nil {
+		t.Fatal(err)
+	}
+
+	completionEntered := make(chan struct{})
+	releaseCompletion := make(chan struct{})
+	forced := errors.New("forced completion persistence failure")
+	logger.writeHook = func(e Entry) error {
+		if e.Phase == "complete" {
+			close(completionEntered)
+			<-releaseCompletion
+			return forced
+		}
+		return nil
+	}
+
+	completionDone := make(chan error, 1)
+	go func() {
+		completionDone <- logger.WriteCompletion(Entry{Phase: "complete", Action: "write_file", RequestID: "req-a"})
+	}()
+	<-completionEntered
+
+	startAttempted := make(chan struct{})
+	logger.beforeLockHook = func(e Entry) {
+		if e.RequestID == "req-b" {
+			close(startAttempted)
+		}
+	}
+	startDone := make(chan error, 1)
+	go func() {
+		startDone <- logger.Write(Entry{Phase: "start", Action: "write_file", RequestID: "req-b"})
+	}()
+	// This signal is emitted by Write itself immediately before it attempts the
+	// logger mutex, while Action A is still holding that mutex inside the
+	// forced completion failure boundary.
+	<-startAttempted
+
+	select {
+	case err := <-startDone:
+		t.Fatalf("concurrent start escaped completion critical section before failure latched: %v", err)
+	default:
+	}
+
+	close(releaseCompletion)
+	if err := <-completionDone; !errors.Is(err, forced) {
+		t.Fatalf("completion error = %v, want forced failure", err)
+	}
+	if err := <-startDone; !errors.Is(err, ErrDegraded) {
+		t.Fatalf("concurrent start error = %v, want ErrDegraded", err)
+	}
+
+	// Repairing the underlying write path/hook alone must not clear the safety
+	// latch in the running logger instance.
+	logger.beforeLockHook = nil
+	logger.writeHook = nil
+	if err := logger.Write(Entry{Phase: "start", Action: "write_file", RequestID: "req-c"}); !errors.Is(err, ErrDegraded) {
+		t.Fatalf("same logger resumed after repair without restart: %v", err)
+	}
+
+	// Reconstructing the logger models executor restart and is the only way to
+	// clear the in-memory degraded latch after the audit path is healthy.
+	restarted := New(path)
+	restarted.safetyReserve = 0
+	if err := restarted.Write(Entry{Phase: "start", Action: "write_file", RequestID: "req-after-restart"}); err != nil {
+		t.Fatalf("fresh logger did not recover after restart: %v", err)
+	}
+}
+
+func TestPreActionWriteFailureDoesNotLatchDegraded(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "audit.jsonl")
+	logger := New(path)
+	logger.safetyReserve = 0
+	forced := errors.New("forced start persistence failure")
+	logger.writeHook = func(e Entry) error {
+		return forced
+	}
+	if err := logger.Write(Entry{Phase: "start", Action: "run"}); !errors.Is(err, forced) {
+		t.Fatalf("start error = %v, want forced failure", err)
+	}
+	logger.writeHook = nil
+	if err := logger.Write(Entry{Phase: "start", Action: "run"}); err != nil {
+		t.Fatalf("pre-action failure incorrectly latched degraded state: %v", err)
 	}
 }
