@@ -424,7 +424,7 @@ func (b *environmentBuilder) probeTools(ctx context.Context) {
 			continue
 		}
 
-		bestRank := -1
+		bestScore := -1
 		for _, candidate := range candidates {
 			version := candidate.versionHint
 			compatibility := "compatible"
@@ -450,17 +450,18 @@ func (b *environmentBuilder) probeTools(ctx context.Context) {
 				}
 			}
 			rank := environmentCompatibilityRank(compatibility)
-			if rank <= bestRank {
+			score := rank*10 + environmentCandidateEvidenceRank(candidate, version)
+			if score <= bestScore {
 				continue
 			}
-			bestRank = rank
+			bestScore = score
 			tool.Available = true
 			tool.Path = candidate.path
 			tool.Source = candidate.source
 			tool.Version = version
 			tool.Compatibility = compatibility
 			tool.Reason = reason
-			if rank == 3 {
+			if rank == 3 && candidate.source == "system_path" {
 				break
 			}
 		}
@@ -478,6 +479,23 @@ func (b *environmentBuilder) probeTools(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func environmentCandidateEvidenceRank(candidate environmentExecutableCandidate, version string) int {
+	switch candidate.source {
+	case "system_path":
+		return 3
+	case "worker_cache":
+		if version != "" {
+			return 2
+		}
+		return 1
+	case "system_path_unverified":
+		if version != "" {
+			return 1
+		}
+	}
+	return 0
 }
 
 func environmentCompatibilityRank(compatibility string) int {
