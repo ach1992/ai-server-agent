@@ -74,6 +74,7 @@ type stdioSession struct {
 	done       chan struct{}
 	expiry     *time.Timer
 	terminal   *tmuxTerminalState // consumer-specific Control Mode state; broker owns its process
+	dap        *dapState          // DAP stream attaches to this same process identity and broker
 }
 
 type stdioSessionBroker struct {
@@ -421,6 +422,13 @@ func (b *stdioSessionBroker) removeAndStop(entry *stdioSession) error {
 	entry.stopMu.Lock()
 	entry.mu.Lock()
 	entry.closed = true
+	if entry.dap != nil {
+		entry.dap.mu.Lock()
+		if entry.dap.conn != nil {
+			_ = entry.dap.conn.Close()
+		}
+		entry.dap.mu.Unlock()
+	}
 	if entry.expiry != nil {
 		entry.expiry.Stop()
 	}
@@ -467,6 +475,20 @@ func (b *stdioSessionBroker) removeAndStop(entry *stdioSession) error {
 		// Keep this session addressable and its PID pinned; deletion would
 		// turn an uncertain cleanup into an unauditable orphan.
 		return fmt.Errorf("session_stop_outcome_unknown: %w", finalErr)
+	}
+	// DAP's private socket is transport runtime state only, not a second
+	// process owner. Clean it only after pidfd-pinned broker cleanup succeeds.
+	if entry.dap != nil {
+		dir := entry.dap.socketDir
+		if dir != "" {
+			socket := filepath.Join(dir, "dap.sock")
+			if err := os.Remove(socket); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("dap_socket_cleanup_uncertain: %w", err)
+			}
+			if err := os.Remove(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("dap_runtime_cleanup_uncertain: %w", err)
+			}
+		}
 	}
 	b.remove(entry)
 	return nil

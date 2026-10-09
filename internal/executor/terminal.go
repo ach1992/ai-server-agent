@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/base64"
 	"encoding/hex"
@@ -493,6 +494,14 @@ func (s *Server) terminalCommand(req Request, e *stdioSession, command string) e
 // The existing broker timer owns expiry; terminal expiry must terminate the
 // actual tmux session, not merely its Control Mode client process.
 func (s *Server) expireProcessSession(entry *stdioSession) {
+	if entry.dap != nil {
+		req := Request{Action: "debug_stop", PrincipalID: entry.ownerID, PrincipalClass: entry.ownerClass, Workspace: entry.workspace, SessionID: entry.id}
+		_ = ensureRequestCorrelation(&req)
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		_ = s.debugStop(ctx, req)
+		return
+	}
 	if entry.terminal == nil {
 		_ = s.sessions.removeAndStop(entry)
 		return

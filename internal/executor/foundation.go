@@ -89,7 +89,7 @@ func connectionContext(c net.Conn) (context.Context, context.CancelFunc) {
 
 func (s *Server) dispatchContext(ctx context.Context, req Request) Response {
 	switch req.Action {
-	case "run", "code_inspect", "workspace_stat", "workspace_read", "workspace_write", "workspace_apply_edits", "workspace_text_search", "workspace_search", "repository_environment", "repository_discover", "repository_inspect", "worktree_create", "worktree_remove":
+	case "run", "code_inspect", "debug_adapter_status", "debug_launch", "debug_action", "debug_status", "debug_stop", "workspace_stat", "workspace_read", "workspace_write", "workspace_apply_edits", "workspace_text_search", "workspace_search", "repository_environment", "repository_discover", "repository_inspect", "worktree_create", "worktree_remove":
 		if !s.auth(req.Token) {
 			return Response{Error: "unauthorized"}
 		}
@@ -98,6 +98,8 @@ func (s *Server) dispatchContext(ctx context.Context, req Request) Response {
 			return s.runContext(ctx, req)
 		case "code_inspect":
 			return s.codeInspect(ctx, req)
+		case "debug_adapter_status", "debug_launch", "debug_action", "debug_status", "debug_stop":
+			return s.debugAction(ctx, req)
 		case "workspace_stat", "workspace_read", "workspace_write", "workspace_apply_edits", "workspace_text_search":
 			return s.workerWorkspaceFile(ctx, req)
 		case "workspace_search":

@@ -341,6 +341,7 @@ func (s *Server) registerTools() {
 	s.registerWorkspaceFileTools()
 	s.registerTerminalTools()
 	s.registerGoCodeTools()
+	s.registerDebugTools()
 	s.registerRepositoryTools()
 	s.registerWorkspaceSearchTool()
 }
