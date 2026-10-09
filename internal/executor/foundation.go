@@ -88,13 +88,18 @@ func connectionContext(c net.Conn) (context.Context, context.CancelFunc) {
 }
 
 func (s *Server) dispatchContext(ctx context.Context, req Request) Response {
-	if req.Action == "run" {
+	switch req.Action {
+	case "run", "workspace_search":
 		if !s.auth(req.Token) {
 			return Response{Error: "unauthorized"}
 		}
-		return s.runContext(ctx, req)
+		if req.Action == "run" {
+			return s.runContext(ctx, req)
+		}
+		return s.workspaceSearchContext(ctx, req)
+	default:
+		return s.dispatch(req)
 	}
-	return s.dispatch(req)
 }
 
 func processGroupExists(pgid int) (bool, error) {

@@ -3,21 +3,28 @@ package executor
 import "time"
 
 type Request struct {
-	Token        string `json:"token"`
-	Action       string `json:"action"`
-	Command      string `json:"command,omitempty"`
-	Root         bool   `json:"root,omitempty"`
-	Approval     bool   `json:"approval,omitempty"`
-	TimeoutMS    int64  `json:"timeout_ms,omitempty"`
-	OperationID  string `json:"operation_id,omitempty"`
-	JobID        string `json:"job_id,omitempty"`
-	Offset       int64  `json:"offset,omitempty"`
-	Limit        int    `json:"limit,omitempty"`
-	Path         string `json:"path,omitempty"`
-	Content      string `json:"content,omitempty"`
-	Mode         uint32 `json:"mode,omitempty"`
-	FileVersion  string `json:"file_version,omitempty"`
-	MustNotExist bool   `json:"must_not_exist,omitempty"`
+	Token        string   `json:"token"`
+	Action       string   `json:"action"`
+	Command      string   `json:"command,omitempty"`
+	Root         bool     `json:"root,omitempty"`
+	Approval     bool     `json:"approval,omitempty"`
+	TimeoutMS    int64    `json:"timeout_ms,omitempty"`
+	OperationID  string   `json:"operation_id,omitempty"`
+	JobID        string   `json:"job_id,omitempty"`
+	Offset       int64    `json:"offset,omitempty"`
+	Limit        int      `json:"limit,omitempty"`
+	Path         string   `json:"path,omitempty"`
+	Content      string   `json:"content,omitempty"`
+	Mode         uint32   `json:"mode,omitempty"`
+	FileVersion  string   `json:"file_version,omitempty"`
+	MustNotExist bool     `json:"must_not_exist,omitempty"`
+	SearchMode   string   `json:"search_mode,omitempty"`
+	Language     string   `json:"language,omitempty"`
+	Pattern      string   `json:"pattern,omitempty"`
+	Workspace    string   `json:"workspace,omitempty"`
+	SearchPaths  []string `json:"search_paths,omitempty"`
+	Globs        []string `json:"globs,omitempty"`
+	SearchLimit  int      `json:"search_limit,omitempty"`
 }
 
 type Response struct {

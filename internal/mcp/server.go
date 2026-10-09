@@ -115,7 +115,7 @@ func New(cfg config.Config) (*Server, error) {
 }
 
 func instructions(workspaceDir string) string {
-	return fmt.Sprintf("Dedicated AI-operated test-server control plane. Before host-wide package, firewall, network, service, disk, user, web-stack, or control-panel changes, call agent_environment and preserve all critical components it reports. The workspace at %s is persistent: inspect and reuse existing repositories, worktrees, and task environments before creating duplicates, prefer git worktree when another checkout of the same repository is needed, and never delete dirty, untracked, ambiguous, or unknown workspace state. The control plane intentionally does not own ports 80/443 and does not require nginx, Apache, PHP, MySQL, Docker, Node.js, Python, or aaPanel. Use run_command for ordinary bounded work and run_root_command only when host-level privileges are required. Use start_job from the beginning for installs, large builds/test suites, migrations, crawls, or other work expected to run long or produce substantial output, then continue with job_status/job_output. If a tool returns approval_required, explain the exact risk to the user and retry with approval=true only after explicit confirmation. Persistent jobs survive MCP/ChatGPT disconnects. Optional interactive terminal workflows may install and use tmux through root shell without making tmux a core dependency.", workspaceDir)
+	return fmt.Sprintf("Dedicated AI-operated test-server control plane. Before host-wide package, firewall, network, service, disk, user, web-stack, or control-panel changes, call agent_environment and preserve all critical components it reports. The workspace at %s is persistent: inspect and reuse existing repositories, worktrees, and task environments before creating duplicates, prefer git worktree when another checkout of the same repository is needed, and never delete dirty, untracked, ambiguous, or unknown workspace state. The control plane intentionally does not own ports 80/443 and does not require nginx, Apache, PHP, MySQL, Docker, Node.js, Python, or aaPanel. Use run_command for ordinary bounded work and run_root_command only when host-level privileges are required. For code inspection, use rg/git grep through run_command for text occurrences, workspace_search for structural syntax-tree patterns, and do not treat structural matches as semantic symbol/type/reference resolution. Use start_job from the beginning for installs, large builds/test suites, migrations, crawls, or other work expected to run long or produce substantial output, then continue with job_status/job_output. If a tool returns approval_required, explain the exact risk to the user and retry with approval=true only after explicit confirmation. Persistent jobs survive MCP/ChatGPT disconnects. Optional interactive terminal workflows may install and use tmux through root shell without making tmux a core dependency.", workspaceDir)
 }
 
 func annotations(readOnly, destructive, idempotent, openWorld bool) *mcpsdk.ToolAnnotations {
@@ -278,6 +278,8 @@ func (s *Server) registerTools() {
 			}
 			return responseResult(resp)
 		})
+
+	s.registerWorkspaceSearchTool()
 }
 
 func (s *Server) auth(next http.Handler) http.Handler {
