@@ -145,7 +145,7 @@ func (s *Server) dispatch(req Request) Response {
 		return s.readFile(req)
 	case "write_file":
 		return s.writeFile(req)
-	case "workspace_read", "workspace_write", "workspace_apply_edits", "workspace_text_search":
+	case "workspace_stat", "workspace_read", "workspace_write", "workspace_apply_edits", "workspace_text_search":
 		return s.workerWorkspaceFile(context.Background(), req)
 	case "workspace_search":
 		return s.workspaceSearchContext(context.Background(), req)

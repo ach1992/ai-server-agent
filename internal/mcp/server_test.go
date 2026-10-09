@@ -86,6 +86,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 	foundJobStatus := false
 	foundReadFile := false
 	foundWriteFile := false
+	foundWorkerStat := false
 	foundWorkerRead := false
 	foundWorkerWrite := false
 	foundWorkerApplyEdits := false
@@ -182,6 +183,28 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 				if !strings.Contains(string(in), `"`+field+`"`) {
 					t.Fatalf("write_file input schema missing %q: %s", field, in)
 				}
+			}
+		case "workspace_stat":
+			foundWorkerStat = true
+			if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint ||
+				tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint {
+				t.Fatal("workspace_stat must advertise read-only worker metadata")
+			}
+			if !strings.Contains(tool.Description, "aiworker") || !strings.Contains(tool.Description, "without reading") {
+				t.Fatal("workspace_stat must disclose worker authority and no-content semantics")
+			}
+			in, err := json.Marshal(tool.InputSchema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"workspace", "path", "file_version"} {
+				if !strings.Contains(string(in), `"`+field+`"`) {
+					t.Fatalf("workspace_stat input missing %q: %s", field, in)
+				}
+			}
+			if strings.Contains(string(in), `"limit"`) || strings.Contains(string(in), `"offset"`) ||
+				strings.Contains(string(in), `"content"`) {
+				t.Fatal("workspace_stat must not expose a content read/write parameter")
 			}
 		case "workspace_read":
 			foundWorkerRead = true
@@ -374,7 +397,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			}
 		}
 	}
-	if !foundEnvironment || !foundRoot || !foundStartJob || !foundJobStatus || !foundReadFile || !foundWriteFile || !foundWorkerRead || !foundWorkerWrite || !foundWorkerApplyEdits || !foundWorkspaceSearch || !foundRepositoryEnvironment || !foundRepositoryDiscover || !foundRepositoryInspect || !foundWorktreeCreate || !foundWorktreeRemove || !foundBrowserStatus || !foundBrowser {
+	if !foundEnvironment || !foundRoot || !foundStartJob || !foundJobStatus || !foundReadFile || !foundWriteFile || !foundWorkerStat || !foundWorkerRead || !foundWorkerWrite || !foundWorkerApplyEdits || !foundWorkspaceSearch || !foundRepositoryEnvironment || !foundRepositoryDiscover || !foundRepositoryInspect || !foundWorktreeCreate || !foundWorktreeRemove || !foundBrowserStatus || !foundBrowser {
 		t.Fatalf("required tools missing: environment=%v root=%v start_job=%v job_status=%v read_file=%v write_file=%v workspace_search=%v repository_environment=%v repository_discover=%v repository_inspect=%v worktree_create=%v worktree_remove=%v browser_status=%v browser=%v", foundEnvironment, foundRoot, foundStartJob, foundJobStatus, foundReadFile, foundWriteFile, foundWorkspaceSearch, foundRepositoryEnvironment, foundRepositoryDiscover, foundRepositoryInspect, foundWorktreeCreate, foundWorktreeRemove, foundBrowserStatus, foundBrowser)
 	}
 }
@@ -386,6 +409,7 @@ func TestInstructionsDescribePersistentWorkspace(t *testing.T) {
 		"task environments",
 		"prefer git worktree",
 		"never delete dirty, untracked, ambiguous, or unknown workspace state",
+		"workspace_stat to inspect size/version without content",
 		"workspace_search mode=text for bounded literal/regex text occurrences",
 		"workspace_search mode=structural for syntax-tree patterns",
 		"LSP for semantic symbol/type/reference meaning",

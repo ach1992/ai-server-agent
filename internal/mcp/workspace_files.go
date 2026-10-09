@@ -6,6 +6,13 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// Stat never returns file bytes; callers may pass its version to workspace_read.
+type WorkspaceStatInput struct {
+	Workspace   string `json:"workspace" jsonschema:"Explicit workspace/worktree directory inside the configured Agent workspace root"`
+	Path        string `json:"path" jsonschema:"Relative readable regular-file path; symlinks and Git admin paths are not followed"`
+	FileVersion string `json:"file_version,omitempty" jsonschema:"Optional consistency precondition from a previous workspace_stat or workspace_read"`
+}
+
 type WorkspaceReadInput struct {
 	Workspace   string `json:"workspace" jsonschema:"Explicit workspace/worktree directory inside the configured Agent workspace root"`
 	Path        string `json:"path" jsonschema:"Relative regular-file path inside workspace; symlinks and Git admin paths are not followed"`
@@ -29,6 +36,16 @@ type WorkspaceWriteInput struct {
 
 func (s *Server) registerWorkspaceFileTools() {
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
+		Name: "workspace_stat", Description: "Inspect the size and file_version of a readable regular file in one explicit aiworker workspace without reading or returning any file bytes. Uses the same worker-only symlink-safe Landlock/openat2 path as workspace_read; status=metadata_only and output_encoding=none do NOT mean the file content was delivered. Use workspace_read with a small explicit limit and matching file_version for selected content.",
+		Annotations: annotations(true, false, true, false),
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input WorkspaceStatInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "workspace_stat", Workspace: input.Workspace, Path: input.Path, FileVersion: input.FileVersion})
+		if err != nil {
+			return executorTransportErrorResult(err)
+		}
+		return responseResult(resp)
+	})
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name: "workspace_apply_edits", Description: "Apply up to 12 bounded aiworker source-file edits in one explicit workspace after preflighting EVERY path, expected version and exact replacement context. Each file commits atomically but the batch is NOT an all-or-nothing transaction: structured result reports exact applied, failed and unattempted paths, including possible unknown completion. No Git staging/commit, code execution or implicit rollback.",
 		Annotations: annotations(false, true, false, false),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input WorkspaceApplyEditsInput) (*mcpsdk.CallToolResult, executor.Response, error) {
@@ -39,7 +56,7 @@ func (s *Server) registerWorkspaceFileTools() {
 		return responseResult(resp)
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-		Name: "workspace_read", Description: "Read a bounded raw-byte range from a regular source file inside one explicit workspace as aiworker, not root. No symlinks, traversal or implicit Git administrative reads; returns a file_version for optimistic edits. Does not execute project code.",
+		Name: "workspace_read", Description: "Read a bounded raw-byte range from a regular source file inside one explicit workspace as aiworker, not root. For unknown/large files use workspace_stat first, then select a small explicit limit with matching file_version; the default zero limit reads up to 1 MiB and may exceed an AI client model-context budget. No symlinks, traversal or implicit Git administrative reads; returns a file_version for optimistic edits. Does not execute project code.",
 		Annotations: annotations(true, false, true, false),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input WorkspaceReadInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "workspace_read", Workspace: input.Workspace, Path: input.Path, Offset: input.Offset, Limit: input.Limit, FileVersion: input.FileVersion})

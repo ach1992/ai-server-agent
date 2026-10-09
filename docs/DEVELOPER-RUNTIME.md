@@ -316,7 +316,7 @@ Source-byte limits, encoded MCP response limits, and the AI client's usable cont
 | Need | Preferred presentation |
 | --- | --- |
 | Small, focused text or structured facts | Compact inline content with source identity, type/encoding, and completeness metadata. |
-| Medium or searchable content | Metadata and a deliberately small preview/selection; request only necessary byte ranges, lines, matches or records, with continuation and source-version checks. |
+| Medium or searchable content | Prefer metadata-first workspace_stat on readable worker files, then a deliberately small workspace_read window with matching file_version or scoped search/selection. File size is not MIME detection or content interpretation. |
 | Large files or generated evidence | Keep data at the source; return bounded metadata/preview and use safe, authorized ranged access or an expiring artifact handle only where a concrete consumer justifies one. |
 | Binary, images, PDF, archives, audio or other formats | Represent the type accurately; use protocol-native typed content or a resource/optional extraction mechanism only when supported and authorized. Transporting base64 bytes is not equivalent to AI understanding a document or image. |
 | Streaming logs, PTY/LSP/DAP and browser events | Bounded incremental output with explicit cursor/sequence, retention gaps, truncation and reconnection semantics; never imply dropped bytes can be replayed. |

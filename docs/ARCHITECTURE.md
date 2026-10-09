@@ -116,7 +116,7 @@ The durable execution/data rules are:
 - ordinary synchronous commands remain low-overhead bounded request/response operations;
 - command/browser output is bounded while it is produced, with explicit truncation/encoding/timing metadata rather than unbounded buffering followed by silent clipping;
 - expected long/high-output work uses persistent jobs plus ranged `job_output`, not ever-larger synchronous timeouts;
-- file reads are ranged/bounded and binary-safe; ordinary complete-file writes are bounded, atomic where filesystem semantics allow, and symlink-safe;
+- file reads are ranged/bounded and binary-safe; workspace_stat reuses the worker-confined file path to expose regular-file size/version without reading source bytes, allowing callers to request only deliberate small, version-pinned ranges; ordinary complete-file writes are bounded, atomic where filesystem semantics allow, and symlink-safe;
 - persistent job count and underlying log growth are bounded while offset/continuation semantics remain reliable;
 - browser input/runtime/output is bounded and one hung run cannot hold the browser path forever;
 - transport timeout/disconnect is not treated as proof that a mutating host command stopped;

@@ -164,10 +164,17 @@ func TestWorkspaceFileHelperRunsWithWorkerIdentityAndAudit(t *testing.T) {
 	if sys.Uid != uint32(os.Geteuid()) {
 		t.Fatalf("helper did not create under worker identity: uid=%d", sys.Uid)
 	}
-	req.Action = "workspace_read"
+	req.Action = "workspace_stat"
 	req.FileVersion = write.FileVersion
 	req.Content = ""
 	req.MustNotExist = false
+	metadata := server.workerWorkspaceFile(t.Context(), req)
+	if !metadata.OK || metadata.Status != "metadata_only" || metadata.Output != "" ||
+		metadata.FileSize == nil || *metadata.FileSize != int64(len("worker-created")) ||
+		metadata.FileVersion != write.FileVersion || metadata.OutputEncoding != "none" {
+		t.Fatalf("worker helper metadata must be bounded and content-free: %+v", metadata)
+	}
+	req.Action = "workspace_read"
 	read := server.workerWorkspaceFile(t.Context(), req)
 	if !read.OK || read.Output != "worker-created" {
 		t.Fatalf("worker helper read: %+v", read)
@@ -227,5 +234,108 @@ func TestWorkspaceFileHelperRunsWithWorkerIdentityAndAudit(t *testing.T) {
 	}
 	if _, err := os.Stat(filepath.Join(repo, laterPath)); !os.IsNotExist(err) {
 		t.Fatalf("worker mutation after degraded latch: %v", err)
+	}
+}
+
+// Metadata-first inspection is deliberately not a one-megabyte implicit read.
+// It must work for empty, binary and sparse large regular files without
+// returning source bytes or pretending their contents were interpreted.
+func TestWorkerWorkspaceStatMetadataFirstAndVersionedRead(t *testing.T) {
+	_, repo, op := workspaceFixture(t)
+	path := filepath.Join(repo, op.Path)
+	if err := os.WriteFile(path, nil, 0644); err != nil {
+		t.Fatal(err)
+	}
+	op.Action = "workspace_stat"
+	empty := readWorkerWorkspaceFile(op)
+	if !empty.OK || empty.Status != "metadata_only" || empty.FileSize == nil || *empty.FileSize != 0 ||
+		empty.FileVersion == "" || empty.Output != "" || empty.OutputEncoding != "none" || empty.BytesSeen != 0 {
+		t.Fatalf("empty metadata: %+v", empty)
+	}
+
+	if err := os.WriteFile(path, []byte{0xff, 0, 0xfe}, 0644); err != nil {
+		t.Fatal(err)
+	}
+	binary := readWorkerWorkspaceFile(op)
+	if !binary.OK || binary.FileSize == nil || *binary.FileSize != 3 ||
+		binary.Output != "" || binary.OutputEncoding != "none" || binary.BytesReturned != 0 {
+		t.Fatalf("binary metadata must not return data/guess MIME: %+v", binary)
+	}
+	op.FileVersion = empty.FileVersion
+	if stale := readWorkerWorkspaceFile(op); stale.OK || stale.ErrorCode != "file_changed" {
+		t.Fatalf("stale stat accepted: %+v", stale)
+	}
+	op.FileVersion = binary.FileVersion
+	op.Action = "workspace_read"
+	op.Limit = 2
+	read := readWorkerWorkspaceFile(op)
+	if !read.OK || read.OutputEncoding != "base64" || read.BytesReturned != 2 || !read.Truncated ||
+		read.NextOffset == nil || *read.NextOffset != 2 {
+		t.Fatalf("versioned range read after stat: %+v", read)
+	}
+
+	largePath := filepath.Join(repo, "src", "sparse.dat")
+	f, err := os.Create(largePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const sparseSize int64 = 8 << 30
+	if err := f.Truncate(sparseSize); err != nil {
+		f.Close()
+		t.Fatal(err)
+	}
+	if err := f.Close(); err != nil {
+		t.Fatal(err)
+	}
+	op.Path, op.FileVersion, op.Action, op.Offset, op.Limit = "src/sparse.dat", "", "workspace_stat", 0, 0
+	large := readWorkerWorkspaceFile(op)
+	if !large.OK || large.FileSize == nil || *large.FileSize != sparseSize ||
+		large.Output != "" || large.BytesSeen != 0 || large.NextOffset != nil {
+		t.Fatalf("sparse multi-GB metadata unexpectedly read file content: %+v", large)
+	}
+	op.Action, op.FileVersion, op.Limit = "workspace_read", large.FileVersion, 4096
+	window := readWorkerWorkspaceFile(op)
+	if !window.OK || window.BytesReturned != 4096 || window.FileSize == nil || *window.FileSize != sparseSize ||
+		window.NextOffset == nil || *window.NextOffset != 4096 || !window.Truncated {
+		t.Fatalf("metadata was not sufficient for an explicit bounded window: %+v", window)
+	}
+}
+
+func TestWorkerWorkspaceStatRejectsNonRegularAndUnsafePaths(t *testing.T) {
+	_, repo, op := workspaceFixture(t)
+	op.Action = "workspace_stat"
+	outside := filepath.Join(t.TempDir(), "outside")
+	if err := os.WriteFile(outside, []byte("secret"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(outside, filepath.Join(repo, "link")); err != nil {
+		t.Fatal(err)
+	}
+	for _, path := range []string{"../outside", "/etc/passwd", ".git/config", "link", "src"} {
+		op.Path = path
+		if result := readWorkerWorkspaceFile(op); result.OK {
+			t.Errorf("unsafe stat path %q succeeded: %+v", path, result)
+		}
+	}
+	if err := unix.Mkfifo(filepath.Join(repo, "named-pipe"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	op.Path = "named-pipe"
+	done := make(chan Response, 1)
+	go func() { done <- readWorkerWorkspaceFile(op) }()
+	select {
+	case result := <-done:
+		if result.OK || result.ErrorCode != "unsupported_file_type" {
+			t.Fatalf("FIFO stat: %+v", result)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("workspace_stat blocked on FIFO")
+	}
+	op.Path = "src/normal"
+	if result := readWorkerWorkspaceFile(workspaceFileOperation{
+		Action: "workspace_stat", WorkspaceRoot: op.WorkspaceRoot,
+		Workspace: op.Workspace, Path: op.Path, Limit: 1,
+	}); result.OK || result.ErrorCode != "invalid_request" {
+		t.Fatalf("stat accepted content-range parameters: %+v", result)
 	}
 }
