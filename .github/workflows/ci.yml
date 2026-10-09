@@ -1,4 +1,5 @@
 name: CI
+run-name: "CI ${{ github.event_name }} PR:${{ github.event.pull_request.number || 'none' }} REF:${{ github.event.pull_request.base.ref || 'none' }} BASE:${{ github.event.pull_request.base.sha || 'none' }} HEAD:${{ github.event.pull_request.head.sha || github.sha }}"
 on:
   push:
     branches: [main]
@@ -14,8 +15,13 @@ jobs:
   change-scope:
     name: CI change scope
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
     outputs:
       runtime_changed: ${{ steps.scope.outputs.runtime_changed }}
+      reuse_validated_pr: ${{ steps.reuse.outputs.reuse_validated_pr }}
       go_changed: ${{ steps.scope.outputs.go_changed }}
       shell_changed: ${{ steps.scope.outputs.shell_changed }}
       cloudflare_security_changed: ${{ steps.scope.outputs.cloudflare_security_changed }}
@@ -28,17 +34,25 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
         with:
           fetch-depth: 0
-      - name: Validate change-scope classifier
+      - name: Validate change-scope and reuse proofs
         run: |
-          bash -n scripts/ci-change-scope.sh tests/ci_change_scope.sh
+          for source in scripts/ci-change-scope.sh tests/ci_change_scope.sh scripts/ci-reuse-pr-validation.sh tests/ci_pr_validation_reuse.sh; do
+            bash -n "$source"
+          done
           bash tests/ci_change_scope.sh
+          bash tests/ci_pr_validation_reuse.sh
       - name: Classify changed paths
         id: scope
         run: bash scripts/ci-change-scope.sh >> "$GITHUB_OUTPUT"
+      - name: Reuse validated exact-tree PR evidence on squash-merged main
+        id: reuse
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/ci-reuse-pr-validation.sh >> "$GITHUB_OUTPUT"
 
   test:
     needs: change-scope
-    if: ${{ always() && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed != 'false') }}
+    if: ${{ always() && needs.change-scope.outputs.reuse_validated_pr != 'true' && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed != 'false') }}
     runs-on: ubuntu-22.04
     steps:
       - name: Require successful change classification
@@ -791,10 +805,10 @@ jobs:
           retention-days: 7
 
 
-  docs-main-release-artifact:
-    name: Docs-only main release artifact
+  main-release-artifact:
+    name: Exact main release artifact
     needs: change-scope
-    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.change-scope.result == 'success' && needs.change-scope.outputs.runtime_changed == 'false' }}
+    if: ${{ always() && github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.change-scope.result == 'success' && (needs.change-scope.outputs.runtime_changed == 'false' || needs.change-scope.outputs.reuse_validated_pr == 'true') }}
     runs-on: ubuntu-22.04
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -818,7 +832,9 @@ jobs:
 
   debian-compatibility:
     needs: change-scope
-    if: ${{ always() }}
+    # Required per-Debian PR checks still run. On a proven identical main
+    # squash, omit the entire three-runner matrix rather than starting empty VMs.
+    if: ${{ always() && needs.change-scope.outputs.reuse_validated_pr != 'true' }}
     name: Debian ${{ matrix.version }} stable compatibility
     runs-on: ubuntu-24.04
     strategy:
@@ -863,7 +879,7 @@ jobs:
 
   arm64-lifecycle:
     needs: change-scope
-    if: ${{ always() && (needs.change-scope.result != 'success' || needs.change-scope.outputs.go_changed != 'false' || needs.change-scope.outputs.platform_changed != 'false' || needs.change-scope.outputs.arm64_lifecycle_changed != 'false') }}
+    if: ${{ always() && needs.change-scope.outputs.reuse_validated_pr != 'true' && (needs.change-scope.result != 'success' || needs.change-scope.outputs.go_changed != 'false' || needs.change-scope.outputs.platform_changed != 'false' || needs.change-scope.outputs.arm64_lifecycle_changed != 'false') }}
     runs-on: ubuntu-24.04-arm
     steps:
       - name: Require successful change classification
