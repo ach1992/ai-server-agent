@@ -261,6 +261,19 @@ credential_health(){
   fi
 }
 
+credential_restart_and_wait(){
+  local attempt=0
+  systemctl restart ai-server-agent.service || return 1
+  while [ "$attempt" -lt 20 ]; do
+    if systemctl is-active --quiet ai-server-agent.service && credential_health >/dev/null 2>&1; then
+      return 0
+    fi
+    attempt=$((attempt + 1))
+    sleep 0.25
+  done
+  return 1
+}
+
 credential_status(){
   need_cmd jq
   validate_credential_store_file
@@ -302,14 +315,18 @@ credential_issue(){ (
   ' "$CREDENTIAL_STORE" > "$candidate" || { rm -f "$candidate" "$backup"; die "Could not construct credential update."; }
   chown root:"$AGENT_USER" "$candidate"; chmod 0640 "$candidate"
   mv -f "$candidate" "$CREDENTIAL_STORE"
-  if ! systemctl restart ai-server-agent.service || ! systemctl is-active --quiet ai-server-agent.service || ! credential_health || ! verify_mcp_token_local "$token"; then
+  if ! credential_restart_and_wait || ! verify_mcp_token_local "$token"; then
     restore="$(mktemp "$CONFIG_DIR/.mcp-credentials.restore.XXXXXX")"
     cp -a "$backup" "$restore"; chown root:"$AGENT_USER" "$restore"; chmod 0640 "$restore"
     mv -f "$restore" "$CREDENTIAL_STORE"
-    systemctl restart ai-server-agent.service || true
+    if ! credential_restart_and_wait; then
+      rm -f "$backup"
+      token=""
+      die "Credential activation could not be verified; the previous credential store was restored on disk but service recovery could not be verified."
+    fi
     rm -f "$backup"
     token=""
-    die "Credential activation could not be verified; the previous credential store was restored."
+    die "Credential activation could not be verified; the previous credential store was restored and service health was reverified."
   fi
   rm -f "$backup"
   rm -f -- "$AUTH_HEADER_FILE" "$CONFIG_DIR/mcp.token"
@@ -335,13 +352,16 @@ credential_revoke(){ (
   jq --arg id "$principal" --arg now "$now" '(.credentials[] | select(.principal.id==$id)) |= (.enabled=false | .revoked_at=$now)' "$CREDENTIAL_STORE" > "$candidate"
   chown root:"$AGENT_USER" "$candidate"; chmod 0640 "$candidate"
   mv -f "$candidate" "$CREDENTIAL_STORE"
-  if ! systemctl restart ai-server-agent.service || ! systemctl is-active --quiet ai-server-agent.service || ! credential_health; then
+  if ! credential_restart_and_wait; then
     restore="$(mktemp "$CONFIG_DIR/.mcp-credentials.restore.XXXXXX")"
     cp -a "$backup" "$restore"; chown root:"$AGENT_USER" "$restore"; chmod 0640 "$restore"
     mv -f "$restore" "$CREDENTIAL_STORE"
-    systemctl restart ai-server-agent.service || true
+    if ! credential_restart_and_wait; then
+      rm -f "$backup"
+      die "Credential revocation activation could not be verified; the previous credential store was restored on disk but service recovery could not be verified."
+    fi
     rm -f "$backup"
-    die "Credential revocation activation could not be verified; the previous credential store was restored."
+    die "Credential revocation activation could not be verified; the previous credential store was restored and service health was reverified."
   fi
   rm -f "$backup"
   printf '%sCredential revoked:%s %s\n' "$GREEN" "$RESET" "$principal"
