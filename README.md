@@ -196,6 +196,8 @@ Once a supported MCP client is connected, the Agent exposes a compact tool surfa
 | --- | --- |
 | `agent_environment` | read the current self-preservation manifest before host-wide changes |
 | `run_command` | run ordinary Bash as `aiworker` in `/srv/ai-workspace` |
+| `repository_discover` / `repository_inspect` | discover or prove exact Git repository/worktree identity, HEAD, branch/upstream, dirty/conflict state and linked worktrees without trusting directory names |
+| `worktree_create` / `worktree_remove` | create exact-SHA task worktrees and safely remove only clean linked worktrees after durability/disposable-state checks |
 | `run_root_command` | run Bash as root, subject to executor policy/approval guardrails |
 | `start_job` | start a persistent transient-systemd background job that survives MCP/client disconnects |
 | `job_status` / `job_output` / `job_stop` | inspect, read output from, or stop a persistent Agent job |
@@ -209,6 +211,14 @@ Once a supported MCP client is connected, the Agent exposes a compact tool surfa
 Use `run_command` for normal development work, builds, tests, Git, project package managers and diagnostics that do not require host privilege. It runs as `aiworker` with `/srv/ai-workspace` as HOME/CWD. Synchronous `run_command` / `run_root_command` calls are limited to five minutes; work expected to run longer or produce high output should use `start_job`. Command bodies are limited to 256 KiB and are delivered to Bash through stdin rather than being copied into the spawned process argv. Synchronous stdout/stderr is captured with a 1 MiB production-time head/tail bound and returns explicit encoding, raw-byte, truncation and duration/timeout metadata; binary output is base64-encoded instead of being treated as UTF-8. Active synchronous worker and root execution have separate bounded capacity and fail immediately with a structured `busy/resource_limit` result instead of entering a hidden queue. Cancellation/timeout terminates the command process group with TERM followed by a bounded KILL fallback, and ordinary same-process-group background children are cleaned up; a command that deliberately escapes that process group cannot be claimed as stopped, so durable/background work belongs in `start_job` or an intentionally managed service.
 
 `/srv/ai-workspace` is persistent. Connected models are instructed to inspect and reuse existing repositories, worktrees and task environments before creating duplicates, prefer `git worktree` when another checkout of the same repository is appropriate, and never treat dirty, untracked, ambiguous or unknown workspace state as safe to delete.
+
+### Repository and worktree lifecycle
+
+The structured repository tools solve checkout **identity and lifecycle correctness**; they do not replace Git. `repository_discover` finds bounded Git identities under the configured workspace and can filter by canonical remote identity without contacting the remote. `repository_inspect` reports the exact repository/worktree path, common Git directory, HEAD, branch or detached state, upstream divergence, staged/unstaged/untracked/conflict counts, in-progress Git operations, remotes and linked worktrees. Optional `verify_remote=true` checks either an explicitly selected configured remote/branch or the current upstream with `git ls-remote` without fetching or moving local refs; this is the structured reconciliation step after an ordinary CLI push. Credential-bearing URL userinfo/query data is not returned.
+
+`worktree_create` requires an exact expected start SHA and refuses stale refs, a branch already checked out elsewhere, path collisions and ambiguous state. `worktree_remove` never removes the main worktree or local branch, never uses force, and refuses dirty/untracked/conflicted/in-progress or incompletely inspected state. Normal removal additionally proves that the selected external remote branch is exactly at the expected HEAD; `disposable=true` is an explicit escape hatch only for a clean task worktree whose external durability is intentionally not required.
+
+Ordinary `git status`, `git diff`, `git log`, `git fetch`, `git commit`, `git push` and similar verbs remain normal Git CLI through `run_command` or future PTY use. Structured lifecycle Git runs under `aiworker`, stays inside the configured workspace (including Git/common metadata), disables repository hooks/external fsmonitor integration, refuses repository checkout filters on the structured create path, and uses non-interactive Git arguments rather than shell-composed path/ref commands. Repositories that intentionally require checkout filters remain usable through ordinary Git CLI.
 
 Use `run_root_command` only when host-level privilege is genuinely required. Normal root commands can execute directly, but commands that reference protected Agent resources, can interrupt connectivity/control-plane services, or match destructive-operation policy return `approval_required` first. The connected client/model should explain the exact risk and retry with `approval=true` only after explicit user confirmation.
 
@@ -432,6 +442,7 @@ Use change impact rather than ritual repetition:
 - repeat live Cloudflare validation when Cloudflare reconciliation, ownership/recovery, TLS, DNS, public binding or provider API assumptions change;
 - repeat real ChatGPT custom-MCP validation when endpoint/auth behavior, MCP tool schema/annotations, approval semantics, or important client-side compatibility assumptions change;
 - repeat browser setup/run validation when browser installer/runtime/profile behavior changes;
+- repeat repository/worktree lifecycle validation when repository identity, Git execution isolation, worktree create/remove or remote-durability semantics change;
 - repeat privileged/root safety validation when executor policy, protected resources, root execution environment or approval behavior changes.
 
 A documentation-only change that does not alter these contracts does not by itself require a new stable release or destructive fresh-install cycle.

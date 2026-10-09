@@ -160,9 +160,9 @@ acquire_lifecycle_lock
 if [ -s "$CONFIG_FILE" ]; then FRESH_INSTALL=0; fi
 
 export DEBIAN_FRONTEND=noninteractive
-log "Installing minimal setup utilities (ca-certificates, curl, jq, openssl, tar, xz-utils)..."
+log "Installing minimal setup utilities (ca-certificates, curl, git, jq, openssl, tar, xz-utils)..."
 apt-get update -qq
-apt-get install -y -qq ca-certificates curl jq openssl tar xz-utils >/dev/null
+apt-get install -y -qq ca-certificates curl git jq openssl tar xz-utils >/dev/null
 
 # Preserve an existing connection unless explicit environment variables override it.
 if [ "$FRESH_INSTALL" -eq 0 ]; then
