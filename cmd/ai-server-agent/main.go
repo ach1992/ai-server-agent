@@ -16,6 +16,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "job-runner" {
 		os.Exit(executor.RunJobHelper(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "workspace-helper" {
+		os.Exit(executor.RunWorkspaceFileHelper())
+	}
 
 	cfgPath := flag.String("config", "/etc/ai-server-agent/config.json", "config path")
 	flag.Parse()

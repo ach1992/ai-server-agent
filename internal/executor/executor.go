@@ -38,6 +38,7 @@ type Server struct {
 	fileWriteHooks            *fileWriteTestHooks
 	workspaceHooks            *workspaceTestHooks
 	structuralSearchBinary    string // test-only override; production resolves trusted ast-grep paths
+	workspaceHelperBinary     string // test-only compiled Agent binary; production self-executes
 }
 
 func NewServer(cfg config.Config, token string) (*Server, error) {
@@ -144,6 +145,8 @@ func (s *Server) dispatch(req Request) Response {
 		return s.readFile(req)
 	case "write_file":
 		return s.writeFile(req)
+	case "workspace_read", "workspace_write":
+		return s.workerWorkspaceFile(context.Background(), req)
 	case "workspace_search":
 		return s.workspaceSearchContext(context.Background(), req)
 	case "repository_environment":

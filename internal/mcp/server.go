@@ -308,6 +308,7 @@ func (s *Server) registerTools() {
 		})
 
 	s.registerRepositoryEnvironmentTool()
+	s.registerWorkspaceFileTools()
 	s.registerRepositoryTools()
 	s.registerWorkspaceSearchTool()
 }
