@@ -306,7 +306,7 @@ func TestClientCallContextOverridesCallerPrincipalFromAuthenticatedContext(t *te
 			return
 		}
 		reqCh <- req
-		if err := json.NewEncoder(conn).Encode(Response{OK: true, Status: "ok"}); err != nil {
+		if err := json.NewEncoder(conn).Encode(Response{OK: true, Status: "ok", RequestID: req.RequestID, OperationID: req.OperationID}); err != nil {
 			errCh <- err
 		}
 	}()
@@ -314,9 +314,14 @@ func TestClientCallContextOverridesCallerPrincipalFromAuthenticatedContext(t *te
 	ctx := credential.WithPrincipal(context.Background(), credential.Principal{
 		ID: "mcp-gateway", Class: "gateway", Name: "mcp-gateway",
 	})
-	_, err = ClientCallContext(ctx, socket, "executor-secret", Request{
+	ctx, requestID, err := WithNewRequestCorrelation(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	resp, err := ClientCallContext(ctx, socket, "executor-secret", Request{
 		Action:         "run",
 		Command:        "true",
+		Approval:       true,
 		PrincipalID:    "caller-controlled",
 		PrincipalClass: "caller",
 		PrincipalName:  "caller",
@@ -331,6 +336,12 @@ func TestClientCallContextOverridesCallerPrincipalFromAuthenticatedContext(t *te
 	case req := <-reqCh:
 		if req.PrincipalID != "mcp-gateway" || req.PrincipalClass != "gateway" || req.PrincipalName != "mcp-gateway" {
 			t.Fatalf("executor request principal was not server-derived: %+v", req)
+		}
+		if req.RequestID != requestID || req.ApprovalID == "" {
+			t.Fatalf("MCP-entry correlation was not propagated to executor request: want=%q req=%+v", requestID, req)
+		}
+		if resp.RequestID != req.RequestID {
+			t.Fatalf("request correlation was not preserved in response: resp=%+v req=%+v", resp, req)
 		}
 	case <-time.After(2 * time.Second):
 		t.Fatal("timed out waiting for executor request")

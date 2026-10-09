@@ -14,7 +14,6 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/ach1992/ai-server-agent/internal/audit"
 	"github.com/ach1992/ai-server-agent/internal/credential"
 	"github.com/ach1992/ai-server-agent/internal/policy"
 )
@@ -259,6 +258,10 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 		return resp
 	}
 	defer release()
+	if blocked := s.beginActionAudit(req, "run", auditMode(req.Root), req.Command, dec.Category); blocked != nil {
+		blocked.DurationMS = time.Since(started).Milliseconds()
+		return *blocked
+	}
 
 	out := newBoundedOutputCollector(maxSyncOutputBytes)
 	cmd.Stdout = out
@@ -320,15 +323,6 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 		}
 	}
 
-	_ = s.audit.Write(audit.Entry{
-		Action:         "run",
-		Mode:           map[bool]string{true: "root", false: "worker"}[req.Root],
-		Success:        err == nil,
-		Detail:         dec.Category,
-		PrincipalID:    req.PrincipalID,
-		PrincipalClass: req.PrincipalClass,
-		PrincipalName:  req.PrincipalName,
-	})
 	resp := Response{
 		OK:         err == nil,
 		Error:      errorText,
@@ -340,7 +334,7 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 		TimedOut:   timedOut,
 	}
 	applyOutputResult(&resp, out.Result())
-	return resp
+	return s.finishActionAudit(req, "run", auditMode(req.Root), req.Command, dec.Category, started, resp)
 }
 func encodeExecutorResponse(resp Response) []byte {
 	payload, err := json.Marshal(resp)
@@ -363,6 +357,14 @@ func ClientCallContext(ctx context.Context, socket, token string, req Request) (
 		req.PrincipalID = principal.ID
 		req.PrincipalClass = principal.Class
 		req.PrincipalName = principal.Name
+	}
+	if req.RequestID == "" {
+		if requestID, ok := RequestCorrelationID(ctx); ok {
+			req.RequestID = requestID
+		}
+	}
+	if err := ensureRequestCorrelation(&req); err != nil {
+		return Response{}, err
 	}
 	req.Token = token
 	dialer := net.Dialer{Timeout: 5 * time.Second}

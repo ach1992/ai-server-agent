@@ -10,6 +10,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/ach1992/ai-server-agent/internal/audit"
 	"github.com/ach1992/ai-server-agent/internal/policy"
@@ -265,7 +266,7 @@ func (s *Server) readFile(req Request) Response {
 	if next < before.Size {
 		omitted = before.Size - next
 	}
-	_ = s.audit.Write(audit.Entry{Action: "read_file", Mode: "root", Command: path, Success: true, PrincipalID: req.PrincipalID, PrincipalClass: req.PrincipalClass, PrincipalName: req.PrincipalName})
+	_ = s.audit.Write(audit.Entry{Phase: "complete", Action: "read_file", Mode: "root", Command: path, Success: audit.Bool(true), RequestID: req.RequestID, OperationID: req.OperationID, ApprovalID: req.ApprovalID, PrincipalID: req.PrincipalID, PrincipalClass: req.PrincipalClass, PrincipalName: req.PrincipalName})
 	return Response{
 		OK:              true,
 		Output:          output,
@@ -439,7 +440,7 @@ func rollbackExistingExchange(parentFD int, base, tempName string, prepared, dis
 	return nil
 }
 
-func (s *Server) writeFile(req Request) Response {
+func (s *Server) writeFile(req Request) (resp Response) {
 	path, err := validateFilePath(req.Path)
 	if err != nil {
 		return fileError("invalid_path", "validation", err)
@@ -496,6 +497,14 @@ func (s *Server) writeFile(req Request) Response {
 	if req.Mode != 0 {
 		mode = req.Mode
 	}
+
+	auditStarted := time.Now()
+	if blocked := s.beginActionAudit(req, "write_file", "root", path, dec.Category); blocked != nil {
+		return *blocked
+	}
+	defer func() {
+		resp = s.finishActionAudit(req, "write_file", "root", path, dec.Category, auditStarted, resp)
+	}()
 
 	tempFD, tempName, err := createTempFileAt(parentFD)
 	if err != nil {
@@ -603,7 +612,6 @@ func (s *Server) writeFile(req Request) Response {
 		return unknownFileCompletion("replacement committed but final destination identity changed after directory sync", nil)
 	}
 
-	_ = s.audit.Write(audit.Entry{Action: "write_file", Mode: "root", Command: path, Success: true, PrincipalID: req.PrincipalID, PrincipalClass: req.PrincipalClass, PrincipalName: req.PrincipalName})
 	return Response{
 		OK:          true,
 		Status:      "written",

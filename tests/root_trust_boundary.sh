@@ -12,6 +12,7 @@ MANAGE_CMD=/usr/local/sbin/ai-server-agent-manage
 MANAGE_IMPL=/usr/local/lib/ai-server-agent/manage.sh
 LIFECYCLE_LOCK_DIR=/run/lock/ai-server-agent
 LIFECYCLE_LOCK="$LIFECYCLE_LOCK_DIR/management.lock"
+AUDIT_FINGERPRINT_KEY=/etc/ai-server-agent/audit-fingerprint.key
 
 assert_owner_mode(){
   local path="$1" owner="$2" group="$3" mode="$4" actual
@@ -34,6 +35,9 @@ assert_owner_mode "$STATE_DIR/runtime" root root 711
 assert_owner_mode "$STATE_DIR/jobs" root root 711
 assert_owner_mode "$LIFECYCLE_LOCK_DIR" root root 700
 assert_owner_mode "$LIFECYCLE_LOCK" root root 600
+assert_owner_mode "$AUDIT_FINGERPRINT_KEY" root root 600
+[ ! -L "$AUDIT_FINGERPRINT_KEY" ]
+grep -Eq '^v1:[0-9a-f]{64}$' "$AUDIT_FINGERPRINT_KEY"
 [ ! -L "$INSTALL_STATE" ]
 [ ! -L "$LIFECYCLE_LOCK" ]
 jq -e 'type=="object" and (keys|sort)==["channel","ref","track_ref","version"]' "$INSTALL_STATE" >/dev/null
@@ -52,6 +56,8 @@ expect_denied aiagent ln -sfn /tmp/attacker "$STATE_DIR/AI_ENVIRONMENT.json"
 
 state_hash="$(sha256sum "$INSTALL_STATE" | awk '{print $1}')"
 for user in aiagent aiworker; do
+  expect_denied "$user" cat "$AUDIT_FINGERPRINT_KEY"
+  expect_denied "$user" sh -c "printf attacker > '$AUDIT_FINGERPRINT_KEY'"
   expect_denied "$user" rm -f "$INSTALL_STATE"
   expect_denied "$user" mv "$INSTALL_STATE" "$CONTROL_DIR/install-state.replaced"
   expect_denied "$user" ln -sfn /tmp/attacker "$INSTALL_STATE"

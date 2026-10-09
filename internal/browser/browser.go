@@ -412,12 +412,17 @@ func (m *Manager) Setup(ctx context.Context, approval bool) (executor.Response, 
 		return browserBusy("browser setup"), nil
 	}
 	defer m.mu.Unlock()
+	correlatedCtx, _, err := executor.EnsureRequestCorrelationContext(ctx)
+	if err != nil {
+		return browserUnknown("browser setup correlation", err, false), nil
+	}
+	ctx = correlatedCtx
 
 	if before := m.inspectStatus(ctx, true); before.Ready {
 		clientCtx, cancel := context.WithTimeout(ctx, browserCleanupTimeout+browserExecutorClientGrace)
 		defer cancel()
 		resp, err := executor.ClientCallContext(clientCtx, m.cfg.ExecutorSocket, m.token, executor.Request{
-			Action: "run", Command: m.cleanupCommand(), Root: true, Approval: true,
+			Action: "run", AuditAction: "browser_cleanup", Command: m.cleanupCommand(), Root: true, Approval: true,
 			TimeoutMS: int64(browserCleanupTimeout / time.Millisecond),
 		})
 		if err != nil {
@@ -436,11 +441,12 @@ func (m *Manager) Setup(ctx context.Context, approval bool) (executor.Response, 
 	clientCtx, cancel := context.WithTimeout(ctx, browserSetupTimeout+browserExecutorClientGrace)
 	defer cancel()
 	resp, err := executor.ClientCallContext(clientCtx, m.cfg.ExecutorSocket, m.token, executor.Request{
-		Action:    "run",
-		Command:   command,
-		Root:      true,
-		Approval:  true,
-		TimeoutMS: int64(browserSetupTimeout / time.Millisecond),
+		Action:      "run",
+		AuditAction: "browser_setup",
+		Command:     command,
+		Root:        true,
+		Approval:    true,
+		TimeoutMS:   int64(browserSetupTimeout / time.Millisecond),
 	})
 	if err != nil {
 		return browserUnknown("browser setup", err, true), nil
@@ -477,14 +483,20 @@ func (m *Manager) Run(ctx context.Context, opts RunOptions) (executor.Response, 
 	if status := m.inspectStatus(ctx, true); !status.Ready {
 		return browserError("browser_runtime_not_ready", "state", "browser runtime is not ready: "+status.Reason+"; call browser_setup"), nil
 	}
+	correlatedCtx, _, err := executor.EnsureRequestCorrelationContext(ctx)
+	if err != nil {
+		return browserUnknown("browser execution correlation", err, false), nil
+	}
+	ctx = correlatedCtx
 
 	clientCtx, cancel := context.WithTimeout(ctx, timeout+browserExecutorClientGrace)
 	defer cancel()
 	resp, err := executor.ClientCallContext(clientCtx, m.cfg.ExecutorSocket, m.token, executor.Request{
-		Action:    "run",
-		Command:   m.runCommand(opts.Script, opts.IgnoreHTTPSErrors),
-		Root:      false,
-		TimeoutMS: int64(timeout / time.Millisecond),
+		Action:      "run",
+		AuditAction: "browser_run",
+		Command:     m.runCommand(opts.Script, opts.IgnoreHTTPSErrors),
+		Root:        false,
+		TimeoutMS:   int64(timeout / time.Millisecond),
 	})
 	if err != nil {
 		return browserUnknown("browser execution", err, false), nil
