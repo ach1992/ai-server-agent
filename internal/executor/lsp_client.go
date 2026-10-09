@@ -212,8 +212,9 @@ func (w *lspWire) notify(method string, params any) error {
 }
 
 // workerGoDefinition is the first bounded, read-only consumer of the shared
-// broker. The source is supplied by the #55 worker file path, not read as root
-// or inferred from an arbitrary host path. No tool is published by this slice.
+// broker. Its caller must supply version-consistent source via #55's worker
+// file read; this private helper never reads workspace files as root. No
+// public tool or untrusted caller interface is published by this slice.
 func (s *Server) workerGoDefinition(ctx context.Context, req Request, goplsPath, file string, source string, line, character int) (json.RawMessage, error) {
 	if line < 0 || character < 0 || line > 1<<20 || character > 1<<20 {
 		return nil, errors.New("lsp_invalid_position")
