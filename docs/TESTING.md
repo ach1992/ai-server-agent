@@ -322,6 +322,12 @@ recover exact repository/worktree
 -> recover again from GitHub evidence
 ```
 
+### Structural search
+
+`internal/executor/workspace_search_test.go` keeps the first-class `workspace_search` surface bounded and read-only. Tests cover explicit workspace/path containment including symlink escape rejection, structured zero-based file/range/capture output, no-match exit semantics, result-limit and timeout partial-state reporting, malformed/out-of-workspace engine output rejection, engine/version validation, repository-config isolation through `--config /dev/null`, and process cancellation when enough results have been collected. MCP discovery tests preserve the text -> structural -> semantic responsibility ladder and prevent rewrite/apply inputs from entering the public schema.
+
+A gated real-engine acceptance (`AST_GREP_ACCEPTANCE_BIN`) runs the same production wrapper against an explicitly supplied ast-grep binary. The #62 candidate evidence exercised both the minimum-supported 0.40.5 contract and 0.45.3 with release-asset SHA-256 verification before execution. A separate rewrite-plan evaluation proves ast-grep can calculate a replacement while the source checksum remains unchanged; the first-class tool exposes no automatic apply path. Managed installation is intentionally not performed merely to satisfy a read-only search call.
+
 ### Repository environment/toolchain discovery
 
 `internal/executor/environment_test.go` validates the lightweight #64 discovery/reuse boundary against real temporary Git repositories. Coverage includes fresh-repository recovery from tracked manifests, compatible/incompatible worker-cache toolchain reuse, native language and package-manager declarations, package scripts without execution, mise/devenv/Dev Container/Dagger detection without automatic provisioning, explicit multi-mechanism/package-manager selection state, conflicting exact pins, untracked declaration durability warnings, workspace path-escape/symlink rejection, and bounded tool-version output. `internal/mcp/server_test.go` also keeps the public tool read-only, idempotent, local-only and bound to an explicit repository path with a typed output schema.

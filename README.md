@@ -196,6 +196,7 @@ Once a supported MCP client is connected, the Agent exposes a compact tool surfa
 | --- | --- |
 | `agent_environment` | read the current self-preservation manifest before host-wide changes |
 | `run_command` | run ordinary Bash as `aiworker` in `/srv/ai-workspace` |
+| `workspace_search` | run bounded read-only structural AST search with `ast-grep`; text search remains `rg`/`git grep`, semantic meaning remains LSP-owned |
 | `repository_environment` | inspect repository-owned language/toolchain/environment declarations and current host compatibility without installing or running project tasks |
 | `repository_discover` / `repository_inspect` | discover or prove exact Git repository/worktree identity, HEAD, branch/upstream, dirty/conflict state and linked worktrees without trusting directory names |
 | `worktree_create` / `worktree_remove` | create exact-SHA task worktrees and safely remove only clean linked worktrees after durability/disposable-state checks |
@@ -212,6 +213,14 @@ Once a supported MCP client is connected, the Agent exposes a compact tool surfa
 Use `run_command` for normal development work, builds, tests, Git, project package managers and diagnostics that do not require host privilege. It runs as `aiworker` with `/srv/ai-workspace` as HOME/CWD. Synchronous `run_command` / `run_root_command` calls are limited to five minutes; work expected to run longer or produce high output should use `start_job`. Command bodies are limited to 256 KiB and are delivered to Bash through stdin rather than being copied into the spawned process argv. Synchronous stdout/stderr is captured with a 1 MiB production-time head/tail bound and returns explicit encoding, raw-byte, truncation and duration/timeout metadata; binary output is base64-encoded instead of being treated as UTF-8. Active synchronous worker and root execution have separate bounded capacity and fail immediately with a structured `busy/resource_limit` result instead of entering a hidden queue. Cancellation/timeout terminates the command process group with TERM followed by a bounded KILL fallback, and ordinary same-process-group background children are cleaned up; a command that deliberately escapes that process group cannot be claimed as stopped, so durable/background work belongs in `start_job` or an intentionally managed service.
 
 `/srv/ai-workspace` is persistent. Connected models are instructed to inspect and reuse existing repositories, worktrees and task environments before creating duplicates, prefer `git worktree` when another checkout of the same repository is appropriate, and never treat dirty, untracked, ambiguous or unknown workspace state as safe to delete.
+
+### Structural code search
+
+Use the lowest inspection layer that answers the question correctly: `rg`/`git grep` through `run_command` for literal or regex text occurrences, `workspace_search` for AST/syntax-tree shapes, and LSP for symbol/type/reference meaning. `workspace_search` currently accepts `mode=structural` only and returns workspace-relative files, zero-based ranges, bounded matched text and bounded metavariable captures. Result count, individual match/capture text, aggregate result size and execution time are bounded; a result that reaches a bound is returned explicitly as partial/truncated rather than pretending the search was complete.
+
+The first-class structural path is read-only. It never exposes ast-grep rewrite/apply flags, never creates a code index, uses one scan thread, rejects requested search paths that resolve outside the selected workspace, does not enable ast-grep `--follow`, and runs ast-grep with `--config /dev/null` so repository `sgconfig.yml`/advanced rule configuration is not implicitly loaded. Advanced ast-grep rules/codemods remain an intentional direct-CLI escape hatch rather than an expanded MCP surface; any future first-class structural edit must flow through the safe workspace-edit/precondition semantics tracked separately instead of making ast-grep a second filesystem writer.
+
+The Agent detects a trusted full `ast-grep` executable and requires version 0.40.5 or newer for the current JSON-stream contract. Linux `/usr/bin/sg` is not treated as ast-grep because that name is commonly owned by util-linux. Structural search does not silently install tooling: if no trusted compatible engine is present, it fails clearly so installation/provisioning can remain an explicit lifecycle action.
 
 ### Repository environment discovery
 

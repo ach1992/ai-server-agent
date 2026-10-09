@@ -90,6 +90,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 	foundRepositoryInspect := false
 	foundWorktreeCreate := false
 	foundWorktreeRemove := false
+	foundWorkspaceSearch := false
 	for _, tool := range res.Tools {
 		switch tool.Name {
 		case "agent_environment":
@@ -176,6 +177,41 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			for _, field := range []string{"file_version", "must_not_exist"} {
 				if !strings.Contains(string(in), `"`+field+`"`) {
 					t.Fatalf("write_file input schema missing %q: %s", field, in)
+				}
+			}
+		case "workspace_search":
+			foundWorkspaceSearch = true
+			if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint || !tool.Annotations.IdempotentHint {
+				t.Fatal("workspace_search must advertise read-only/idempotent hints")
+			}
+			if tool.Annotations.DestructiveHint == nil || *tool.Annotations.DestructiveHint {
+				t.Fatal("workspace_search must remain non-destructive")
+			}
+			if tool.Annotations.OpenWorldHint == nil || *tool.Annotations.OpenWorldHint {
+				t.Fatal("workspace_search must remain local-only")
+			}
+			if !strings.Contains(tool.Description, "never applies rewrites") || !strings.Contains(tool.Description, "rg/git grep") || !strings.Contains(tool.Description, "LSP") {
+				t.Fatalf("workspace_search description must preserve inspection responsibility ladder: %q", tool.Description)
+			}
+			in, err := json.Marshal(tool.InputSchema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"mode", "workspace", "language", "pattern", "paths", "globs", "limit", "timeout_ms"} {
+				if !strings.Contains(string(in), `"`+field+`"`) {
+					t.Fatalf("workspace_search input schema missing %q: %s", field, in)
+				}
+			}
+			if strings.Contains(string(in), `"rewrite"`) || strings.Contains(string(in), `"update_all"`) {
+				t.Fatalf("workspace_search must not expose automatic rewrite/apply inputs: %s", in)
+			}
+			out, err := json.Marshal(tool.OutputSchema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"engine_version", "matches", "complete", "truncated", "truncation_reason", "timed_out", "duration_ms", "file", "range", "captures"} {
+				if !strings.Contains(string(out), `"`+field+`"`) {
+					t.Fatalf("workspace_search output schema missing %q: %s", field, out)
 				}
 			}
 		case "repository_discover":
@@ -295,8 +331,8 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			}
 		}
 	}
-	if !foundEnvironment || !foundRoot || !foundStartJob || !foundJobStatus || !foundReadFile || !foundWriteFile || !foundRepositoryEnvironment || !foundRepositoryDiscover || !foundRepositoryInspect || !foundWorktreeCreate || !foundWorktreeRemove || !foundBrowserStatus || !foundBrowser {
-		t.Fatalf("required tools missing: environment=%v root=%v start_job=%v job_status=%v read_file=%v write_file=%v repository_environment=%v repository_discover=%v repository_inspect=%v worktree_create=%v worktree_remove=%v browser_status=%v browser=%v", foundEnvironment, foundRoot, foundStartJob, foundJobStatus, foundReadFile, foundWriteFile, foundRepositoryEnvironment, foundRepositoryDiscover, foundRepositoryInspect, foundWorktreeCreate, foundWorktreeRemove, foundBrowserStatus, foundBrowser)
+	if !foundEnvironment || !foundRoot || !foundStartJob || !foundJobStatus || !foundReadFile || !foundWriteFile || !foundWorkspaceSearch || !foundRepositoryEnvironment || !foundRepositoryDiscover || !foundRepositoryInspect || !foundWorktreeCreate || !foundWorktreeRemove || !foundBrowserStatus || !foundBrowser {
+		t.Fatalf("required tools missing: environment=%v root=%v start_job=%v job_status=%v read_file=%v write_file=%v workspace_search=%v repository_environment=%v repository_discover=%v repository_inspect=%v worktree_create=%v worktree_remove=%v browser_status=%v browser=%v", foundEnvironment, foundRoot, foundStartJob, foundJobStatus, foundReadFile, foundWriteFile, foundWorkspaceSearch, foundRepositoryEnvironment, foundRepositoryDiscover, foundRepositoryInspect, foundWorktreeCreate, foundWorktreeRemove, foundBrowserStatus, foundBrowser)
 	}
 }
 
@@ -307,6 +343,9 @@ func TestInstructionsDescribePersistentWorkspace(t *testing.T) {
 		"task environments",
 		"prefer git worktree",
 		"never delete dirty, untracked, ambiguous, or unknown workspace state",
+		"rg/git grep through run_command for text occurrences",
+		"workspace_search for structural syntax-tree patterns",
+		"do not treat structural matches as semantic symbol/type/reference resolution",
 	} {
 		if !strings.Contains(got, want) {
 			t.Fatalf("instructions missing %q", want)
