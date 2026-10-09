@@ -35,9 +35,19 @@ parents="$(git show -s --format='%P' "$sha" 2>/dev/null)" || refuse 'missing pus
 [ "$parents" = "$before" ] || refuse 'not a single squash commit based on before'
 main_tree="$(git rev-parse "$sha^{tree}" 2>/dev/null)" || refuse 'unreadable main tree'
 
-# GitHub's associated-PR endpoint retains the merged PR linkage even when
-# source branches are later deleted. Refuse ambiguous or cross-repository PRs.
-prs="$(gh api "repos/$repo/commits/$sha/pulls" 2>/dev/null)" || refuse 'merged PR lookup failed'
+# GitHub's associated-PR endpoint retains the merged PR linkage after branch
+# deletion, but is PAGINATED. Uniqueness is meaningless over just page 1.
+# Explicitly bound a single-page result (<100) and prove page 2 is empty.
+# A full page, later-page entries, any bad shape or API error => full main CI.
+# Even unrelated later-page PRs are conservatively refused; successful reuse
+# is an optimization, not a reason to weaken the uniqueness trust anchor.
+prs="$(gh api "repos/$repo/commits/$sha/pulls?per_page=100&page=1" 2>/dev/null)" || refuse 'merged PR page 1 lookup failed'
+jq -se 'length == 1 and (.[0] | type == "array" and length < 100)' <<< "$prs" >/dev/null 2>&1 || refuse 'merged PR page 1 incomplete or malformed'
+more_prs="$(gh api "repos/$repo/commits/$sha/pulls?per_page=100&page=2" 2>/dev/null)" || refuse 'merged PR page 2 completeness lookup failed'
+jq -se 'length == 1 and (.[0] | type == "array" and length == 0)' <<< "$more_prs" >/dev/null 2>&1 || refuse 'merged PR inventory has additional pages or invalid evidence'
+
+# We have proved the bounded PR inventory is complete; only NOW may a unique
+# exact merge-commit association be selected. Reject conflicting associations.
 pr="$(jq -er --arg repo "$repo" --arg sha "$sha" --arg base "$before" '
   select(type == "array")
   | [.[] | select(.merge_commit_sha == $sha)]

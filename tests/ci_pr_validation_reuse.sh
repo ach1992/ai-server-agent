@@ -34,8 +34,33 @@ set -Eeuo pipefail
 [ "${1:-}" = api ] || exit 3
 path="${2:-}"
 case "$path" in
-  "repos/$GITHUB_REPOSITORY/commits/$TEST_MAIN/pulls")
+  "repos/$GITHUB_REPOSITORY/commits/$TEST_MAIN/pulls"*)
+    # Legacy selector used an unpaged URI. New selector must ask for page 1
+    # explicitly and PROVE that page 2 is empty, or refuse reuse.
+    case "$path" in
+      "repos/$GITHUB_REPOSITORY/commits/$TEST_MAIN/pulls") page=1 ;;
+      "repos/$GITHUB_REPOSITORY/commits/$TEST_MAIN/pulls?per_page=100&page=1") page=1 ;;
+      "repos/$GITHUB_REPOSITORY/commits/$TEST_MAIN/pulls?per_page=100&page=2") page=2 ;;
+      *) echo "unexpected commit-pulls API request $path" >&2; exit 3 ;;
+    esac
+    printf '%s\n' "$path" >> "$MOCK_API_LOG"
     [ "${MOCK_CASE:-}" != api_error ] || exit 7
+    if [ "$page" -eq 2 ]; then
+      case "${MOCK_CASE:-}" in
+        duplicate_later_page)
+          jq -n --arg main "$TEST_MAIN" '[{number:92,state:"closed",
+            merge_commit_sha:$main,base:{ref:"main",sha:"another-base"},
+            head:{sha:"another-head",ref:"another-branch"}}]';;
+        page2_unrelated_with_first_match)
+          echo '[{"number":92,"merge_commit_sha":"0000000000000000000000000000000000000000"}]';;
+        page2_api_error) exit 7;;
+        page2_malformed_json) echo 'not-json';;
+        page2_nonarray) echo '{"items":[]}';;
+        page2_multiple_documents) printf '[]\n[]\n';;
+        *) echo '[]';;
+      esac
+      exit 0
+    fi
     if [ "${MOCK_CASE:-}" = no_pr ]; then echo '[]';exit 0;fi
     repo="$GITHUB_REPOSITORY"
     if [ "${MOCK_CASE:-}" = fork ];then repo='other/fork';fi
@@ -48,6 +73,16 @@ case "$path" in
       elif [ "${MOCK_CASE:-}" = second_same_merge_wrong_base ]; then
         jq '. + [ (.[0] | .number=92 | .base.sha="0000000000000000000000000000000000000000") ]'
       elif [ "${MOCK_CASE:-}" = missing_pr_number ]; then jq '.[0] |= del(.number)'
+      elif [ "${MOCK_CASE:-}" = page1_malformed_json ]; then echo 'not-json'
+      elif [ "${MOCK_CASE:-}" = page1_nonarray ]; then jq '{items:.}'
+      elif [ "${MOCK_CASE:-}" = page1_multiple_documents ]; then cat; echo '[]'
+      elif [ "${MOCK_CASE:-}" = page1_full_100 ] || [ "${MOCK_CASE:-}" = page1_oversized_101 ] || [ "${MOCK_CASE:-}" = many_99_one_match ]; then
+        count=100
+        if [ "${MOCK_CASE:-}" = page1_oversized_101 ];then count=101;fi
+        if [ "${MOCK_CASE:-}" = many_99_one_match ];then count=99;fi
+        jq --argjson count "$count" '.[0] as $target |
+          . + [range(1;$count) | . as $i |
+          ($target | .number=($i+100) | .merge_commit_sha="0000000000000000000000000000000000000000")]'
       else cat;fi
     ;;
   "repos/$GITHUB_REPOSITORY/git/commits/$TEST_HEAD")
@@ -193,6 +228,7 @@ export GITHUB_EVENT_NAME=push GITHUB_REF=refs/heads/main GITHUB_REPOSITORY=test-
 export GITHUB_SHA="$merged" GH_TOKEN=offline-test TEST_MAIN="$merged" TEST_BASE="$base" TEST_HEAD="$candidate"
 export TEST_HEAD_TREE="$candidate_tree" TEST_BASE_TREE="$(git rev-parse "$base^{tree}")"
 export PATH="$tmp/fakebin:$PATH" GITHUB_EVENT_PATH="$tmp/push.json"
+export MOCK_API_LOG="$tmp/gh-api-paths.log"
 jq -n --arg before "$base" --arg after "$merged" --arg repo "$GITHUB_REPOSITORY" \
   '{before:$before,after:$after,ref:"refs/heads/main",repository:{full_name:$repo},forced:false,deleted:false,created:false}' > "$GITHUB_EVENT_PATH"
 
@@ -201,6 +237,7 @@ check(){
   local what="$1" want="$2" got
   ((cases_checked += 1))
   export MOCK_CASE="$what"
+  : > "$MOCK_API_LOG"
   got="$(bash "$SCRIPT" 2>"$tmp/last-stderr")" || { echo "reuse proof unexpectedly failed: $what" >&2;cat "$tmp/last-stderr" >&2;exit 1; }
   [ "$got" = "reuse_validated_pr=$want" ] || {
     echo "bad evidence selection: case=$what got=$got want=$want" >&2
@@ -210,6 +247,12 @@ check(){
 }
 
 check matching_squash true
+# A regular successful merge requires a complete associated-PR inventory.
+grep -qF '/pulls?per_page=100&page=1' "$MOCK_API_LOG" || { echo 'PR page 1 not requested' >&2; exit 1; }
+grep -qF '/pulls?per_page=100&page=2' "$MOCK_API_LOG" || { echo 'PR page 2 completeness probe not requested' >&2; exit 1; }
+# The old selector incorrectly accepted a second matching PR on page 2.
+check duplicate_later_page false
+check many_99_one_match true
 # The required jobs, protected PR validations and exact-SHA main artifact are
 # separate paths; ensure the proof output is consumed by both workflows.
 grep -qF 'reuse_validated_pr: ${{ steps.reuse.outputs.reuse_validated_pr }}' "$ROOT/.github/workflows/ci.yml"
@@ -234,6 +277,8 @@ check newer_security_postmerge true
 check newer_ci_other_branch true
 check newer_security_other_branch true
 for scenario in no_pr api_error fork ambiguous_pr second_same_merge_wrong_base missing_pr_number stale_base changed_tree failed_tree_lookup bad_ancestry \
+  page2_unrelated_with_first_match page2_api_error page2_malformed_json page2_nonarray page2_multiple_documents \
+  page1_full_100 page1_oversized_101 page1_malformed_json page1_nonarray page1_multiple_documents \
   missing_ci failed_ci latest_ci_failure latest_ci_pending missing_ci_timestamp \
   missing_security failed_security failed_security_lookup \
   foreign_ci_only foreign_security_only foreign_ci_masks_failure foreign_security_masks_failure \
