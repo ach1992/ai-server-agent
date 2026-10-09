@@ -95,55 +95,72 @@ func workerLandlockRestrict(workspaceRoot, selectedWorkspace string, textSearch 
 	if abi >= 3 {
 		handled |= unix.LANDLOCK_ACCESS_FS_TRUNCATE
 	}
-	attr := landlockRulesetAttr{HandledAccessFS: handled}
-	ruleset, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr), 0)
-	if errno != 0 {
-		return nil, fmt.Errorf("create worker workspace sandbox: %w", errno)
-	}
-	defer unix.Close(int(ruleset))
-	rule := landlockPathBeneathAttr{AllowedAccess: handled, ParentFD: int32(selectedFD)}
-	_, _, errno = unix.Syscall6(unix.SYS_LANDLOCK_ADD_RULE, ruleset, uintptr(unix.LANDLOCK_RULE_PATH_BENEATH), uintptr(unsafe.Pointer(&rule)), 0, 0, 0)
-	if errno != 0 {
-		return nil, fmt.Errorf("restrict worker filesystem rule: %w", errno)
-	}
-	if textSearch {
-		// Ripgrep uses a system-owned executable and shared libraries. Grant
-		// only system read access for its runtime, never write permission;
-		// all source-file reads remain restricted to the selected workspace.
-		for _, candidate := range []string{"/usr/bin/rg", "/lib", "/lib64", "/usr/lib"} {
-			resolved, evalErr := filepath.EvalSymlinks(candidate)
-			if evalErr != nil {
-				continue
-			}
-			if candidate == "/usr/bin/rg" && !trustedWorkspaceSearchExecutable(resolved) {
-				return nil, errors.New("system ripgrep executable is not trusted")
-			}
-			info, statErr := os.Stat(resolved)
-			if statErr != nil {
-				continue
-			}
-			pathFD, openErr := unix.Open(resolved, unix.O_PATH|unix.O_CLOEXEC, 0)
-			if openErr != nil {
-				return nil, fmt.Errorf("open trusted search runtime: %w", openErr)
-			}
-			allowed := uint64(unix.LANDLOCK_ACCESS_FS_READ_FILE)
-			if info.IsDir() {
-				allowed |= unix.LANDLOCK_ACCESS_FS_READ_DIR
-			}
-			rule := landlockPathBeneathAttr{AllowedAccess: allowed, ParentFD: int32(pathFD)}
-			_, _, ruleErr := unix.Syscall6(unix.SYS_LANDLOCK_ADD_RULE, ruleset, uintptr(unix.LANDLOCK_RULE_PATH_BENEATH), uintptr(unsafe.Pointer(&rule)), 0, 0, 0)
-			unix.Close(pathFD)
-			if ruleErr != 0 {
-				return nil, fmt.Errorf("limit trusted search runtime: %w", ruleErr)
-			}
-		}
-	}
+	// Landlock rules within one layer are additive; a rule tied only to the
+	// selected directory would still allow writes if another process moved
+	// the WHOLE selected directory outside the configured workspace. Stack
+	// two independent rulesets so both containment decisions are mandatory:
+	// configured Agent root AND explicitly selected workspace. This guards
+	// both selected-root reparenting and nested-parent reparenting.
 	if err := unix.Prctl(unix.PR_SET_NO_NEW_PRIVS, 1, 0, 0, 0); err != nil {
 		return nil, fmt.Errorf("prevent privilege escalation in worker helper: %w", err)
 	}
-	_, _, errno = unix.Syscall(unix.SYS_LANDLOCK_RESTRICT_SELF, ruleset, 0, 0)
-	if errno != 0 {
-		return nil, fmt.Errorf("activate worker filesystem sandbox: %w", errno)
+	for _, anchorFD := range []int{rootFD, selectedFD} {
+		if err := applyWorkerLandlockLayer(anchorFD, handled, textSearch); err != nil {
+			return nil, err
+		}
 	}
 	return unlock, nil
+}
+
+// Each call creates an independent Landlock layer. A filesystem action must
+// be permitted by every layer: the configured-root and selected-checkout
+// bounds cannot be bypassed by reparenting one of these directories.
+func applyWorkerLandlockLayer(anchorFD int, handled uint64, textSearch bool) error {
+	attr := landlockRulesetAttr{HandledAccessFS: handled}
+	ruleset, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr), 0)
+	if errno != 0 {
+		return fmt.Errorf("create worker filesystem layer: %w", errno)
+	}
+	defer unix.Close(int(ruleset))
+	rule := landlockPathBeneathAttr{AllowedAccess: handled, ParentFD: int32(anchorFD)}
+	_, _, errno = unix.Syscall6(unix.SYS_LANDLOCK_ADD_RULE, ruleset, uintptr(unix.LANDLOCK_RULE_PATH_BENEATH), uintptr(unsafe.Pointer(&rule)), 0, 0, 0)
+	if errno != 0 {
+		return fmt.Errorf("add worker workspace confinement: %w", errno)
+	}
+	if textSearch {
+		// The search executable and shared libraries are read-only exceptions
+		// repeated in BOTH layers; they never extend workspace write rights.
+		for _, candidate := range []string{"/usr/bin/rg", "/lib", "/lib64", "/usr/lib"} {
+			resolved, err := filepath.EvalSymlinks(candidate)
+			if err != nil {
+				continue
+			}
+			if candidate == "/usr/bin/rg" && !trustedWorkspaceSearchExecutable(resolved) {
+				return errors.New("system ripgrep executable is not trusted")
+			}
+			info, err := os.Stat(resolved)
+			if err != nil {
+				continue
+			}
+			fd, err := unix.Open(resolved, unix.O_PATH|unix.O_CLOEXEC, 0)
+			if err != nil {
+				return fmt.Errorf("open trusted search runtime: %w", err)
+			}
+			rights := uint64(unix.LANDLOCK_ACCESS_FS_READ_FILE)
+			if info.IsDir() {
+				rights |= unix.LANDLOCK_ACCESS_FS_READ_DIR
+			}
+			r := landlockPathBeneathAttr{AllowedAccess: rights, ParentFD: int32(fd)}
+			_, _, ruleErr := unix.Syscall6(unix.SYS_LANDLOCK_ADD_RULE, ruleset, uintptr(unix.LANDLOCK_RULE_PATH_BENEATH), uintptr(unsafe.Pointer(&r)), 0, 0, 0)
+			unix.Close(fd)
+			if ruleErr != 0 {
+				return fmt.Errorf("add trusted search runtime read-only rule: %w", ruleErr)
+			}
+		}
+	}
+	_, _, errno = unix.Syscall(unix.SYS_LANDLOCK_RESTRICT_SELF, ruleset, 0, 0)
+	if errno != 0 {
+		return fmt.Errorf("apply worker filesystem confinement layer: %w", errno)
+	}
+	return nil
 }
