@@ -27,6 +27,7 @@ func managedSessionRunner(engine, profile, downloads string, ignoreHTTPS bool) (
 		items = append(items, string(raw))
 	}
 	return fmt.Sprintf(`import { createInterface } from 'node:readline';
+import { createHash } from 'node:crypto';
 import { statfsSync } from 'node:fs';
 process.env.PLAYWRIGHT_BROWSERS_PATH = %s;
 const { chromium } = await import(%s);
@@ -71,6 +72,34 @@ try {
     let input;
     try { input = JSON.parse(line); } catch { reply({event:'error',reason:'invalid_request'}); break; }
     if (input?.type === 'close') break;
+    // Screenshot is an explicit, bounded image consumer. Frames stay below
+    // the existing 64 KiB broker event ring; no image is saved to disk,
+    // no page bytes enter audit, and the profile remains session-owned.
+    if (input?.type === 'capture' && typeof input.nonce === 'string' && /^[0-9a-f]{32}$/.test(input.nonce) &&
+        Number.isInteger(input.quality) && input.quality >= 15 && input.quality <= 70 &&
+        Number.isInteger(input.max_width) && input.max_width >= 320 && input.max_width <= 1024) {
+      try {
+        const vp = page.viewportSize();
+        if (!vp || vp.width < 1 || vp.height < 1) throw Error('viewport_unavailable');
+        // A viewport-only screenshot with origin (0,0) follows the current
+        // scrolled view; shifting its clip by window.scrollY would cause a
+        // viewport-relative double-offset and an invalid clipped region.
+        const jpeg = await page.screenshot({type:'jpeg',quality:input.quality,animations:'disabled',caret:'hide',
+          fullPage:false,clip:{x:0,y:0,width:Math.min(vp.width,input.max_width),height:Math.min(vp.height,720)},
+          timeout:10000});
+        if (jpeg.length < 4 || jpeg.length > 32768) {
+          reply({event:'error',nonce:input.nonce,reason:'capture_too_large'}); continue;
+        }
+        const payload = jpeg.toString('base64');
+        const parts = Math.ceil(payload.length/8192);
+        reply({event:'capture_meta',nonce:input.nonce,mime:'image/jpeg',size:jpeg.length,
+          sha256:createHash('sha256').update(jpeg).digest('hex'),parts});
+        for (let i=0;i<parts;i++) reply({event:'capture_part',nonce:input.nonce,index:i,
+          data:payload.slice(i*8192,(i+1)*8192)});
+        reply({event:'capture_done',nonce:input.nonce});
+      } catch { reply({event:'error',nonce:input.nonce,reason:'capture_failed'}); }
+      continue;
+    }
     if (input?.type !== 'flow' || !Array.isArray(input.steps) || input.steps.length < 1 || input.steps.length > 12 ||
         typeof input.nonce !== 'string' || !/^[0-9a-f]{32}$/.test(input.nonce)) {
       reply({event:'error',reason:'invalid_request'}); break;

@@ -380,7 +380,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 					t.Fatalf("browser_status output schema missing %q: %s", field, out)
 				}
 			}
-		case "browser_session_open", "browser_session_flow", "browser_session_status", "browser_session_close":
+		case "browser_session_open", "browser_session_flow", "browser_session_capture", "browser_session_status", "browser_session_close":
 			foundBrowserSessions[tool.Name] = true
 			if tool.Annotations == nil {
 				t.Fatalf("%s lacks annotations", tool.Name)
@@ -388,6 +388,10 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			if tool.Name == "browser_session_status" {
 				if !tool.Annotations.ReadOnlyHint || !tool.Annotations.IdempotentHint {
 					t.Fatal("Browser session status must be read-only/idempotent")
+				}
+			} else if tool.Name == "browser_session_capture" {
+				if !tool.Annotations.ReadOnlyHint || tool.Annotations.OpenWorldHint == nil || !*tool.Annotations.OpenWorldHint || (tool.Annotations.DestructiveHint != nil && *tool.Annotations.DestructiveHint) {
+					t.Fatal("Browser capture must be read-only, open-world and non-destructive")
 				}
 			} else if tool.Annotations.DestructiveHint == nil || !*tool.Annotations.DestructiveHint {
 				t.Fatalf("%s can affect an open-world Browser session", tool.Name)
@@ -403,6 +407,16 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			}
 			if tool.Name != "browser_session_open" && !strings.Contains(string(input), `"session_id"`) {
 				t.Fatalf("%s lacks opaque session identity: %s", tool.Name, input)
+			}
+			if tool.Name == "browser_session_capture" {
+				for _, field := range []string{"representation", "quality", "max_width", "session_id"} {
+					if !strings.Contains(string(input), `"`+field+`"`) {
+						t.Fatalf("screenshot schema missing %s: %s", field, input)
+					}
+				}
+				if !strings.Contains(tool.Description, "32 KiB") || !strings.Contains(tool.Description, "SHA256") || !strings.Contains(tool.Description, "base64") {
+					t.Fatal("screenshot missing limits, integrity, or text-only fallback description")
+				}
 			}
 			if tool.Name == "browser_session_flow" {
 				for _, field := range []string{"steps", "ref", "timeout_ms"} {
@@ -458,7 +472,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			}
 		}
 	}
-	for _, name := range []string{"browser_session_open", "browser_session_flow", "browser_session_status", "browser_session_close"} {
+	for _, name := range []string{"browser_session_open", "browser_session_flow", "browser_session_capture", "browser_session_status", "browser_session_close"} {
 		if !foundBrowserSessions[name] {
 			t.Errorf("missing managed Browser tool %s", name)
 		}
