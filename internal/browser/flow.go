@@ -15,6 +15,7 @@ const (
 	maxFlowSteps         = 12
 	maxFlowInputBytes    = 16 << 10
 	maxFlowSelectorBytes = 512
+	maxFlowRefBytes      = 8
 	maxFlowURLBytes      = 2048
 	maxFlowValueBytes    = 4096
 	maxFlowExpectedBytes = 1024
@@ -27,7 +28,8 @@ const (
 type FlowStep struct {
 	Action    string `json:"action" jsonschema:"goto, snapshot, click, fill, assert_text, assert_url, console or network"`
 	URL       string `json:"url,omitempty" jsonschema:"HTTP(S) URL for goto; about:blank is permitted"`
-	Selector  string `json:"selector,omitempty" jsonschema:"CSS locator (instead of role/name); maximum 512 UTF-8 bytes"`
+	Selector  string `json:"selector,omitempty" jsonschema:"CSS locator (instead of role/name/ref); maximum 512 UTF-8 bytes"`
+	Ref       string `json:"ref,omitempty" jsonschema:"Snapshot-issued element ref (e1, e2, ...); usable only within this one browser_e2e call, not across calls"`
 	Role      string `json:"role,omitempty" jsonschema:"Accessible role (instead of selector), such as button or textbox"`
 	Name      string `json:"name,omitempty" jsonschema:"Exact accessible name when role is used"`
 	Value     string `json:"value,omitempty" jsonschema:"Input value for fill, maximum 4096 UTF-8 bytes"`
@@ -41,6 +43,18 @@ type FlowOptions struct {
 	IgnoreHTTPSErrors bool
 }
 
+func validFlowRef(ref string) bool {
+	if len(ref) < 2 || len(ref) > maxFlowRefBytes || ref[0] != 'e' || ref[1] < '1' || ref[1] > '9' {
+		return false
+	}
+	for i := 2; i < len(ref); i++ {
+		if ref[i] < '0' || ref[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func validateFlowStep(s FlowStep) error {
 	if s.TimeoutMS < 0 || s.TimeoutMS > maxFlowStepTimeoutMS {
 		return fmt.Errorf("timeout_ms must be between 0 and %d", maxFlowStepTimeoutMS)
@@ -50,9 +64,10 @@ func validateFlowStep(s FlowStep) error {
 		len(s.Expected) > maxFlowExpectedBytes {
 		return errors.New("step field exceeds its size limit")
 	}
-	hasLocator := s.Selector != "" || s.Role != ""
-	if (s.Selector != "" && (s.Role != "" || s.Name != "")) || (s.Name != "" && s.Role == "") {
-		return errors.New("supply either selector or role/name, never both")
+	hasLocator := s.Selector != "" || s.Role != "" || s.Ref != ""
+	if (s.Ref != "" && (!validFlowRef(s.Ref) || s.Selector != "" || s.Role != "" || s.Name != "")) ||
+		(s.Selector != "" && (s.Role != "" || s.Name != "")) || (s.Name != "" && s.Role == "") {
+		return errors.New("supply exactly one of selector, role/name or a valid snapshot ref")
 	}
 	switch s.Action {
 	case "goto":
@@ -66,7 +81,7 @@ func validateFlowStep(s FlowStep) error {
 			}
 		}
 	case "snapshot":
-		if s.URL != "" || s.Value != "" || s.Expected != "" {
+		if s.URL != "" || s.Ref != "" || s.Value != "" || s.Expected != "" {
 			return errors.New("snapshot accepts only optional selector or role/name")
 		}
 	case "console", "network":
@@ -201,6 +216,133 @@ const __asaNavigationFailure = error => {
 const __asaLocator = step => step.selector
   ? page.locator(step.selector)
   : page.getByRole(step.role, step.name ? { name: step.name, exact: true } : {});
+// Refs are only issued from a verified, stable accessibility snapshot
+// generation. This map never survives the one browser_e2e call.
+const __asaRefs = new Map();
+let __asaRefSequence = 0;
+const __asaMaxRefs = 64;
+const __asaRefRoles = ['textbox','button','link','checkbox','radio','combobox','switch','tab','option','menuitem'];
+// This safety check is serialized into the browser for both issuance and use.
+// A CSS-visible aria-hidden or inert descendant must not become actionable.
+const __asaRefAccessible = el => {
+  if (!el.isConnected || el.ownerDocument !== document) return false;
+  for (let n = el; n;) {
+    if (n.nodeType === Node.ELEMENT_NODE &&
+        (n.hasAttribute('hidden') || n.inert ||
+         n.getAttribute('aria-hidden')?.toLowerCase() === 'true')) return false;
+    n = n.parentElement || n.getRootNode()?.host || null;
+  }
+  return true;
+};
+const __asaGetTarget = async step => {
+  if (!step.ref) return __asaLocator(step);
+  const entry = __asaRefs.get(step.ref);
+  if (!entry) throw new Error('invalid_ref');
+  if (entry.url !== page.url()) throw new Error('stale_ref');
+  const active = await entry.element.evaluate(__asaRefAccessible).catch(() => false);
+  if (!active) throw new Error('stale_ref');
+  return entry.element;
+};
+// Playwright's getByRole() uses accessibility semantics instead of raw CSS
+// visibility. The complete, untruncated snapshot must contain the same count
+// of each emitted role; otherwise ALL refs are unavailable (never guess).
+const __asaSnapshotRoleHeaders = snapshot => {
+  const headers = new Map();
+  const expression = /^\s*- (textbox|button|link|checkbox|radio|combobox|switch|tab|option|menuitem)(?=[\s:]|$)/;
+  for (const line of snapshot.split('\n')) {
+    const match = expression.exec(line);
+    if (!match) continue;
+    if (!headers.has(match[1])) headers.set(match[1], []);
+    headers.get(match[1]).push(line.trim());
+  }
+  return headers;
+};
+// Handles are staged but NOT published until the root/document mutation
+// monitor and an identical second ariaSnapshot have both been verified.
+const __asaSnapshotRefs = async (target, content, stable, timeout) => {
+  const roles = __asaSnapshotRoleHeaders(content);
+  const handles = [];
+  let dropped = 0;
+  for (const role of __asaRefRoles) {
+    const headers = roles.get(role) || [];
+    const expected = headers.length;
+    if (!expected) continue;
+    // Two identical accessible headers cannot be mapped unambiguously to
+    // distinct DOM handles, even when count and document generation match.
+    if (new Set(headers).size !== expected) return null;
+    if (!await stable()) return null;
+    const locator = target.getByRole(role);
+    const actual = await locator.count();
+    if (!await stable() || actual !== expected) return null;
+    const capacity = Math.max(0, Math.min(24 - handles.length,
+      __asaMaxRefs - __asaRefSequence - handles.length));
+    const take = Math.min(actual, capacity);
+    dropped += actual - take;
+    for (let i = 0; i < take; i++) {
+      if (!await stable()) return null;
+      const current = locator.nth(i);
+      // ARIA ownership can reorder the accessibility tree without changing
+      // DOM/getByRole order. Require the exact role+name/state header to
+      // agree with the entry at the SAME position in the returned snapshot.
+      const ownSnapshot = await current.ariaSnapshot({
+        timeout: Math.min(timeout, 1000)
+      }).catch(() => null);
+      if (!ownSnapshot || ownSnapshot.split('\n', 1)[0].trim() !== headers[i] ||
+          !await stable()) return null;
+      const handle = await current.elementHandle({
+        timeout: Math.min(timeout, 1000)
+      }).catch(() => null);
+      if (!handle || !await stable() ||
+          !await handle.evaluate(__asaRefAccessible).catch(() => false)) return null;
+      // Only static role/index metadata crosses the renderer. A candidate
+      // with an unproved or reordered accessible header receives no ref.
+      handles.push({ element: handle, role, role_index: i });
+    }
+  }
+  return { handles, dropped };
+};
+// A matching textual snapshot is insufficient: CSSOM can temporarily swap
+// which *DOM node* owns a given accessible role/header and revert without a
+// MutationObserver event. Resolve the FINAL accessibility role mapping again
+// after the full snapshot has been verified, then prove each mapped node is
+// identical to the ElementHandle staged before that verification. A mismatch
+// invalidates the entire batch. Never silently replace the staged handle.
+const __asaVerifyFinalRefIdentities = async (target, content, staged, stable, timeout) => {
+  const headers = __asaSnapshotRoleHeaders(content);
+  const locators = new Map();
+  for (const entry of staged.handles) {
+    if (!await stable()) return false;
+    let locator = locators.get(entry.role);
+    if (!locator) {
+      locator = target.getByRole(entry.role);
+      const expected = headers.get(entry.role) || [];
+      if (new Set(expected).size !== expected.length ||
+          await locator.count() !== expected.length || !await stable()) return false;
+      locators.set(entry.role, locator);
+    }
+    const selected = locator.nth(entry.role_index);
+    const ownSnapshot = await selected.ariaSnapshot({
+      timeout: Math.min(timeout, 1000)
+    }).catch(() => null);
+    if (!ownSnapshot ||
+        ownSnapshot.split('\n', 1)[0].trim() !== headers.get(entry.role)?.[entry.role_index] ||
+        !await stable()) return false;
+    const mapped = await selected.elementHandle({
+      timeout: Math.min(timeout, 1000)
+    }).catch(() => null);
+    if (!mapped) return false;
+    try {
+      // Pass the staged JSHandle as an argument, comparing true DOM identity
+      // inside Chromium. JSHandle object identity in Node is not sufficient.
+      const sameNode = await mapped.evaluate((element, original) =>
+        element === original && element.isConnected, entry.element).catch(() => false);
+      if (!sameNode || !await stable()) return false;
+    } finally {
+      await mapped.dispose().catch(() => {});
+    }
+  }
+  return await stable();
+};
 const __asaResults = [];
 let __asaFailedStep = null;
 for (let i = 0; i < __asaSteps.length; i++) {
@@ -211,6 +353,7 @@ for (let i = 0; i < __asaSteps.length; i++) {
   try {
     switch (step.action) {
       case 'goto':
+        __asaRefs.clear();
         await page.goto(step.url, { waitUntil: 'domcontentloaded', timeout });
         item.url = __asaURL(page.url());
         break;
@@ -220,9 +363,35 @@ for (let i = 0; i < __asaSteps.length; i++) {
         // Count local content AND outside accessible-name/ownership references:
         // ARIA IDREFs, associated native <label>s and transitive references.
         // A tiny scoped target can otherwise pull megabytes from elsewhere.
-        const scope = await target.evaluate(element => {
+        const root = await target.elementHandle({ timeout });
+        // Install before the DOM preflight, ariaSnapshot and role lookups.
+        // A document replacement (including same-URL reload), detached root
+        // or any DOM mutation invalidates the snapshot/ref association.
+        const monitor = await root.evaluateHandle(el => {
+          const doc = el.ownerDocument;
+          let changed = false;
+          const observer = new MutationObserver(() => { changed = true; });
+          observer.observe(doc, {
+            subtree: true, childList: true, attributes: true, characterData: true
+          });
+          return {
+            stable: () => {
+              if (observer.takeRecords().length) changed = true;
+              return !changed && doc === document && el.isConnected;
+            },
+            close: () => observer.disconnect()
+          };
+        });
+        const stable = () => monitor.evaluate(m => m.stable()).catch(() => false);
+        item.refs = [];
+        item.refs_unavailable = true;
+        item.refs_dropped = null;
+        item.refs_scope = 'flow_only';
+        try {
+        const scope = await root.evaluate(element => {
           const budget = { nodes: 0, text_units: 0, attribute_units: 0,
-            state_units: 0, generated_units: 0 };
+            state_units: 0, generated_units: 0,
+            has_shadow: element.getRootNode() instanceof ShadowRoot };
           const roots = [element];
           const queued = new Set(roots);
           const visited = new Set();
@@ -286,8 +455,12 @@ for (let i = 0; i < __asaSteps.length; i++) {
                   if (add('state_units', node.value.length))
                     return { too_large: true, reason: 'control_value', ...budget };
                 }
-                if (node.shadowRoot && addRoot(node.shadowRoot))
-                  return reject('dependency_refs');
+                if (node.shadowRoot) {
+                  // A document observer cannot follow mutations in shadow
+                  // trees; fail closed on refs for this snapshot scope.
+                  budget.has_shadow = true;
+                  if (addRoot(node.shadowRoot)) return reject('dependency_refs');
+                }
                 // The same node may expose a reflected property and an IDREF
                 // attribute; consider both so neither can bypass preflight.
                 // Property paths are essential for ID-less remote Elements.
@@ -343,7 +516,7 @@ for (let i = 0; i < __asaSteps.length; i++) {
               node = walker.nextNode();
             } while (node);
           }
-          return { too_large: false };
+          return { too_large: false, has_shadow: budget.has_shadow };
         }, undefined, { timeout });
         if (scope.too_large) {
           item.snapshot = '';
@@ -353,24 +526,81 @@ for (let i = 0; i < __asaSteps.length; i++) {
           item.preflight_reason = scope.reason;
           break;
         }
+        if (!await stable()) {
+          item.snapshot = '';
+          item.truncated = true;
+          item.reason = 'dom_changed_during_preflight';
+          break;
+        }
         const content = await target.ariaSnapshot({ timeout });
         const bounded = __asaBudgeted(content);
         item.total_bytes = Buffer.byteLength(content, 'utf8');
         item.snapshot = bounded.text;
         item.truncated = bounded.truncated;
+        // Never issue a ref to an element not present in the complete,
+        // stable accessibility snapshot. A document mutation/reload or
+        // unsupported shadow subtree yields snapshot text but no refs.
+        if (bounded.truncated || scope.has_shadow || !await stable()) {
+          item.refs_reason = bounded.truncated ? 'snapshot_truncated' :
+            scope.has_shadow ? 'shadow_scope' : 'snapshot_changed';
+          break;
+        }
+        const candidates = await __asaSnapshotRefs(target, content, stable, timeout).catch(() => null);
+        if (!candidates || !await stable()) {
+          item.refs_reason = 'snapshot_changed';
+          break;
+        }
+        // Re-check accessibility after the independent role lookups. This
+        // detects CSSOM/accessibility changes even without a DOM mutation.
+        const verify = await target.ariaSnapshot({ timeout }).catch(() => null);
+        if (verify !== content || !await stable()) {
+          item.refs_reason = 'snapshot_changed';
+          break;
+        }
+        // The second complete snapshot may be identical even if CSSOM
+        // swapped A->B->A while we staged B (same accessible header).
+        // Re-resolve the final role/index mapping and compare exact DOM
+        // identities BEFORE any ref becomes action-capable.
+        if (!await __asaVerifyFinalRefIdentities(target, content, candidates, stable, timeout)
+            .catch(() => false)) {
+          item.refs_reason = 'snapshot_changed';
+          break;
+        }
+        const projected = candidates.handles.map((entry, j) => ({
+          ref: 'e' + (__asaRefSequence + j + 1),
+          role: entry.role, role_index: entry.role_index
+        }));
+        const selected = __asaBudgetedEntries(projected);
+        if (!await stable()) {
+          item.refs_reason = 'snapshot_changed';
+          break;
+        }
+        for (let j = 0; j < selected.entries.length; j++) {
+          const id = selected.entries[j].ref;
+          __asaRefs.set(id, { element: candidates.handles[j].element, url: page.url() });
+        }
+        __asaRefSequence += selected.entries.length;
+        item.refs = selected.entries;
+        item.refs_dropped = candidates.dropped + selected.omitted;
+        item.refs_unavailable = false;
         break;
+        } finally {
+          await monitor.evaluate(m => m.close()).catch(() => {});
+          await monitor.dispose().catch(() => {});
+          await root.dispose().catch(() => {});
+        }
       }
       case 'click':
-        await __asaLocator(step).click({ timeout });
+        await (await __asaGetTarget(step)).click({ timeout });
         break;
       case 'fill':
-        await __asaLocator(step).fill(step.value || '', { timeout });
+        await (await __asaGetTarget(step)).fill(step.value || '', { timeout });
         break;
       case 'assert_text': {
         // Element absence is normal during SPA/data-load transitions. A
         // short innerText timeout must not prematurely end a longer caller
         // deadline. Retry only within that exact bounded step deadline.
-        const locator = __asaLocator(step);
+        const locator = await __asaGetTarget(step);
         const deadline = Date.now() + timeout;
         let matched = false;
         while (Date.now() < deadline) {
@@ -422,6 +652,14 @@ for (let i = 0; i < __asaSteps.length; i++) {
     if (step.action === 'goto') {
       item.error = __asaNavigationFailure(error);
       item.url = __asaURL(step.url);
+     } else if (step.action === 'snapshot') {
+      item.error = 'snapshot_failed';
+    } else if (step.ref) {
+      // ElementHandle action failures can include the page's sensitive URL,
+      // query or DOM. Ref errors are finite classifications, never raw text.
+      const message = String(error?.message || error);
+      item.error = message === 'invalid_ref' || message === 'stale_ref' ?
+        message : 'ref_action_failed';
     } else {
       item.error = __asaCap(String(error?.message || error).split('\n')[0], 240);
     }

@@ -41,6 +41,15 @@ func TestBrowserFlowValidationAndBounds(t *testing.T) {
 		"missing-expected":  {{Action: "assert_text", Selector: "#a"}},
 		"oversized-value":   {{Action: "fill", Selector: "#a", Value: strings.Repeat("x", maxFlowValueBytes+1)}},
 		"oversized-timeout": {{Action: "click", Selector: "#a", TimeoutMS: maxFlowStepTimeoutMS + 1}},
+		"ref-and-selector":  {{Action: "click", Selector: "#a", Ref: "e1"}},
+		"ref-and-role":      {{Action: "fill", Role: "textbox", Ref: "e1", Value: "X"}},
+		"bad-ref-zero":      {{Action: "click", Ref: "e0"}},
+		"bad-ref-leading":   {{Action: "click", Ref: "e01"}},
+		"bad-ref-format":    {{Action: "click", Ref: "a1"}},
+		"bad-ref-suffix":    {{Action: "click", Ref: "e1x"}},
+		"ref-on-snapshot":   {{Action: "snapshot", Ref: "e1"}},
+		"ref-on-goto":       {{Action: "goto", URL: "https://example.test", Ref: "e1"}},
+		"ref-on-events":     {{Action: "console", Ref: "e1"}},
 	} {
 		t.Run(name, func(t *testing.T) {
 			if _, err := flowScript(steps); err == nil {
@@ -136,8 +145,8 @@ console.log('submitted');
 	steps := []FlowStep{
 		{Action: "goto", URL: srv.URL},
 		{Action: "snapshot"},
-		{Action: "fill", Role: "textbox", Name: "Name", Value: "ACh"},
-		{Action: "click", Role: "button", Name: "Submit"},
+		{Action: "fill", Ref: "e1", Value: "ACh"},
+		{Action: "click", Ref: "e2"},
 		{Action: "assert_text", Selector: "#result", Expected: "ACh:Done"},
 		{Action: "assert_url", Expected: srv.URL + "/"},
 		{Action: "console"},
@@ -195,6 +204,11 @@ try {
 			Truncated  bool              `json:"truncated"`
 			Reason     string            `json:"reason"`
 			Entries    []json.RawMessage `json:"entries"`
+			Refs       []struct {
+				Ref  string `json:"ref"`
+				Role string `json:"role"`
+			} `json:"refs"`
+			RefsScope string `json:"refs_scope"`
 		} `json:"results"`
 	}
 	if err := json.Unmarshal([]byte(strings.TrimSpace(string(out[index+len(marker):]))), &result); err != nil {
@@ -211,6 +225,12 @@ try {
 	if !strings.Contains(result.Results[1].Snapshot, "textbox") ||
 		!strings.Contains(result.Results[1].Snapshot, "Submit") {
 		t.Fatalf("snapshot missing accessible element description: %+v", result.Results[1])
+	}
+	refs := result.Results[1].Refs
+	if len(refs) != 2 || refs[0].Ref != "e1" || refs[0].Role != "textbox" ||
+		refs[1].Ref != "e2" || refs[1].Role != "button" ||
+		result.Results[1].RefsScope != "flow_only" {
+		t.Fatalf("snapshot refs unavailable or incorrectly scoped: %+v", result.Results[1])
 	}
 	if len(result.Results[6].Entries) == 0 || len(result.Results[7].Entries) == 0 {
 		t.Fatalf("console or network events missing from real browser: %+v", result.Results)
