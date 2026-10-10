@@ -1,6 +1,7 @@
 package browser
 
 import (
+	"archive/zip"
 	"bufio"
 	"bytes"
 	"context"
@@ -71,6 +72,15 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 	if err := os.Mkdir(downloads, 0700); err != nil {
 		t.Fatal(err)
 	}
+	// Simulate an orphan from a prior interrupted trace recording. Startup
+	// under exclusive profile admission reclaims it without touching worktrees.
+	orphan := filepath.Join(downloads, "asa-trace-Ab3d9Z")
+	if err := os.Mkdir(orphan, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(orphan, "trace.zip"), []byte("sensitive-disposable-fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
 	src, err := managedSessionRunner(engine, filepath.Join(dir, "profile"), downloads, false)
 	if err != nil {
 		t.Fatal(err)
@@ -79,7 +89,7 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 	if err = os.WriteFile(file, []byte(src), 0600); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, filepath.Join(engine, "node/bin/node"), file)
 	cmd.Env = append(os.Environ(), "PLAYWRIGHT_BROWSERS_PATH="+filepath.Join(engine, "browsers"))
@@ -202,6 +212,65 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 	entries, err := os.ReadDir(downloads)
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("capture left disk artifacts: %v %v", entries, err)
+	}
+	// Record one real Playwright ZIP trace, then prove incremental byte
+	// windows reconstruct a valid archive and no named ZIP remains on disk.
+	traceNonce := strings.Repeat("6", 32)
+	send(map[string]any{"type": "trace_record", "nonce": traceNonce,
+		"steps": []FlowStep{{Action: "snapshot"}}})
+	traceMeta := read()
+	if traceMeta["event"] != "trace_meta" || traceMeta["nonce"] != traceNonce ||
+		traceMeta["mime"] != "application/zip" || traceMeta["result"].(map[string]any)["ok"] != true {
+		t.Fatalf("trace did not return bounded metadata: %v; stderr=%s", traceMeta, stderr.String())
+	}
+	traceSize := int(traceMeta["size"].(float64))
+	if traceSize < 4 || traceSize > 512<<10 {
+		t.Fatalf("unbounded trace bytes: %d", traceSize)
+	}
+	version := "sha256:" + traceMeta["sha256"].(string)
+	var traceZIP []byte
+	for len(traceZIP) < traceSize {
+		nonce := fmt.Sprintf("%032x", len(traceZIP)+1)
+		send(map[string]any{"type": "trace_read", "nonce": nonce, "offset": len(traceZIP), "file_version": version})
+		chunk := read()
+		if chunk["event"] != "trace_chunk" || chunk["nonce"] != nonce || int(chunk["offset"].(float64)) != len(traceZIP) ||
+			int(chunk["size"].(float64)) != traceSize || chunk["sha256"] != traceMeta["sha256"] {
+			t.Fatalf("trace read window wrong cursor/version: %v", chunk)
+		}
+		data, er := base64.StdEncoding.Strict().DecodeString(chunk["data"].(string))
+		if er != nil || len(data) == 0 || len(data) > 8192 {
+			t.Fatalf("invalid trace window: size=%d err=%v", len(data), er)
+		}
+		digest := sha256.Sum256(data)
+		if hex.EncodeToString(digest[:]) != chunk["chunk_sha256"] {
+			t.Fatal("trace window digest mismatch")
+		}
+		traceZIP = append(traceZIP, data...)
+	}
+	allSHA := sha256.Sum256(traceZIP)
+	if len(traceZIP) != traceSize || hex.EncodeToString(allSHA[:]) != traceMeta["sha256"] {
+		t.Fatal("reconstructed trace ZIP integrity differs from pinned recording")
+	}
+	archive, er := zip.NewReader(bytes.NewReader(traceZIP), int64(len(traceZIP)))
+	if er != nil || len(archive.File) == 0 {
+		t.Fatalf("Playwright trace ZIP not readable: %v", er)
+	}
+	// Version mismatch is a known refusal; it cannot leak a previous ZIP.
+	send(map[string]any{"type": "trace_read", "nonce": strings.Repeat("a", 32),
+		"offset": 0, "file_version": "sha256:" + strings.Repeat("0", 64)})
+	if stale := read(); stale["event"] != "error" || stale["reason"] != "trace_stale" {
+		t.Fatalf("stale version disclosed trace data: %v", stale)
+	}
+	send(map[string]any{"type": "trace_discard", "nonce": strings.Repeat("b", 32), "file_version": version})
+	if discarded := read(); discarded["event"] != "trace_discarded" {
+		t.Fatalf("trace discard failed: %v", discarded)
+	}
+	send(map[string]any{"type": "trace_read", "nonce": strings.Repeat("c", 32), "offset": 0, "file_version": version})
+	if missing := read(); missing["event"] != "error" || missing["reason"] != "trace_unavailable" {
+		t.Fatalf("discarded trace bytes still retrievable: %v", missing)
+	}
+	if leftovers, er := os.ReadDir(downloads); er != nil || len(leftovers) != 0 {
+		t.Fatalf("trace temporary files retained after verified completion: %v %v", leftovers, er)
 	}
 	// A screenshot after scroll must represent the *visible* viewport,
 	// never the page origin. The two blocks have opposite dominant colors.

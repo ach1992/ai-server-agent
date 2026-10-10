@@ -27,6 +27,15 @@ type BrowserSessionCaptureInput struct {
 	Representation string `json:"representation,omitempty" jsonschema:"image (default): typed MCP image with small text metadata; base64: text-visible JPEG only when raw capture <=16 KiB, otherwise explicit too_large error"`
 }
 
+type BrowserSessionTraceInput struct {
+	Workspace   string             `json:"workspace" jsonschema:"Exact authenticated Browser session workspace"`
+	SessionID   string             `json:"session_id" jsonschema:"Principal-bound managed Browser session ID"`
+	Operation   string             `json:"operation" jsonschema:"record: run a single <=30s flow with ZIP trace; read: return at most 8192 raw bytes as base64; discard: explicitly erase cached ZIP"`
+	Steps       []browser.FlowStep `json:"steps,omitempty" jsonschema:"1..12 browser_e2e steps, only for record; these can mutate the page and must never be replayed automatically"`
+	Offset      int64              `json:"offset,omitempty" jsonschema:"Byte offset for read; use exact next_offset, never infer that output was complete"`
+	FileVersion string             `json:"file_version,omitempty" jsonschema:"Required sha256:<64 hex> version returned by record when reading or discarding; stale versions never deliver bytes"`
+}
+
 type BrowserSessionFlowInput struct {
 	Workspace string             `json:"workspace" jsonschema:"Exact workspace of the Browser session"`
 	SessionID string             `json:"session_id" jsonschema:"Opaque Browser session ID returned by browser_session_open"`
@@ -80,6 +89,13 @@ func (s *Server) registerBrowserSessionTools() {
 		meta.OutputEncoding = "none"
 		summary := fmt.Sprintf("Browser JPEG screenshot captured: %d bytes, %s, digest %s. If no image is visible in this client, retry with representation=base64, quality=15 and max_width=320 (text-only cap 16 KiB). No persistent artifact was created.", len(raw), resp.MIMEType, resp.FileVersion)
 		return &mcpsdk.CallToolResult{Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: summary}, &mcpsdk.ImageContent{Data: raw, MIMEType: "image/jpeg"}}}, meta, nil
+	})
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_trace", Description: "Opt-in Playwright ZIP trace of ONE bounded managed Browser flow (record) or an integrity-checked, version-pinned base64 byte window (read), or discard. Uses the existing authenticated principal/exact workspace/session/profile/worker broker. A completed recording retains at most 512 KiB in the private worker's memory, NOT a project worktree or publicly addressable URL; temporary Playwright ZIP files are removed before success. Each read returns at most 8192 raw bytes with offset, next_offset, EOF, full ZIP SHA256 and per-window integrity. Trace may contain sensitive page/request data. Recording can execute side-effecting flow steps: never automatically replay on failure, and close an uncertain session. Retention ends on discard, replacement, close, expiry or process death; not a Stable/installed-client availability claim.", Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionTraceInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+		resp, err := s.browser.SessionTrace(ctx, browser.SessionOptions{Workspace: in.Workspace, SessionID: in.SessionID, Steps: in.Steps, TraceOperation: in.Operation, TraceOffset: in.Offset, TraceVersion: in.FileVersion})
+		if err != nil {
+			return executorTransportErrorResult(err)
+		}
+		return responseResult(resp)
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_status", Description: "Inspect own Browser session running/uncertain state with principal/workspace checks. No profile or page data is returned.", Annotations: annotations(true, false, true, false)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionIDInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := s.browser.SessionStatus(ctx, browser.SessionOptions{Workspace: in.Workspace, SessionID: in.SessionID})

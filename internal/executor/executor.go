@@ -178,7 +178,7 @@ func (s *Server) dispatch(req Request) Response {
 			return Response{OK: true, Status: "reserved"}
 		}
 		return Response{OK: true, Status: "available"}
-	case "browser_session_open", "browser_session_flow", "browser_session_capture", "browser_session_status", "browser_session_close":
+	case "browser_session_open", "browser_session_flow", "browser_session_capture", "browser_session_trace", "browser_session_status", "browser_session_close":
 		return s.browserSessionAction(context.Background(), req)
 	default:
 		return Response{Error: "unknown action"}

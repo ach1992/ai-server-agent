@@ -28,13 +28,20 @@ func managedSessionRunner(engine, profile, downloads string, ignoreHTTPS bool) (
 	}
 	return fmt.Sprintf(`import { createInterface } from 'node:readline';
 import { createHash } from 'node:crypto';
-import { statfsSync } from 'node:fs';
+import { statfsSync, mkdtempSync, rmSync, openSync, fstatSync, readFileSync, closeSync, constants, readdirSync } from 'node:fs';
+import { join } from 'node:path';
 process.env.PLAYWRIGHT_BROWSERS_PATH = %s;
 const { chromium } = await import(%s);
 const profile = %s;
 const downloads = %s;
 const flowTemplate = %s;
 const state = { refs: new Map(), sequence: 0 };
+// One bounded, short-lived, per-session trace slot. The artifact's bytes
+// are only held in this worker's memory after Playwright finalizes its ZIP.
+let traceData = null;
+let traceDigest = '';
+const traceMaxBytes = 512 * 1024;
+const traceReadBytes = 8192;
 globalThis.__asaManagedFlowState = state;
 const reserve = 512n * 1024n * 1024n;
 const diskSafe = () => {
@@ -44,6 +51,15 @@ const diskSafe = () => {
   } catch { return false; }
 };
 if (!diskSafe()) throw new Error('browser_session_disk_reserve_unavailable');
+// At session open, the executor's exclusive Browser profile lease proves
+// no prior managed worker is alive. Reclaim only our own randomly named
+// abandoned trace directories, including those from SIGKILL/crash. Never
+// traverse an arbitrary browser profile/worktree or follow a symlink.
+for (const entry of readdirSync(downloads, {withFileTypes:true})) {
+  if (!entry.isDirectory() || !/^asa-trace-[A-Za-z0-9]{6}$/.test(entry.name)) continue;
+  rmSync(join(downloads,entry.name),{recursive:true,force:true});
+}
+
 const context = await chromium.launchPersistentContext(profile, {
   headless: true, ignoreHTTPSErrors: %t, acceptDownloads: false, downloadsPath: downloads,
   args: ['--disk-cache-size=67108864', '--media-cache-size=33554432']
@@ -102,6 +118,89 @@ try {
           data:payload.slice(i*8192,(i+1)*8192)});
         reply({event:'capture_done',nonce:input.nonce});
       } catch { reply({event:'error',nonce:input.nonce,reason:'capture_failed'}); }
+      continue;
+    }
+    // A trace encloses exactly ONE bounded flow, rather than an unbounded
+    // cross-call recording. Reading is a separate, integrity/version-pinned
+    // operation that never replays actions. Previous trace data is erased
+    // BEFORE executing a replacement flow.
+    if (input?.type === 'trace_record' && typeof input.nonce === 'string' && /^[0-9a-f]{32}$/.test(input.nonce) &&
+        Array.isArray(input.steps) && input.steps.length >= 1 && input.steps.length <= 12) {
+      traceData = null; traceDigest = '';
+      let dir = '', started = false, response;
+      const watchdog = setTimeout(() => { void context.close().finally(() => process.exit(74)); }, 30000);
+      try {
+        if (!diskSafe()) throw Error('trace_disk_reserve_unavailable');
+        dir = mkdtempSync(join(downloads, 'asa-trace-'));
+        const zipPath = join(dir, 'trace.zip');
+        await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
+        started = true;
+        const body = flowTemplate.replace('__ASA_FLOW_STEPS_JSON__', JSON.stringify(input.steps));
+        if (body.length > 131072) throw Error('input_too_large');
+        const emitted = [];
+        const sink = {log(value) { if (typeof value === 'string' && value.startsWith('ASA_BROWSER_E2E_RESULT '))
+          emitted.push(value.slice('ASA_BROWSER_E2E_RESULT '.length)); }};
+        await new AsyncFunction('page','context','browser','console',body)(page,context,browser,sink);
+        if (emitted.length !== 1 || Buffer.byteLength(emitted[0],'utf8') > 16000)
+          throw Error('invalid_trace_result');
+        const flowResult = JSON.parse(emitted[0]);
+        await context.tracing.stop({path:zipPath});
+        started = false;
+        // O_NOFOLLOW + descriptor-based stat/read avoids path-replacement
+        // ambiguity between size validation and bounded memory allocation.
+        const fd = openSync(zipPath, constants.O_RDONLY | constants.O_NOFOLLOW);
+        let payload;
+        try {
+          const info = fstatSync(fd);
+          if (!info.isFile() || info.size < 4) throw Error('invalid_trace_zip');
+          if (info.size > traceMaxBytes) {
+            response = {event:'error',nonce:input.nonce,reason:'trace_too_large',result:flowResult};
+          } else {
+            payload = readFileSync(fd);
+            if (payload.length !== info.size || payload[0] !== 0x50 || payload[1] !== 0x4b)
+              throw Error('invalid_trace_zip');
+            const digest = createHash('sha256').update(payload).digest('hex');
+            traceData = payload; traceDigest = digest;
+            response = {event:'trace_meta',nonce:input.nonce,mime:'application/zip',size:payload.length,
+              sha256:digest,result:flowResult};
+          }
+        } finally { closeSync(fd); }
+      } catch {
+        if (started) { try { await context.tracing.stop(); } catch {} }
+        traceData = null; traceDigest = '';
+        response = {event:'error',nonce:input.nonce,reason:'trace_record_unknown'};
+      } finally {
+        clearTimeout(watchdog);
+        try { if (dir) rmSync(dir,{recursive:true,force:true}); }
+        catch { traceData = null; traceDigest = ''; response = {event:'error',nonce:input.nonce,reason:'trace_cleanup_unknown'}; }
+      }
+      reply(response);
+      continue;
+    }
+    if (input?.type === 'trace_read' && typeof input.nonce === 'string' && /^[0-9a-f]{32}$/.test(input.nonce) &&
+        Number.isSafeInteger(input.offset) && input.offset >= 0 && typeof input.file_version === 'string') {
+      if (!traceData) {
+        reply({event:'error',nonce:input.nonce,reason:'trace_unavailable'});
+      } else if (input.file_version !== 'sha256:' + traceDigest) {
+        reply({event:'error',nonce:input.nonce,reason:'trace_stale'});
+      } else if (input.offset > traceData.length) {
+        reply({event:'error',nonce:input.nonce,reason:'trace_invalid_offset'});
+      } else {
+        const chunk = traceData.subarray(input.offset,Math.min(traceData.length,input.offset+traceReadBytes));
+        reply({event:'trace_chunk',nonce:input.nonce,mime:'application/zip',size:traceData.length,
+          sha256:traceDigest,offset:input.offset,
+          chunk_sha256:createHash('sha256').update(chunk).digest('hex'),data:chunk.toString('base64')});
+      }
+      continue;
+    }
+    if (input?.type === 'trace_discard' && typeof input.nonce === 'string' && /^[0-9a-f]{32}$/.test(input.nonce) &&
+        typeof input.file_version === 'string') {
+      if (!traceData || input.file_version !== 'sha256:' + traceDigest) {
+        reply({event:'error',nonce:input.nonce,reason:'trace_stale'});
+      } else {
+        traceData = null; traceDigest = '';
+        reply({event:'trace_discarded',nonce:input.nonce});
+      }
       continue;
     }
     if (input?.type !== 'flow' || !Array.isArray(input.steps) || input.steps.length < 1 || input.steps.length > 12 ||
