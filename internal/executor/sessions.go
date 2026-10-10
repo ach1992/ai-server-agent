@@ -52,30 +52,31 @@ type stdioSessionRead struct {
 }
 
 type stdioSession struct {
-	mu         sync.Mutex
-	stopMu     sync.Mutex
-	id         string
-	kind       string
-	ownerID    string
-	ownerClass string
-	workspace  string
-	pid        int
-	pidPin     *os.File // The pidfd is a stable process identity; it does NOT reserve the numeric PGID after reaping.
-	cmd        *exec.Cmd
-	stdin      *os.File
-	closed     bool
-	exited     bool
-	exitCode   int
-	cleanupErr error
-	completed  time.Time
-	lastSeq    uint64
-	events     []stdioSessionEvent
-	bytes      int
-	done       chan struct{}
-	expiry     *time.Timer
-	terminal   *tmuxTerminalState // consumer-specific Control Mode state; broker owns its process
-	dap        *dapState          // DAP stream attaches to this same process identity and broker
-	browser    *browserStdioState // managed Browser consumer; never a second process broker
+	mu           sync.Mutex
+	stopMu       sync.Mutex
+	id           string
+	kind         string
+	ownerID      string
+	ownerClass   string
+	workspace    string
+	pid          int
+	pidPin       *os.File // The pidfd is a stable process identity; it does NOT reserve the numeric PGID after reaping.
+	cmd          *exec.Cmd
+	stdin        *os.File
+	closed       bool
+	exited       bool
+	exitCode     int
+	cleanupErr   error
+	completed    time.Time
+	lastSeq      uint64
+	events       []stdioSessionEvent
+	bytes        int
+	done         chan struct{}
+	expiry       *time.Timer
+	terminal     *tmuxTerminalState       // consumer-specific Control Mode state; broker owns its process
+	dap          *dapState                // DAP stream attaches to this same process identity and broker
+	browser      *browserStdioState       // managed Browser consumer; never a second process broker
+	browserLease *browserSessionAdmission // release only after verified process cleanup, before broker deletion
 }
 
 type stdioSessionBroker struct {
@@ -236,6 +237,7 @@ func (s *Server) startProcessSessionWithID(req Request, kind, workspace, binary 
 		// audit. Even a post-spawn audit failure must leave the Browser
 		// entry addressable for status/close/expiry reconciliation.
 		entry.browser = &browserStdioState{}
+		entry.browserLease = &s.browserAdmission
 	}
 	if err := s.sessions.reserve(entry); err != nil {
 		return "", err
@@ -590,6 +592,13 @@ func (b *stdioSessionBroker) removeAndStop(entry *stdioSession) error {
 				return fmt.Errorf("dap_runtime_cleanup_uncertain: %w", err)
 			}
 		}
+	}
+	// Browser has one shared-profile lease. Do not remove the last broker
+	// reconciliation identity until the verified process is dead AND the
+	// exact lease has been released; an audit-completion failure happens
+	// *later* and must not cause an unrecoverable profile lock.
+	if entry.browserLease != nil && !entry.browserLease.release(entry.id) {
+		return errors.New("browser_profile_lease_reconciliation_failed")
 	}
 	b.remove(entry)
 	return nil

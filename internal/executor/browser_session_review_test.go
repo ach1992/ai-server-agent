@@ -127,6 +127,9 @@ func TestBrowserSessionCloseAuditDegradedDoesNotStrandProfile(t *testing.T) {
 		// broker close. Break the *close completion* only, AFTER the child
 		// was cleanly stopped/removed from the broker.
 		if completeCount == 2 {
+			if s.browserAdmission.matches(id) {
+				t.Error("broker deleted Browser before releasing its lease at audit boundary")
+			}
 			breakAuditCompletion(t, path)
 		}
 	}

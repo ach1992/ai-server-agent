@@ -44,12 +44,17 @@ func (a *browserSessionAdmission) transfer(from, to string) bool {
 	a.holder = to
 	return true
 }
-func (a *browserSessionAdmission) release(holder string) {
+
+// release reports whether this exact owner held the lease. A Browser
+// broker entry must not be discarded unless release was confirmed.
+func (a *browserSessionAdmission) release(holder string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.holder == holder {
-		a.holder = ""
+	if a.holder != holder {
+		return false
 	}
+	a.holder = ""
+	return true
 }
 func (a *browserSessionAdmission) matches(holder string) bool {
 	a.mu.Lock()
@@ -398,10 +403,8 @@ func (s *Server) browserSessionClose(req Request) Response {
 		state.uncertain = true
 		return browserSessionError("browser_session_cleanup_unverified", "state", errors.New("Browser worker stop was not proved; shared profile remains reserved"))
 	}
-	// Proven cleanup is independent of whether the *completion audit*
-	// durably finished. Never retain an unaddressable profile lease after
-	// the broker has successfully removed the exact clean process.
-	s.browserAdmission.release(entry.id)
+	// The broker atomically reconciles the Browser lease BEFORE deleting
+	// the clean entry. An audit completion failure cannot strand the lease.
 	if closeErr != nil {
 		return Response{SessionID: entry.id, Status: "closed_audit_degraded", ErrorCode: "audit_degraded", ReasonCode: "audit_degraded", ErrorClass: "audit", Error: "Browser process termination verified and profile released; audit completion degraded; privileged audit recovery still required"}
 	}
