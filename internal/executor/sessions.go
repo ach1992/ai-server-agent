@@ -52,31 +52,32 @@ type stdioSessionRead struct {
 }
 
 type stdioSession struct {
-	mu           sync.Mutex
-	stopMu       sync.Mutex
-	id           string
-	kind         string
-	ownerID      string
-	ownerClass   string
-	workspace    string
-	pid          int
-	pidPin       *os.File // The pidfd is a stable process identity; it does NOT reserve the numeric PGID after reaping.
-	cmd          *exec.Cmd
-	stdin        *os.File
-	closed       bool
-	exited       bool
-	exitCode     int
-	cleanupErr   error
-	completed    time.Time
-	lastSeq      uint64
-	events       []stdioSessionEvent
-	bytes        int
-	done         chan struct{}
-	expiry       *time.Timer
-	terminal     *tmuxTerminalState       // consumer-specific Control Mode state; broker owns its process
-	dap          *dapState                // DAP stream attaches to this same process identity and broker
-	browser      *browserStdioState       // managed Browser consumer; never a second process broker
-	browserLease *browserSessionAdmission // release only after verified process cleanup, before broker deletion
+	mu                      sync.Mutex
+	stopMu                  sync.Mutex
+	id                      string
+	kind                    string
+	ownerID                 string
+	ownerClass              string
+	workspace               string
+	pid                     int
+	pidPin                  *os.File // The pidfd is a stable process identity; it does NOT reserve the numeric PGID after reaping.
+	cmd                     *exec.Cmd
+	stdin                   *os.File
+	closed                  bool
+	exited                  bool
+	exitCode                int
+	cleanupErr              error
+	completed               time.Time
+	lastSeq                 uint64
+	events                  []stdioSessionEvent
+	bytes                   int
+	done                    chan struct{}
+	expiry                  *time.Timer
+	terminal                *tmuxTerminalState       // consumer-specific Control Mode state; broker owns its process
+	terminalRecordPersisted bool                     // guarded by entry.mu; prevents double counting persisted sessions
+	dap                     *dapState                // DAP stream attaches to this same process identity and broker
+	browser                 *browserStdioState       // managed Browser consumer; never a second process broker
+	browserLease            *browserSessionAdmission // release only after verified process cleanup, before broker deletion
 }
 
 type stdioSessionBroker struct {
@@ -86,6 +87,41 @@ type stdioSessionBroker struct {
 
 func newStdioSessionBroker() *stdioSessionBroker {
 	return &stdioSessionBroker{sessions: make(map[string]*stdioSession)}
+}
+
+// A scope whose startup could not be proven clean has NO Control Mode client
+// yet. It remains a principal-bound reserved session until exact shutdown is
+// verified. Normal failed-start defers must not discard this identity.
+func preserveUncertainTerminalStart(entry *stdioSession, err error) bool {
+	var unknown *terminalScopeCleanupUncertain
+	if entry == nil || entry.terminal == nil || !errors.As(err, &unknown) {
+		return false
+	}
+	entry.mu.Lock()
+	entry.terminal.scopeUncertain = true
+	entry.cleanupErr = err
+	entry.mu.Unlock()
+	return true
+}
+
+// Count terminal sessions without a verified durable record. An uncertain
+// scope start is NOT a free slot; the caller holds terminalAdmissionMu.
+func (b *stdioSessionBroker) unpersistedTerminalCount() int {
+	if b == nil {
+		return 0
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	count := 0
+	for _, entry := range b.sessions {
+		entry.mu.Lock()
+		pending := entry.terminal != nil && !entry.terminalRecordPersisted
+		entry.mu.Unlock()
+		if pending {
+			count++
+		}
+	}
+	return count
 }
 
 func (b *stdioSessionBroker) get(req Request, id string) (*stdioSession, error) {
@@ -228,7 +264,8 @@ func (s *Server) startProcessSessionWithID(req Request, kind, workspace, binary 
 		priorID = "stdio_" + hex.EncodeToString(nonce[:])
 	}
 	entry := &stdioSession{
-		id: priorID, kind: kind,
+		terminalRecordPersisted: terminal != nil && terminal.recovered,
+		id:                      priorID, kind: kind,
 		ownerID: req.PrincipalID, ownerClass: req.PrincipalClass,
 		workspace: cwd, done: make(chan struct{}), exitCode: -1, terminal: terminal,
 	}
@@ -259,6 +296,10 @@ func (s *Server) startProcessSessionWithID(req Request, kind, workspace, binary 
 				// the earlier deferred remove must not erase this session.
 				removeOnFailure = false
 				err = errors.Join(err, fmt.Errorf("terminal_scope_cleanup_unverified: %w", stopErr))
+				entry.mu.Lock()
+				terminal.scopeUncertain = true
+				entry.cleanupErr = err
+				entry.mu.Unlock()
 				id = entry.id
 			}
 		}
@@ -274,9 +315,20 @@ func (s *Server) startProcessSessionWithID(req Request, kind, workspace, binary 
 		return "", errors.New("worker tmux requires root executor-owned backend")
 	}
 	if terminal != nil && s.terminalBinary == "" && !terminal.recovered {
-		if err := s.startScopedTerminalBackend(req, binary, terminal, args); err != nil {
-			s.finishActionAudit(req, "session_create", auditMode(req.Root), kind+"\x00"+cwd+"\x00"+binary, "developer_session", start, Response{Error: err.Error()})
-			return "", err
+		launch := s.startScopedTerminalBackend
+		if s.terminalScopeStartTestHook != nil {
+			launch = s.terminalScopeStartTestHook
+		}
+		if scopeErr := launch(req, binary, terminal, args); scopeErr != nil {
+			// A may-exist privileged scope with unverified cleanup must never
+			// turn into a normal failed start. Preserve the already reserved
+			// broker identity; its SessionID is the explicit close/retry locator.
+			if preserveUncertainTerminalStart(entry, scopeErr) {
+				removeOnFailure = false
+				id = entry.id
+			}
+			s.finishActionAudit(req, "session_create", auditMode(req.Root), kind+"\x00"+cwd+"\x00"+binary, "developer_session", start, Response{Error: scopeErr.Error()})
+			return id, scopeErr
 		}
 		launchedScope = true
 		args = []string{"-f", "/dev/null", "-S", terminal.socket, "-C", "attach-session", "-t", terminal.name}

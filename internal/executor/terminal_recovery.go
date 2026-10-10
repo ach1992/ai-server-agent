@@ -81,6 +81,10 @@ func (s *Server) terminalRecordPath(id string) (string, error) {
 // the private root-owned record without following symlinks. Only records
 // explicitly tagged as new managed scopes and already expired may be reaped.
 func (s *Server) terminalRecordCount() (int, error) {
+	return s.terminalRecordCountWithStop(stopScopedTerminalBackend)
+}
+
+func (s *Server) terminalRecordCountWithStop(stop func(string) error) (int, error) {
 	dir, err := s.terminalRecordsDir()
 	if err != nil {
 		return 0, err
@@ -136,7 +140,7 @@ func (s *Server) terminalRecordCount() (int, error) {
 		// A dead Executor cannot fire its in-memory expiry timer. PID1's
 		// one-hour limit still owns the backend. Stop only the exact, random
 		// scoped unit from this trusted expired record, then fsync deletion.
-		if err := stopScopedTerminalBackend(rec.Name); err != nil {
+		if err := stop(rec.Name); err != nil {
 			return 0, fmt.Errorf("expired terminal backend not cleaned: %w", err)
 		}
 		if err := s.deleteTerminalRecord(rec.ID); err != nil {
@@ -294,6 +298,11 @@ func (s *Server) terminalReconnect(req Request) Response {
 	}
 	if current, err := s.sessions.get(req, req.SessionID); err == nil {
 		current.mu.Lock()
+		if current.terminal != nil && current.terminal.scopeUncertain {
+			epoch := current.terminal.epoch
+			current.mu.Unlock()
+			return Response{SessionID: current.id, SessionEpoch: epoch, Error: "scope cleanup is unverified; close/reconcile original session first", ErrorCode: "terminal_reconnect_unknown", ErrorClass: "state"}
+		}
 		live := !current.exited && !current.closed && !current.terminal.exited
 		epoch := current.terminal.epoch
 		current.mu.Unlock()

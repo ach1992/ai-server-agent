@@ -20,6 +20,41 @@ import (
 // record; root-owned private sockets are never delegated to aiworker.
 const terminalScopeCommandTimeout = 15 * time.Second
 
+// This error is reserved for cases where PID1 may own a privileged backend
+// and the exact-scope stop CANNOT be proven. The caller must retain the
+// principal-bound in-memory session identity and return its opaque ID.
+type terminalScopeCleanupUncertain struct {
+	phase   string
+	cause   error
+	cleanup error
+}
+
+func (e *terminalScopeCleanupUncertain) Error() string {
+	return fmt.Sprintf("terminal scope %s outcome uncertain: %v; cleanup: %v", e.phase, e.cause, e.cleanup)
+}
+
+func (e *terminalScopeCleanupUncertain) Unwrap() error { return e.cause }
+
+// Isolating the lifecycle decision permits deterministic fault injection for
+// both run-unknown and policy-verification-unknown paths without needing to
+// run systemd or mutate any host. A proven exact-scope stop is the only
+// condition under which a startup failure is a clean failure.
+func startTerminalScopeLifecycle(name string, run func() error, verify func() error, stop func(string) error) error {
+	if err := run(); err != nil {
+		if stopErr := stop(name); stopErr != nil {
+			return &terminalScopeCleanupUncertain{phase: "launch", cause: err, cleanup: stopErr}
+		}
+		return fmt.Errorf("terminal scope launch rejected: %w", err)
+	}
+	if err := verify(); err != nil {
+		if stopErr := stop(name); stopErr != nil {
+			return &terminalScopeCleanupUncertain{phase: "verification", cause: err, cleanup: stopErr}
+		}
+		return fmt.Errorf("terminal scope verification failed: %w", err)
+	}
+	return nil
+}
+
 func terminalScopeUnit(name string) (string, error) {
 	if !validTmuxSessionName(name) {
 		return "", errors.New("untrusted terminal generation")
@@ -63,21 +98,19 @@ func (s *Server) startScopedTerminalBackend(req Request, binary string, t *tmuxT
 	cmd := exec.CommandContext(ctx, runner, args...)
 	cmd.Dir = req.Workspace
 	cmd.Env = append(sanitizedSessionEnv("/root"), "TERM=xterm-256color")
-	output, runErr := cmd.CombinedOutput()
-	if runErr != nil {
-		// If systemd-run succeeded before its own transport failed, this
-		// exact random unit still needs reconciliation. Do not claim a
-		// clean failure unless stopping that unit is proven.
-		if stopErr := stopScopedTerminalBackend(t.name); stopErr != nil {
-			return fmt.Errorf("terminal scope launch uncertain (%s): %w; cleanup: %v", unit, runErr, stopErr)
+	var output []byte
+	err = startTerminalScopeLifecycle(t.name, func() error {
+		var runErr error
+		output, runErr = cmd.CombinedOutput()
+		if runErr != nil {
+			return fmt.Errorf("systemd-run: %w (%s)", runErr, strings.TrimSpace(string(output)))
 		}
-		return fmt.Errorf("terminal scope launch rejected: %w (%s)", runErr, strings.TrimSpace(string(output)))
-	}
-	if err := verifyScopedTerminalBackend(t.name); err != nil {
-		if stopErr := stopScopedTerminalBackend(t.name); stopErr != nil {
-			return fmt.Errorf("terminal scope startup uncertain: %w; cleanup: %v", err, stopErr)
-		}
-		return fmt.Errorf("terminal scope verification failed: %w", err)
+		return nil
+	}, func() error {
+		return verifyScopedTerminalBackend(t.name)
+	}, stopScopedTerminalBackend)
+	if err != nil {
+		return err
 	}
 	t.scoped = true
 	return nil
