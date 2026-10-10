@@ -73,7 +73,26 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 	if err = cmd.Start(); err != nil {
 		t.Fatal(err)
 	}
-	defer func() { _ = stdin.Close(); _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	// Normal test teardown must follow the SAME graceful Browser session
+	// protocol as production: allow context.close() to terminate Chromium
+	// and finish writing the profile before t.TempDir removes its files.
+	// Killing Node immediately races Chrome's profile writes on fast CI.
+	defer func() {
+		_, _ = stdin.Write([]byte("{\"type\":\"close\"}\n"))
+		_ = stdin.Close()
+		done := make(chan error, 1)
+		go func() { done <- cmd.Wait() }()
+		select {
+		case er := <-done:
+			if er != nil {
+				t.Errorf("graceful Browser fixture close: %v; stderr=%s", er, stderr.String())
+			}
+		case <-time.After(5 * time.Second):
+			_ = cmd.Process.Kill()
+			<-done
+			t.Error("graceful Browser fixture close timed out; emergency kill applied")
+		}
+	}()
 	rd := bufio.NewReader(stdout)
 	read := func() map[string]any {
 		t.Helper()
@@ -200,5 +219,6 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 	if success, raw := capture(strings.Repeat("f", 32), 35, 320); success["event"] != "capture_meta" || len(raw) == 0 {
 		t.Fatalf("known too_large poisoned Browser session: %v", success)
 	}
-	send(map[string]any{"type": "close"})
+	// The deferred teardown sends exactly one close request and awaits
+	// worker+Chromium completion before TempDir cleanup.
 }
