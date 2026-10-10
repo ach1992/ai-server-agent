@@ -385,7 +385,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 				tool.Annotations.OpenWorldHint == nil || !*tool.Annotations.OpenWorldHint {
 				t.Fatal("browser_e2e must disclose open-world/action-capable behavior")
 			}
-			for _, label := range []string{"SAME managed Chromium/profile/admission/TLS/resource limits", "one browser execution", "not a cross-call live session"} {
+			for _, label := range []string{"SAME managed Chromium/profile/admission/TLS/resource limits", "one browser execution", "not a cross-call live session", "refs expire on navigation"} {
 				if !strings.Contains(tool.Description, label) {
 					t.Fatalf("browser_e2e description missing %q", label)
 				}
@@ -394,7 +394,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, field := range []string{"steps", "action", "url", "selector", "role", "name", "value", "expected", "timeout_ms", "ignore_https_errors"} {
+			for _, field := range []string{"steps", "action", "url", "selector", "ref", "role", "name", "value", "expected", "timeout_ms", "ignore_https_errors"} {
 				if !strings.Contains(string(in), `"`+field+`"`) {
 					t.Fatalf("browser_e2e schema missing %q: %s", field, in)
 				}

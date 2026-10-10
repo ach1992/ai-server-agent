@@ -28,6 +28,13 @@ type reviewFlowResult struct {
 		PreflightReason string `json:"preflight_reason"`
 		ScannedNodes    int    `json:"scanned_nodes"`
 		Snapshot        string `json:"snapshot"`
+		Refs            []struct {
+			Ref  string `json:"ref"`
+			Role string `json:"role"`
+			Name string `json:"name"`
+		} `json:"refs"`
+		RefsDropped int    `json:"refs_dropped"`
+		RefsScope   string `json:"refs_scope"`
 	} `json:"results"`
 }
 
@@ -437,4 +444,134 @@ Object.defineProperty(document.getElementById('tiny'), 'ariaLabelledByElements',
 	})
 	t.Log("PASS: reflected ID-less DOM references, transitive/cyclic and aggregate budgets, older attribute fallback")
 	t.Log("PASS: Chromium delays/privacy/ARIA budgets, external labels/IDREFs/ownership, cyclic refs")
+}
+
+// Pinned real Chromium proof: refs refer to exact ElementHandles only within
+// one flow. Detached elements, navigation and invalid refs cannot silently
+// retarget a different node (or return a sensitive page URL in errors).
+func TestBrowserFlowRefLifecyclePinnedRuntime(t *testing.T) {
+	engine := os.Getenv("AI_SERVER_AGENT_BROWSER_FLOW_RUNTIME")
+	if engine == "" {
+		t.Skip("requires pinned Playwright and Chromium")
+	}
+	var err error
+	engine, err = filepath.Abs(engine)
+	if err != nil {
+		t.Fatal(err)
+	}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		switch r.URL.Path {
+		case "/many":
+			fmt.Fprint(w, "<body>")
+			for i := 0; i < 90; i++ {
+				fmt.Fprintf(w, "<button>Action %d</button>", i)
+			}
+			fmt.Fprint(w, "</body>")
+		case "/other":
+			fmt.Fprint(w, "<body><button>Other page</button></body>")
+		case "/reorder":
+			fmt.Fprint(w, `<body><button id="prepend">Prepend</button>
+<button id="target">Target</button><div id="result">Waiting</div>
+<script>
+ document.getElementById('prepend').onclick = () => {
+   const button = document.createElement('button');
+   button.textContent = 'Inserted';
+   document.getElementById('target').before(button);
+ };
+ document.getElementById('target').onclick = () =>
+   document.getElementById('result').textContent = 'Target hit';
+</script></body>`)
+		default:
+			fmt.Fprint(w, `<body>
+<button style="display:none" aria-label="invisible-private-label">Hidden</button>
+<label for="name">Name</label><input id="name"><button id="save"><span style="display:none">private-descendant-text</span>Save</button>
+<div id="result">Waiting</div>
+<script>document.getElementById('save').onclick = function () {
+ document.getElementById('result').textContent = document.getElementById('name').value;
+ this.remove();
+}</script></body>`)
+		}
+	}))
+	defer srv.Close()
+
+	t.Run("valid-refs", func(t *testing.T) {
+		result, out, runErr := reviewRun(t, engine, []FlowStep{
+			{Action: "goto", URL: srv.URL + "/?key=do-not-leak"},
+			{Action: "snapshot"},
+			{Action: "fill", Ref: "e1", Value: "Ref accepted"},
+			{Action: "click", Ref: "e2"},
+			{Action: "assert_text", Selector: "#result", Expected: "Ref accepted"},
+		})
+		if runErr != nil || !result.OK || len(result.Results) != 5 {
+			t.Fatalf("ref flow failed: err=%v result=%+v", runErr, result)
+		}
+		refs := result.Results[1].Refs
+		if len(refs) != 2 || refs[0].Ref != "e1" || refs[0].Role != "textbox" ||
+			refs[1].Ref != "e2" || refs[1].Role != "button" ||
+			refs[1].Name != "Save" || result.Results[1].RefsScope != "flow_only" ||
+			strings.Contains(out, "invisible-private-label") ||
+			strings.Contains(out, "private-descendant-text") {
+			t.Fatalf("missing/ambiguous refs: %+v", result.Results[1])
+		}
+	})
+	t.Run("dom-reorder-does-not-retarget", func(t *testing.T) {
+		result, _, runErr := reviewRun(t, engine, []FlowStep{
+			{Action: "goto", URL: srv.URL + "/reorder"},
+			{Action: "snapshot"},
+			{Action: "click", Ref: "e1"},
+			{Action: "click", Ref: "e2"},
+			{Action: "assert_text", Selector: "#result", Expected: "Target hit"},
+		})
+		if runErr != nil || !result.OK || len(result.Results) != 5 {
+			t.Fatalf("DOM reordering retargeted a ref: err=%v result=%+v", runErr, result)
+		}
+	})
+	t.Run("detached", func(t *testing.T) {
+		result, out, runErr := reviewRun(t, engine, []FlowStep{
+			{Action: "goto", URL: srv.URL + "/?key=do-not-leak"},
+			{Action: "snapshot"},
+			{Action: "click", Ref: "e2"},
+			{Action: "click", Ref: "e2"},
+		})
+		if runErr == nil || result.OK || result.FailedStep == nil ||
+			*result.FailedStep != 3 || result.Results[3].Error != "stale_ref" ||
+			strings.Contains(out, "do-not-leak") {
+			t.Fatalf("detached ref did not fail safely: err=%v result=%+v output=%s", runErr, result, out)
+		}
+	})
+	t.Run("new-call-cannot-reuse-prior-ref", func(t *testing.T) {
+		// A new browser_e2e call has no ref registry even if the managed
+		// Browser profile has persistent cookies and other authorized state.
+		result, _, runErr := reviewRun(t, engine, []FlowStep{
+			{Action: "click", Ref: "e1"},
+		})
+		if runErr == nil || result.OK || len(result.Results) != 1 ||
+			result.Results[0].Error != "invalid_ref" {
+			t.Fatalf("ref unexpectedly survived call boundary: err=%v result=%+v", runErr, result)
+		}
+	})
+	t.Run("navigation", func(t *testing.T) {
+		result, _, runErr := reviewRun(t, engine, []FlowStep{
+			{Action: "goto", URL: srv.URL},
+			{Action: "snapshot"},
+			{Action: "goto", URL: srv.URL + "/other"},
+			{Action: "click", Ref: "e1"},
+		})
+		if runErr == nil || result.OK || len(result.Results) != 4 ||
+			result.Results[3].Error != "invalid_ref" {
+			t.Fatalf("navigation did not invalidate refs: err=%v result=%+v", runErr, result)
+		}
+	})
+	t.Run("bounded", func(t *testing.T) {
+		result, out, runErr := reviewRun(t, engine, []FlowStep{
+			{Action: "goto", URL: srv.URL + "/many"},
+			{Action: "snapshot"},
+		})
+		if runErr != nil || !result.OK || len(result.Results) != 2 ||
+			len(result.Results[1].Refs) > 24 || result.Results[1].RefsDropped < 66 ||
+			len(out) >= 32768 {
+			t.Fatalf("refs exceeded budget or count: err=%v result=%+v output_len=%d", runErr, result, len(out))
+		}
+	})
 }

@@ -15,6 +15,7 @@ const (
 	maxFlowSteps         = 12
 	maxFlowInputBytes    = 16 << 10
 	maxFlowSelectorBytes = 512
+	maxFlowRefBytes      = 8
 	maxFlowURLBytes      = 2048
 	maxFlowValueBytes    = 4096
 	maxFlowExpectedBytes = 1024
@@ -27,7 +28,8 @@ const (
 type FlowStep struct {
 	Action    string `json:"action" jsonschema:"goto, snapshot, click, fill, assert_text, assert_url, console or network"`
 	URL       string `json:"url,omitempty" jsonschema:"HTTP(S) URL for goto; about:blank is permitted"`
-	Selector  string `json:"selector,omitempty" jsonschema:"CSS locator (instead of role/name); maximum 512 UTF-8 bytes"`
+	Selector  string `json:"selector,omitempty" jsonschema:"CSS locator (instead of role/name/ref); maximum 512 UTF-8 bytes"`
+	Ref       string `json:"ref,omitempty" jsonschema:"Snapshot-issued element ref (e1, e2, ...); usable only within this one browser_e2e call, not across calls"`
 	Role      string `json:"role,omitempty" jsonschema:"Accessible role (instead of selector), such as button or textbox"`
 	Name      string `json:"name,omitempty" jsonschema:"Exact accessible name when role is used"`
 	Value     string `json:"value,omitempty" jsonschema:"Input value for fill, maximum 4096 UTF-8 bytes"`
@@ -41,6 +43,18 @@ type FlowOptions struct {
 	IgnoreHTTPSErrors bool
 }
 
+func validFlowRef(ref string) bool {
+	if len(ref) < 2 || len(ref) > maxFlowRefBytes || ref[0] != 'e' || ref[1] < '1' || ref[1] > '9' {
+		return false
+	}
+	for i := 2; i < len(ref); i++ {
+		if ref[i] < '0' || ref[i] > '9' {
+			return false
+		}
+	}
+	return true
+}
+
 func validateFlowStep(s FlowStep) error {
 	if s.TimeoutMS < 0 || s.TimeoutMS > maxFlowStepTimeoutMS {
 		return fmt.Errorf("timeout_ms must be between 0 and %d", maxFlowStepTimeoutMS)
@@ -50,9 +64,10 @@ func validateFlowStep(s FlowStep) error {
 		len(s.Expected) > maxFlowExpectedBytes {
 		return errors.New("step field exceeds its size limit")
 	}
-	hasLocator := s.Selector != "" || s.Role != ""
-	if (s.Selector != "" && (s.Role != "" || s.Name != "")) || (s.Name != "" && s.Role == "") {
-		return errors.New("supply either selector or role/name, never both")
+	hasLocator := s.Selector != "" || s.Role != "" || s.Ref != ""
+	if (s.Ref != "" && (!validFlowRef(s.Ref) || s.Selector != "" || s.Role != "" || s.Name != "")) ||
+		(s.Selector != "" && (s.Role != "" || s.Name != "")) || (s.Name != "" && s.Role == "") {
+		return errors.New("supply exactly one of selector, role/name or a valid snapshot ref")
 	}
 	switch s.Action {
 	case "goto":
@@ -66,7 +81,7 @@ func validateFlowStep(s FlowStep) error {
 			}
 		}
 	case "snapshot":
-		if s.URL != "" || s.Value != "" || s.Expected != "" {
+		if s.URL != "" || s.Ref != "" || s.Value != "" || s.Expected != "" {
 			return errors.New("snapshot accepts only optional selector or role/name")
 		}
 	case "console", "network":
@@ -201,6 +216,60 @@ const __asaNavigationFailure = error => {
 const __asaLocator = step => step.selector
   ? page.locator(step.selector)
   : page.getByRole(step.role, step.name ? { name: step.name, exact: true } : {});
+// Ref handles live in this ONE execution only. A new call never gets the
+// handle map, and a navigation or detached element invalidates old refs.
+const __asaRefs = new Map();
+let __asaRefSequence = 0;
+const __asaMaxRefs = 64;
+const __asaRefSelector = 'a,button,input:not([type="hidden"]),textarea,select,[role],[tabindex]';
+const __asaGetTarget = async step => {
+  if (!step.ref) return __asaLocator(step);
+  const entry = __asaRefs.get(step.ref);
+  if (!entry) throw new Error('invalid_ref');
+  if (entry.url !== page.url()) throw new Error('stale_ref');
+  const attached = await entry.element.evaluate(el => el.isConnected).catch(() => false);
+  if (!attached) throw new Error('stale_ref');
+  return entry.element;
+};
+const __asaSnapshotRefs = async target => {
+  const candidates = target.locator(__asaRefSelector);
+  const root = await target.elementHandle().catch(() => null);
+  const rootMatch = root ? await root.evaluate((el, selector) => el.matches(selector),
+    __asaRefSelector).catch(() => false) : false;
+  const total = (rootMatch ? 1 : 0) + await candidates.count();
+  const maxRefs = Math.min(24, __asaMaxRefs - __asaRefSequence);
+  const refs = [];
+  // Scan no more than 64 candidates: hidden controls must never expose
+  // invisible labels/metadata that were omitted from the ARIA snapshot.
+  for (let i = 0; i < Math.min(total, 64) && refs.length < maxRefs; i++) {
+    const handle = rootMatch && i === 0 ? root :
+      await candidates.nth(i - (rootMatch ? 1 : 0)).elementHandle().catch(() => null);
+    if (!handle || !await handle.isVisible().catch(() => false)) continue;
+    // Bound DOM-derived strings before crossing the renderer boundary.
+    // Never expose form values; accessible names may be client-visible UI.
+    const info = await handle.evaluate(el => {
+      const tag = el.tagName.toLowerCase();
+      const type = el.getAttribute('type') || '';
+      const role = (el.getAttribute('role') || (
+        tag === 'button' ? 'button' : tag === 'a' ? 'link' :
+        tag === 'textarea' ? 'textbox' : tag === 'select' ? 'combobox' :
+        tag === 'input' ? (type === 'checkbox' ? 'checkbox' : type === 'radio' ? 'radio' : 'textbox') : ''
+      )).slice(0, 40);
+      const isForm = ['input','textarea','select'].includes(tag);
+      const name = (el.getAttribute('aria-label') || el.getAttribute('title') ||
+        (isForm ? (el.labels?.[0]?.innerText || el.getAttribute('placeholder')) :
+        // innerText omits hidden descendants; textContent would leak them.
+        el.innerText) || '').trim().slice(0, 80);
+      return { tag, role, name };
+    }).catch(() => null);
+    if (!info) continue;
+    const ref = 'e' + (++__asaRefSequence);
+    __asaRefs.set(ref, { element: handle, url: page.url() });
+    refs.push({ ref, ...info });
+  }
+  const budgeted = __asaBudgetedEntries(refs);
+  return { entries: budgeted.entries, dropped: Math.max(0, total - refs.length) + budgeted.omitted };
+};
 const __asaResults = [];
 let __asaFailedStep = null;
 for (let i = 0; i < __asaSteps.length; i++) {
@@ -211,6 +280,7 @@ for (let i = 0; i < __asaSteps.length; i++) {
   try {
     switch (step.action) {
       case 'goto':
+        __asaRefs.clear();
         await page.goto(step.url, { waitUntil: 'domcontentloaded', timeout });
         item.url = __asaURL(page.url());
         break;
@@ -358,19 +428,26 @@ for (let i = 0; i < __asaSteps.length; i++) {
         item.total_bytes = Buffer.byteLength(content, 'utf8');
         item.snapshot = bounded.text;
         item.truncated = bounded.truncated;
+        // Page churn must not turn a successfully bounded snapshot into a
+        // failure merely because optional ref enumeration raced navigation.
+        const refs = await __asaSnapshotRefs(target).catch(() => null);
+        item.refs = refs?.entries || [];
+        item.refs_dropped = refs?.dropped ?? null;
+        item.refs_unavailable = !refs;
+        item.refs_scope = 'flow_only';
         break;
       }
       case 'click':
-        await __asaLocator(step).click({ timeout });
+        await (await __asaGetTarget(step)).click({ timeout });
         break;
       case 'fill':
-        await __asaLocator(step).fill(step.value || '', { timeout });
+        await (await __asaGetTarget(step)).fill(step.value || '', { timeout });
         break;
       case 'assert_text': {
         // Element absence is normal during SPA/data-load transitions. A
         // short innerText timeout must not prematurely end a longer caller
         // deadline. Retry only within that exact bounded step deadline.
-        const locator = __asaLocator(step);
+        const locator = await __asaGetTarget(step);
         const deadline = Date.now() + timeout;
         let matched = false;
         while (Date.now() < deadline) {
@@ -422,6 +499,12 @@ for (let i = 0; i < __asaSteps.length; i++) {
     if (step.action === 'goto') {
       item.error = __asaNavigationFailure(error);
       item.url = __asaURL(step.url);
+     } else if (step.ref) {
+      // ElementHandle action failures can include the page's sensitive URL,
+      // query or DOM. Ref errors are finite classifications, never raw text.
+      const message = String(error?.message || error);
+      item.error = message === 'invalid_ref' || message === 'stale_ref' ?
+        message : 'ref_action_failed';
     } else {
       item.error = __asaCap(String(error?.message || error).split('\n')[0], 240);
     }
