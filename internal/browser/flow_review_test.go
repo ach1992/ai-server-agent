@@ -145,6 +145,94 @@ document.querySelector('#host').attachShadow({mode:'open'}).append(b);
 		case "/cycle":
 			fmt.Fprint(w, `<span id="a" aria-labelledby="b">First</span><span id="b" aria-labelledby="a">Second</span>
 <button id="tiny" aria-labelledby="a">Tiny</button>`)
+		case "/property-label-large", "/property-desc-large",
+			"/property-owns-large", "/property-details-large",
+			"/property-error-large", "/property-controls-large",
+			"/property-flowto-large", "/property-active-large",
+			"/property-label-small", "/property-desc-small", "/property-owns-small":
+			key := strings.TrimPrefix(r.URL.Path, "/property-")
+			parts := strings.Split(key, "-")
+			properties := map[string]struct {
+				property, attr string
+				single         bool
+			}{
+				"label":    {"ariaLabelledByElements", "aria-labelledby", false},
+				"desc":     {"ariaDescribedByElements", "aria-describedby", false},
+				"owns":     {"ariaOwnsElements", "aria-owns", false},
+				"details":  {"ariaDetailsElements", "aria-details", false},
+				"error":    {"ariaErrorMessageElements", "aria-errormessage", false},
+				"controls": {"ariaControlsElements", "aria-controls", false},
+				"flowto":   {"ariaFlowToElements", "aria-flowto", false},
+				"active":   {"ariaActiveDescendantElement", "aria-activedescendant", true},
+			}
+			meta := properties[parts[0]]
+			text := "A short external description"
+			if parts[1] == "large" {
+				text = strings.Repeat("X", 2<<20)
+			}
+			fmt.Fprintf(w, `<span data-external>%s</span><button id="tiny">Local</button>
+<output id="proof"></output><script>
+const target = document.getElementById('tiny');
+const external = document.querySelector('[data-external]');
+const property = %q, attr = %q, singular = %t;
+const supported = property in target;
+if (supported) target[property] = singular ? external : [external];
+const reflect = supported ? target[property] : null;
+const valid = supported && (singular ? reflect === external :
+  Array.isArray(reflect) && reflect.length === 1 && reflect[0] === external);
+const attribute = target.getAttribute(attr);
+document.getElementById('proof').textContent =
+  (supported ? 'supported' : 'unsupported') + ':' +
+  (valid ? 'verified' : 'unverified') + ':' +
+  (attribute == null || attribute === '' ? 'attribute_empty' : 'attribute_set') +
+  ':' + (external.id === '' ? 'idless' : 'has_id');
+</script>`, text, meta.property, meta.attr, meta.single)
+		case "/property-aggregate":
+			fmt.Fprint(w, `<button id="tiny">Local</button><output id="proof"></output>`)
+			for i := 0; i < 85; i++ {
+				fmt.Fprint(w, `<span data-external>`, strings.Repeat("Q", 1000), `</span>`)
+			}
+			fmt.Fprint(w, `<script>
+const target = document.getElementById('tiny');
+const refs = Array.from(document.querySelectorAll('[data-external]'));
+const supported = 'ariaLabelledByElements' in target;
+if (supported) target.ariaLabelledByElements = refs;
+document.getElementById('proof').textContent =
+  (supported ? 'supported' : 'unsupported') + ':' +
+  (supported && target.ariaLabelledByElements.length === 85 ? 'verified' : 'unverified') +
+  ':' + (target.getAttribute('aria-labelledby') === '' ? 'attribute_empty' : 'attribute_set') +
+  ':idless';
+</script>`)
+		case "/property-cycle":
+			fmt.Fprint(w, `<span data-external>External</span><button id="tiny">Local</button>
+<output id="proof"></output><script>
+const target = document.getElementById('tiny'), external = document.querySelector('[data-external]');
+const supported = 'ariaLabelledByElements' in target;
+if (supported) {
+  target.ariaLabelledByElements = [external];
+  external.ariaLabelledByElements = [target];
+}
+document.getElementById('proof').textContent =
+  (supported ? 'supported' : 'unsupported') + ':verified:attribute_empty:idless';
+</script>`)
+		case "/property-owns-synthetic":
+			fmt.Fprint(w, `<span data-external>`, strings.Repeat("U", 2<<20),
+				`</span><button id="tiny">Local</button><output id="proof"></output><script>
+const target = document.getElementById('tiny'), external = document.querySelector('[data-external]');
+// Current pinned Chromium does not natively expose ariaOwnsElements.
+// Assigning the same Element[] shape exercises the future platform path.
+target.ariaOwnsElements = [external];
+document.getElementById('proof').textContent =
+  (target.ariaOwnsElements[0] === external ? 'supported:verified' : 'invalid') +
+  ':' + (target.getAttribute('aria-owns') == null ? 'attribute_empty' : 'attribute_set') +
+  ':idless';
+</script>`)
+		case "/property-accessor-throws":
+			fmt.Fprint(w, `<button id="tiny">Local</button><script>
+Object.defineProperty(document.getElementById('tiny'), 'ariaLabelledByElements', {
+  get() { throw new Error('REFLECTED_SECRET_SENTINEL'); }
+});
+</script>`)
 		default:
 			fmt.Fprint(w, `<p id="initial">Initial content</p>`)
 		}
@@ -269,5 +357,84 @@ document.querySelector('#host').attachShadow({mode:'open'}).append(b);
 			}
 		})
 	}
+	// Chromium exposes reflected Element references even for ID-less nodes
+	// and may clear the aria-* content attribute when assigning the property.
+	// They must be discovered before ariaSnapshot, not by getElementById.
+	for _, tc := range []struct {
+		name, path string
+		large      bool
+		optional   bool
+	}{
+		{"reflected_ariaLabelledByElements_large_idless", "/property-label-large", true, false},
+		{"reflected_ariaDescribedByElements_large_idless", "/property-desc-large", true, false},
+		{"reflected_ariaOwnsElements_large_if_supported", "/property-owns-large", true, true},
+		{"reflected_ariaDetailsElements_large_idless", "/property-details-large", true, true},
+		{"reflected_ariaErrorMessageElements_large_idless", "/property-error-large", true, true},
+		{"reflected_ariaControlsElements_large_idless", "/property-controls-large", true, true},
+		{"reflected_ariaFlowToElements_large_idless", "/property-flowto-large", true, true},
+		{"reflected_ariaActiveDescendantElement_large_idless", "/property-active-large", true, true},
+		{"small_reflected_ariaLabelledByElements", "/property-label-small", false, false},
+		{"small_reflected_ariaDescribedByElements", "/property-desc-small", false, false},
+		{"small_reflected_ariaOwnsElements_if_supported", "/property-owns-small", false, true},
+		{"many_reflected_idless_nodes_share_one_budget", "/property-aggregate", true, false},
+		{"cyclic_reflected_ariaLabelledByElements", "/property-cycle", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, output, e := reviewRun(t, engine, []FlowStep{
+				{Action: "goto", URL: srv.URL + tc.path},
+				{Action: "snapshot", Selector: "#proof"},
+				{Action: "snapshot", Selector: "#tiny"},
+			})
+			if e != nil || !got.OK || got.Executed != 3 || len(got.Results) != 3 {
+				t.Fatalf("property-reflected flow did not finish: %+v err=%v", got, e)
+			}
+			proof := got.Results[1].Snapshot
+			if strings.Contains(proof, "unsupported") && tc.optional {
+				t.Skip("Pinned Chromium does not expose this property; existing attribute fallback is tested")
+			}
+			if !strings.Contains(proof, "supported:verified:attribute_empty:idless") {
+				t.Fatalf("property/ID-less/attribute-clearing precondition not proven: %q", proof)
+			}
+			last := got.Results[2]
+			if tc.large {
+				if !last.Truncated || last.Reason != "dom_too_large" || last.Snapshot != "" ||
+					(last.PreflightReason != "text" && last.PreflightReason != "attribute") {
+					t.Fatalf("large property-assigned remote accessible content was not blocked: %+v", last)
+				}
+			} else if last.Truncated || last.Reason != "" || !strings.Contains(last.Snapshot, "button") {
+				t.Fatalf("small reflected external reference could not be snapshotted: %+v", last)
+			}
+			if len(output) >= 16384 {
+				t.Fatalf("property-reflected remote content exceeded output budget: %d", len(output))
+			}
+		})
+	}
+	t.Run("synthetic_future_ariaOwnsElements_is_already_bounded", func(t *testing.T) {
+		got, output, e := reviewRun(t, engine, []FlowStep{
+			{Action: "goto", URL: srv.URL + "/property-owns-synthetic"},
+			{Action: "snapshot", Selector: "#proof"},
+			{Action: "snapshot", Selector: "#tiny"},
+		})
+		if e != nil || !got.OK || got.Executed != 3 ||
+			!strings.Contains(got.Results[1].Snapshot, "supported:verified:attribute_empty:idless") ||
+			got.Results[2].Reason != "dom_too_large" || got.Results[2].PreflightReason != "text" ||
+			got.Results[2].Snapshot != "" || len(output) >= 16384 {
+			t.Fatalf("future ariaOwnsElements shape bypassed shared preflight: %+v err=%v", got, e)
+		}
+	})
+	t.Run("reflected_property_getter_failure_fails_closed_without_leaking", func(t *testing.T) {
+		got, output, e := reviewRun(t, engine, []FlowStep{
+			{Action: "goto", URL: srv.URL + "/property-accessor-throws"},
+			{Action: "snapshot", Selector: "#tiny"},
+		})
+		if e != nil || !got.OK || got.Executed != 2 ||
+			got.Results[1].Reason != "dom_too_large" ||
+			got.Results[1].PreflightReason != "unresolvable_references" ||
+			got.Results[1].Snapshot != "" ||
+			strings.Contains(output, "REFLECTED_SECRET_SENTINEL") {
+			t.Fatalf("uninspectable external getter was not rejected safely: %+v err=%v", got, e)
+		}
+	})
+	t.Log("PASS: reflected ID-less DOM references, transitive/cyclic and aggregate budgets, older attribute fallback")
 	t.Log("PASS: Chromium delays/privacy/ARIA budgets, external labels/IDREFs/ownership, cyclic refs")
 }

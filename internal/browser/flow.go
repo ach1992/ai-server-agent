@@ -243,8 +243,21 @@ for (let i = 0; i < __asaSteps.length; i++) {
               (budget.text_units + budget.attribute_units +
                budget.state_units + budget.generated_units) > 120000;
           };
-          const idrefs = ['aria-labelledby', 'aria-describedby', 'aria-owns',
-            'aria-details', 'aria-errormessage'];
+          // ARIA external references have two independent representations:
+          // DOM-reflected Element arrays/singletons, which may point to
+          // ID-less nodes and clear the corresponding content attribute,
+          // and legacy attribute IDREF strings. Check both without querying
+          // the entire document, using ONE visited/queued/content budget.
+          const relationships = [
+            ['ariaLabelledByElements', 'aria-labelledby', true],
+            ['ariaDescribedByElements', 'aria-describedby', true],
+            ['ariaOwnsElements', 'aria-owns', true],
+            ['ariaDetailsElements', 'aria-details', true],
+            ['ariaErrorMessageElements', 'aria-errormessage', true],
+            ['ariaControlsElements', 'aria-controls', true],
+            ['ariaFlowToElements', 'aria-flowto', true],
+            ['ariaActiveDescendantElement', 'aria-activedescendant', false],
+          ];
           while (roots.length) {
             const root = roots.pop();
             if (visited.has(root)) continue;
@@ -275,20 +288,42 @@ for (let i = 0; i < __asaSteps.length; i++) {
                 }
                 if (node.shadowRoot && addRoot(node.shadowRoot))
                   return reject('dependency_refs');
-                // Resolve references within their actual document/shadow root,
-                // not by scanning an unbounded document for labels/IDs.
+                // The same node may expose a reflected property and an IDREF
+                // attribute; consider both so neither can bypass preflight.
+                // Property paths are essential for ID-less remote Elements.
                 const tree = node.getRootNode();
-                if (tree && typeof tree.getElementById === 'function') {
-                  for (const attr of idrefs) {
-                    const ids = node.getAttribute(attr);
-                    if (!ids) continue;
-                    for (const id of ids.trim().split(/\s+/)) {
-                      if (id && addRoot(tree.getElementById(id)))
-                        return reject('dependency_refs');
+                for (const [property, attr, multiple] of relationships) {
+                  if (property in node) {
+                    let refs;
+                    try {
+                      refs = node[property];
+                    } catch {
+                      return reject('unresolvable_references');
+                    }
+                    if (refs != null) {
+                      if (multiple) {
+                        if (!Array.isArray(refs) || refs.length > 4000)
+                          return reject('dependency_refs');
+                        for (const ref of refs) {
+                          if (!(ref instanceof Element))
+                            return reject('unresolvable_references');
+                          if (addRoot(ref)) return reject('dependency_refs');
+                        }
+                      } else {
+                        if (!(refs instanceof Element))
+                          return reject('unresolvable_references');
+                        if (addRoot(refs)) return reject('dependency_refs');
+                      }
                     }
                   }
-                } else if (idrefs.some(attr => node.hasAttribute(attr))) {
-                  return reject('unresolvable_references');
+                  const ids = node.getAttribute(attr);
+                  if (!ids) continue;
+                  if (!tree || typeof tree.getElementById !== 'function')
+                    return reject('unresolvable_references');
+                  for (const id of ids.trim().split(/\s+/)) {
+                    if (id && addRoot(tree.getElementById(id)))
+                      return reject('dependency_refs');
+                  }
                 }
                 // Native labels may be anywhere in the same document, not
                 // descendants of the scoped form control.
