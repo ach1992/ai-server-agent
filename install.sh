@@ -253,10 +253,26 @@ install -d -m 0750 -o "$WORKER_USER" -g "$WORKER_USER" "$WORKSPACE_DIR"
 install -d -m 0700 -o "$WORKER_USER" -g "$WORKER_USER" "$WORKER_HOME"
 # Existing installs may still record WorkspaceDir as the account's login
 # home. Change only that known legacy value; never move/delete project data.
+# An active job can make shadow-utils usermod return E_USER_BUSY (8). The
+# managed session HOME is independently pinned to the private worker-home,
+# so defer ONLY this optional passwd metadata migration in that exact case.
+# Do not kill existing worker jobs or silently ignore other usermod errors.
+migrate_existing_worker_login_home() {
+  local account="$1" legacy_home="$2" new_home="$3" existing_home="$4" rc
+  [ "$existing_home" = "$legacy_home" ] || return 0
+  if usermod --home "$new_home" "$account"; then
+    return 0
+  else
+    rc=$?
+  fi
+  if [ "$rc" -eq 8 ] && [ "$(getent passwd "$account" | cut -d: -f6)" = "$legacy_home" ]; then
+    warn "Deferring legacy $account login HOME migration: active worker processes prevented usermod. Existing jobs and workspace are preserved; managed sessions use $new_home. Retry an installer repair when worker processes are idle."
+    return 0
+  fi
+  die "Could not migrate $account login HOME (usermod exit $rc); refusing to hide an unexpected account change"
+}
 existing_worker_home="$(getent passwd "$WORKER_USER" | cut -d: -f6)"
-if [ "$existing_worker_home" = "$WORKSPACE_DIR" ]; then
-  usermod --home "$WORKER_HOME" "$WORKER_USER"
-fi
+migrate_existing_worker_login_home "$WORKER_USER" "$WORKSPACE_DIR" "$WORKER_HOME" "$existing_worker_home"
 secure_state_container(){
   local path="$1"
   if [ -L "$path" ]; then
