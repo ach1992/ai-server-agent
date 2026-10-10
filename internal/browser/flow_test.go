@@ -115,6 +115,11 @@ func TestBrowserFlowPinnedRuntimeAcceptance(t *testing.T) {
 			fmt.Fprint(w, "<!doctype html><p>", strings.Repeat("گزارش فارسی ", 4500), "</p>")
 			return
 		}
+		if req.URL.Path == "/nodes" {
+			w.Header().Set("Content-Type", "text/html; charset=utf-8")
+			fmt.Fprint(w, "<!doctype html><main id='app'>", strings.Repeat("<span>x</span>", 4500), "</main><aside id='small'>Safe scoped element</aside>")
+			return
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		fmt.Fprint(w, `<!doctype html><title>E2E fixture</title>
 <label for="name">Name</label><input id="name"><button id="submit">Submit</button>
@@ -138,6 +143,8 @@ console.log('submitted');
 		{Action: "console"},
 		{Action: "network"},
 		{Action: "goto", URL: srv.URL + "/large"},
+		{Action: "snapshot"},
+		{Action: "goto", URL: srv.URL + "/nodes"},
 		{Action: "snapshot"},
 	}
 	script, err := flowScript(steps)
@@ -186,6 +193,7 @@ try {
 			Snapshot   string            `json:"snapshot"`
 			TotalBytes int               `json:"total_bytes"`
 			Truncated  bool              `json:"truncated"`
+			Reason     string            `json:"reason"`
 			Entries    []json.RawMessage `json:"entries"`
 		} `json:"results"`
 	}
@@ -217,5 +225,31 @@ try {
 	if strings.Contains(string(out), "do-not-log") {
 		t.Fatal("browser flow leaked a request query credential in model-facing network evidence")
 	}
-	t.Log("PASS: managed Chromium browser E2E flow, semantic interactions, console/network and large UTF-8 output budgeting")
+	if oversized := result.Results[11]; !oversized.Truncated || oversized.Reason != "dom_too_large" || oversized.Snapshot != "" {
+		t.Fatalf("oversized DOM was materialized instead of safely omitted: %+v", oversized)
+	}
+	// A caller must be able to inspect a narrow subtree of the same oversized
+	// page instead of being forced to materialize the entire page DOM.
+	scoped, err := flowScript([]FlowStep{
+		{Action: "goto", URL: srv.URL + "/nodes"},
+		{Action: "snapshot", Selector: "#small"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	scopedRunner := strings.Replace(src, script, scoped, 1)
+	if scopedRunner == src {
+		t.Fatal("failed to substitute scoped flow")
+	}
+	if err := os.WriteFile(runner, []byte(scopedRunner), 0600); err != nil {
+		t.Fatal(err)
+	}
+	scopedCmd := exec.CommandContext(ctx, node, runner)
+	scopedCmd.Dir = tmp
+	scopedCmd.Env = cmd.Env
+	scopedOutput, err := scopedCmd.CombinedOutput()
+	if err != nil || !strings.Contains(string(scopedOutput), "Safe scoped element") {
+		t.Fatalf("narrow snapshot failed on oversized DOM: %v: %s", err, scopedOutput)
+	}
+	t.Log("PASS: managed Chromium browser E2E, bounded UTF-8, DOM preflight and scoped snapshot")
 }

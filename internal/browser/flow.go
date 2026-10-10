@@ -65,9 +65,13 @@ func validateFlowStep(s FlowStep) error {
 				return errors.New("goto requires an absolute http/https URL without embedded user credentials")
 			}
 		}
-	case "snapshot", "console", "network":
+	case "snapshot":
+		if s.URL != "" || s.Value != "" || s.Expected != "" {
+			return errors.New("snapshot accepts only optional selector or role/name")
+		}
+	case "console", "network":
 		if s.URL != "" || hasLocator || s.Name != "" || s.Value != "" || s.Expected != "" {
-			return errors.New("inspection actions take no element or value fields")
+			return errors.New("console and network actions take no element or value fields")
 		}
 	case "click", "fill", "assert_text":
 		if !hasLocator || s.URL != "" {
@@ -202,7 +206,32 @@ for (let i = 0; i < __asaSteps.length; i++) {
         item.url = __asaURL(page.url());
         break;
       case 'snapshot': {
-        const content = await page.locator('body').ariaSnapshot({ timeout });
+        const target = step.selector || step.role ? __asaLocator(step) : page.locator('body');
+        // Avoid materializing an arbitrarily large ARIA tree in Node just to
+        // truncate it afterwards. Walk a finite DOM subset before snapshot.
+        // A caller can narrow a large page using selector or role/name.
+        const scope = await target.evaluate(element => {
+          const walker = document.createTreeWalker(element,
+            NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+          let nodes = 0, textUnits = 0;
+          while (walker.nextNode()) {
+            const n = walker.currentNode;
+            nodes++;
+            if (n.nodeType === Node.TEXT_NODE) textUnits += n.length;
+            if (nodes > 4000 || textUnits > 70000)
+              return { too_large: true, nodes, text_units: textUnits };
+          }
+          return { too_large: false };
+        }, undefined, { timeout });
+        if (scope.too_large) {
+          item.snapshot = '';
+          item.truncated = true;
+          item.reason = 'dom_too_large';
+          item.scanned_nodes = scope.nodes;
+          item.scanned_text_units = scope.text_units;
+          break;
+        }
+        const content = await target.ariaSnapshot({ timeout });
         const bounded = __asaBudgeted(content);
         item.total_bytes = Buffer.byteLength(content, 'utf8');
         item.snapshot = bounded.text;
