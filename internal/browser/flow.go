@@ -29,7 +29,7 @@ type FlowStep struct {
 	Action    string `json:"action" jsonschema:"goto, snapshot, click, fill, assert_text, assert_url, console or network"`
 	URL       string `json:"url,omitempty" jsonschema:"HTTP(S) URL for goto; about:blank is permitted"`
 	Selector  string `json:"selector,omitempty" jsonschema:"CSS locator (instead of role/name/ref); maximum 512 UTF-8 bytes"`
-	Ref       string `json:"ref,omitempty" jsonschema:"Snapshot-issued element ref (e1, e2, ...); usable only within this one browser_e2e call, not across calls"`
+	Ref       string `json:"ref,omitempty" jsonschema:"Snapshot-issued element ref (e1, e2, ...). In browser_e2e it is flow-only; in browser_session_flow it persists across calls in the same session until navigation, a new snapshot, or element invalidation"`
 	Role      string `json:"role,omitempty" jsonschema:"Accessible role (instead of selector), such as button or textbox"`
 	Name      string `json:"name,omitempty" jsonschema:"Exact accessible name when role is used"`
 	Value     string `json:"value,omitempty" jsonschema:"Input value for fill, maximum 4096 UTF-8 bytes"`

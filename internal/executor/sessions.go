@@ -107,7 +107,10 @@ func (b *stdioSessionBroker) reserve(session *stdioSession) error {
 	now := time.Now()
 	for id, entry := range b.sessions {
 		entry.mu.Lock()
-		outdated := entry.exited && entry.cleanupErr == nil && entry.pidPin == nil && now.Sub(entry.completed) >= completedSessionRetain
+		// Browser session identity is also the ONLY reconciliation record
+		// for the shared-profile lease. Only an explicit verified close
+		// removes it; generic completed-session GC must never erase it.
+		outdated := entry.kind != "browser" && entry.exited && entry.cleanupErr == nil && entry.pidPin == nil && now.Sub(entry.completed) >= completedSessionRetain
 		if outdated && entry.expiry != nil {
 			entry.expiry.Stop()
 		}
@@ -227,6 +230,12 @@ func (s *Server) startProcessSessionWithID(req Request, kind, workspace, binary 
 		id: priorID, kind: kind,
 		ownerID: req.PrincipalID, ownerClass: req.PrincipalClass,
 		workspace: cwd, done: make(chan struct{}), exitCode: -1, terminal: terminal,
+	}
+	if kind == "browser" {
+		// Attach before broker reservation, process spawn, and completion
+		// audit. Even a post-spawn audit failure must leave the Browser
+		// entry addressable for status/close/expiry reconciliation.
+		entry.browser = &browserStdioState{}
 	}
 	if err := s.sessions.reserve(entry); err != nil {
 		return "", err
@@ -592,6 +601,24 @@ func (b *stdioSessionBroker) close(req Request, id string) error {
 		return err
 	}
 	return b.removeAndStop(e)
+}
+
+// cleanlyRemoved is intentionally keyed to the exact previously authorized
+// pointer, not only a reusable session ID or optimistic close response.
+// Only the broker's verified process-group reconciliation may prove the
+// Browser profile safe to release after a completion-audit failure.
+func (b *stdioSessionBroker) cleanlyRemoved(e *stdioSession) bool {
+	if b == nil || e == nil {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.sessions[e.id] != nil {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.closed && e.exited && e.cleanupErr == nil && e.pidPin == nil
 }
 
 // Owning capability handlers must use these audit-gated entry points, never

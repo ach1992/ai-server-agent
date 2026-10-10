@@ -51,7 +51,30 @@ test -x "$root/browsers/chromium-$chromium_revision/chrome-linux64/chrome"
 printf 'EXACT_BROWSER_ACCEPTANCE_HEAD=%s\n' "$(git rev-parse HEAD)"
 printf 'PINNED_RUNTIME node=%s playwright=%s chromium_revision=%s\n' "$node_version" "$playwright_version" "$chromium_revision"
 log="$root/browser-e2e-acceptance.log"
-AI_SERVER_AGENT_BROWSER_FLOW_RUNTIME="$root" \
-  go test ./internal/browser -run '^TestBrowserFlow(PinnedRuntimeAcceptance|ReviewAcceptance|RefLifecyclePinnedRuntime|SnapshotIssuanceRacePinnedRuntime|AccessibilityPrivacyPinnedRuntime)$' -v -count=1 | tee "$log"
+export AI_SERVER_AGENT_BROWSER_FLOW_RUNTIME="$root"
+go test ./internal/browser -run '^(TestBrowserFlow(PinnedRuntimeAcceptance|ReviewAcceptance|RefLifecyclePinnedRuntime|SnapshotIssuanceRacePinnedRuntime|AccessibilityPrivacyPinnedRuntime)|TestManagedBrowserSession(RunnerPinnedRuntime|CrashCleanupPinnedRuntime))$' -v -count=1 | tee "$log"
+# Broker/audit fault injection needs no Chromium profile; run once here to
+# correlate the source-level recovery checks with the exact pinned runtime.
+go test ./internal/executor -run '^(TestBrowserSession|TestBrowserAdmissionStatus)' -v -count=1 | tee -a "$log"
+go test ./internal/mcp -run '^(TestOfficialSDKCanDiscoverTools|TestBrowserSessionKnownFlowFailureMCP)' -v -count=1 | tee -a "$log"
+# A stale regex or environment cannot make a critical new Browser test
+# silently SKIP while the pinned acceptance job still reports SUCCESS.
+for name in \
+  TestManagedBrowserSessionRunnerPinnedRuntime \
+  TestManagedBrowserSessionCrashCleanupPinnedRuntime \
+  TestBrowserSessionCreateAuditDegradedRemainsRecoverable \
+  TestBrowserSessionCloseAuditDegradedDoesNotStrandProfile \
+  TestBrowserSessionExitedRetentionGCAndExpiry \
+  TestBrowserSessionKnownFlowFailurePreservesSession \
+  TestBrowserSessionKnownFlowFailureMCP; do
+  grep -Fq -- "--- PASS: $name (" "$log" || {
+    echo "Missing pinned Browser gate result: $name" >&2
+    exit 1
+  }
+done
+if grep -Eq '^--- SKIP: (TestManagedBrowserSession|TestBrowserSession)' "$log"; then
+  echo "Managed Browser acceptance test unexpectedly skipped" >&2
+  exit 1
+fi
 printf 'PINNED_BROWSER_ACCEPTANCE_LOG_SHA256='
 sha256sum "$log" | awk '{print $1}'

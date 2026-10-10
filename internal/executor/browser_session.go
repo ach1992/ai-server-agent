@@ -56,6 +56,11 @@ func (a *browserSessionAdmission) matches(holder string) bool {
 	defer a.mu.Unlock()
 	return a.holder == holder
 }
+func (a *browserSessionAdmission) reserved() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.holder != ""
+}
 
 type browserStdioState struct {
 	mu        sync.Mutex // single in-flight action / ordered stream cursor
@@ -120,13 +125,20 @@ func (s *Server) browserSessionOpen(ctx context.Context, req Request) Response {
 		}
 	}()
 	node := "/opt/ai-server-agent/browser/node/bin/node"
+	if s.browserNodeBinary != "" { // private hermetic test fixture, never public input
+		node = s.browserNodeBinary
+	}
 	info, err := os.Lstat(node)
 	if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 {
 		return browserSessionError("browser_runtime_not_ready", "dependency", errors.New("pinned Browser Node executable unavailable"))
 	}
 	st, ok := info.Sys().(*syscall.Stat_t)
-	if !ok || st.Uid != 0 || info.Mode().Perm()&0022 != 0 {
-		return browserSessionError("browser_runtime_untrusted", "security", errors.New("pinned Browser executable is not root-owned and immutable by workers"))
+	expectedUID := uint32(0)
+	if s.browserNodeBinary != "" { // test fixtures are not deployed runtimes
+		expectedUID = s.workerUID
+	}
+	if !ok || st.Uid != expectedUID || info.Mode().Perm()&0022 != 0 {
+		return browserSessionError("browser_runtime_untrusted", "security", errors.New("Browser executable identity or permissions are unsafe"))
 	}
 	if !filepath.IsAbs(req.Workspace) || filepath.Clean(req.Workspace) != req.Workspace {
 		return browserSessionError("invalid_browser_workspace", "validation", errors.New("exact absolute worker workspace required"))
@@ -152,17 +164,27 @@ func (s *Server) browserSessionOpen(ctx context.Context, req Request) Response {
 		reserved = false
 	}
 	if err != nil {
+		if id != "" {
+			if entry, lookupErr := s.sessions.get(req, id); lookupErr == nil && entry.browser != nil {
+				entry.browser.mu.Lock()
+				entry.browser.uncertain = true // started, but audit completion is not trustworthy
+				entry.browser.mu.Unlock()
+			}
+		}
 		resp := browserSessionError("browser_session_start_uncertain", "runtime", errors.New("Browser launch or audit failed; inspect/close the returned session before retry"))
 		resp.SessionID = id
+		resp.Status = "uncertain"
 		return resp
 	}
 	entry, err := s.sessions.get(req, id)
 	if err != nil {
 		return Response{SessionID: id, ErrorCode: "browser_session_start_uncertain", ErrorClass: "state", Error: "Browser session identity unavailable after start"}
 	}
-	entry.mu.Lock()
-	entry.browser = &browserStdioState{}
-	entry.mu.Unlock()
+	// Browser-specific state was attached by the shared broker before
+	// spawn; it MUST already exist, including after audit degradation.
+	if entry.browser == nil {
+		return browserSessionError("browser_session_start_uncertain", "state", errors.New("Browser reconciliation state missing"))
+	}
 	readyCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	reply, err := s.browserSessionReadFrame(readyCtx, req, entry.browser, id, "")
@@ -303,9 +325,27 @@ func (s *Server) browserSessionFlow(ctx context.Context, req Request) Response {
 		state.uncertain = true
 		return browserSessionError("browser_session_action_uncertain", "state", errors.New("Browser action may have happened; inspect status and close before a new action"))
 	}
-	// The Node worker is intentionally not given a generic arbitrary script
-	// operation. Only the existing validated browser_e2e action grammar flows.
-	return Response{OK: true, Status: "result", SessionID: entry.id, Output: string(frame.Result), OutputEncoding: "json", BytesSeen: int64(len(frame.Result)), BytesReturned: int64(len(frame.Result))}
+	// A known Browser assertion/action failure is NOT an executor success.
+	// Preserve the bounded flow details/session identity without poisoning
+	// the session; only unknown completion makes further actions unsafe.
+	var outcome struct {
+		OK         *bool `json:"ok"`
+		FailedStep *int  `json:"failed_step"`
+	}
+	if json.Unmarshal(frame.Result, &outcome) != nil || outcome.OK == nil ||
+		(*outcome.OK && outcome.FailedStep != nil) || (!*outcome.OK && outcome.FailedStep == nil) {
+		state.uncertain = true
+		return browserSessionError("browser_session_action_uncertain", "state", errors.New("Browser result invalid; close before retry"))
+	}
+	response := Response{OK: *outcome.OK, Status: "result", SessionID: entry.id, Output: string(frame.Result), OutputEncoding: "json", BytesSeen: int64(len(frame.Result)), BytesReturned: int64(len(frame.Result))}
+	if !*outcome.OK {
+		response.Status = "failed"
+		response.ReasonCode = "browser_flow_failed"
+		response.ErrorCode = "browser_flow_failed"
+		response.ErrorClass = "action"
+		response.Error = "Browser flow action or assertion failed at a known step; inspect bounded result before continuing"
+	}
+	return response
 }
 
 func (s *Server) browserSessionStatus(req Request) Response {
@@ -353,10 +393,17 @@ func (s *Server) browserSessionClose(req Request) Response {
 	case <-entry.done:
 	case <-time.After(3 * time.Second):
 	}
-	if err := s.workerStdioClose(req, entry.id); err != nil {
+	closeErr := s.workerStdioClose(req, entry.id)
+	if !s.sessions.cleanlyRemoved(entry) {
 		state.uncertain = true
 		return browserSessionError("browser_session_cleanup_unverified", "state", errors.New("Browser worker stop was not proved; shared profile remains reserved"))
 	}
+	// Proven cleanup is independent of whether the *completion audit*
+	// durably finished. Never retain an unaddressable profile lease after
+	// the broker has successfully removed the exact clean process.
 	s.browserAdmission.release(entry.id)
+	if closeErr != nil {
+		return Response{SessionID: entry.id, Status: "closed_audit_degraded", ErrorCode: "audit_degraded", ReasonCode: "audit_degraded", ErrorClass: "audit", Error: "Browser process termination verified and profile released; audit completion degraded; privileged audit recovery still required"}
+	}
 	return Response{OK: true, Status: "closed", SessionID: entry.id}
 }

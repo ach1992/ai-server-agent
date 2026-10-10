@@ -15,6 +15,17 @@ import (
 
 // Pinned Chromium crash acceptance: Node termination must not orphan Chrome.
 func TestManagedBrowserSessionCrashCleanupPinnedRuntime(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		signal syscall.Signal
+	}{
+		{"SIGTERM", syscall.SIGTERM}, {"SIGKILL", syscall.SIGKILL},
+	} {
+		t.Run(tc.name, func(t *testing.T) { testManagedBrowserCrashSignal(t, tc.signal) })
+	}
+}
+
+func testManagedBrowserCrashSignal(t *testing.T, signal syscall.Signal) {
 	engine := os.Getenv("AI_SERVER_AGENT_BROWSER_FLOW_RUNTIME")
 	if engine == "" {
 		t.Skip("pinned runtime")
@@ -67,7 +78,9 @@ func TestManagedBrowserSessionCrashCleanupPinnedRuntime(t *testing.T) {
 		t.Fatal("test did not observe launched isolated Chromium")
 	}
 	t.Logf("isolated chromium processes before Node crash: %v", before)
-	_ = cmd.Process.Kill()
+	if err := cmd.Process.Signal(signal); err != nil {
+		t.Fatal(err)
+	}
 	_ = cmd.Wait()
 	deadline := time.Now().Add(3 * time.Second)
 	after := ids()
@@ -81,6 +94,6 @@ func TestManagedBrowserSessionCrashCleanupPinnedRuntime(t *testing.T) {
 		}
 	}
 	if len(after) != 0 {
-		t.Errorf("orphaned Chromium after Node SIGKILL (cleaned isolated fixture PIDs): %v", after)
+		t.Errorf("orphaned Chromium after Node %s (cleaned isolated fixture PIDs): %v", signal, after)
 	}
 }

@@ -5,15 +5,29 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
 
 func TestBrowserSessionLeaseAndPrincipalBinding(t *testing.T) {
-	if _, err := os.Stat("/opt/ai-server-agent/browser/node/bin/node"); err != nil {
-		t.Skip("pinned test server Node unavailable")
-	}
 	s, owner, workspace := testStdioBroker(t)
+	// In pinned GitHub Actions CI, use the exact downloaded Node binary.
+	// The test-only private override accepts the runner-owned binary;
+	// production still pins the root-owned /opt executable.
+	if root := os.Getenv("AI_SERVER_AGENT_BROWSER_FLOW_RUNTIME"); root != "" {
+		candidate := filepath.Join(root, "node", "bin", "node")
+		if info, err := os.Stat(candidate); err == nil {
+			if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Uid == s.workerUID {
+				s.browserNodeBinary = candidate
+			}
+		}
+	}
+	if s.browserNodeBinary == "" {
+		if _, err := os.Stat("/opt/ai-server-agent/browser/node/bin/node"); err != nil {
+			t.Skip("requires pinned Browser runtime for real Node broker proof")
+		}
+	}
 	// The agent owns this body. The fixture exercises the real pinned Node,
 	// executor-owned process/pidfd, bounded stdio transport and auth layer,
 	// not an unauthenticated public client or a second Browser engine.

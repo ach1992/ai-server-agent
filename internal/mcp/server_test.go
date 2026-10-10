@@ -410,6 +410,11 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 						t.Fatalf("session flow missing %s: %s", field, input)
 					}
 				}
+				for _, description := range []string{"browser_e2e it is flow-only", "browser_session_flow it persists across calls"} {
+					if !strings.Contains(string(input), description) {
+						t.Fatalf("session flow ref schema contradicts tool lifetime: missing %q in %s", description, input)
+					}
+				}
 			}
 		case "browser_e2e":
 			foundBrowserE2E = true
@@ -430,6 +435,9 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 				if !strings.Contains(string(in), `"`+field+`"`) {
 					t.Fatalf("browser_e2e schema missing %q: %s", field, in)
 				}
+			}
+			if !strings.Contains(string(in), "browser_e2e it is flow-only") {
+				t.Fatalf("browser_e2e ref lifetime not clear: %s", in)
 			}
 		case "browser_run":
 			foundBrowser = true

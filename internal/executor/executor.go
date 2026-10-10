@@ -35,6 +35,7 @@ type Server struct {
 	runs                      *runLimiter
 	sessions                  *stdioSessionBroker
 	browserAdmission          browserSessionAdmission // exclusive shared profile lease
+	browserNodeBinary         string                  // test-only private fixture override; production always uses root-owned pinned Node
 	jobsMu                    sync.Mutex
 	lifecycleLockPath         string
 	fileWriteHooks            *fileWriteTestHooks
@@ -172,6 +173,11 @@ func (s *Server) dispatch(req Request) Response {
 		return s.debugAction(context.Background(), req)
 	case "terminal_open", "terminal_read", "terminal_write", "terminal_interrupt", "terminal_resize", "terminal_close", "terminal_reconnect":
 		return s.terminalAction(req)
+	case "browser_admission_status":
+		if s.browserAdmission.reserved() {
+			return Response{OK: true, Status: "reserved"}
+		}
+		return Response{OK: true, Status: "available"}
 	case "browser_session_open", "browser_session_flow", "browser_session_status", "browser_session_close":
 		return s.browserSessionAction(context.Background(), req)
 	default:
