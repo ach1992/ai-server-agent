@@ -217,14 +217,24 @@ for (let i = 0; i < __asaSteps.length; i++) {
       case 'snapshot': {
         const target = step.selector || step.role ? __asaLocator(step) : page.locator('body');
         // Guard before invoking Playwright's unbounded ariaSnapshot().
-        // Count the target itself, descendant text, ALL attributes (not only
-        // aria-label), live control values, CSS generated text and open shadow
-        // roots. The ARIA implementation can combine these into names even
-        // when the light DOM has only a few nodes.
+        // Count local content AND outside accessible-name/ownership references:
+        // ARIA IDREFs, associated native <label>s and transitive references.
+        // A tiny scoped target can otherwise pull megabytes from elsewhere.
         const scope = await target.evaluate(element => {
           const budget = { nodes: 0, text_units: 0, attribute_units: 0,
             state_units: 0, generated_units: 0 };
           const roots = [element];
+          const queued = new Set(roots);
+          const visited = new Set();
+          const reject = reason => ({ too_large: true, reason, ...budget });
+          const addRoot = node => {
+            if (!node || visited.has(node) || queued.has(node)) return false;
+            // Bound the pending reference graph, including cyclic IDREFs.
+            if (queued.size >= 4000) return true;
+            queued.add(node);
+            roots.push(node);
+            return false;
+          };
           const add = (field, units) => {
             budget[field] += units;
             return (field !== 'text_units' && units > 16384) || budget.nodes > 4000 ||
@@ -233,15 +243,22 @@ for (let i = 0; i < __asaSteps.length; i++) {
               (budget.text_units + budget.attribute_units +
                budget.state_units + budget.generated_units) > 120000;
           };
+          const idrefs = ['aria-labelledby', 'aria-describedby', 'aria-owns',
+            'aria-details', 'aria-errormessage'];
           while (roots.length) {
             const root = roots.pop();
+            if (visited.has(root)) continue;
             const walker = document.createTreeWalker(root,
               NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
             let node = root;
             do {
+              if (visited.has(node)) {
+                node = walker.nextNode();
+                continue;
+              }
+              visited.add(node);
               budget.nodes++;
-              if (budget.nodes > 4000)
-                return { too_large: true, reason: 'node_count', ...budget };
+              if (budget.nodes > 4000) return reject('node_count');
               if (node.nodeType === Node.TEXT_NODE) {
                 if (add('text_units', node.length))
                   return { too_large: true, reason: 'text', ...budget };
@@ -256,7 +273,30 @@ for (let i = 0; i < __asaSteps.length; i++) {
                   if (add('state_units', node.value.length))
                     return { too_large: true, reason: 'control_value', ...budget };
                 }
-                if (node.shadowRoot) roots.push(node.shadowRoot);
+                if (node.shadowRoot && addRoot(node.shadowRoot))
+                  return reject('dependency_refs');
+                // Resolve references within their actual document/shadow root,
+                // not by scanning an unbounded document for labels/IDs.
+                const tree = node.getRootNode();
+                if (tree && typeof tree.getElementById === 'function') {
+                  for (const attr of idrefs) {
+                    const ids = node.getAttribute(attr);
+                    if (!ids) continue;
+                    for (const id of ids.trim().split(/\s+/)) {
+                      if (id && addRoot(tree.getElementById(id)))
+                        return reject('dependency_refs');
+                    }
+                  }
+                } else if (idrefs.some(attr => node.hasAttribute(attr))) {
+                  return reject('unresolvable_references');
+                }
+                // Native labels may be anywhere in the same document, not
+                // descendants of the scoped form control.
+                if ('labels' in node && node.labels) {
+                  for (const label of node.labels) {
+                    if (addRoot(label)) return reject('dependency_refs');
+                  }
+                }
                 // ariaSnapshot includes generated content from CSS pseudo
                 // elements, which does not appear as a DOM text node.
                 for (const pseudo of ['::before', '::after', '::marker']) {

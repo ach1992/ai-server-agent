@@ -111,6 +111,40 @@ const b=document.createElement('button');
 b.setAttribute('aria-label','Z'.repeat(2<<20));
 document.querySelector('#host').attachShadow({mode:'open'}).append(b);
 </script>`)
+		case "/external-labelledby":
+			fmt.Fprint(w, `<span id="outside">`, strings.Repeat("N", 2<<20),
+				`</span><button id="tiny" aria-labelledby="outside">Tiny</button>`)
+		case "/external-native-label":
+			fmt.Fprint(w, `<label for="tiny">`, strings.Repeat("L", 2<<20),
+				`</label><input id="tiny">`)
+		case "/external-owns":
+			fmt.Fprint(w, `<div id="owned" role="option" aria-label="`, strings.Repeat("O", 2<<20),
+				`">Owned</div><div id="tiny" role="listbox" aria-owns="owned">Small</div>`)
+		case "/external-chain":
+			fmt.Fprint(w, `<button id="tiny" aria-labelledby="first">Tiny</button>
+<span id="first" aria-labelledby="second">First</span><span id="second">`,
+				strings.Repeat("T", 2<<20), `</span>`)
+		case "/external-describedby":
+			fmt.Fprint(w, `<p id="description">`, strings.Repeat("D", 2<<20),
+				`</p><input id="tiny" aria-describedby="description">`)
+		case "/aggregate-external":
+			ids := make([]string, 85)
+			for i := range ids {
+				ids[i] = fmt.Sprintf("a%d", i)
+			}
+			fmt.Fprintf(w, `<button id="tiny" aria-labelledby="%s">Tiny</button>`, strings.Join(ids, " "))
+			for i := range ids {
+				fmt.Fprintf(w, `<span id="a%d">%s</span>`, i, strings.Repeat("q", 1000))
+			}
+		case "/small-labelledby":
+			fmt.Fprint(w, `<span id="title">Proceed safely</span><button id="tiny" aria-labelledby="title">Tiny</button>`)
+		case "/small-native-label":
+			fmt.Fprint(w, `<label for="tiny">Account name</label><input id="tiny">`)
+		case "/small-owns":
+			fmt.Fprint(w, `<div id="owned" role="option">Item A</div><div id="tiny" role="listbox" aria-owns="owned"></div>`)
+		case "/cycle":
+			fmt.Fprint(w, `<span id="a" aria-labelledby="b">First</span><span id="b" aria-labelledby="a">Second</span>
+<button id="tiny" aria-labelledby="a">Tiny</button>`)
 		default:
 			fmt.Fprint(w, `<p id="initial">Initial content</p>`)
 		}
@@ -175,5 +209,65 @@ document.querySelector('#host').attachShadow({mode:'open'}).append(b);
 			}
 		})
 	}
-	t.Log("PASS: real Chromium assertion deadlines, navigation privacy, ARIA/value/CSS/shadow preflight")
+	for _, tc := range []struct{ name, path, selector, reason string }{
+		{"external_aria_labelledby_large_text", "/external-labelledby", "#tiny", "text"},
+		{"external_native_label_large_text", "/external-native-label", "#tiny", "text"},
+		{"external_aria_owns_large_accessible_name", "/external-owns", "#tiny", "attribute"},
+		{"transitive_external_aria_idref", "/external-chain", "#tiny", "text"},
+		{"external_aria_describedby_large_text", "/external-describedby", "#tiny", "text"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, output, e := reviewRun(t, engine, []FlowStep{
+				{Action: "goto", URL: srv.URL + tc.path},
+				{Action: "snapshot", Selector: tc.selector},
+			})
+			if e != nil || !got.OK || got.Executed != 2 || len(got.Results) != 2 {
+				t.Fatalf("external accessibility dependency check failed: %+v err=%v", got, e)
+			}
+			last := got.Results[1]
+			if !last.Truncated || last.Reason != "dom_too_large" ||
+				last.PreflightReason != tc.reason || last.Snapshot != "" || last.ScannedNodes > 12 {
+				t.Fatalf("large external dependency was not bounded before ARIA snapshot: %+v", last)
+			}
+			if len(output) >= 16384 {
+				t.Fatalf("external dependency leaked oversized browser output: %d bytes", len(output))
+			}
+		})
+	}
+	t.Run("aggregate_external_idrefs_use_one_shared_budget", func(t *testing.T) {
+		got, output, e := reviewRun(t, engine, []FlowStep{
+			{Action: "goto", URL: srv.URL + "/aggregate-external"},
+			{Action: "snapshot", Selector: "#tiny"},
+		})
+		if e != nil || !got.OK || got.Executed != 2 {
+			t.Fatalf("aggregate external IDREF flow failed: %+v err=%v", got, e)
+		}
+		last := got.Results[1]
+		if !last.Truncated || last.PreflightReason != "text" ||
+			last.Reason != "dom_too_large" || last.Snapshot != "" ||
+			last.ScannedNodes < 70 || last.ScannedNodes > 4000 || len(output) > 16384 {
+			t.Fatalf("aggregate external IDREF budget was bypassed: %+v output_bytes=%d", last, len(output))
+		}
+	})
+	for _, tc := range []struct{ name, path, expected string }{
+		{"small_external_aria_labelledby_still_works", "/small-labelledby", "Proceed safely"},
+		{"small_external_native_label_still_works", "/small-native-label", "Account name"},
+		{"small_external_aria_owned_subtree_still_works", "/small-owns", "listbox"},
+		{"cyclic_aria_references_do_not_loop", "/cycle", "button"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got, _, e := reviewRun(t, engine, []FlowStep{
+				{Action: "goto", URL: srv.URL + tc.path},
+				{Action: "snapshot", Selector: "#tiny"},
+			})
+			if e != nil || !got.OK || got.Executed != 2 || len(got.Results) != 2 {
+				t.Fatalf("small external reference/cycle failed: %+v err=%v", got, e)
+			}
+			last := got.Results[1]
+			if last.Truncated || last.Reason != "" || !strings.Contains(last.Snapshot, tc.expected) {
+				t.Fatalf("small external reference failed to produce accessible snapshot: %+v", last)
+			}
+		})
+	}
+	t.Log("PASS: Chromium delays/privacy/ARIA budgets, external labels/IDREFs/ownership, cyclic refs")
 }
