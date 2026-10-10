@@ -263,6 +263,8 @@ Use the lowest-overhead Playwright path that gives the AI useful structured sess
 
 Do not create separate browser engine/profile ownership for CLI versus scripted paths. Browser binaries, profile data, traces/screenshots and generated evidence stay outside project worktrees with bounded lifecycle and protected permissions.
 
+The pinned Playwright package currently exposes its own compact CLI and can prove snapshot/ref workflows without a second runtime or npm dependency. Bare CLI defaults to system Google Chrome; select the Agent-pinned Chromium binary explicitly. Direct worker CLI sessions are an **acceptance/consumer probe**, not automatically an Agent-managed first-class Browser operation: their detached daemon, admission, profile lifecycle, disk retention and model-visible binary artifacts must meet the existing #42/#63/#99 contracts before promotion. Avoid committing CLI-generated state into worktrees; do not silently assume CLI sessions and browser_run share browser state.
+
 ## 12. Environment and toolchain reuse
 
 Developer Runtime discovers and reuses repository intent; it does not invent a universal environment format.
