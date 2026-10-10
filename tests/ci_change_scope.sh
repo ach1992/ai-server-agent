@@ -23,6 +23,7 @@ expect_flag(){
 expect_docs_only(){
   local paths=("$@")
   expect_flag false runtime_changed "${paths[@]}"
+  expect_flag false browser_flow_changed "${paths[@]}"
   expect_flag false platform_changed "${paths[@]}"
   expect_flag false cloudflare_security_changed "${paths[@]}"
   expect_flag false root_trust_security_changed "${paths[@]}"
@@ -38,6 +39,8 @@ expect_flag true stable_provenance_changed README.md
 
 expect_flag true runtime_changed internal/browser/browser.go
 expect_flag true go_changed internal/browser/browser.go
+expect_flag true browser_flow_changed internal/browser/browser.go
+expect_flag false browser_flow_changed internal/mcp/server.go
 expect_flag false platform_changed internal/browser/browser.go
 expect_flag false cloudflare_security_changed internal/browser/browser.go
 expect_flag false root_trust_security_changed internal/browser/browser.go
@@ -77,6 +80,7 @@ expect_flag false cloudflare_security_changed README.md internal/browser/browser
 
 for path in .github/workflows/ci.yml scripts/ci-change-scope.sh tests/ci_change_scope.sh new-unknown-root-file.conf internal/new-security-unknown/file.go; do
   expect_flag true runtime_changed "$path"
+  expect_flag true browser_flow_changed "$path"
   expect_flag true platform_changed "$path"
   expect_flag true arm64_lifecycle_changed "$path"
   expect_flag true cloudflare_security_changed "$path"

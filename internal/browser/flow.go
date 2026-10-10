@@ -189,6 +189,15 @@ page.on('response', response =>
   __asaPush(__asaNetwork, { method: response.request().method(), status: response.status(),
     url: __asaURL(response.url()) }, 'network'));
 
+// Never echo raw navigation error messages: Chromium/Playwright includes the
+// full failed URL (including query and fragment) in many failure paths.
+const __asaNavigationFailure = error => {
+  const message = String(error?.message || error);
+  const code = message.match(/\bnet::(ERR_[A-Z0-9_]+)/);
+  if (code) return 'navigation_' + code[1];
+  if (/timeout/i.test(message)) return 'navigation_timeout';
+  return 'navigation_failed';
+};
 const __asaLocator = step => step.selector
   ? page.locator(step.selector)
   : page.getByRole(step.role, step.name ? { name: step.name, exact: true } : {});
@@ -207,19 +216,57 @@ for (let i = 0; i < __asaSteps.length; i++) {
         break;
       case 'snapshot': {
         const target = step.selector || step.role ? __asaLocator(step) : page.locator('body');
-        // Avoid materializing an arbitrarily large ARIA tree in Node just to
-        // truncate it afterwards. Walk a finite DOM subset before snapshot.
-        // A caller can narrow a large page using selector or role/name.
+        // Guard before invoking Playwright's unbounded ariaSnapshot().
+        // Count the target itself, descendant text, ALL attributes (not only
+        // aria-label), live control values, CSS generated text and open shadow
+        // roots. The ARIA implementation can combine these into names even
+        // when the light DOM has only a few nodes.
         const scope = await target.evaluate(element => {
-          const walker = document.createTreeWalker(element,
-            NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
-          let nodes = 0, textUnits = 0;
-          while (walker.nextNode()) {
-            const n = walker.currentNode;
-            nodes++;
-            if (n.nodeType === Node.TEXT_NODE) textUnits += n.length;
-            if (nodes > 4000 || textUnits > 70000)
-              return { too_large: true, nodes, text_units: textUnits };
+          const budget = { nodes: 0, text_units: 0, attribute_units: 0,
+            state_units: 0, generated_units: 0 };
+          const roots = [element];
+          const add = (field, units) => {
+            budget[field] += units;
+            return (field !== 'text_units' && units > 16384) || budget.nodes > 4000 ||
+              budget.text_units > 70000 || budget.attribute_units > 70000 ||
+              budget.state_units > 70000 || budget.generated_units > 70000 ||
+              (budget.text_units + budget.attribute_units +
+               budget.state_units + budget.generated_units) > 120000;
+          };
+          while (roots.length) {
+            const root = roots.pop();
+            const walker = document.createTreeWalker(root,
+              NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT);
+            let node = root;
+            do {
+              budget.nodes++;
+              if (budget.nodes > 4000)
+                return { too_large: true, reason: 'node_count', ...budget };
+              if (node.nodeType === Node.TEXT_NODE) {
+                if (add('text_units', node.length))
+                  return { too_large: true, reason: 'text', ...budget };
+              } else if (node.nodeType === Node.ELEMENT_NODE) {
+                for (const attr of node.attributes) {
+                  if (add('attribute_units', attr.value.length))
+                    return { too_large: true, reason: 'attribute', ...budget };
+                }
+                if (node instanceof HTMLInputElement ||
+                    node instanceof HTMLTextAreaElement ||
+                    node instanceof HTMLSelectElement) {
+                  if (add('state_units', node.value.length))
+                    return { too_large: true, reason: 'control_value', ...budget };
+                }
+                if (node.shadowRoot) roots.push(node.shadowRoot);
+                // ariaSnapshot includes generated content from CSS pseudo
+                // elements, which does not appear as a DOM text node.
+                for (const pseudo of ['::before', '::after', '::marker']) {
+                  const generated = getComputedStyle(node, pseudo).content;
+                  if (add('generated_units', generated?.length || 0))
+                    return { too_large: true, reason: 'generated_content', ...budget };
+                }
+              }
+              node = walker.nextNode();
+            } while (node);
           }
           return { too_large: false };
         }, undefined, { timeout });
@@ -228,7 +275,7 @@ for (let i = 0; i < __asaSteps.length; i++) {
           item.truncated = true;
           item.reason = 'dom_too_large';
           item.scanned_nodes = scope.nodes;
-          item.scanned_text_units = scope.text_units;
+          item.preflight_reason = scope.reason;
           break;
         }
         const content = await target.ariaSnapshot({ timeout });
@@ -245,23 +292,38 @@ for (let i = 0; i < __asaSteps.length; i++) {
         await __asaLocator(step).fill(step.value || '', { timeout });
         break;
       case 'assert_text': {
-        // Real forms often settle asynchronously after a click/fetch. Poll
-        // within the caller's bounded per-step timeout, not a fixed sleep.
+        // Element absence is normal during SPA/data-load transitions. A
+        // short innerText timeout must not prematurely end a longer caller
+        // deadline. Retry only within that exact bounded step deadline.
         const locator = __asaLocator(step);
         const deadline = Date.now() + timeout;
         let matched = false;
         while (Date.now() < deadline) {
           const remaining = deadline - Date.now();
-          const value = await locator.innerText({ timeout: Math.min(remaining, 2000) });
-          if (value.includes(step.expected)) { matched = true; break; }
-          await page.waitForTimeout(Math.min(100, Math.max(0, deadline - Date.now())));
+          try {
+            const value = await locator.innerText({ timeout: Math.min(remaining, 500) });
+            if (value.includes(step.expected)) { matched = true; break; }
+          } catch (_) {
+            // Transient absence/visibility/locator errors are retried only
+            // while the caller's deadline still has budget.
+          }
+          const pause = Math.min(100, Math.max(0, deadline - Date.now()));
+          if (pause > 0) await page.waitForTimeout(pause);
         }
         if (!matched) throw new Error('expected text substring was not found within timeout');
         break;
       }
-      case 'assert_url':
-        if (page.url() !== step.expected) throw new Error('exact URL assertion failed');
+      case 'assert_url': {
+        const deadline = Date.now() + timeout;
+        let matched = page.url() === step.expected;
+        while (!matched && Date.now() < deadline) {
+          const pause = Math.min(100, Math.max(0, deadline - Date.now()));
+          if (pause > 0) await page.waitForTimeout(pause);
+          matched = page.url() === step.expected;
+        }
+        if (!matched) throw new Error('exact URL was not reached within timeout');
         break;
+      }
       case 'console': {
         const bounded = __asaBudgetedEntries(__asaConsole);
         item.entries = bounded.entries;
@@ -279,9 +341,15 @@ for (let i = 0; i < __asaSteps.length; i++) {
     }
   } catch (error) {
     item.ok = false;
-    // Playwright exceptions can include whole DOM excerpts and credentials.
-    // Return only the first diagnostic line, bounded and without a stack.
-    item.error = __asaCap(String(error?.message || error).split('\n')[0], 240);
+    // Navigation failures routinely include the original URL with private
+    // query/fragment data. Keep a useful *classification* but never echo
+    // their raw message; the request path is separately normalized.
+    if (step.action === 'goto') {
+      item.error = __asaNavigationFailure(error);
+      item.url = __asaURL(step.url);
+    } else {
+      item.error = __asaCap(String(error?.message || error).split('\n')[0], 240);
+    }
     __asaFailedStep = i;
   }
   item.duration_ms = Date.now() - started;
