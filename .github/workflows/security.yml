@@ -73,7 +73,9 @@ jobs:
           go-version: '1.26.x'
           cache: false
       - name: Shell syntax
-        run: bash -n scripts/install-stable.sh tests/stable_bootstrap.sh tests/root_trust_boundary.sh tests/root_trust_migration.sh
+        run: bash -n scripts/install-stable.sh tests/stable_bootstrap.sh tests/root_trust_boundary.sh tests/root_trust_migration.sh tests/worker_home_migration.sh
+      - name: Worker HOME migration identity and fail-closed regression
+        run: bash tests/worker_home_migration.sh
       - name: Build local test binary
         run: CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
       - name: Migrate hostile legacy state and verify root trust boundary

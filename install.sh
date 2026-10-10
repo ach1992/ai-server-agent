@@ -258,21 +258,63 @@ install -d -m 0700 -o "$WORKER_USER" -g "$WORKER_USER" "$WORKER_HOME"
 # so defer ONLY this optional passwd metadata migration in that exact case.
 # Do not kill existing worker jobs or silently ignore other usermod errors.
 migrate_existing_worker_login_home() {
-  local account="$1" legacy_home="$2" new_home="$3" existing_home="$4" rc
-  [ "$existing_home" = "$legacy_home" ] || return 0
-  if usermod --home "$new_home" "$account"; then
-    return 0
-  else
-    rc=$?
+  local account="$1" legacy_home="$2" new_home="$3"
+  local before after expected_home rc=0 index owner
+  local -a initial_parts final_parts
+  # Capture the complete resolved account *after* provisioning the private
+  # worker HOME. A HOME-only check could accidentally accept UID/GID drift.
+  before="$(getent passwd "$account")" || { die "Could not resolve $account before HOME migration"; return 86; }
+  if [[ -z "$before" || "$before" == *$'\n'* ]]; then
+    die "Ambiguous $account passwd entry before HOME migration"; return 86
   fi
-  if [ "$rc" -eq 8 ] && [ "$(getent passwd "$account" | cut -d: -f6)" = "$legacy_home" ]; then
+  IFS=: read -r -a initial_parts <<< "$before"
+  if [[ "${#initial_parts[@]}" -ne 7 || "${initial_parts[0]}" != "$account" ||
+        ! "${initial_parts[2]}" =~ ^[0-9]+$ || ! "${initial_parts[3]}" =~ ^[0-9]+$ ||
+        "${initial_parts[2]}" == 0 || "${initial_parts[3]}" == 0 ||
+        "${initial_parts[5]}" != /* ]]; then
+    die "Malformed or unsafe $account identity before HOME migration"; return 86
+  fi
+  expected_home="${initial_parts[5]}"
+  if [[ "$expected_home" == "$legacy_home" ]]; then
+    if usermod --home "$new_home" "$account"; then
+      expected_home="$new_home"
+    else
+      rc=$?
+      if [[ "$rc" != 8 ]]; then
+        die "Could not migrate $account login HOME (usermod exit $rc)"; return 86
+      fi
+    fi
+  fi
+  after="$(getent passwd "$account")" || { die "Could not resolve $account after HOME migration"; return 86; }
+  if [[ -z "$after" || "$after" == *$'\n'* ]]; then
+    die "Ambiguous $account passwd entry after HOME migration"; return 86
+  fi
+  IFS=: read -r -a final_parts <<< "$after"
+  if [[ "${#final_parts[@]}" -ne 7 ]]; then
+    die "Malformed $account passwd entry after HOME migration"; return 86
+  fi
+  # Only the HOME field may change. Even a successful usermod must not hide
+  # a changed UID, GID, username, shell or other account security metadata.
+  for index in 0 1 2 3 4 6; do
+    if [[ "${final_parts[index]}" != "${initial_parts[index]}" ]]; then
+      die "Worker account identity changed during HOME migration"; return 86
+    fi
+  done
+  if [[ "${final_parts[5]}" != "$expected_home" ]]; then
+    die "Worker account HOME changed unexpectedly during migration"; return 86
+  fi
+  if [[ ! -d "$new_home" || -L "$new_home" ]]; then
+    die "Worker private HOME is not a trusted directory"; return 86
+  fi
+  owner="$(stat -c '%u:%g:%a' -- "$new_home")" || { die "Could not inspect worker private HOME"; return 86; }
+  if [[ "$owner" != "${initial_parts[2]}:${initial_parts[3]}:700" ]]; then
+    die "Worker private HOME ownership or mode disagrees with account identity"; return 86
+  fi
+  if [[ "$rc" == 8 ]]; then
     warn "Deferring legacy $account login HOME migration: active worker processes prevented usermod. Existing jobs and workspace are preserved; managed sessions use $new_home. Retry an installer repair when worker processes are idle."
-    return 0
   fi
-  die "Could not migrate $account login HOME (usermod exit $rc); refusing to hide an unexpected account change"
 }
-existing_worker_home="$(getent passwd "$WORKER_USER" | cut -d: -f6)"
-migrate_existing_worker_login_home "$WORKER_USER" "$WORKSPACE_DIR" "$WORKER_HOME" "$existing_worker_home"
+migrate_existing_worker_login_home "$WORKER_USER" "$WORKSPACE_DIR" "$WORKER_HOME"
 secure_state_container(){
   local path="$1"
   if [ -L "$path" ]; then
