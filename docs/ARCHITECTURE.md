@@ -85,7 +85,7 @@ Worker and root synchronous execution use separate non-queueing capacity guards.
 
 Command bodies are capped at 256 KiB and enter the sanitized Bash process through stdin rather than a raw `-c <command>` argv element. Synchronous stdout/stderr is retained in a 1 MiB in-memory head/tail collector while the process runs, so producer volume cannot grow executor memory without bound. Results preserve raw byte counts, returned-byte counts, UTF-8 versus base64 encoding, truncation/omission metadata, exit status, duration and timeout state. MCP structured content carries the full bounded result; the human-readable text fallback does not duplicate a large output field. For larger outputs, it retains bounded source/continuation and job-retention metadata needed to request a smaller segment when a client does not display structured content. This does not turn truncated synchronous output into a replayable stream, provide full log history beyond the retained ring, or constitute a general binary-artifact transfer system (#99).
 
-**Target Developer Runtime changes this separation:** project worktrees remain under the workspace root, while worker HOME/config/cache state moves to Agent-managed locations outside project worktrees. This is accepted target architecture, not a statement that the current runtime already implements the split. See `docs/DEVELOPER-RUNTIME.md`.
+**Current source/runtime distinction:** existing one-shot `run_command` still uses `/srv/ai-workspace` for worker HOME/CWD, while the integrated stateful worker PTY/LSP/DAP session implementation provisions a separate Agent-managed worker HOME/config/cache outside project worktrees. Project worktree identity remains explicit; do not infer that all one-shot/project commands have changed HOME. Installed builds and optional session readiness must be checked independently. See `docs/DEVELOPER-RUNTIME.md`.
 
 ### Persistent jobs
 
@@ -344,4 +344,4 @@ Core target capabilities include repository/worktree identity, safe worker editi
 
 This architecture document remains authoritative for overall host/process/trust/lifecycle boundaries. `docs/DEVELOPER-RUNTIME.md` owns the detailed development-capability composition and Layer-1/Layer-2/deferred boundary.
 
-Until the implementation work lands, README/current source remain authoritative for which capabilities are actually shipped. Do not infer runtime availability merely from target-architecture documentation.
+The principal Developer Runtime source slices are now integrated in `main`, including repository/worktree, workspace editing/search, LSP, PTY, DAP and managed Browser capabilities. However, source integration is not installed-client acceptance or a published Stable release. `README.md` and implementation describe current source behavior; Issue #59 and its dependencies own outstanding end-to-end, supported-platform and delivery evidence. Do not infer availability or completion merely from target-architecture prose.
