@@ -6,9 +6,14 @@ Run as root on a dedicated test host after inspecting the candidate and this fil
   python3 tests/integrated_data_path.py /absolute/path/to/candidate --terminal-only
 
 The optional terminal-only mode exercises authenticated MCP + an isolated
-worker tmux PTY/reconnect without creating systemd job units. The default
-mode additionally requires spare global ai-job capacity, and never stops
-other clients' jobs to free it. Only task-owned temporary resources change.
+worker tmux PTY/reconnect without creating systemd job units. Two separate
+disposable named credentials exercise real cross-principal MCP authorization.
+Opt-in fault probes use ASA_TEST_MCP_TERMINAL_FAULT=after_open or
+ASA_TEST_MCP_TERMINAL_FAULT=cleanup_unverified with --terminal-only; both
+MUST fail, and the second intentionally preserves an inspectable private
+fixture for verified task-only cleanup. The default mode additionally
+requires spare global ai-job capacity and never stops unrelated jobs.
+Only task-owned temporary resources change.
 This proves the isolated wire/process path, not installed-service acceptance,
 ChatGPT rendering or Gateway.
 """
@@ -23,6 +28,7 @@ import secrets
 import shlex
 import shutil
 import socket
+import stat
 import subprocess
 import sys
 import tempfile
@@ -72,6 +78,11 @@ def main(candidate, *, terminal_only=False):
     safe_to_remove = False
     terminal_cleanup_unverified = False
     terminal_mode_success = False
+    fault = os.environ.get("ASA_TEST_MCP_TERMINAL_FAULT", "")
+    require(fault in ("", "after_open", "cleanup_unverified"),
+            "unknown fixture-only terminal fault mode")
+    require(terminal_only or not fault,
+            "terminal fault simulation requires explicit --terminal-only mode")
     try:
         root = Path(tmp)
         root.chmod(0o755)
@@ -91,6 +102,7 @@ def main(candidate, *, terminal_only=False):
         # The fixture server runs as aiworker. Its private credentials are unrelated
         # to the installed Agent and are never printed or retained after cleanup.
         token = secrets.token_hex(32)
+        other_token = secrets.token_hex(32) if terminal_only else None
         for name in ("bearer", "executor-token"):
             path = root / name
             path.write_text(token)
@@ -109,6 +121,30 @@ def main(candidate, *, terminal_only=False):
             "workspace_dir": str(workspace), "worker_user": "aiworker",
             "agent_user": "aiworker",
         }
+        if terminal_only:
+            # Exercise the production named-principal credential boundary,
+            # without touching any installed credential store or recording
+            # either raw bearer in fixture files.
+            store_path = root / "mcp-credentials.json"
+            now = "2026-10-10T00:00:00Z"
+            store = {"version": 1, "credentials": [
+                {"principal": {"id": "direct-default", "class": "direct", "name": "direct/default"},
+                 "verifier_algorithm": "sha256-v1",
+                 "verifier": hashlib.sha256(token.encode("ascii")).hexdigest(),
+                 "created_at": now, "enabled": True},
+                {"principal": {"id": "mcp-gateway", "class": "gateway", "name": "mcp-gateway"},
+                 "verifier_algorithm": "sha256-v1",
+                 "verifier": hashlib.sha256(other_token.encode("ascii")).hexdigest(),
+                 "created_at": now, "enabled": True},
+            ]}
+            store_fd = os.open(store_path, os.O_WRONLY | os.O_CREAT |
+                               os.O_EXCL | os.O_NOFOLLOW, 0o600)
+            with os.fdopen(store_fd, "w", encoding="utf-8") as store_file:
+                json.dump(store, store_file)
+            os.chown(store_path, 0, worker.pw_gid)
+            store_path.chmod(0o640)
+            cfg.pop("bearer_token_file")
+            cfg["credential_store_file"] = str(store_path)
         config = root / "config.json"
         config.write_text(json.dumps(cfg))
         config.chmod(0o644)
@@ -150,14 +186,14 @@ def main(candidate, *, terminal_only=False):
         server = None
         sequence = 0
 
-        def rpc(method, params=None):
+        def rpc(method, params=None, *, bearer_token=None):
             nonlocal sequence
             sequence += 1
             body = json.dumps({"jsonrpc": "2.0", "id": sequence,
                                "method": method, "params": params or {}}).encode()
             request = urllib.request.Request(
                 f"http://127.0.0.1:{port}/mcp", data=body,
-                headers={"Authorization": "Bearer " + token,
+                headers={"Authorization": "Bearer " + (token if bearer_token is None else bearer_token),
                          "Content-Type": "application/json",
                          "Accept": "application/json, text/event-stream",
                          "MCP-Protocol-Version": "2025-11-25"},
@@ -169,8 +205,9 @@ def main(candidate, *, terminal_only=False):
             require("error" not in value, "JSON-RPC returned an error")
             return value["result"], len(raw)
 
-        def call(name, arguments):
-            result, wire_bytes = rpc("tools/call", {"name": name, "arguments": arguments})
+        def call(name, arguments, *, bearer_token=None):
+            result, wire_bytes = rpc("tools/call", {"name": name, "arguments": arguments},
+                                     bearer_token=bearer_token)
             structured = result.get("structuredContent")
             require(isinstance(structured, dict), f"{name} lacks structuredContent")
             if structured.get("job_id"):
@@ -224,43 +261,108 @@ def main(candidate, *, terminal_only=False):
             evidence.append({"sample": "binary_and_ranged_file", "result": "PASS"})
 
             if terminal_only:
-                # Public authenticated MCP proof of the exact merged source,
-                # using only this fixture's isolated server/executor/state.
+                # Exercise two distinct authenticated principals on the same
+                # loopback MCP endpoint. The second is a named fixture-only
+                # gateway identity, not an installed Gateway integration.
+                assert other_token is not None
+                other_init, _ = rpc(
+                    "initialize",
+                    {"protocolVersion": "2025-11-25", "capabilities": {},
+                     "clientInfo": {"name": "isolated-other-principal", "version": "1"}},
+                    bearer_token=other_token)
+                require(other_init.get("serverInfo", {}).get("name") == "ai-server-agent",
+                        "second credential did not authenticate")
+                other_tools, _ = rpc("tools/list", bearer_token=other_token)
+                require(len(other_tools.get("tools", [])) >= 1, "other principal cannot list tools")
+
                 names = {entry["name"] for entry in tools["tools"]}
-                needed = {"terminal_open", "terminal_write", "terminal_read", "terminal_resize",
-                          "terminal_interrupt", "terminal_close", "terminal_reconnect",
-                          "workspace_stat", "code_definition", "debug_adapter_status"}
-                require(not (needed - names), "missing public MCP capabilities: " + repr(sorted(needed - names)))
-                evidence.append({"sample": "authenticated_mcp_tools_list", "result": "PASS", "named_tools": len(names)})
+                needed = {"terminal_open", "terminal_write", "terminal_read",
+                          "terminal_resize", "terminal_interrupt", "terminal_close",
+                          "terminal_reconnect", "workspace_stat", "code_definition",
+                          "debug_adapter_status"}
+                require(not (needed - names), "missing public MCP capabilities: " +
+                        repr(sorted(needed - names)))
+                evidence.append({"sample": "authenticated_mcp_tools_list",
+                                 "result": "PASS", "named_tools": len(names)})
                 source = workspace / "main.go"
                 source.write_text("package main\nfunc main() {}\n")
                 source.chmod(0o644)
-                stat, _, _ = call("workspace_stat", {"workspace": str(workspace), "path": "main.go"})
-                require(stat.get("ok") and stat.get("file_version"), "real worker workspace_stat failed: " + str(stat.get("error_code")))
+                worker_stat, _, _ = call("workspace_stat", {
+                    "workspace": str(workspace), "path": "main.go"})
+                require(worker_stat.get("ok") and worker_stat.get("file_version"),
+                        "real worker workspace_stat failed: " +
+                        str(worker_stat.get("error_code")))
                 evidence.append({"sample": "public_worker_workspace_stat", "result": "PASS"})
 
                 def must(name, arguments):
                     result, _, _ = call(name, arguments)
-                    require(result.get("ok") is True, name + " failed: " + str(result.get("error_code")) + "/" + str(result.get("error_class")))
+                    require(result.get("ok") is True,
+                            name + " failed: " + str(result.get("error_code")) +
+                            "/" + str(result.get("error_class")))
                     return result
 
                 worker_identity = {"workspace": str(workspace)}
-                opened = must("terminal_open", dict(worker_identity, columns=80, rows=24))
-                session_id = opened.get("session_id")
-                epoch = opened.get("session_epoch")
-                require(session_id and epoch, "worker terminal session/epoch identity missing")
-                terminal_live = True
+                worker_runtime = state / "worker-terminals"
+                session_id = None
+                epoch = None
+                terminal_closed = False
+
+                def owned_terminal_dirs():
+                    # This state tree was created fresh for this exact fixture.
+                    # Trust only root-owned private directories, not symlinks or
+                    # arbitrary entries. Unknown state is a failed cleanup proof.
+                    if not worker_runtime.exists() and not worker_runtime.is_symlink():
+                        return []
+                    parent_info = os.lstat(worker_runtime)
+                    require(stat.S_ISDIR(parent_info.st_mode) and
+                            parent_info.st_uid == 0 and
+                            stat.S_IMODE(parent_info.st_mode) == 0o700,
+                            "fixture worker terminal parent is untrusted")
+                    owned = []
+                    for child in worker_runtime.iterdir():
+                        info = os.lstat(child)
+                        require(child.name.startswith(".asa-tmux-") and
+                                stat.S_ISDIR(info.st_mode) and
+                                info.st_uid == 0 and
+                                stat.S_IMODE(info.st_mode) == 0o700,
+                                "unexpected fixture terminal runtime entry")
+                        owned.append(child)
+                    return owned
+
+                def cleanup_owned_terminal_backends():
+                    # Even terminal_open with OK=false can start a real tmux
+                    # backend. Scan the ACTUAL runtime directory, independent
+                    # of whether the response supplied a usable session ID.
+                    for directory in owned_terminal_dirs():
+                        sock = directory / "socket"  # real production basename
+                        if os.path.lexists(sock):
+                            info = os.lstat(sock)
+                            require(stat.S_ISSOCK(info.st_mode) and info.st_uid == 0,
+                                    "fixture tmux socket identity is untrusted")
+                            subprocess.run(["/usr/bin/tmux", "-S", str(sock), "kill-server"],
+                                           stdout=subprocess.DEVNULL,
+                                           stderr=subprocess.DEVNULL, timeout=4,
+                                           check=False)
+                            for _ in range(30):
+                                if not os.path.lexists(sock):
+                                    break
+                                time.sleep(.05)
+                        require(not os.path.lexists(sock),
+                                "fixture tmux backend still has its real socket")
+                        directory.rmdir()  # only if empty; never delete unknown data
+                    require(not owned_terminal_dirs(),
+                            "fixture tmux runtime not fully retired")
 
                 def await_output(marker, session_epoch, timeout=8.0):
                     cursor = 0
                     collected = bytearray()
                     expires = time.monotonic() + timeout
                     while time.monotonic() < expires:
-                        result = must("terminal_read", dict(worker_identity, session_id=session_id,
-                                                            session_epoch=session_epoch, cursor=cursor, limit=8192))
+                        result = must("terminal_read", dict(
+                            worker_identity, session_id=session_id,
+                            session_epoch=session_epoch, cursor=cursor, limit=8192))
                         cursor = result.get("next_cursor", cursor)
-                        chunk = base64.b64decode(result.get("output", ""))
-                        collected.extend(chunk)
+                        collected.extend(base64.b64decode(result.get("output", "")))
                         if marker.encode() in collected:
                             return
                         if len(collected) > 65536:
@@ -269,27 +371,81 @@ def main(candidate, *, terminal_only=False):
                     raise AssertionError("worker terminal marker missing: " + marker)
 
                 def send(inp, session_epoch):
-                    return must("terminal_write", dict(worker_identity, session_id=session_id,
-                                                       session_epoch=session_epoch, content=inp))
+                    return must("terminal_write", dict(
+                        worker_identity, session_id=session_id,
+                        session_epoch=session_epoch, content=inp))
 
                 try:
-                    stale, _, _ = call("terminal_read", dict(worker_identity, session_id=session_id,
-                                                              session_epoch="stale-invalid-epoch"))
-                    require(stale.get("error_code") == "terminal_epoch_changed", "stale epoch not rejected")
+                    require(not owned_terminal_dirs(),
+                            "fresh fixture unexpectedly has prior terminal backends")
+                    # Capture a partially successful/uncertain open response
+                    # BEFORE asserting OK, so broker/direct cleanup remains
+                    # possible when terminal_start_uncertain returns identity.
+                    opened, _, _ = call("terminal_open", dict(
+                        worker_identity, columns=80, rows=24))
+                    session_id = opened.get("session_id")
+                    epoch = opened.get("session_epoch")
+                    if fault == "after_open" and opened.get("ok"):
+                        # Deterministic failure after actual backend creation,
+                        # before accepting a successful open; must NOT PASS.
+                        opened = dict(opened, ok=False,
+                                      error_code="terminal_start_uncertain")
+                    require(opened.get("ok") and session_id and epoch,
+                            "terminal_open failed or uncertain: " +
+                            str(opened.get("error_code")))
+
+                    owner = dict(worker_identity, session_id=session_id,
+                                 session_epoch=epoch)
+                    for name, args in (
+                        ("terminal_read", dict(owner, limit=8192)),
+                        ("terminal_write", dict(owner, content="printf BAD\n")),
+                        ("terminal_reconnect", dict(owner)),
+                        ("terminal_close", dict(owner)),
+                    ):
+                        denied, _, _ = call(name, args, bearer_token=other_token)
+                        # A reconnect also checks the durable record, so
+                        # that path maps the SAME non-disclosing sentinel to
+                        # terminal_reconnect_unavailable. Never accept a
+                        # successful call or a leaked session/epoch identity.
+                        code = denied.get("error_code")
+                        concealed_reconnect = (
+                            name == "terminal_reconnect" and
+                            code == "terminal_reconnect_unavailable" and
+                            denied.get("error") == "session_not_found")
+                        require(denied.get("ok") is not True and
+                                (code == "session_not_found" or concealed_reconnect) and
+                                not denied.get("session_id") and
+                                not denied.get("session_epoch"),
+                                name + ": other principal was not denied without disclosure")
+                    # The owner must retain control after every attempted
+                    # cross-principal operation, including denied close.
+                    send("printf 'OWNER_%s\n' 'SURVIVED'\n", epoch)
+                    await_output("OWNER_SURVIVED", epoch)
+                    evidence.append({"sample": "authenticated_mcp_cross_principal_terminal_denials",
+                                     "result": "PASS", "principal_count": 2,
+                                     "denied_actions": 4})
+
+                    stale, _, _ = call("terminal_read", dict(
+                        owner, session_epoch="stale-invalid-epoch"))
+                    require(stale.get("error_code") == "terminal_epoch_changed",
+                            "stale epoch not rejected")
                     send("printf 'UID:%s\\n' \"$(id -u)\"\n", epoch)
                     await_output("UID:" + str(worker.pw_uid), epoch)
                     send("printf 'HOME:%s\\n' \"$HOME\"\n", epoch)
                     await_output("HOME:" + str(worker_home), epoch)
-                    must("terminal_resize", dict(worker_identity, session_id=session_id,
-                                                  session_epoch=epoch, columns=93, rows=31))
+                    must("terminal_resize", dict(
+                        owner, session_epoch=epoch, columns=93, rows=31))
                     send("printf 'SLEEP_%s\\n' 'STARTED'; sleep 15\n", epoch)
                     await_output("SLEEP_STARTED", epoch)
-                    must("terminal_interrupt", dict(worker_identity, session_id=session_id, session_epoch=epoch))
+                    must("terminal_interrupt", dict(owner, session_epoch=epoch))
                     send("printf 'AFTER_%s\\n' 'INTERRUPT'\n", epoch)
                     await_output("AFTER_INTERRUPT", epoch)
-                    # Restart ONLY the fixture-owned executor; never touch Agent services.
+
+                    # Restart ONLY the fixture-owned executor, preserving the
+                    # MCP server and a live tmux backend.
                     stop(executor)
                     executor = launch("executor")
+
                     def executor_reconnected():
                         if executor.poll() is not None:
                             raise RuntimeError("fixture executor unexpectedly exited")
@@ -299,47 +455,75 @@ def main(candidate, *, terminal_only=False):
                             return True
                         except OSError:
                             return False
+
                     wait_for(executor_reconnected)
-                    recovered = must("terminal_reconnect", dict(worker_identity, session_id=session_id))
+                    intruder_reconnect, _, _ = call("terminal_reconnect", dict(
+                        worker_identity, session_id=session_id),
+                        bearer_token=other_token)
+                    require(intruder_reconnect.get("ok") is not True and
+                            intruder_reconnect.get("error_code") ==
+                                "terminal_reconnect_unavailable" and
+                            intruder_reconnect.get("error") == "session_not_found" and
+                            not intruder_reconnect.get("session_id") and
+                            not intruder_reconnect.get("session_epoch"),
+                            "other principal gained recovered session")
+                    recovered = must("terminal_reconnect", dict(
+                        worker_identity, session_id=session_id))
                     new_epoch = recovered.get("session_epoch")
-                    require(new_epoch and new_epoch != epoch, "reconnect did not fence previous epoch")
-                    stale, _, _ = call("terminal_write", dict(worker_identity, session_id=session_id,
-                                                               session_epoch=epoch, content="true\n"))
-                    require(stale.get("error_code") == "terminal_epoch_changed", "old write epoch not fenced")
+                    require(new_epoch and new_epoch != epoch,
+                            "reconnect did not fence previous epoch")
+                    stale, _, _ = call("terminal_write", dict(
+                        owner, session_epoch=epoch, content="true\n"))
+                    require(stale.get("error_code") == "terminal_epoch_changed",
+                            "old write epoch not fenced")
                     epoch = new_epoch
                     send("printf 'POST_%s\\n' 'RECONNECT'\n", epoch)
                     await_output("POST_RECONNECT", epoch)
-                    must("terminal_close", dict(worker_identity, session_id=session_id, session_epoch=epoch))
-                    terminal_live = False
-                    sockets = list((state / "worker-terminals").glob(".asa-tmux-*/tmux.sock"))
-                    require(not sockets, "fixture tmux sockets remained after close")
-                    evidence.append({"sample": "public_worker_terminal_open_write_read_resize_interrupt_reconnect_close",
-                                     "result": "PASS", "isolated": True})
+                    if fault == "cleanup_unverified":
+                        # Introduce one task-owned, non-secret unexpected file
+                        # in the REAL tmux socket directory. Broker close
+                        # stops tmux, but its nonrecursive rmdir cannot delete
+                        # this marker; our verifier must detect/retain it.
+                        directories = owned_terminal_dirs()
+                        require(len(directories) == 1,
+                                "cleanup-fault fixture has unexpected backend count")
+                        (directories[0] / ".fixture-unknown-cleanup-entry").write_text(
+                            "disposable cleanup-proof marker\n")
+                    must("terminal_close", dict(
+                        owner, session_epoch=epoch))
+                    terminal_closed = True
                 finally:
-                    if terminal_live:
+                    # Always enter cleanup, including when terminal_open had
+                    # no usable result, or when opening was uncertain.
+                    if session_id and epoch and not terminal_closed:
                         try:
-                            call("terminal_close", dict(worker_identity, session_id=session_id, session_epoch=epoch))
+                            call("terminal_close", dict(
+                                worker_identity, session_id=session_id,
+                                session_epoch=epoch))
                         except Exception:
-                            pass
-                    # In failure paths, kill only sockets below this fixture's own
-                    # fresh disposable state directory; never touch other tmux.
-                    for sock in (state / "worker-terminals").glob(".asa-tmux-*/tmux.sock"):
-                        try:
-                            subprocess.run(["/usr/bin/tmux", "-S", str(sock), "kill-server"],
-                                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, timeout=3)
-                        except Exception:
-                            pass
-                    if list((state / "worker-terminals").glob(".asa-tmux-*/tmux.sock")):
+                            pass  # verify/terminate exact local backend below
+                    try:
+                        cleanup_owned_terminal_backends()
+                    except Exception:
                         terminal_cleanup_unverified = True
+                    # Any unknown socket-directory entries keep the fixture
+                    # for explicit investigation rather than false PASS.
+
+                require(not terminal_cleanup_unverified,
+                        "fixture terminal cleanup unverified; preserve evidence")
+                evidence.append({"sample": "public_worker_terminal_open_write_read_resize_interrupt_reconnect_close",
+                                 "result": "PASS", "isolated": True,
+                                 "actual_socket_name": "socket",
+                                 "verified_runtime_dirs": 0})
                 dbg, _, _ = call("debug_adapter_status", {})
                 require(dbg.get("ok"), "public debugger capability status unavailable")
                 adapter = json.loads(dbg.get("output", "{}"))
-                require(isinstance(adapter, dict) and isinstance(adapter.get("installed"), bool),
+                require(isinstance(adapter, dict) and
+                        isinstance(adapter.get("installed"), bool),
                         "debug_adapter_status lacks installed boolean")
-                evidence.append({"sample": "public_debug_adapter_status", "result": "PASS",
+                evidence.append({"sample": "public_debug_adapter_status",
+                                 "result": "PASS",
                                  "trusted_system_delve_installed": adapter["installed"]})
-                # Discovery is not a DAP protocol test. Real gopls/Delve must
-                # be tested separately in their owning component/installed lane.
                 terminal_mode_success = True
                 return
 
