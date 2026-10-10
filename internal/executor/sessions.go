@@ -513,8 +513,13 @@ func (b *stdioSessionBroker) removeAndStop(entry *stdioSession) error {
 		pinError := entry.dap.pinError
 		targetStillPinned := entry.dap.debuggeePin != nil
 		entry.dap.mu.Unlock()
-		if pinError != "" || targetStillPinned {
-			return errors.New("session_stop_outcome_unknown: DAP process identity or target cleanup unproven")
+		// A successful verified cgroup.kill reconciles all descendants,
+		// including identities never delivered in DAP events.
+		entry.dap.mu.Lock()
+		proven := entry.dap.containmentProven
+		entry.dap.mu.Unlock()
+		if !proven && (pinError != "" || targetStillPinned) {
+			return errors.New("session_stop_outcome_unknown: DAP target cleanup not proven")
 		}
 	}
 	// DAP's private socket is transport runtime state only, not a second

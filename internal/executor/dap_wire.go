@@ -27,30 +27,33 @@ const (
 )
 
 type dapState struct {
-	mu              sync.Mutex // serializes DAP frames and events
-	actionMu        sync.Mutex // serializes complete user operations and close
-	conn            net.Conn
-	pending         []byte // incomplete frame retained across status timeouts
-	workspace       string
-	adapter         string
-	program         string
-	adapterPID      int
-	adapterPin      *os.File // duplicated original adapter pidfd, not a numeric PID claim
-	workerUID       uint32
-	debuggeePID     int
-	debuggeePin     *os.File
-	pinError        string
-	uncertain       bool
-	uncertainReason string
-	sourceVersion   string
-	sourceVersions  map[string]string // workspace-relative breakpoint source identities
-	seq             int
-	events          []json.RawMessage
-	eventBytes      int
-	eventsDropped   uint64
-	stage           string
-	configured      bool
-	socketDir       string
+	mu                  sync.Mutex // serializes DAP frames and events
+	actionMu            sync.Mutex // serializes complete user operations and close
+	conn                net.Conn
+	pending             []byte // incomplete frame retained across status timeouts
+	workspace           string
+	adapter             string
+	program             string
+	adapterPID          int
+	adapterPin          *os.File // duplicated original adapter pidfd, not a numeric PID claim
+	workerUID           uint32
+	debuggeePID         int
+	debuggeePin         *os.File
+	containment         *dapCgroup
+	containmentProven   bool
+	launchMayHaveTarget bool
+	pinError            string
+	uncertain           bool
+	uncertainReason     string
+	sourceVersion       string
+	sourceVersions      map[string]string // workspace-relative breakpoint source identities
+	seq                 int
+	events              []json.RawMessage
+	eventBytes          int
+	eventsDropped       uint64
+	stage               string
+	configured          bool
+	socketDir           string
 }
 
 func dapFrame(conn net.Conn, obj any) error {
@@ -200,6 +203,11 @@ func (d *dapState) call(ctx context.Context, command string, args any) (json.Raw
 		return nil, err
 	}
 	defer d.conn.SetDeadline(time.Time{})
+	// After the first launch byte is sent, absence of a process event can
+	// NEVER mean no target exists. This is the early-adapter-crash invariant.
+	if command == "launch" {
+		d.launchMayHaveTarget = true
+	}
 	if err := dapFrame(d.conn, map[string]any{"seq": seq, "type": "request", "command": command, "arguments": args}); err != nil {
 		return nil, d.markUncertain(err)
 	}
@@ -270,16 +278,14 @@ func (d *dapState) drain(ctx context.Context) {
 			if errors.As(err, &netErr) && netErr.Timeout() {
 				return
 			}
-			if errors.Is(err, io.EOF) {
-				d.stage = "disconnected"
-			} else {
-				d.stage = "failed"
-			}
+			// Non-timeout transport and malformed framing cannot recover
+			// ordering guarantees; status stays queryable, actions poison.
+			d.markUncertain(fmt.Errorf("dap_drain_transport_unproven: %w", err))
 			return
 		}
 		var packet dapPacket
 		if json.Unmarshal(raw, &packet) != nil {
-			d.stage = "failed"
+			d.markUncertain(errors.New("dap_drain_invalid_packet"))
 			return
 		}
 		if packet.Type == "event" {
@@ -287,9 +293,12 @@ func (d *dapState) drain(ctx context.Context) {
 		} else if packet.Type == "request" {
 			d.seq++
 			_ = d.conn.SetWriteDeadline(time.Now().Add(time.Second))
-			_ = dapFrame(d.conn, map[string]any{"seq": d.seq, "type": "response", "request_seq": packet.Seq, "command": packet.Command, "success": false, "message": "unsupported_adapter_reverse_request"})
+			if err := dapFrame(d.conn, map[string]any{"seq": d.seq, "type": "response", "request_seq": packet.Seq, "command": packet.Command, "success": false, "message": "unsupported_adapter_reverse_request"}); err != nil {
+				d.markUncertain(fmt.Errorf("dap_drain_reverse_request_failed: %w", err))
+				return
+			}
 		} else {
-			d.stage = "failed"
+			d.markUncertain(errors.New("dap_drain_unexpected_response_or_packet"))
 			return
 		}
 	}

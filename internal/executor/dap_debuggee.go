@@ -97,11 +97,18 @@ func (d *dapState) pinDebuggeeProcess(body json.RawMessage) error {
 	if d.adapterPin == nil || unix.PidfdSendSignal(int(d.adapterPin.Fd()), 0, nil, 0) != nil {
 		return errors.New("dap_original_adapter_no_longer_live")
 	}
-	// A final stable-identity check closes numeric /proc TOCTOU. The group
-	// flag is also an explicit Linux 6.9+ capability check; this non-child
-	// MUST NEVER fall back to an unsafe kill(-PGID).
-	if err := unix.PidfdSendSignal(int(pin.Fd()), 0, nil, pidfdSignalProcessGroup); err != nil {
-		return fmt.Errorf("dap_debuggee_group_identity_not_live_or_unsupported: %w", err)
+	if d.containment != nil && !d.containment.containsPID(pid) {
+		return errors.New("dap_debuggee_is_not_in_executor_owned_containment")
+	}
+	// Validate the exact original debuggee pidfd after procfs provenance.
+	// The production target is killed via its verified cgroup, never by a
+	// bare numeric PID/PGID. Fixture-only tests still use safe group pidfd.
+	signalFlags := 0
+	if d.containment == nil {
+		signalFlags = pidfdSignalProcessGroup
+	}
+	if err := unix.PidfdSendSignal(int(pin.Fd()), 0, nil, signalFlags); err != nil {
+		return fmt.Errorf("dap_debuggee_original_identity_not_live: %w", err)
 	}
 	d.debuggeePID = pid
 	d.debuggeePin = pin
@@ -113,9 +120,30 @@ func (d *dapState) pinDebuggeeProcess(body json.RawMessage) error {
 // broker wait() after an unexpected Delve SIGKILL. Never silently discard a
 // failed pin: that would turn an orphan into a successful session cleanup.
 func (d *dapState) stopPinnedDebuggee() error {
+	if d.containment != nil {
+		// cgroup.kill atomically covers adapter, debuggee and all inherited
+		// descendants, even without *any* validated DAP process event.
+		if err := d.containment.killVerifyAndRelease(); err != nil {
+			return fmt.Errorf("dap_containment_cleanup_unknown: %w", err)
+		}
+		d.containment = nil
+		d.containmentProven = true
+		if d.debuggeePin != nil {
+			_ = d.debuggeePin.Close()
+			d.debuggeePin = nil
+		}
+		d.debuggeePID = 0
+		return nil
+	}
+	// The following alternative is exclusively for unprivileged fixture
+	// tests with an explicit s.dlvBinary override; production never enters
+	// it. Unobserved launch completion must remain unproven, not success.
 	if d.debuggeePin == nil {
 		if d.pinError != "" {
 			return errors.New(d.pinError)
+		}
+		if d.launchMayHaveTarget {
+			return errors.New("debuggee_identity_unobserved_after_launch_without_containment")
 		}
 		return nil
 	}

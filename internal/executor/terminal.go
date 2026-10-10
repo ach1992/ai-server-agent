@@ -269,17 +269,10 @@ func (s *Server) terminalOpen(req Request) Response {
 		return terminalError("terminal_epoch_unavailable", err)
 	}
 	t := &tmuxTerminalState{root: req.Root, socketDir: dir, socket: socket, name: name, columns: req.Columns, rows: req.Rows, epoch: epoch}
-	binary := s.terminalBinary
-	if binary == "" {
-		binary = "/usr/bin/tmux"
-	}
-	if s.terminalBinary == "" && !systemexec.Trusted(binary) {
+	binary, err := s.resolveTmuxBinary()
+	if err != nil {
 		_ = os.Remove(dir)
-		return terminalError("tmux_untrusted", errors.New("optional tmux must be root-owned, regular, executable, and not writable by non-root"))
-	}
-	if _, err := os.Stat(binary); err != nil {
-		_ = os.Remove(dir)
-		return terminalError("tmux_unavailable", err)
+		return terminalError("tmux_untrusted", err)
 	}
 	args := []string{"-f", "/dev/null", "-S", socket, "-C", "new-session", "-s", name,
 		"-c", cwd, "-x", strconv.Itoa(req.Columns), "-y", strconv.Itoa(req.Rows)}
@@ -330,6 +323,18 @@ func (s *Server) terminalOpen(req Request) Response {
 	// We cannot claim a usable terminal until its control stream identifies
 	// the original pane. Keep its ID on uncertain launch for reconciliation.
 	return Response{Error: "terminal started but initial pane/ack not verified", ReasonCode: "terminal_start_uncertain", ErrorCode: "terminal_start_uncertain", ErrorClass: "state", SessionID: id, SessionEpoch: epoch}
+}
+
+// The production binary trust rule must be identical for initial open and
+// recovered sessions: root reconnect must never bypass the trusted path.
+func (s *Server) resolveTmuxBinary() (string, error) {
+	if s.terminalBinary != "" {
+		return s.terminalBinary, nil
+	} // internal fixture override
+	if binary := systemexec.First("/usr/bin/tmux"); binary != "" {
+		return binary, nil
+	}
+	return "", errors.New("optional tmux must be root-owned, executable, non-symlink and protected from non-root writes")
 }
 
 func (s *Server) terminalRead(req Request) Response {

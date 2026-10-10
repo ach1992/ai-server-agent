@@ -254,9 +254,9 @@ func (s *Server) terminalReconnect(req Request) Response {
 	}
 	t := &tmuxTerminalState{root: rec.Root, socketDir: rec.SocketDir, socket: filepath.Join(rec.SocketDir, "socket"),
 		name: rec.Name, pane: rec.Pane, columns: rec.Columns, rows: rec.Rows, epoch: epoch, recovered: true}
-	binary := s.terminalBinary
-	if binary == "" {
-		binary = "/usr/bin/tmux"
+	binary, err := s.resolveTmuxBinary()
+	if err != nil {
+		return terminalError("tmux_untrusted", err)
 	}
 	id, err := s.startProcessSessionWithID(req, "terminal", rec.Workspace, binary, t, rec.ID,
 		"-f", "/dev/null", "-S", t.socket, "-C", "attach-session", "-t", rec.Name)

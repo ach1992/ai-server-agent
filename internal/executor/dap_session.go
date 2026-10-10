@@ -29,11 +29,11 @@ func (s *Server) debugAction(ctx context.Context, req Request) Response {
 	case "debug_adapter_status":
 		_, err := s.debugBinary()
 		available := err == nil
-		detail := map[string]any{"adapter": "go/delve", "installed": available, "modes": []string{"exec"}, "attach_supported": false, "privileged": false, "provisioning": "optional_admin_owned_binary", "kernel_group_signal": "must_validate_against_live_adapter_before_launch"}
+		detail := map[string]any{"adapter": "go/delve", "installed": available, "modes": []string{"exec"}, "attach_supported": false, "privileged": false, "provisioning": "optional_admin_owned_binary", "containment": "root_owned_cgroup_v2_required_before_launch"}
 		b, _ := json.Marshal(detail)
 		return Response{OK: true, Status: func() string {
 			if available {
-				return "installed_kernel_unverified"
+				return "installed_containment_unverified"
 			}
 			return "unavailable"
 		}(), Output: string(b), OutputEncoding: "json", BytesReturned: int64(len(b)), BytesSeen: int64(len(b))}
@@ -115,9 +115,9 @@ func (s *Server) createDAPListener() (net.Listener, string, string, error) {
 	return listener, dir, socket, nil
 }
 
-// The concrete adapter process must remain live after accepting an AF_UNIX
-// connection. Also prove group pidfd signals before any Delve launch may
-// create a tracee: on older kernels unsafe group cleanup is not attempted.
+// The concrete adapter process must remain live after accepting AF_UNIX.
+// DAP cleanup relies on root-owned cgroup v2 containment, not on a numeric
+// process group or kernel-version-specific group-scoped pidfd signalling.
 func adapterPidfdLiveAndGroupSafe(e *stdioSession) bool {
 	e.mu.Lock()
 	defer e.mu.Unlock()
@@ -125,8 +125,7 @@ func adapterPidfdLiveAndGroupSafe(e *stdioSession) bool {
 		return false
 	}
 	fd := int(e.pidPin.Fd())
-	return unix.PidfdSendSignal(fd, 0, nil, 0) == nil &&
-		unix.PidfdSendSignal(fd, 0, nil, pidfdSignalProcessGroup) == nil
+	return unix.PidfdSendSignal(fd, 0, nil, 0) == nil
 }
 
 // Check the live pinned adapter and peer credentials while holding e.mu so
@@ -139,8 +138,8 @@ func pinnedDAPPeer(e *stdioSession, conn *net.UnixConn, uid uint32) (*os.File, e
 		return nil, errors.New("original adapter pidfd missing")
 	}
 	fd := int(e.pidPin.Fd())
-	if unix.PidfdSendSignal(fd, 0, nil, 0) != nil || unix.PidfdSendSignal(fd, 0, nil, pidfdSignalProcessGroup) != nil {
-		return nil, errors.New("adapter exited or stable group signalling unavailable")
+	if unix.PidfdSendSignal(fd, 0, nil, 0) != nil {
+		return nil, errors.New("adapter identity is no longer live")
 	}
 	if !peerIsWorkerDelve(conn, uid, e.pid) {
 		return nil, errors.New("accepted peer is not pinned adapter")
@@ -192,6 +191,9 @@ func (s *Server) debugLaunch(ctx context.Context, req Request) (response Respons
 	}
 	if stat.FileVersion != req.FileVersion {
 		return fileError("debug_program_changed", "conflict", errors.New("executable changed before debug launch"))
+	}
+	if os.Geteuid() != 0 && s.dlvBinary == "" {
+		return fileError("dap_containment_unavailable", "dependency", errors.New("production DAP requires root executor-owned cgroup v2 containment"))
 	}
 	binary, err := s.debugBinary()
 	if err != nil {
@@ -278,6 +280,14 @@ func (s *Server) debugLaunch(ctx context.Context, req Request) (response Respons
 	}
 	_ = listener.Close()
 	d := &dapState{conn: stream, workspace: workspace, adapter: "go/delve", adapterPID: pid, workerUID: s.workerUID, program: relative, sourceVersion: req.FileVersion, stage: "starting", socketDir: dir}
+	var containment *dapCgroup
+	if os.Geteuid() == 0 {
+		containment, err = createDAPCgroup()
+		if err != nil {
+			_ = stream.Close()
+			return fileError("dap_containment_unavailable", "dependency", err)
+		}
+	}
 	// Lock in the same order as broker wait/stop: the DAP consumer must be
 	// installed before wait() snapshots consumers, or be rejected outright.
 	e.stopMu.Lock()
@@ -286,8 +296,34 @@ func (s *Server) debugLaunch(ctx context.Context, req Request) (response Respons
 		e.mu.Unlock()
 		e.stopMu.Unlock()
 		_ = stream.Close()
-		return fileError("debug_adapter_exited_before_attach", "state", errors.New("adapter exited before its DAP consumer was safely registered"))
+		if containment != nil {
+			_ = containment.removeUnused()
+		}
+		return fileError("debug_adapter_exited_before_attach", "state", errors.New("adapter exited before DAP containment setup"))
 	}
+	e.mu.Unlock()
+	if containment != nil {
+		if joinErr := containment.joinOriginalAdapter(e); joinErr != nil {
+			e.stopMu.Unlock()
+			abortErr := containment.abortBeforeLaunch()
+			_ = stream.Close()
+			if abortErr != nil {
+				return fileError("dap_containment_cleanup_uncertain", "state", fmt.Errorf("%v; %w", joinErr, abortErr))
+			}
+			return fileError("dap_containment_join_failed", "state", joinErr)
+		}
+	}
+	e.mu.Lock()
+	if e.closed || e.exited {
+		e.mu.Unlock()
+		e.stopMu.Unlock()
+		if containment != nil {
+			_ = containment.abortBeforeLaunch()
+		}
+		_ = stream.Close()
+		return fileError("debug_adapter_exited_before_attach", "state", errors.New("adapter exited during containment attachment"))
+	}
+	d.containment = containment
 	d.adapterPin = adapterPin
 	e.dap = d
 	adapterPin = nil
