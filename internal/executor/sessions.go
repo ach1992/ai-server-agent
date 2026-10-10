@@ -74,7 +74,7 @@ type stdioSession struct {
 	done                    chan struct{}
 	expiry                  *time.Timer
 	terminal                *tmuxTerminalState       // consumer-specific Control Mode state; broker owns its process
-	terminalRecordPersisted bool                     // guarded by entry.mu; prevents double counting persisted sessions
+	terminalRecordPersisted bool                     // guarded by entry.mu; PENDING or ACTIVE file owns capacity
 	dap                     *dapState                // DAP stream attaches to this same process identity and broker
 	browser                 *browserStdioState       // managed Browser consumer; never a second process broker
 	browserLease            *browserSessionAdmission // release only after verified process cleanup, before broker deletion
@@ -285,23 +285,35 @@ func (s *Server) startProcessSessionWithID(req Request, kind, workspace, binary 
 			s.sessions.remove(entry)
 		}
 	}()
-	// A failed Control Mode client startup must not leak its separately
-	// scoped tmux server. Keep cleanup under the same validated unit identity.
-	launchedScope := false
+	// An externally owned scope must have an fsynced pending reservation
+	// BEFORE systemd-run. Every later startup failure must reconcile that
+	// record; no in-memory-only uncertain backend is permitted.
+	launchedScope, pendingLinked := false, false
 	defer func() {
-		if removeOnFailure && launchedScope {
-			if stopErr := stopScopedTerminalBackend(terminal.name); stopErr != nil {
-				// A failed PID1 stop is not a proven harmless failure. Keep
-				// the reserved broker identity for follow-up reconciliation:
-				// the earlier deferred remove must not erase this session.
-				removeOnFailure = false
-				err = errors.Join(err, fmt.Errorf("terminal_scope_cleanup_unverified: %w", stopErr))
-				entry.mu.Lock()
-				terminal.scopeUncertain = true
-				entry.cleanupErr = err
-				entry.mu.Unlock()
-				id = entry.id
+		if !removeOnFailure || !pendingLinked {
+			return
+		}
+		var cleanupErr error
+		if launchedScope {
+			stop := stopScopedTerminalBackend
+			if s.terminalScopeStopTestHook != nil {
+				stop = s.terminalScopeStopTestHook
 			}
+			cleanupErr = stop(terminal.name)
+		}
+		if cleanupErr == nil {
+			cleanupErr = s.deleteTerminalRecord(entry.id)
+		}
+		if cleanupErr != nil {
+			// Until PID1 has verified the stop AND deletion is durable,
+			// retain the opaque ID and fail closed on all terminal I/O.
+			removeOnFailure = false
+			err = errors.Join(err, fmt.Errorf("terminal_scope_reconciliation_unverified: %w", cleanupErr))
+			entry.mu.Lock()
+			terminal.scopeUncertain = true
+			entry.cleanupErr = err
+			entry.mu.Unlock()
+			id = entry.id
 		}
 	}()
 	if blocked := s.beginActionAudit(req, "session_create", auditMode(req.Root), kind+"\x00"+cwd+"\x00"+binary, "developer_session"); blocked != nil {
@@ -315,6 +327,16 @@ func (s *Server) startProcessSessionWithID(req Request, kind, workspace, binary 
 		return "", errors.New("worker tmux requires root executor-owned backend")
 	}
 	if terminal != nil && s.terminalBinary == "" && !terminal.recovered {
+		linked, reservationErr := s.persistPendingTerminalRecord(entry)
+		pendingLinked = linked
+		if linked {
+			entry.mu.Lock()
+			entry.terminalRecordPersisted = true
+			entry.mu.Unlock()
+		}
+		if reservationErr != nil {
+			return "", fmt.Errorf("terminal_pending_reservation_unverified: %w", reservationErr)
+		}
 		launch := s.startScopedTerminalBackend
 		if s.terminalScopeStartTestHook != nil {
 			launch = s.terminalScopeStartTestHook

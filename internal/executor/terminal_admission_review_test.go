@@ -47,11 +47,20 @@ func TestReviewR1UncertainScopeStartupKeepsExactIdentityUntilVerifiedStop(t *tes
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, owner, _ := testStdioBroker(t)
+			shortState, err := os.MkdirTemp("/tmp", "asa-r1-")
+			if err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { _ = os.RemoveAll(shortState) })
+			s.cfg.StateDir = shortState
 			owner.Action = "terminal_open"
 			owner.SessionID = "stdio_0123456789abcdef0123456789abcdef"
-			owner.SessionEpoch = "test-epoch"
+			owner.SessionEpoch = "0123456789abcdef01234567"
+			socketDir := filepath.Join(s.cfg.StateDir, "worker-terminals", ".asa-tmux-review")
 			term := &tmuxTerminalState{
 				name: "asa_0123456789abcdef01234567", epoch: owner.SessionEpoch,
+				socketDir: socketDir, socket: filepath.Join(socketDir, "socket"),
+				scoped: true, columns: 80, rows: 24,
 			}
 			entry := &stdioSession{
 				id: owner.SessionID, kind: "terminal", ownerID: owner.PrincipalID,
@@ -61,6 +70,10 @@ func TestReviewR1UncertainScopeStartupKeepsExactIdentityUntilVerifiedStop(t *tes
 			if err := s.sessions.reserve(entry); err != nil {
 				t.Fatal(err)
 			}
+			if linked, err := s.persistPendingTerminalRecord(entry); err != nil || !linked {
+				t.Fatalf("durable PENDING must precede scope launch: linked=%t err=%v", linked, err)
+			}
+			entry.terminalRecordPersisted = true
 			launches, verifies, stops := 0, 0, 0
 			lifecycleErr := startTerminalScopeLifecycle(term.name, func() error {
 				launches++
@@ -93,8 +106,11 @@ func TestReviewR1UncertainScopeStartupKeepsExactIdentityUntilVerifiedStop(t *tes
 			if got, err := s.sessions.get(owner, entry.id); err != nil || got != entry {
 				t.Fatalf("lost principal-bound reconciliation ID: %v", err)
 			}
-			if count := s.sessions.unpersistedTerminalCount(); count != 1 {
-				t.Fatalf("uncertain privileged backend did not occupy terminal capacity: %d", count)
+			if count, err := s.terminalRecordCountWithStop(func(string) error { return errors.New("unexpected stop") }); err != nil || count != 1 {
+				t.Fatalf("durable PENDING did not occupy terminal capacity: %d (%v)", count, err)
+			}
+			if s.sessions.unpersistedTerminalCount() != 0 {
+				t.Fatal("PENDING counted twice in disk and broker capacity")
 			}
 			wrong := owner
 			wrong.PrincipalID = "another-principal"

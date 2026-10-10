@@ -105,7 +105,7 @@ func TestApprovedR1ScopeUncertainFullOpenRetainsBrokerIdentity(t *testing.T) {
 			req.SessionID, req.SessionEpoch = opened.SessionID, opened.SessionEpoch
 			entry, err := s.sessions.get(req, opened.SessionID)
 			if err != nil || entry.terminal.name != exactName ||
-				!entry.terminal.scopeUncertain || s.sessions.unpersistedTerminalCount() != 1 {
+				!entry.terminal.scopeUncertain || s.sessions.unpersistedTerminalCount() != 0 {
 				t.Fatalf("lost real broker reservation: entry=%+v err=%v", entry, err)
 			}
 			wrong := req
@@ -142,8 +142,11 @@ func TestApprovedR1ScopeUncertainFullOpenRetainsBrokerIdentity(t *testing.T) {
 				t.Fatalf("failed stop erased reconciliation ID: %+v", first)
 			}
 			if _, err := s.sessions.get(req, req.SessionID); err != nil ||
-				s.sessions.unpersistedTerminalCount() != 1 {
+				s.sessions.unpersistedTerminalCount() != 0 {
 				t.Fatalf("failed stop freed scope ownership: %v", err)
+			}
+			if _, err := s.readOwnedTerminalRecord(req, true); err != nil {
+				t.Fatalf("failed stop lost durable PENDING record: %v", err)
 			}
 			if closed := s.terminalAction(req); !closed.OK || stopCalls != 2 {
 				t.Fatalf("repaired cleanup did not release exact scope: %+v stops=%d", closed, stopCalls)

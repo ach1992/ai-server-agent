@@ -27,6 +27,8 @@ type terminalRecord struct {
 	Workspace  string    `json:"workspace"`
 	Root       bool      `json:"root"`
 	Scoped     bool      `json:"scoped,omitempty"`
+	Lifecycle  string    `json:"lifecycle,omitempty"` // pending before PID1 launch, active after pane verification
+	Epoch      string    `json:"epoch,omitempty"`     // only pending; binds exact close across Executor restart
 	SocketDir  string    `json:"socket_dir"`
 	Name       string    `json:"name"`
 	Pane       string    `json:"pane"`
@@ -42,6 +44,14 @@ func validTerminalID(id string) bool {
 	_, err := hex.DecodeString(id[6:])
 	return err == nil
 }
+func validTerminalEpoch(epoch string) bool {
+	if len(epoch) != 24 {
+		return false
+	}
+	_, err := hex.DecodeString(epoch)
+	return err == nil
+}
+
 func validTmuxSessionName(name string) bool {
 	if len(name) != 28 || !strings.HasPrefix(name, "asa_") {
 		return false
@@ -75,6 +85,8 @@ func (s *Server) terminalRecordPath(id string) (string, error) {
 	}
 	return filepath.Join(dir, id+".json"), nil
 }
+
+var errTerminalPending = errors.New("terminal_start_uncertain")
 
 // Retired scoped servers must not permanently consume the limited terminal
 // registry after an Executor crash. Never trust the filename alone: inspect
@@ -133,6 +145,8 @@ func (s *Server) terminalRecordCountWithStop(stop func(string) error) (int, erro
 		}
 		if parseErr != nil || rec.Version != 1 || rec.ID != id ||
 			!rec.Scoped || !validTmuxSessionName(rec.Name) ||
+			(rec.Lifecycle != "" && rec.Lifecycle != "active" && rec.Lifecycle != "pending") ||
+			(rec.Lifecycle == "pending" && (!validTerminalEpoch(rec.Epoch) || !validTerminalPendingSocket(rec, s.cfg.StateDir))) ||
 			rec.ExpiresAt.IsZero() || !now.After(rec.ExpiresAt) {
 			count++
 			continue
@@ -149,25 +163,72 @@ func (s *Server) terminalRecordCountWithStop(stop func(string) error) (int, erro
 	}
 	return count, nil
 }
+
+// A pending reservation is linked and directory-fsynced before systemd-run
+// can create a scope. The returned linked flag tells the caller whether a
+// failed sync requires deletion/reconciliation; never delete a collided ID.
+func (s *Server) persistPendingTerminalRecord(e *stdioSession) (bool, error) {
+	e.mu.Lock()
+	t := e.terminal
+	rec := terminalRecord{Version: 1, ID: e.id, OwnerID: e.ownerID, OwnerClass: e.ownerClass,
+		Workspace: e.workspace, Root: t.root, Scoped: true, Lifecycle: "pending",
+		Epoch: t.epoch, SocketDir: t.socketDir, Name: t.name, Columns: t.columns,
+		Rows: t.rows, ExpiresAt: time.Now().Add(maxStdioSessionAge)}
+	e.mu.Unlock()
+	if !validTerminalPendingSocket(rec, s.cfg.StateDir) || !validTerminalEpoch(rec.Epoch) {
+		return false, errors.New("terminal_pending_identity_invalid")
+	}
+	return s.writeTerminalRecord(rec, false)
+}
+
+// The same durable file transitions from PENDING to ACTIVE by a single atomic
+// rename. A crash sees one complete lifecycle state, never a missing record.
+// Do not reset expiry: PID1's hard scope TTL began at initial launch.
 func (s *Server) persistTerminalRecord(req Request, e *stdioSession) error {
 	e.mu.Lock()
 	t := e.terminal
 	rec := terminalRecord{Version: 1, ID: e.id, OwnerID: e.ownerID, OwnerClass: e.ownerClass,
 		Workspace: e.workspace, Root: t.root, SocketDir: t.socketDir, Name: t.name,
-		Pane: t.pane, Scoped: t.scoped, Columns: t.columns, Rows: t.rows, ExpiresAt: time.Now().Add(maxStdioSessionAge)}
+		Pane: t.pane, Scoped: t.scoped, Lifecycle: "active", Columns: t.columns,
+		Rows: t.rows, ExpiresAt: time.Now().Add(maxStdioSessionAge)}
 	e.mu.Unlock()
-	path, err := s.terminalRecordPath(e.id)
+	if rec.Scoped {
+		// During terminal_open the public Request has not received its
+		// generated SessionID yet. Recovery records are keyed to the
+		// broker-assigned opaque ID, not to req.SessionID.
+		owner := req
+		owner.SessionID = rec.ID
+		owner.Workspace = rec.Workspace
+		old, err := s.readOwnedTerminalRecord(owner, true)
+		if err != nil || old.ID != rec.ID || old.Name != rec.Name || old.SocketDir != rec.SocketDir ||
+			old.Root != rec.Root || old.Columns != rec.Columns || old.Rows != rec.Rows {
+			return errors.New("terminal_pending_identity_changed")
+		}
+		rec.ExpiresAt = old.ExpiresAt
+	}
+	_, err := s.writeTerminalRecord(rec, rec.Scoped)
+	return err
+}
+
+// This atomic-file writer retains the prior no-clobber rule for initial
+// creation. Replacement is allowed ONLY for a previously verified matching
+// pending reservation under the private executor-owned namespace.
+func (s *Server) writeTerminalRecord(rec terminalRecord, promote bool) (linked bool, err error) {
+	path, err := s.terminalRecordPath(rec.ID)
 	if err != nil {
-		return err
+		return false, err
 	}
 	body, err := json.Marshal(rec)
 	if err != nil {
-		return err
+		return false, err
+	}
+	if len(body) > 4096 {
+		return false, errors.New("terminal_record_too_large")
 	}
 	dir := filepath.Dir(path)
 	f, err := os.CreateTemp(dir, ".terminal-pending-")
 	if err != nil {
-		return err
+		return false, err
 	}
 	tmp := f.Name()
 	defer os.Remove(tmp)
@@ -179,24 +240,53 @@ func (s *Server) persistTerminalRecord(req Request, e *stdioSession) error {
 	}
 	closeErr := f.Close()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if closeErr != nil {
-		return closeErr
+		return false, closeErr
 	}
-	// Link is no-clobber: a reused/stale opaque ID must never overwrite an
-	// older runtime record, and a worker cannot write this directory.
-	if err = os.Link(tmp, path); err != nil {
-		return err
+	if promote {
+		if err = os.Rename(tmp, path); err != nil {
+			return false, err
+		}
+	} else {
+		if err = os.Link(tmp, path); err != nil {
+			return false, err
+		}
 	}
 	d, err := os.Open(dir)
 	if err != nil {
-		return err
+		return true, err
 	}
 	defer d.Close()
-	return d.Sync()
+	return true, d.Sync()
 }
+
+// Pending scope identity may have no tmux socket or pane yet. Restrict
+// reconciliation to the original authenticated owner and trusted namespace;
+// absence of a socket must never prevent exact PID1 scope shutdown.
+func validTerminalPendingSocket(rec terminalRecord, stateDir string) bool {
+	if !rec.Scoped || !validTmuxSessionName(rec.Name) || !filepath.IsAbs(rec.Workspace) ||
+		rec.Workspace != filepath.Clean(rec.Workspace) || rec.OwnerID == "" || rec.OwnerClass == "" ||
+		rec.ExpiresAt.IsZero() || rec.Columns < 20 || rec.Columns > 240 || rec.Rows < 5 || rec.Rows > 80 {
+		return false
+	}
+	base := filepath.Join(stateDir, "worker-terminals")
+	if rec.Root {
+		base = filepath.Join(stateDir, "root-terminals")
+	}
+	return filepath.IsAbs(rec.SocketDir) && rec.SocketDir != base &&
+		withinPath(base, rec.SocketDir) && strings.HasPrefix(filepath.Base(rec.SocketDir), ".asa-tmux-") &&
+		len(filepath.Join(rec.SocketDir, "socket")) <= terminalMaxUnixSocketPath
+}
+
 func (s *Server) readTerminalRecord(req Request) (terminalRecord, error) {
+	return s.readOwnedTerminalRecord(req, false)
+}
+
+// pendingOnly permits an authenticated owner to reconcile an incomplete
+// creation after a brand-new Executor has lost its volatile broker.
+func (s *Server) readOwnedTerminalRecord(req Request, pendingOnly bool) (terminalRecord, error) {
 	var rec terminalRecord
 	path, err := s.terminalRecordPath(req.SessionID)
 	if err != nil {
@@ -222,7 +312,21 @@ func (s *Server) readTerminalRecord(req Request) (terminalRecord, error) {
 	if err = json.Unmarshal(body, &rec); err != nil {
 		return rec, errors.New("terminal_record_invalid")
 	}
-	if rec.Version != 1 || rec.ID != req.SessionID || rec.OwnerID != req.PrincipalID || rec.OwnerClass != req.PrincipalClass || rec.Workspace != filepath.Clean(req.Workspace) || rec.Root != req.Root || req.Approval != req.Root || !validTmuxSessionName(rec.Name) || !validTerminalID(rec.ID) || rec.Pane == "" || rec.Columns < 20 || rec.Columns > 240 || rec.Rows < 5 || rec.Rows > 80 {
+	if rec.Version != 1 || rec.ID != req.SessionID || rec.OwnerID != req.PrincipalID || rec.OwnerClass != req.PrincipalClass || rec.Workspace != filepath.Clean(req.Workspace) || rec.Root != req.Root || req.Approval != req.Root || !validTmuxSessionName(rec.Name) || !validTerminalID(rec.ID) ||
+		(rec.Lifecycle != "" && rec.Lifecycle != "active" && rec.Lifecycle != "pending") {
+		return terminalRecord{}, errSessionNotFound
+	}
+	if pendingOnly {
+		if rec.Lifecycle != "pending" || !validTerminalEpoch(rec.Epoch) ||
+			!validTerminalPendingSocket(rec, s.cfg.StateDir) {
+			return terminalRecord{}, errSessionNotFound
+		}
+		return rec, nil
+	}
+	if rec.Lifecycle == "pending" {
+		return rec, errTerminalPending
+	}
+	if rec.Pane == "" || rec.Columns < 20 || rec.Columns > 240 || rec.Rows < 5 || rec.Rows > 80 {
 		return terminalRecord{}, errSessionNotFound
 	}
 	// Production worker terminals are executor-root-controlled just like
@@ -290,6 +394,86 @@ func terminalEpoch() (string, error) {
 	return hex.EncodeToString(b[:]), nil
 }
 
+// pendingTerminalAction is a deliberately narrow recovery capability: the
+// original owner can close a scope after the Executor process (and its
+// volatile broker) has died. No socket, pane or Control Mode action is ever
+// exposed while the on-disk lifecycle remains PENDING.
+func (s *Server) pendingTerminalAction(req Request) (Response, bool) {
+	// Serializing exact close with expired-record admission/GC prevents a
+	// concurrent open from acting on or deleting the same pending scope.
+	if req.Action == "terminal_close" {
+		s.terminalAdmissionMu.Lock()
+		defer s.terminalAdmissionMu.Unlock()
+	}
+	rec, err := s.readOwnedTerminalRecord(req, true)
+	if err != nil {
+		return Response{}, false
+	}
+	if req.SessionEpoch != rec.Epoch {
+		return Response{SessionID: rec.ID, SessionEpoch: rec.Epoch,
+			Error: "terminal pending epoch mismatch", ErrorCode: "terminal_epoch_changed", ErrorClass: "state"}, true
+	}
+	if req.Action != "terminal_close" {
+		code := "terminal_start_uncertain"
+		if req.Action == "terminal_reconnect" {
+			code = "terminal_reconnect_unknown"
+		}
+		return Response{SessionID: rec.ID, SessionEpoch: rec.Epoch,
+			Error:     "terminal creation remains pending; only exact close is permitted",
+			ErrorCode: code, ErrorClass: "state"}, true
+	}
+	if blocked := s.beginActionAudit(req, req.Action, auditMode(req.Root), rec.ID, "developer_terminal"); blocked != nil {
+		return *blocked, true
+	}
+	started := time.Now()
+	stop := stopScopedTerminalBackend
+	if s.terminalScopeStopTestHook != nil {
+		stop = s.terminalScopeStopTestHook
+	}
+	err = stop(rec.Name)
+	if err == nil {
+		err = s.deleteTerminalRecord(rec.ID)
+	}
+	if err == nil {
+		removeVerifiedPendingSocketDir(rec.SocketDir)
+	}
+	result := Response{OK: err == nil, SessionID: rec.ID, SessionEpoch: rec.Epoch}
+	if err != nil {
+		result.Error = "terminal pending cleanup unverified: " + err.Error()
+		result.ErrorCode = "terminal_control_unknown"
+		result.ErrorClass = "state"
+	}
+	return s.finishActionAudit(req, req.Action, auditMode(req.Root), rec.ID, "developer_terminal", started, result), true
+}
+
+// Best-effort runtime cleanup must never follow a replaced/symlinked
+// directory or unlink a non-socket target. Root-only persisted identity is
+// sufficient to STOP the scope even when its local socket is missing.
+func removeVerifiedPendingSocketDir(dir string) {
+	info, err := os.Lstat(dir)
+	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
+		return
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || st.Uid != uint32(os.Geteuid()) {
+		return
+	}
+	socket := filepath.Join(dir, "socket")
+	si, err := os.Lstat(socket)
+	if err == nil {
+		sockStat, ok := si.Sys().(*syscall.Stat_t)
+		if !ok || si.Mode()&os.ModeSocket == 0 || sockStat.Uid != uint32(os.Geteuid()) {
+			return
+		}
+		if err := os.Remove(socket); err != nil {
+			return
+		}
+	} else if !errors.Is(err, os.ErrNotExist) {
+		return
+	}
+	_ = os.Remove(dir) // never recurse through unexpected contents
+}
+
 // Reattach a verified tmux backend without creating a new shell/pane. An old
 // output epoch cannot silently refer to a new in-memory bounded event stream.
 func (s *Server) terminalReconnect(req Request) Response {
@@ -314,6 +498,12 @@ func (s *Server) terminalReconnect(req Request) Response {
 		}
 	}
 	rec, err := s.readTerminalRecord(req)
+	if errors.Is(err, errTerminalPending) {
+		if pending, ok := s.pendingTerminalAction(req); ok {
+			return pending
+		}
+		return terminalError("terminal_reconnect_unknown", errTerminalPending)
+	}
 	if err != nil {
 		return terminalError("terminal_reconnect_unavailable", err)
 	}
