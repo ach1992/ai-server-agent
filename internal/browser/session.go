@@ -16,6 +16,8 @@ type SessionOptions struct {
 	Steps             []FlowStep
 	TimeoutMS         int64
 	IgnoreHTTPSErrors bool
+	CaptureQuality    int
+	CaptureMaxWidth   int
 }
 
 // Managed sessions reuse the same pinned Browser runtime, shared persistent
@@ -85,6 +87,46 @@ func (m *Manager) SessionFlow(ctx context.Context, opts SessionOptions) (executo
 	})
 	if err != nil {
 		return browserUnknown("browser session action", err, false), nil
+	}
+	return resp, nil
+}
+
+// SessionCapture takes an explicit, bounded in-memory screenshot using the
+// same principal-bound Browser session. It does not write to the workspace
+// or the private Browser profile/artifact disk and never supplies arbitrary JS.
+func (m *Manager) SessionCapture(ctx context.Context, opts SessionOptions) (executor.Response, error) {
+	if opts.SessionID == "" || opts.Workspace == "" {
+		return browserError("invalid_browser_session", "validation", "workspace and session_id required"), nil
+	}
+	q, w := opts.CaptureQuality, opts.CaptureMaxWidth
+	if q == 0 {
+		q = 40
+	}
+	if w == 0 {
+		w = 640
+	}
+	if q < 15 || q > 70 || w < 320 || w > 1024 {
+		return browserError("invalid_browser_capture", "validation", "quality must be 15..70 and max_width 320..1024"), nil
+	}
+	if !m.mu.TryLock() {
+		return browserBusy("Browser session screenshot"), nil
+	}
+	defer m.mu.Unlock()
+	ctx, _, err := executor.EnsureRequestCorrelationContext(ctx)
+	if err != nil {
+		return browserUnknown("Browser screenshot correlation", err, false), nil
+	}
+	payload, err := json.Marshal(map[string]int{"quality": q, "max_width": w})
+	if err != nil {
+		return browserError("invalid_browser_capture", "validation", "cannot serialize bounded capture"), nil
+	}
+	callCtx, cancel := context.WithTimeout(ctx, 25*time.Second)
+	defer cancel()
+	resp, err := executor.ClientCallContext(callCtx, m.cfg.ExecutorSocket, m.token, executor.Request{
+		Action: "browser_session_capture", Workspace: opts.Workspace, SessionID: opts.SessionID, Content: string(payload),
+	})
+	if err != nil {
+		return browserUnknown("Browser screenshot transport", err, false), nil
 	}
 	return resp, nil
 }

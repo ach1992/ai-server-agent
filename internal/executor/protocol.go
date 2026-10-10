@@ -74,6 +74,7 @@ type Response struct {
 	OperationID         string                     `json:"operation_id,omitempty"`
 	Output              string                     `json:"output"`
 	OutputEncoding      string                     `json:"output_encoding"`
+	MIMEType            string                     `json:"mime_type,omitempty"`
 	BytesSeen           int64                      `json:"bytes_seen"`
 	BytesReturned       int64                      `json:"bytes_returned"`
 	Truncated           bool                       `json:"truncated"`
