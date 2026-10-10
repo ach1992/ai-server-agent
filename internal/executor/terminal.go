@@ -294,7 +294,7 @@ func (s *Server) terminalOpen(req Request) Response {
 		// no shell interpolation, worker-controlled config, or root pane shell.
 		setpriv := systemexec.First("/usr/bin/setpriv")
 		env := systemexec.First("/usr/bin/env")
-		bash := systemexec.First("/usr/bin/bash")
+		bash := systemexec.First("/usr/bin/bash", "/bin/bash")
 		if setpriv == "" || env == "" || bash == "" {
 			_ = os.Remove(dir)
 			return terminalError("worker_shell_unavailable", errors.New("trusted setpriv/env/bash required for isolated worker pane"))
