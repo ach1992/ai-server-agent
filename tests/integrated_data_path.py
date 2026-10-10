@@ -104,6 +104,20 @@ def main(candidate):
         config = root / "config.json"
         config.write_text(json.dumps(cfg))
         config.chmod(0o644)
+        # The production executor fails closed without the canonical keyed
+        # Audit prerequisite. Reproduce the install.sh format in this
+        # disposable, root-owned fixture; never use the host Agent key.
+        key_path = root / "audit-fingerprint.key"
+        key_fd = os.open(key_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, 0o600)
+        with os.fdopen(key_fd, "w", encoding="ascii") as key_file:
+            key_file.write("v1:" + secrets.token_hex(32) + "\n")
+        key_info = key_path.stat()
+        require(key_info.st_uid == 0 and key_info.st_gid == 0 and
+                key_info.st_mode & 0o777 == 0o600 and key_info.st_size == 68,
+                "fixture-only Audit key does not meet installer trust requirements")
+        worker_home = state / "worker-home"
+        worker_home.mkdir(mode=0o700)
+        os.chown(worker_home, worker.pw_uid, worker.pw_gid)
         # The state containers retain the same root-owned trust boundary as a
         # real installation; only the existing manifest is worker-writable.
         (state / "jobs").mkdir(mode=0o711)
