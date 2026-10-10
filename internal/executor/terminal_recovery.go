@@ -26,6 +26,7 @@ type terminalRecord struct {
 	OwnerClass string    `json:"owner_class"`
 	Workspace  string    `json:"workspace"`
 	Root       bool      `json:"root"`
+	Scoped     bool      `json:"scoped,omitempty"`
 	SocketDir  string    `json:"socket_dir"`
 	Name       string    `json:"name"`
 	Pane       string    `json:"pane"`
@@ -74,6 +75,11 @@ func (s *Server) terminalRecordPath(id string) (string, error) {
 	}
 	return filepath.Join(dir, id+".json"), nil
 }
+
+// Retired scoped servers must not permanently consume the limited terminal
+// registry after an Executor crash. Never trust the filename alone: inspect
+// the private root-owned record without following symlinks. Only records
+// explicitly tagged as new managed scopes and already expired may be reaped.
 func (s *Server) terminalRecordCount() (int, error) {
 	dir, err := s.terminalRecordsDir()
 	if err != nil {
@@ -84,9 +90,57 @@ func (s *Server) terminalRecordCount() (int, error) {
 		return 0, err
 	}
 	count := 0
-	for _, f := range files {
-		if !f.IsDir() && strings.HasSuffix(f.Name(), ".json") {
+	now := time.Now()
+	for _, entry := range files {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		id := strings.TrimSuffix(entry.Name(), ".json")
+		if !validTerminalID(id) {
+			count++ // ambiguous root-only state must never be deleted on guesswork
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		f, openErr := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
+		if openErr != nil {
+			return 0, fmt.Errorf("terminal_record_cleanup_unverified: %w", openErr)
+		}
+		info, statErr := f.Stat()
+		var rec terminalRecord
+		var parseErr error
+		if statErr == nil {
+			st, ok := info.Sys().(*syscall.Stat_t)
+			if !ok || !info.Mode().IsRegular() || info.Mode().Perm() != 0600 ||
+				st.Uid != uint32(os.Geteuid()) || info.Size() > 4096 {
+				parseErr = errors.New("terminal_record_untrusted")
+			} else {
+				var body []byte
+				body, parseErr = io.ReadAll(io.LimitReader(f, 4097))
+				if parseErr == nil {
+					parseErr = json.Unmarshal(body, &rec)
+				}
+			}
+		} else {
+			parseErr = statErr
+		}
+		closeErr := f.Close()
+		if closeErr != nil {
+			return 0, fmt.Errorf("terminal_record_close_unverified: %w", closeErr)
+		}
+		if parseErr != nil || rec.Version != 1 || rec.ID != id ||
+			!rec.Scoped || !validTmuxSessionName(rec.Name) ||
+			rec.ExpiresAt.IsZero() || !now.After(rec.ExpiresAt) {
 			count++
+			continue
+		}
+		// A dead Executor cannot fire its in-memory expiry timer. PID1's
+		// one-hour limit still owns the backend. Stop only the exact, random
+		// scoped unit from this trusted expired record, then fsync deletion.
+		if err := stopScopedTerminalBackend(rec.Name); err != nil {
+			return 0, fmt.Errorf("expired terminal backend not cleaned: %w", err)
+		}
+		if err := s.deleteTerminalRecord(rec.ID); err != nil {
+			return 0, fmt.Errorf("expired terminal record not deleted: %w", err)
 		}
 	}
 	return count, nil
@@ -96,7 +150,7 @@ func (s *Server) persistTerminalRecord(req Request, e *stdioSession) error {
 	t := e.terminal
 	rec := terminalRecord{Version: 1, ID: e.id, OwnerID: e.ownerID, OwnerClass: e.ownerClass,
 		Workspace: e.workspace, Root: t.root, SocketDir: t.socketDir, Name: t.name,
-		Pane: t.pane, Columns: t.columns, Rows: t.rows, ExpiresAt: time.Now().Add(maxStdioSessionAge)}
+		Pane: t.pane, Scoped: t.scoped, Columns: t.columns, Rows: t.rows, ExpiresAt: time.Now().Add(maxStdioSessionAge)}
 	e.mu.Unlock()
 	path, err := s.terminalRecordPath(e.id)
 	if err != nil {

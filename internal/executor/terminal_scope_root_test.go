@@ -2,6 +2,7 @@ package executor
 
 import (
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"os"
 	"os/exec"
@@ -190,5 +191,83 @@ func TestApprovedWorkerTmuxScopeSurvivesBrokerStop(t *testing.T) {
 	if _, err := os.Stat(sock); !os.IsNotExist(err) {
 		t.Fatalf("private socket survived verified close: %v", err)
 	}
-	t.Log("real root-owned transient scope and aiworker pane, reconnect, cleanup PASS")
+	// An Executor crash loses in-memory expiry timers. Its next terminal
+	// open must reconcile expired, trusted scope records instead of letting
+	// eight expired records permanently consume all available session slots.
+	newRequest := Request{
+		Action: "terminal_open", PrincipalID: owner.PrincipalID, PrincipalClass: owner.PrincipalClass,
+		Workspace: project, Columns: 80, Rows: 24, RequestID: "expired-managed-scope-reaper",
+	}
+	newSession := s2.terminalAction(newRequest)
+	if !newSession.OK {
+		t.Fatalf("new worker scope for stale-record proof: %+v", newSession)
+	}
+	newRequest.SessionID, newRequest.SessionEpoch = newSession.SessionID, newSession.SessionEpoch
+	e2, err := s2.sessions.get(newRequest, newSession.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	name2 := e2.terminal.name
+	t.Cleanup(func() { _ = stopScopedTerminalBackend(name2) })
+	path := filepath.Join(state, "terminal-sessions", newSession.SessionID+".json")
+	body, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var oldRecord terminalRecord
+	if err := json.Unmarshal(body, &oldRecord); err != nil {
+		t.Fatal(err)
+	}
+	if !oldRecord.Scoped {
+		t.Fatal("new record did not persist protected scope provenance")
+	}
+	oldRecord.ExpiresAt = time.Now().Add(-time.Minute)
+	body, err = json.Marshal(oldRecord)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, body, 0600); err != nil {
+		t.Fatal(err)
+	}
+	count, err := s2.terminalRecordCount()
+	if err != nil || count != 0 {
+		t.Fatalf("expired trusted scope record not pruned: count=%d err=%v", count, err)
+	}
+	if err := verifyScopedTerminalBackend(name2); err == nil {
+		t.Fatal("expired terminal backend scope remained active")
+	}
+	if _, err := os.Stat(path); !os.IsNotExist(err) {
+		t.Fatalf("expired root-owned record not removed: %v", err)
+	}
+	if err := s2.sessions.removeAndStop(e2); err != nil {
+		t.Fatalf("scoped control cleanup after expired server: %v", err)
+	}
+	// If PID1 expires the backend while its Executor process still lives,
+	// explicit terminal_close must reconcile a now-dead Control Mode stream
+	// using the authoritative stopped scope, rather than leak its record.
+	gone := Request{Action: "terminal_open", PrincipalID: owner.PrincipalID,
+		PrincipalClass: owner.PrincipalClass, Workspace: project,
+		Columns: 80, Rows: 24, RequestID: "expired-backend-close"}
+	goneOpened := s2.terminalAction(gone)
+	if !goneOpened.OK {
+		t.Fatalf("backend expiry cleanup fixture open: %+v", goneOpened)
+	}
+	gone.SessionID, gone.SessionEpoch = goneOpened.SessionID, goneOpened.SessionEpoch
+	goneEntry, err := s2.sessions.get(gone, gone.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	goneName := goneEntry.terminal.name
+	t.Cleanup(func() { _ = stopScopedTerminalBackend(goneName) })
+	if err := stopScopedTerminalBackend(goneName); err != nil {
+		t.Fatalf("could not simulate PID1 backend deadline: %v", err)
+	}
+	gone.Action = "terminal_close"
+	if closed := s2.terminalAction(gone); !closed.OK {
+		t.Fatalf("close of scope already ended by PID1 not reconciled: %+v", closed)
+	}
+	if _, err := os.Stat(filepath.Join(state, "terminal-sessions", gone.SessionID+".json")); !os.IsNotExist(err) {
+		t.Fatalf("dead-backend terminal record survived verified close: %v", err)
+	}
+	t.Log("real scope, restart, principal isolation, stale-record GC, expired-backend close PASS")
 }

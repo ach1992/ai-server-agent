@@ -502,6 +502,17 @@ func (s *Server) terminalControl(req Request) Response {
 	}
 	started := time.Now()
 	err = s.terminalCommand(req, e, command)
+	if req.Action == "terminal_close" && t.scoped {
+		// At the one-hour PID1 deadline, the scoped backend may have gone
+		// away before our Go timer can send kill-server. A verified stop of
+		// the exact session scope is sufficient to reconcile that close;
+		// never abandon its root-only record and capacity after expiry.
+		if scopeErr := stopScopedTerminalBackend(t.name); scopeErr != nil {
+			err = errors.Join(err, scopeErr)
+		} else {
+			err = nil
+		}
+	}
 	if err == nil && req.Action == "terminal_resize" {
 		e.mu.Lock()
 		t.columns = req.Columns
@@ -510,9 +521,6 @@ func (s *Server) terminalControl(req Request) Response {
 	}
 	if err == nil && req.Action == "terminal_close" {
 		err = s.sessions.removeAndStop(e)
-		if err == nil && t.scoped {
-			err = stopScopedTerminalBackend(t.name)
-		}
 		if err == nil {
 			err = s.deleteTerminalRecord(e.id)
 		}

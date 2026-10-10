@@ -254,8 +254,12 @@ func (s *Server) startProcessSessionWithID(req Request, kind, workspace, binary 
 	defer func() {
 		if removeOnFailure && launchedScope {
 			if stopErr := stopScopedTerminalBackend(terminal.name); stopErr != nil {
+				// A failed PID1 stop is not a proven harmless failure. Keep
+				// the reserved broker identity for follow-up reconciliation:
+				// the earlier deferred remove must not erase this session.
+				removeOnFailure = false
 				err = errors.Join(err, fmt.Errorf("terminal_scope_cleanup_unverified: %w", stopErr))
-				id = entry.id // preserve the identity for privileged diagnosis
+				id = entry.id
 			}
 		}
 	}()

@@ -110,7 +110,7 @@ func verifyScopedTerminalBackend(name string) error {
 	if values["LoadState"] != "loaded" || values["ActiveState"] != "active" ||
 		values["KillMode"] != "control-group" ||
 		values["ControlGroup"] != "/system.slice/"+unit ||
-		(values["RuntimeMaxUSec"] == "" || values["RuntimeMaxUSec"] == "infinity") {
+		values["RuntimeMaxUSec"] != "1h" {
 		return fmt.Errorf("terminal scope boundary or lifetime not verified")
 	}
 	return nil
