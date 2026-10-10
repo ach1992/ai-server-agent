@@ -40,9 +40,18 @@ export XDG_RUNTIME_DIR="$scratch/run"
 export PLAYWRIGHT_BROWSERS_PATH="$engine/browsers"
 session="asa-${scratch##*.}"
 run_cli() { "$node" "$cli" cli "-s=$session" "$@"; }
+session_started=false
 cleanup() {
-  run_cli close >/dev/null 2>&1 || true
+  local status=$?
+  trap - EXIT
+  if [[ "$session_started" == true ]]; then
+    if ! run_cli close >/dev/null 2>&1; then
+      echo "CLI session close unverified: $session; inspect worker-owned daemon state" >&2
+      status=1
+    fi
+  fi
   rm -rf -- "$scratch"
+  exit "$status"
 }
 trap cleanup EXIT
 cd "$scratch"
@@ -63,6 +72,8 @@ async page => {
 }
 JS
 
+# A transport failure can occur after CLI daemon creation; always try to close.
+session_started=true
 opened=$(run_cli open about:blank "--config=$scratch/config.json")
 [[ "$opened" == *"opened with pid"* ]] || { echo "Playwright CLI failed to open" >&2; exit 1; }
 setup=$(run_cli run-code "--filename=$scratch/setup.js")
@@ -101,4 +112,6 @@ trace_stop=$(run_cli tracing-stop)
   echo "Local fixture artifacts exceed the acceptance budget" >&2
   exit 1
 }
-echo "PASS: pinned Chromium CLI open/snapshot/ref/fill/click/assert/console/network/trace; private scratch; no external URL"
+run_cli close >/dev/null
+session_started=false
+echo "PASS: pinned Chromium CLI open/snapshot/ref/fill/click/assert/console/network/trace and verified close; private scratch; no external URL"
