@@ -6,6 +6,15 @@ VERSION="${VERSION#v}"
 [[ "$VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo "VERSION must be a stable semantic version such as v0.1.2" >&2; exit 2; }
 TAG="v$VERSION"
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+# The tar-based release build excludes .git. Capture revision before staging
+# only when ROOT is exactly the Git checkout; never attribute a parent repo.
+SOURCE_REVISION=""
+if [ "$(git -C "$ROOT" rev-parse --show-toplevel 2>/dev/null || true)" = "$ROOT" ]; then
+  SOURCE_REVISION="$(git -C "$ROOT" rev-parse HEAD)"
+  if [ -n "$(git -C "$ROOT" status --porcelain --untracked-files=all -- . ':(exclude)dist/' )" ]; then
+    SOURCE_REVISION="${SOURCE_REVISION}-dirty"
+  fi
+fi
 DEV_VERSION="$(sed -n 's/.*const version = "\([0-9][0-9.]*-dev\)".*/\1/p' "$ROOT/internal/mcp/server.go" | head -n1)"
 DIST="$ROOT/dist"
 ARCH_FILE="$ROOT/scripts/release-arches.txt"
@@ -33,7 +42,7 @@ for ARCH in "${RELEASE_ARCHES[@]}"; do
   mkdir -p "$OUT"
   (
     cd "$SRC"
-    CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath -ldflags='-s -w' -o "$OUT/ai-server-agent" ./cmd/ai-server-agent
+    CGO_ENABLED=0 GOOS=linux GOARCH="$ARCH" go build -trimpath -ldflags="-s -w -X github.com/ach1992/ai-server-agent/internal/mcp.buildRevision=$SOURCE_REVISION" -o "$OUT/ai-server-agent" ./cmd/ai-server-agent
   )
   cp "$ROOT/README.md" "$ROOT/LICENSE" "$ROOT/manage.sh" "$ROOT/update.sh" "$ROOT/uninstall.sh" "$ROOT/ensure-lifecycle-lock.sh" "$OUT/"
   tar -C "$DIST" -czf "$DIST/ai-server-agent_${VERSION}_linux_${ARCH}.tar.gz" "$(basename "$OUT")"

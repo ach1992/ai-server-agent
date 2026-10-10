@@ -56,13 +56,19 @@ func (t bearerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 func TestMCPImplementationVersionBuildIdentity(t *testing.T) {
 	revision := strings.Repeat("a", 40)
 	cases := []struct {
-		name   string
-		marker string
-		info   *debug.BuildInfo
-		want   string
+		name    string
+		marker  string
+		stamped string
+		info    *debug.BuildInfo
+		want    string
 	}{
-		{name: "stable release candidate", marker: "0.1.10", want: "0.1.10"},
+		{name: "release without provenance", marker: "0.1.10", want: "0.1.10"},
+		{name: "stamped release", marker: "0.1.10", stamped: revision, want: "0.1.10+g" + revision},
+		{name: "stamped dirty release", marker: "0.1.10", stamped: revision + "-dirty", want: "0.1.10+g" + revision + ".dirty"},
 		{name: "unknown source", marker: "0.1.0-dev", want: "source-unknown"},
+		{name: "stamped source", marker: "0.1.0-dev", stamped: revision, want: "source-" + revision},
+		{name: "stamped dirty source", marker: "0.1.0-dev", stamped: revision + "-dirty", want: "source-" + revision + "-dirty"},
+		{name: "bad stamped source", marker: "0.1.0-dev", stamped: "invalid", want: "source-unknown"},
 		{name: "clean source", marker: "0.1.0-dev", info: &debug.BuildInfo{Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: revision}, {Key: "vcs.modified", Value: "false"}}}, want: "source-" + revision},
 		{name: "dirty source", marker: "0.1.0-dev", info: &debug.BuildInfo{Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: revision}, {Key: "vcs.modified", Value: "true"}}}, want: "source-" + revision + "-dirty"},
 		{name: "missing dirty status", marker: "0.1.0-dev", info: &debug.BuildInfo{Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: revision}}}, want: "source-unknown"},
@@ -70,7 +76,7 @@ func TestMCPImplementationVersionBuildIdentity(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			if got := versionForBuild(tc.marker, tc.info); got != tc.want {
+			if got := versionForBuild(tc.marker, tc.stamped, tc.info); got != tc.want {
 				t.Fatalf("versionForBuild() = %q, want %q", got, tc.want)
 			}
 		})

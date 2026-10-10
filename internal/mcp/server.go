@@ -27,35 +27,53 @@ import (
 const version = "0.1.0-dev"
 const synchronousCommandTimeout = 5 * time.Minute
 
+// Stamped by the existing release builder from the exact Git checkout. Go's
+// automatic VCS build settings are optional (and absent in some -trimpath
+// builds), so never infer a revision from the old development version marker.
+var buildRevision string
+
 func mcpImplementationVersion() string {
 	info, _ := debug.ReadBuildInfo()
-	return versionForBuild(version, info)
+	return versionForBuild(version, buildRevision, info)
 }
 
-func versionForBuild(releaseMarker string, info *debug.BuildInfo) string {
-	if !strings.HasSuffix(releaseMarker, "-dev") {
-		return releaseMarker
-	}
-	if info == nil {
-		return "source-unknown"
-	}
+func versionForBuild(releaseMarker, stampedRevision string, info *debug.BuildInfo) string {
 	var revision, modified string
-	for _, setting := range info.Settings {
-		switch setting.Key {
-		case "vcs.revision":
-			revision = setting.Value
-		case "vcs.modified":
-			modified = setting.Value
+	if stampedRevision != "" {
+		revision, modified = stampedRevision, "false"
+		if strings.HasSuffix(revision, "-dirty") {
+			revision = strings.TrimSuffix(revision, "-dirty")
+			modified = "true"
+		}
+	} else if info != nil {
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				revision = setting.Value
+			case "vcs.modified":
+				modified = setting.Value
+			}
 		}
 	}
-	if len(revision) != 40 || strings.Trim(revision, "0123456789abcdef") != "" ||
-		(modified != "true" && modified != "false") {
-		return "source-unknown"
+	validRevision := len(revision) == 40 && strings.Trim(revision, "0123456789abcdef") == "" &&
+		(modified == "true" || modified == "false")
+	if strings.HasSuffix(releaseMarker, "-dev") {
+		if !validRevision {
+			return "source-unknown"
+		}
+		if modified == "true" {
+			return "source-" + revision + "-dirty"
+		}
+		return "source-" + revision
 	}
+	if !validRevision {
+		return releaseMarker
+	}
+	identity := releaseMarker + "+g" + revision
 	if modified == "true" {
-		return "source-" + revision + "-dirty"
+		identity += ".dirty"
 	}
-	return "source-" + revision
+	return identity
 }
 
 type Server struct {
