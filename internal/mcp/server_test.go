@@ -81,6 +81,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 	foundEnvironment := false
 	foundRoot := false
 	foundBrowser := false
+	foundBrowserE2E := false
 	foundBrowserStatus := false
 	foundStartJob := false
 	foundJobStatus := false
@@ -378,6 +379,26 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 					t.Fatalf("browser_status output schema missing %q: %s", field, out)
 				}
 			}
+		case "browser_e2e":
+			foundBrowserE2E = true
+			if tool.Annotations == nil || tool.Annotations.DestructiveHint == nil || !*tool.Annotations.DestructiveHint ||
+				tool.Annotations.OpenWorldHint == nil || !*tool.Annotations.OpenWorldHint {
+				t.Fatal("browser_e2e must disclose open-world/action-capable behavior")
+			}
+			for _, label := range []string{"SAME managed Chromium/profile/admission/TLS/resource limits", "one browser execution", "not a cross-call live session"} {
+				if !strings.Contains(tool.Description, label) {
+					t.Fatalf("browser_e2e description missing %q", label)
+				}
+			}
+			in, err := json.Marshal(tool.InputSchema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"steps", "action", "url", "selector", "role", "name", "value", "expected", "timeout_ms", "ignore_https_errors"} {
+				if !strings.Contains(string(in), `"`+field+`"`) {
+					t.Fatalf("browser_e2e schema missing %q: %s", field, in)
+				}
+			}
 		case "browser_run":
 			foundBrowser = true
 			if tool.Annotations == nil || tool.Annotations.DestructiveHint == nil || !*tool.Annotations.DestructiveHint || tool.Annotations.OpenWorldHint == nil || !*tool.Annotations.OpenWorldHint {
@@ -397,8 +418,8 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			}
 		}
 	}
-	if !foundEnvironment || !foundRoot || !foundStartJob || !foundJobStatus || !foundReadFile || !foundWriteFile || !foundWorkerStat || !foundWorkerRead || !foundWorkerWrite || !foundWorkerApplyEdits || !foundWorkspaceSearch || !foundRepositoryEnvironment || !foundRepositoryDiscover || !foundRepositoryInspect || !foundWorktreeCreate || !foundWorktreeRemove || !foundBrowserStatus || !foundBrowser {
-		t.Fatalf("required tools missing: environment=%v root=%v start_job=%v job_status=%v read_file=%v write_file=%v workspace_search=%v repository_environment=%v repository_discover=%v repository_inspect=%v worktree_create=%v worktree_remove=%v browser_status=%v browser=%v", foundEnvironment, foundRoot, foundStartJob, foundJobStatus, foundReadFile, foundWriteFile, foundWorkspaceSearch, foundRepositoryEnvironment, foundRepositoryDiscover, foundRepositoryInspect, foundWorktreeCreate, foundWorktreeRemove, foundBrowserStatus, foundBrowser)
+	if !foundEnvironment || !foundRoot || !foundStartJob || !foundJobStatus || !foundReadFile || !foundWriteFile || !foundWorkerStat || !foundWorkerRead || !foundWorkerWrite || !foundWorkerApplyEdits || !foundWorkspaceSearch || !foundRepositoryEnvironment || !foundRepositoryDiscover || !foundRepositoryInspect || !foundWorktreeCreate || !foundWorktreeRemove || !foundBrowserStatus || !foundBrowser || !foundBrowserE2E {
+		t.Fatalf("required tools missing: environment=%v root=%v start_job=%v job_status=%v read_file=%v write_file=%v workspace_search=%v repository_environment=%v repository_discover=%v repository_inspect=%v worktree_create=%v worktree_remove=%v browser_status=%v browser=%v browser_e2e=%v", foundEnvironment, foundRoot, foundStartJob, foundJobStatus, foundReadFile, foundWriteFile, foundWorkspaceSearch, foundRepositoryEnvironment, foundRepositoryDiscover, foundRepositoryInspect, foundWorktreeCreate, foundWorktreeRemove, foundBrowserStatus, foundBrowser, foundBrowserE2E)
 	}
 }
 

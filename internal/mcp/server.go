@@ -78,6 +78,12 @@ type BrowserRunInput struct {
 	IgnoreHTTPSErrors bool   `json:"ignore_https_errors,omitempty" jsonschema:"Explicit scoped exception for local/self-signed development; default false preserves normal HTTPS certificate validation"`
 }
 
+type BrowserE2EInput struct {
+	Steps             []browser.FlowStep `json:"steps" jsonschema:"Ordered bounded browser steps (1..12): goto, snapshot, click, fill, assert_text, assert_url, console, network"`
+	TimeoutMS         int64              `json:"timeout_ms,omitempty" jsonschema:"Total flow timeout milliseconds; default 90000, maximum 300000"`
+	IgnoreHTTPSErrors bool               `json:"ignore_https_errors,omitempty" jsonschema:"Explicit scoped exception for self-signed development; default false"`
+}
+
 func New(cfg config.Config) (*Server, error) {
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("validate config: %w", err)
@@ -336,6 +342,17 @@ func (s *Server) registerTools() {
 			}
 			return responseResult(resp)
 		})
+
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
+		Name: "browser_e2e", Description: "Run a compact ordered Browser/E2E workflow: navigate, take an accessible snapshot, click/fill by exact role+name or CSS locator, assert text/URL and inspect bounded console/network events. Uses the SAME managed Chromium/profile/admission/TLS/resource limits as browser_run, in one browser execution; no extra daemon or profile. This is not a cross-call live session. Use browser_run for arbitrary Playwright JavaScript and advanced scenarios; use browser_e2e for common bounded flows. Snapshots are explicitly truncated at 8192 characters, and binary trace/screenshot retrieval is not provided by this tool.",
+		Annotations: annotations(false, true, false, true),
+	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input BrowserE2EInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+		resp, err := s.browser.Flow(ctx, browser.FlowOptions{Steps: input.Steps, TimeoutMS: input.TimeoutMS, IgnoreHTTPSErrors: input.IgnoreHTTPSErrors})
+		if err != nil {
+			return executorTransportErrorResult(err)
+		}
+		return responseResult(resp)
+	})
 
 	s.registerRepositoryEnvironmentTool()
 	s.registerWorkspaceFileTools()

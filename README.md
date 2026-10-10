@@ -217,6 +217,7 @@ Once a supported MCP client is connected, the Agent exposes a compact tool surfa
 | `read_file` | read a host file through the privileged root executor; this is broad root-readable file authority, and protected Agent state may additionally require approval |
 | `write_file` | write complete host-file content through the privileged root executor; this is root-capable host mutation, and protected Agent state may additionally require approval |
 | `browser_setup` | install the optional private Node.js + Playwright + Chromium runtime and required shared libraries |
+| `browser_e2e` | run a bounded structured Browser/E2E sequence (navigate, accessible snapshot, fill/click by role or CSS, assert, inspect console/network) on the existing managed Chromium/profile |
 | `browser_run` | run Playwright JavaScript in server-side headless Chromium using a persistent browser profile |
 
 ### Structured worker workspace editing
@@ -314,6 +315,24 @@ Browser automation is optional and installed on demand. The core MCP service doe
 The existing private Playwright runtime also bundles the compact agent-oriented `playwright cli` command (snapshot/element refs, interaction, console, network and tracing). It can be exercised by an unprivileged `run_command` without installing another npm package or browser. Unlike `browser_run`, the CLI maintains its own browser process and session across CLI invocations; **do not assume the two share a page or cookies**. A bare CLI open defaults to system Google Chrome, which can be absent. An explicit CLI configuration must select Chromium with the verified pinned engine executable; set `PLAYWRIGHT_BROWSERS_PATH` to the installed private engine's browsers directory. Keep CLI HOME/XDG, snapshots, traces and downloads in a worker-owned private location **outside Git worktrees**, then close the session.
 
 The reproducible opt-in compatibility test is `AI_SERVER_AGENT_BROWSER_CLI_ACCEPTANCE=1 bash tests/browser_cli_acceptance.sh`. Run it only on an authorized development/test host where `browser_status.ready=true`. The test uses a synthetic, local DOM with a private disposable CLI session and does not install tooling, contact a website or touch the Agent-wide browser profile. It proves only the pinned CLI consumer path. Direct CLI daemon sessions do **not yet** participate in `browser_run`'s serialized admission, lifecycle or disk-retention controls; do not treat this compatibility proof as an approved replacement for the managed Browser/E2E capability (#63), real installed-client acceptance (#59) or typed screenshot/trace delivery (#99).
+
+### Managed Browser/E2E flows (current main source)
+
+`browser_e2e` runs up to **12 ordered steps in one bounded managed Chromium execution**. A minimal form test uses a `steps` array like:
+
+```json
+[
+  {"action":"goto","url":"http://127.0.0.1:8080/"},
+  {"action":"snapshot"},
+  {"action":"fill","role":"textbox","name":"Email","value":"test@example.invalid"},
+  {"action":"click","role":"button","name":"Submit"},
+  {"action":"assert_text","selector":"#result","expected":"Saved"},
+  {"action":"console"},
+  {"action":"network"}
+]
+```
+
+The `goto` URL above is **illustrative**, not a service started by Agent. Element operations accept **either** a CSS `selector` **or** an accessible `role` plus exact `name`. Text assertions poll within a bounded step timeout; failures identify the step and stop subsequent actions. An accessible snapshot is capped at 8192 UTF-8 bytes and explicitly marks truncation; a shared output budget of 12000 bytes bounds returned snapshots and events. Console/network event counts are bounded, and network URLs omit query/fragment values. Every flow shares the existing `browser_run` profile, TLS behavior, fail-fast admission, executor time/resource budgets and temporary-file cleanup. **The steps share one live page only within the call**; this is not a persistent cross-call browser session or a CLI element-ref handle. For ad-hoc interactive `eN` refs, use the separately controlled CLI compatibility path; direct detached CLI sessions do not yet inherit managed Browser lifecycle limits. Binary trace/screenshot delivery remains under Issue #99; flow step timings are not a Playwright trace ZIP. The old `browser_run` JavaScript escape hatch remains unchanged.
 
 The persistent browser profile is intentionally **Agent-wide shared state**. It is not isolated per ChatGPT/Gateway user or per MCP client: any authorized browser caller may act through cookies, local-storage and session state left by another authorized browser caller. Durable profile state is preserved across runs/setup. Per-run downloads/temp files and ordinary relative artifacts are confined to a disposable working directory capped at 256 MiB, known Chromium caches are explicitly size-limited/cleaned, and browser execution maintains a 512 MiB state-filesystem safety reserve without deleting the durable profile. Browser scripts still have ordinary worker filesystem authority for explicitly chosen absolute paths; `browser_run` is not a filesystem sandbox. Setup requires a 2 GiB engine-filesystem reserve so the staged verified runtime can coexist safely with the previous runtime and download/package overhead.
 
