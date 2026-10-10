@@ -40,27 +40,29 @@ type TerminalOutputEvent struct {
 }
 
 type tmuxTerminalState struct {
-	root          bool
-	epoch         string
-	recovered     bool
-	inReply       bool
-	replyLines    []string
-	lastReply     string
-	actionMu      sync.Mutex // serializes control commands and their acknowledgements
-	socketDir     string
-	socket        string
-	name          string
-	pane          string
-	columns       int
-	rows          int
-	pending       []byte
-	chunks        []terminalChunk
-	retained      int
-	latest        uint64
-	ack           uint64
-	ackFailed     bool
-	exited        bool
-	protocolError string
+	root           bool
+	epoch          string
+	recovered      bool
+	scoped         bool // production backend lives in its own bounded systemd scope
+	scopeUncertain bool // PID1 may own a backend but exact-stop verification failed
+	inReply        bool
+	replyLines     []string
+	lastReply      string
+	actionMu       sync.Mutex // serializes control commands and their acknowledgements
+	socketDir      string
+	socket         string
+	name           string
+	pane           string
+	columns        int
+	rows           int
+	pending        []byte
+	chunks         []terminalChunk
+	retained       int
+	latest         uint64
+	ack            uint64
+	ackFailed      bool
+	exited         bool
+	protocolError  string
 }
 
 // accept is called with the owning stdioSession.mu held, ensuring parsed output
@@ -218,6 +220,34 @@ func (s *Server) terminalOpen(req Request) Response {
 	if req.Columns < 20 || req.Columns > 240 || req.Rows < 5 || req.Rows > 80 {
 		return terminalError("invalid_dimensions", errors.New("terminal dimensions must be 20..240 columns and 5..80 rows"))
 	}
+	return s.withTerminalAdmission(func() Response {
+		return s.terminalOpenAdmitted(req)
+	})
+}
+
+// Holding one serialized admission through successful record persistence or
+// verified cleanup is the reservation. Unknown failures stay counted via the
+// broker's unpersisted terminal identities until exact cleanup is proven.
+func (s *Server) withTerminalAdmission(open func() Response) Response {
+	return s.withTerminalAdmissionStop(open, stopScopedTerminalBackend)
+}
+
+// Injected stop is used ONLY by pure deterministic admission tests: installed
+// Executor always uses the verified PID1 scope stopper.
+func (s *Server) withTerminalAdmissionStop(open func() Response, stop func(string) error) Response {
+	s.terminalAdmissionMu.Lock()
+	defer s.terminalAdmissionMu.Unlock()
+	count, admissionErr := s.terminalRecordCountWithStop(stop)
+	if admissionErr != nil {
+		return terminalError("terminal_registry_unavailable", admissionErr)
+	}
+	if count+s.sessions.unpersistedTerminalCount() >= maxStdioSessions {
+		return terminalError("terminal_resource_limit", errSessionBusy)
+	}
+	return open()
+}
+
+func (s *Server) terminalOpenAdmitted(req Request) Response {
 	cwd, err := s.workspacePath(req.Workspace, true)
 	if err != nil {
 		return terminalError("invalid_workspace", err)
@@ -325,9 +355,21 @@ func (s *Server) terminalOpen(req Request) Response {
 	}
 	if err != nil {
 		// A process can be running even if post-start audit completion fails.
-		// Preserve its ID and socket namespace; never claim a clean failure.
+		// Until ACTIVE is fsynced, allow ONLY explicit scope reconciliation.
 		if id != "" {
+			if e, getErr := s.sessions.get(req, id); getErr == nil {
+				e.mu.Lock()
+				t.scopeUncertain = true
+				e.cleanupErr = err
+				e.mu.Unlock()
+			}
 			return Response{SessionID: id, SessionEpoch: epoch, Error: "terminal creation outcome requires reconciliation: " + err.Error(), ReasonCode: "terminal_start_uncertain", ErrorCode: "terminal_start_uncertain", ErrorClass: "state"}
+		}
+		// A verified-clean production scope may still leave its Unix socket
+		// filename behind. Remove only a trusted private socket directory;
+		// never follow links or recursively delete an unknown path.
+		if !fixtureWorkerBackend {
+			removeVerifiedPendingSocketDir(dir)
 		}
 		_ = os.Remove(dir)
 		return terminalError("terminal_start_failed", err)
@@ -336,8 +378,39 @@ func (s *Server) terminalOpen(req Request) Response {
 	if err != nil {
 		return Response{SessionID: id, SessionEpoch: epoch, Error: "terminal session startup outcome uncertain: " + err.Error(), ErrorCode: "terminal_start_uncertain", ErrorClass: "state"}
 	}
+	// All paths returning before ACTIVE publication must fail closed.
+	pendingFailure := func(message string, cause error) Response {
+		e.mu.Lock()
+		t.scopeUncertain = true
+		e.cleanupErr = cause
+		e.mu.Unlock()
+		return Response{SessionID: id, SessionEpoch: epoch, Error: message + ": " + cause.Error(),
+			ErrorCode: "terminal_start_uncertain", ErrorClass: "state"}
+	}
 	deadline := time.Now().Add(terminalCommandTimeout)
+	panePrimed := !t.scoped
 	for time.Now().Before(deadline) {
+		// Attaching to an already-detached tmux server may have no new pane
+		// output yet. After its initial Control Mode acknowledgement, obtain
+		// the original pane identity through an explicit structured reply
+		// instead of requiring a prompt or a magic keystroke.
+		if !panePrimed {
+			e.mu.Lock()
+			canQuery := t.ack > 0 && t.protocolError == "" && !e.exited
+			e.mu.Unlock()
+			if canQuery {
+				panePrimed = true
+				paneErr := s.terminalCommand(req, e, "list-panes -t "+t.name+" -F '#{pane_id}'")
+				e.mu.Lock()
+				pane := strings.TrimSpace(t.lastReply)
+				if paneErr != nil || !validTmuxPaneID(pane) || (t.pane != "" && t.pane != pane) {
+					t.protocolError = "terminal_pane_identity_unverified"
+				} else {
+					t.pane = pane
+				}
+				e.mu.Unlock()
+			}
+		}
 		e.mu.Lock()
 		ready := t.ack > 0 && t.pane != "" && t.protocolError == "" && !e.exited
 		failure := t.protocolError
@@ -345,15 +418,19 @@ func (s *Server) terminalOpen(req Request) Response {
 		e.mu.Unlock()
 		if ready {
 			if err := s.terminalCommand(req, e, "set-option -t "+t.name+" @asa_generation "+t.name); err != nil {
-				return Response{SessionID: id, SessionEpoch: epoch, Error: "tmux generation setup uncertain: " + err.Error(), ErrorCode: "terminal_start_uncertain", ErrorClass: "state"}
+				return pendingFailure("tmux generation setup uncertain", err)
 			}
-			count, err := s.terminalRecordCount()
-			if err != nil || count >= maxStdioSessions {
-				return Response{SessionID: id, SessionEpoch: epoch, Error: "terminal registry unavailable or full", ErrorCode: "terminal_start_uncertain", ErrorClass: "state"}
+			if s.terminalActivePublishTestHook != nil {
+				if hookErr := s.terminalActivePublishTestHook(t); hookErr != nil {
+					return pendingFailure("terminal ACTIVE publication interrupted", hookErr)
+				}
 			}
 			if err = s.persistTerminalRecord(req, e); err != nil {
-				return Response{SessionID: id, SessionEpoch: epoch, Error: "terminal registry persistence unverified: " + err.Error(), ErrorCode: "terminal_start_uncertain", ErrorClass: "state"}
+				return pendingFailure("terminal registry persistence unverified", err)
 			}
+			e.mu.Lock()
+			e.terminalRecordPersisted = true
+			e.mu.Unlock()
 			return Response{OK: true, Status: "running", SessionID: id, SessionEpoch: epoch, Running: boolPtr(true), Columns: t.columns, Rows: t.rows}
 		}
 		if failure != "" || exited {
@@ -363,7 +440,7 @@ func (s *Server) terminalOpen(req Request) Response {
 	}
 	// We cannot claim a usable terminal until its control stream identifies
 	// the original pane. Keep its ID on uncertain launch for reconciliation.
-	return Response{Error: "terminal started but initial pane/ack not verified", ReasonCode: "terminal_start_uncertain", ErrorCode: "terminal_start_uncertain", ErrorClass: "state", SessionID: id, SessionEpoch: epoch}
+	return pendingFailure("terminal started but initial pane/ack not verified", errors.New("initial pane identity missing"))
 }
 
 // The production binary trust rule must be identical for initial open and
@@ -381,6 +458,9 @@ func (s *Server) resolveTmuxBinary() (string, error) {
 func (s *Server) terminalRead(req Request) Response {
 	e, err := s.sessions.get(req, req.SessionID)
 	if err != nil {
+		if pending, ok := s.pendingTerminalAction(req); ok {
+			return pending
+		}
 		return terminalError("session_not_found", err)
 	}
 	if e.kind != "terminal" || e.terminal == nil {
@@ -396,11 +476,17 @@ func (s *Server) terminalRead(req Request) Response {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	t := e.terminal
+	if t.scopeUncertain {
+		return Response{SessionID: e.id, SessionEpoch: t.epoch, Error: "terminal lifecycle remains pending; explicit close required", ErrorCode: "terminal_start_uncertain", ErrorClass: "state"}
+	}
 	if t.protocolError != "" {
 		return terminalError(t.protocolError, errors.New("tmux control protocol became unusable"))
 	}
 	if req.SessionEpoch != t.epoch {
 		return Response{Error: "terminal output epoch changed; resume from cursor zero with returned session_epoch", ReasonCode: "terminal_epoch_changed", ErrorCode: "terminal_epoch_changed", ErrorClass: "state", SessionID: e.id, SessionEpoch: t.epoch, RetentionTruncated: t.recovered}
+	}
+	if t.scopeUncertain {
+		return Response{SessionID: e.id, SessionEpoch: t.epoch, Error: "scope creation remains unverified; explicit close/reconciliation required", ErrorCode: "terminal_start_uncertain", ErrorClass: "state"}
 	}
 	if req.Cursor > t.latest {
 		return terminalError("invalid_cursor", fmt.Errorf("future cursor; latest=%d", t.latest))
@@ -435,14 +521,101 @@ func (s *Server) terminalRead(req Request) Response {
 	return result
 }
 
+// An unknown startup may leave a privileged backend but no Control Mode
+// process. Only exact-scope verified shutdown can release its owner identity.
+func (s *Server) reconcileUnstartedTerminal(e *stdioSession, stop func(string) error) error {
+	e.stopMu.Lock()
+	e.mu.Lock()
+	if e.terminal == nil || !e.terminal.scopeUncertain {
+		e.mu.Unlock()
+		e.stopMu.Unlock()
+		return errors.New("terminal_scope_reconciliation_state_invalid")
+	}
+	name := e.terminal.name
+	hasClient := e.cmd != nil
+	if !hasClient && (e.pid != 0 || e.pidPin != nil) {
+		e.mu.Unlock()
+		e.stopMu.Unlock()
+		return errors.New("terminal_scope_reconciliation_state_invalid")
+	}
+	e.mu.Unlock()
+	if err := stop(name); err != nil {
+		e.stopMu.Unlock()
+		return fmt.Errorf("terminal_scope_cleanup_unverified: %w", err)
+	}
+	e.stopMu.Unlock()
+	if hasClient {
+		if err := s.sessions.removeAndStop(e); err != nil {
+			return fmt.Errorf("terminal_control_client_cleanup_unverified: %w", err)
+		}
+	} else {
+		e.mu.Lock()
+		e.closed = true
+		e.cleanupErr = nil
+		if e.stdin != nil {
+			_ = e.stdin.Close()
+		}
+		e.completed = time.Now()
+		e.mu.Unlock()
+	}
+	// Scope is verified stopped and client safely retired. Only now may a
+	// durable reservation be deleted and the capacity returned to admission.
+	if err := s.deleteTerminalRecord(e.id); err != nil {
+		return fmt.Errorf("terminal_pending_deletion_unverified: %w", err)
+	}
+	s.sessions.remove(e)
+	return nil
+}
+
+func (s *Server) terminalCloseUnstartedScope(req Request, e *stdioSession) Response {
+	s.terminalAdmissionMu.Lock()
+	defer s.terminalAdmissionMu.Unlock()
+	if blocked := s.beginActionAudit(req, req.Action, auditMode(req.Root), e.id, "developer_terminal"); blocked != nil {
+		return *blocked
+	}
+	started := time.Now()
+	stop := stopScopedTerminalBackend
+	if s.terminalScopeStopTestHook != nil {
+		stop = s.terminalScopeStopTestHook
+	}
+	err := s.reconcileUnstartedTerminal(e, stop)
+	if err == nil {
+		if s.terminalBinary == "" {
+			removeVerifiedPendingSocketDir(e.terminal.socketDir)
+		} else {
+			_ = os.Remove(e.terminal.socket)
+			_ = os.Remove(e.terminal.socketDir) // fixture only
+		}
+	}
+	result := Response{OK: err == nil, SessionID: e.id, SessionEpoch: e.terminal.epoch}
+	if err != nil {
+		result.Error = err.Error()
+		result.ErrorCode = "terminal_control_unknown"
+		result.ErrorClass = "state"
+	}
+	return s.finishActionAudit(req, req.Action, auditMode(req.Root), e.id, "developer_terminal", started, result)
+}
+
 func (s *Server) terminalControl(req Request) Response {
 	e, err := s.sessions.get(req, req.SessionID)
-	if err != nil || e.kind != "terminal" || e.terminal == nil {
+	if err != nil {
+		if pending, ok := s.pendingTerminalAction(req); ok {
+			return pending
+		}
+		return terminalError("session_not_found", errSessionNotFound)
+	}
+	if e.kind != "terminal" || e.terminal == nil {
 		return terminalError("session_not_found", errSessionNotFound)
 	}
 	t := e.terminal
 	if req.SessionEpoch != t.epoch {
 		return Response{Error: "terminal control epoch changed; inspect terminal state before retry", ErrorCode: "terminal_epoch_changed", ErrorClass: "state", SessionID: e.id, SessionEpoch: t.epoch}
+	}
+	if t.scopeUncertain {
+		if req.Action != "terminal_close" {
+			return Response{SessionID: e.id, SessionEpoch: t.epoch, Error: "scope creation is unverified; explicitly close/reconcile before other terminal operations", ErrorCode: "terminal_start_uncertain", ErrorClass: "state"}
+		}
+		return s.terminalCloseUnstartedScope(req, e)
 	}
 	var command string
 	switch req.Action {
@@ -479,6 +652,17 @@ func (s *Server) terminalControl(req Request) Response {
 	}
 	started := time.Now()
 	err = s.terminalCommand(req, e, command)
+	if req.Action == "terminal_close" && t.scoped {
+		// At the one-hour PID1 deadline, the scoped backend may have gone
+		// away before our Go timer can send kill-server. A verified stop of
+		// the exact session scope is sufficient to reconcile that close;
+		// never abandon its root-only record and capacity after expiry.
+		if scopeErr := stopScopedTerminalBackend(t.name); scopeErr != nil {
+			err = errors.Join(err, scopeErr)
+		} else {
+			err = nil
+		}
+	}
 	if err == nil && req.Action == "terminal_resize" {
 		e.mu.Lock()
 		t.columns = req.Columns

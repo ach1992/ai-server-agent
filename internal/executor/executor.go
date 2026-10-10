@@ -24,29 +24,33 @@ import (
 )
 
 type Server struct {
-	cfg                       config.Config
-	token                     string
-	guard                     *policy.Guard
-	audit                     *audit.Logger
-	auditWriteHook            func(string) error // test-only pre-action failure injection
-	auditBeforeCompletionHook func()             // test-only completion-path failure/interleaving injection
-	workerUID                 uint32
-	workerGID                 uint32
-	runs                      *runLimiter
-	sessions                  *stdioSessionBroker
-	browserAdmission          browserSessionAdmission // exclusive shared profile lease
-	browserNodeBinary         string                  // test-only private fixture override; production always uses root-owned pinned Node
-	jobsMu                    sync.Mutex
-	lifecycleLockPath         string
-	fileWriteHooks            *fileWriteTestHooks
-	workspaceHooks            *workspaceTestHooks
-	structuralSearchBinary    string // test-only override; production resolves trusted ast-grep paths
-	workspaceHelperBinary     string // test-only compiled Agent binary; production self-executes
-	terminalBinary            string // test-only isolated tmux fixture; production uses /usr/bin/tmux
-	goplsBinary               string // test-only Go language server fixture
-	environmentGoSystemPath   string // test-only Go discovery path; empty uses fixed safeCommandPath
-	codeTargetSnapshotHook    func() // test-only interleaving: alter target after LSP overlay snapshot
-	dlvBinary                 string // test-only Delve DAP fixture; production uses admin-owned binary
+	cfg                           config.Config
+	token                         string
+	guard                         *policy.Guard
+	audit                         *audit.Logger
+	auditWriteHook                func(string) error // test-only pre-action failure injection
+	auditBeforeCompletionHook     func()             // test-only completion-path failure/interleaving injection
+	workerUID                     uint32
+	workerGID                     uint32
+	runs                          *runLimiter
+	sessions                      *stdioSessionBroker
+	terminalAdmissionMu           sync.Mutex              // serializes disk-backed terminal capacity and scope creation
+	browserAdmission              browserSessionAdmission // exclusive shared profile lease
+	browserNodeBinary             string                  // test-only private fixture override; production always uses root-owned pinned Node
+	jobsMu                        sync.Mutex
+	lifecycleLockPath             string
+	fileWriteHooks                *fileWriteTestHooks
+	workspaceHooks                *workspaceTestHooks
+	structuralSearchBinary        string                                                    // test-only override; production resolves trusted ast-grep paths
+	workspaceHelperBinary         string                                                    // test-only compiled Agent binary; production self-executes
+	terminalBinary                string                                                    // test-only isolated tmux fixture; production uses /usr/bin/tmux
+	terminalScopeStartTestHook    func(Request, string, *tmuxTerminalState, []string) error // test-only fault
+	terminalScopeStopTestHook     func(string) error                                        // test-only exact-scope stop fault
+	terminalActivePublishTestHook func(*tmuxTerminalState) error                            // test-only post-scope/pre-ACTIVE fault
+	goplsBinary                   string                                                    // test-only Go language server fixture
+	environmentGoSystemPath       string                                                    // test-only Go discovery path; empty uses fixed safeCommandPath
+	codeTargetSnapshotHook        func()                                                    // test-only interleaving: alter target after LSP overlay snapshot
+	dlvBinary                     string                                                    // test-only Delve DAP fixture; production uses admin-owned binary
 }
 
 func NewServer(cfg config.Config, token string) (*Server, error) {
