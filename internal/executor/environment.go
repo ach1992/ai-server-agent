@@ -525,7 +525,11 @@ func (s *Server) environmentExecutableCandidates(repositoryRoot, name string) []
 		seen[resolved] = true
 		candidates = append(candidates, environmentExecutableCandidate{path: resolved, source: source, versionHint: hint})
 	}
-	for _, dir := range strings.Split(safeCommandPath, ":") {
+	systemPath := safeCommandPath
+	if name == "go" && s.environmentGoSystemPath != "" {
+		systemPath = s.environmentGoSystemPath // hermetic Go-cache tests only
+	}
+	for _, dir := range strings.Split(systemPath, ":") {
 		add(filepath.Join(dir, name), "system_path", "")
 	}
 	workspace, err := filepath.EvalSymlinks(s.cfg.WorkspaceDir)

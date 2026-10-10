@@ -44,6 +44,7 @@ type Server struct {
 	workspaceHelperBinary     string // test-only compiled Agent binary; production self-executes
 	terminalBinary            string // test-only isolated tmux fixture; production uses /usr/bin/tmux
 	goplsBinary               string // test-only Go language server fixture
+	environmentGoSystemPath   string // test-only Go discovery path; empty uses fixed safeCommandPath
 	codeTargetSnapshotHook    func() // test-only interleaving: alter target after LSP overlay snapshot
 	dlvBinary                 string // test-only Delve DAP fixture; production uses admin-owned binary
 }
