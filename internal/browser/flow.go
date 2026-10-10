@@ -301,6 +301,48 @@ const __asaSnapshotRefs = async (target, content, stable, timeout) => {
   }
   return { handles, dropped };
 };
+// A matching textual snapshot is insufficient: CSSOM can temporarily swap
+// which *DOM node* owns a given accessible role/header and revert without a
+// MutationObserver event. Resolve the FINAL accessibility role mapping again
+// after the full snapshot has been verified, then prove each mapped node is
+// identical to the ElementHandle staged before that verification. A mismatch
+// invalidates the entire batch. Never silently replace the staged handle.
+const __asaVerifyFinalRefIdentities = async (target, content, staged, stable, timeout) => {
+  const headers = __asaSnapshotRoleHeaders(content);
+  const locators = new Map();
+  for (const entry of staged.handles) {
+    if (!await stable()) return false;
+    let locator = locators.get(entry.role);
+    if (!locator) {
+      locator = target.getByRole(entry.role);
+      const expected = headers.get(entry.role) || [];
+      if (new Set(expected).size !== expected.length ||
+          await locator.count() !== expected.length || !await stable()) return false;
+      locators.set(entry.role, locator);
+    }
+    const selected = locator.nth(entry.role_index);
+    const ownSnapshot = await selected.ariaSnapshot({
+      timeout: Math.min(timeout, 1000)
+    }).catch(() => null);
+    if (!ownSnapshot ||
+        ownSnapshot.split('\n', 1)[0].trim() !== headers.get(entry.role)?.[entry.role_index] ||
+        !await stable()) return false;
+    const mapped = await selected.elementHandle({
+      timeout: Math.min(timeout, 1000)
+    }).catch(() => null);
+    if (!mapped) return false;
+    try {
+      // Pass the staged JSHandle as an argument, comparing true DOM identity
+      // inside Chromium. JSHandle object identity in Node is not sufficient.
+      const sameNode = await mapped.evaluate((element, original) =>
+        element === original && element.isConnected, entry.element).catch(() => false);
+      if (!sameNode || !await stable()) return false;
+    } finally {
+      await mapped.dispose().catch(() => {});
+    }
+  }
+  return await stable();
+};
 const __asaResults = [];
 let __asaFailedStep = null;
 for (let i = 0; i < __asaSteps.length; i++) {
@@ -512,6 +554,15 @@ for (let i = 0; i < __asaSteps.length; i++) {
         // detects CSSOM/accessibility changes even without a DOM mutation.
         const verify = await target.ariaSnapshot({ timeout }).catch(() => null);
         if (verify !== content || !await stable()) {
+          item.refs_reason = 'snapshot_changed';
+          break;
+        }
+        // The second complete snapshot may be identical even if CSSOM
+        // swapped A->B->A while we staged B (same accessible header).
+        // Re-resolve the final role/index mapping and compare exact DOM
+        // identities BEFORE any ref becomes action-capable.
+        if (!await __asaVerifyFinalRefIdentities(target, content, candidates, stable, timeout)
+            .catch(() => false)) {
           item.refs_reason = 'snapshot_changed';
           break;
         }

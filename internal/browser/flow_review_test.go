@@ -651,6 +651,17 @@ func TestBrowserFlowSnapshotIssuanceRacePinnedRuntime(t *testing.T) {
 	}
 	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		switch r.URL.Path {
+		case "/cssom-toggle":
+			// Two distinct DOM nodes present the same unique accessibility
+			// header, but alternate without any DOM MutationObserver event.
+			fmt.Fprint(w, `<body><button id="a">Action</button>
+<button id="b">Action</button><output id="result">Waiting</output><script>
+document.querySelector('#a').onclick = () => document.querySelector('#result').textContent = 'A selected';
+document.querySelector('#b').onclick = () => document.querySelector('#result').textContent = 'B selected';
+window.__asaCSS = new CSSStyleSheet();
+window.__asaCSS.replaceSync('#b { display: none !important }');
+document.adoptedStyleSheets = [window.__asaCSS];
+</script></body>`)
 		case "/other":
 			fmt.Fprint(w, `<body><button>Other document</button></body>`)
 		default:
@@ -744,6 +755,80 @@ func TestBrowserFlowSnapshotIssuanceRacePinnedRuntime(t *testing.T) {
 			}
 		})
 	}
+
+	t.Run("stable-cssom-still-issues-exact-A-handle", func(t *testing.T) {
+		result, _, runErr := reviewRun(t, engine, []FlowStep{
+			{Action: "goto", URL: srv.URL + "/cssom-toggle"},
+			{Action: "snapshot"},
+			{Action: "click", Ref: "e1"},
+			{Action: "assert_text", Selector: "#result", Expected: "A selected"},
+		})
+		if runErr != nil || !result.OK || len(result.Results) != 4 ||
+			result.Results[1].RefsUnavailable || len(result.Results[1].Refs) != 1 ||
+			result.Results[1].Refs[0].Role != "button" {
+			t.Fatalf("stable accessibility should issue a handle to A: %+v err=%v", result, runErr)
+		}
+	})
+
+	// The first and last complete snapshots both show A. In between, the
+	// Playwright role locator observes B (same role and accessible header).
+	// This is CSSOM-only: neither the document nor the MutationObserver changes.
+	// We also prove B was actually staged; a test that merely failed before
+	// staging would not exercise the B1.1 regression.
+	t.Run("cssom-swap-and-revert-preserves-exact-identity", func(t *testing.T) {
+		prelude := `const __asaProto = Object.getPrototypeOf(page.locator('body'));
+const __asaOriginalCount = __asaProto.count;
+const __asaOriginalSnapshot = __asaProto.ariaSnapshot;
+const __asaOriginalHandle = __asaProto.elementHandle;
+let __asaSnapshots = 0, __asaSwitched = false, __asaRestored = false;
+__asaProto.count = async function (...args) {
+  const result = await __asaOriginalCount.apply(this, args);
+  if (!__asaSwitched && this.toString().includes('getByRole')) {
+    __asaSwitched = true;
+    await page.evaluate(() =>
+      window.__asaCSS.replaceSync('#a { display: none !important }'));
+    console.log('ASA_TEST_SWITCH_TO_B');
+  }
+  return result;
+};
+__asaProto.ariaSnapshot = async function (...args) {
+  __asaSnapshots++;
+  // #1: complete snapshot (A), #2: candidate B, #3: verified snapshot.
+  if (__asaSwitched && !__asaRestored && __asaSnapshots === 3) {
+    __asaRestored = true;
+    await page.evaluate(() =>
+      window.__asaCSS.replaceSync('#b { display: none !important }'));
+    console.log('ASA_TEST_RESTORE_A');
+  }
+  return __asaOriginalSnapshot.apply(this, args);
+};
+__asaProto.elementHandle = async function (...args) {
+  const handle = await __asaOriginalHandle.apply(this, args);
+  if (__asaSwitched && !__asaRestored && handle &&
+      this.toString().includes('getByRole')) {
+    const id = await handle.evaluate(el => el.id);
+    console.log('ASA_TEST_STAGED_' + id);
+  }
+  return handle;
+};`
+		result, output, runErr := reviewRunWithPrelude(t, engine, []FlowStep{
+			{Action: "goto", URL: srv.URL + "/cssom-toggle"},
+			{Action: "snapshot"},
+		}, prelude)
+		if runErr != nil || !result.OK || len(result.Results) != 2 {
+			t.Fatalf("CSSOM race should preserve snapshot result: result=%+v err=%v", result, runErr)
+		}
+		for _, marker := range []string{"ASA_TEST_SWITCH_TO_B", "ASA_TEST_STAGED_b", "ASA_TEST_RESTORE_A"} {
+			if !strings.Contains(output, marker) {
+				t.Fatalf("race fixture did not reach %q: output=%s", marker, output)
+			}
+		}
+		last := result.Results[1]
+		if !last.RefsUnavailable || len(last.Refs) != 0 || last.RefsReason != "snapshot_changed" ||
+			!strings.Contains(last.Snapshot, `button "Action"`) {
+			t.Fatalf("a staged handle from a different accessibility generation was issued: %+v", last)
+		}
+	})
 }
 
 func TestBrowserFlowAccessibilityPrivacyPinnedRuntime(t *testing.T) {
