@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ach1992/ai-server-agent/internal/config"
+	"github.com/ach1992/ai-server-agent/internal/systemexec"
 )
 
 const (
@@ -67,7 +68,9 @@ func Build(c config.Config) Manifest {
 		},
 		Optional: []Component{
 			{Name: "download-utilities", Required: false, Installed: fileExists("/usr/bin/curl") && fileExists("/usr/bin/tar"), Paths: []string{"/usr/bin/curl", "/usr/bin/tar", "/usr/bin/xz"}, Notes: "Used for updates and optional browser setup. Safe to remove without stopping the running MCP core, but update/browser installation will need them restored."},
-			{Name: "terminal", Required: false, Installed: fileExists("/usr/bin/tmux"), Paths: []string{"/usr/bin/tmux"}, Notes: "Optional. AI may install tmux only when an interactive persistent terminal is needed; the MCP core does not depend on it."},
+			{Name: "terminal", Required: false, Installed: systemexec.First("/usr/bin/tmux") != "", Paths: []string{"/usr/bin/tmux"}, Notes: "Optional trusted root-owned, non-symlink tmux provides Control Mode. Worker panes additionally require trusted /usr/bin/setpriv, /usr/bin/env, a trusted bash (/usr/bin/bash or /bin/bash) and Agent-managed private worker HOME; both worker/root tmux sockets are executor-root-owned. This is not a core dependency."},
+			{Name: "go-language-server", Required: false, Installed: systemexec.First("/usr/local/bin/gopls", "/usr/bin/gopls") != "", Paths: []string{"/usr/local/bin/gopls", "/usr/bin/gopls"}, Notes: "Optional Go semantic-code intelligence. code_* requires exact aiworker file_version and does not install gopls or a Go toolchain."},
+			{Name: "go-debugger", Required: false, Installed: systemexec.First("/usr/local/bin/dlv", "/usr/bin/dlv") != "", Paths: []string{"/usr/local/bin/dlv", "/usr/bin/dlv"}, Notes: "Optional Go Delve DAP debugger. v1 launches only prebuilt workspace executables with matching worker file_version; requires trusted admin-owned Delve plus executor-owned root cgroup-v2 containment with cgroup.kill (Linux 5.14+); fails closed before DAP launch without those capabilities. Other Agent capabilities remain usable. Never silently installs/attaches/uses root."},
 			{Name: "browser", Required: false, Installed: fileExists(filepath.Join(browserEngine, "node/bin/node")), Paths: []string{browserEngine, browserData}, Notes: "Optional Playwright/Chromium capability. The executable engine is root-owned under /opt; writable browser profile data is isolated under agent state. Removing it disables browser tools but does not stop the MCP core."},
 		},
 		Rules: []string{
@@ -117,6 +120,11 @@ func filesystemInfo(path string, blocks, availableBlocks, blockSize uint64) File
 }
 
 func fileExists(path string) bool { _, err := os.Stat(path); return err == nil }
+
+func executableFileExists(path string) bool {
+	fi, err := os.Stat(path)
+	return err == nil && fi.Mode().IsRegular() && fi.Mode().Perm()&0111 != 0
+}
 
 func Write(path string, m Manifest) error {
 	b, err := json.MarshalIndent(m, "", "  ")

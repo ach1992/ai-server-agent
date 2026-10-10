@@ -339,6 +339,9 @@ func (s *Server) registerTools() {
 
 	s.registerRepositoryEnvironmentTool()
 	s.registerWorkspaceFileTools()
+	s.registerTerminalTools()
+	s.registerGoCodeTools()
+	s.registerDebugTools()
 	s.registerRepositoryTools()
 	s.registerWorkspaceSearchTool()
 }

@@ -26,6 +26,8 @@ LEGACY_MCP_TOKEN_FILE="$CONFIG_DIR/mcp.token"
 AUDIT_FINGERPRINT_KEY="$CONFIG_DIR/audit-fingerprint.key"
 AGENT_USER="aiagent"
 WORKER_USER="aiworker"
+# Developer Runtime HOME is Agent-managed state, never the project checkout.
+WORKER_HOME="$STATE_DIR/worker-home"
 PORT="${AI_SERVER_AGENT_PORT:-3210}"
 MODE="${AI_SERVER_AGENT_BIND_MODE:-local}"
 TLS_CERT_FILE="${AI_SERVER_AGENT_TLS_CERT_FILE:-}"
@@ -238,7 +240,7 @@ fi
 if ! getent group "$AGENT_USER" >/dev/null 2>&1; then groupadd --system "$AGENT_USER"; fi
 if ! getent group "$WORKER_USER" >/dev/null 2>&1; then groupadd --system "$WORKER_USER"; fi
 if ! id "$AGENT_USER" >/dev/null 2>&1; then useradd --system --gid "$AGENT_USER" --home "$STATE_DIR" --shell /usr/sbin/nologin "$AGENT_USER"; fi
-if ! id "$WORKER_USER" >/dev/null 2>&1; then useradd --system --gid "$WORKER_USER" --create-home --home-dir "$WORKSPACE_DIR" --shell /bin/bash "$WORKER_USER"; fi
+if ! id "$WORKER_USER" >/dev/null 2>&1; then useradd --system --gid "$WORKER_USER" --home-dir "$WORKER_HOME" --shell /bin/bash "$WORKER_USER"; fi
 
 install -d -m 0750 -o root -g "$AGENT_USER" "$CONFIG_DIR"
 install -d -m 0700 -o root -g root "$CONTROL_DIR"
@@ -246,6 +248,15 @@ install -d -m 0700 -o root -g root "$CONTROL_DIR"
 install -d -m 0711 -o root -g root "$STATE_DIR"
 install -d -m 2750 -o root -g "$AGENT_USER" "$LOG_DIR"
 install -d -m 0750 -o "$WORKER_USER" -g "$WORKER_USER" "$WORKSPACE_DIR"
+[ ! -L "$WORKER_HOME" ] || die "Refusing symlinked worker HOME."
+[ ! -e "$WORKER_HOME" ] || [ -d "$WORKER_HOME" ] || die "Worker HOME must be a directory."
+install -d -m 0700 -o "$WORKER_USER" -g "$WORKER_USER" "$WORKER_HOME"
+# Existing installs may still record WorkspaceDir as the account's login
+# home. Change only that known legacy value; never move/delete project data.
+existing_worker_home="$(getent passwd "$WORKER_USER" | cut -d: -f6)"
+if [ "$existing_worker_home" = "$WORKSPACE_DIR" ]; then
+  usermod --home "$WORKER_HOME" "$WORKER_USER"
+fi
 secure_state_container(){
   local path="$1"
   if [ -L "$path" ]; then
