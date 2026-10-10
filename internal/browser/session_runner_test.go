@@ -110,6 +110,9 @@ func TestManagedBrowserSessionRunnerPinnedRuntime(t *testing.T) {
 	if snap["refs_unavailable"] != false {
 		t.Fatalf("refs=%v", snap)
 	}
+	if snap["refs_scope"] != "session_until_invalidated" {
+		t.Fatalf("managed refs_scope=%v, want session_until_invalidated", snap["refs_scope"])
+	}
 	refs := snap["refs"].([]any)
 	if len(refs) == 0 {
 		t.Fatalf("missing refs: %v", snap)

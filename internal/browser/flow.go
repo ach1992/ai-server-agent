@@ -399,7 +399,7 @@ for (let i = 0; i < __asaSteps.length; i++) {
         item.refs = [];
         item.refs_unavailable = true;
         item.refs_dropped = null;
-        item.refs_scope = 'flow_only';
+        item.refs_scope = globalThis.__asaManagedFlowState ? 'session_until_invalidated' : 'flow_only';
         try {
         const scope = await root.evaluate(element => {
           const budget = { nodes: 0, text_units: 0, attribute_units: 0,
