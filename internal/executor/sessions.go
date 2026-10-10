@@ -75,6 +75,7 @@ type stdioSession struct {
 	expiry     *time.Timer
 	terminal   *tmuxTerminalState // consumer-specific Control Mode state; broker owns its process
 	dap        *dapState          // DAP stream attaches to this same process identity and broker
+	browser    *browserStdioState // managed Browser consumer; never a second process broker
 }
 
 type stdioSessionBroker struct {
@@ -187,7 +188,7 @@ func (s *Server) startProcessSessionWithID(req Request, kind, workspace, binary 
 	if s.sessions == nil || req.PrincipalID == "" || req.PrincipalClass == "" || req.Root != (terminal != nil && terminal.root) || req.Approval != req.Root {
 		return "", errors.New("session requires authenticated worker authority")
 	}
-	if kind != "lsp" && kind != "dap" && (kind != "terminal" || terminal == nil) {
+	if kind != "lsp" && kind != "dap" && kind != "browser" && (kind != "terminal" || terminal == nil) {
 		return "", errors.New("unsupported session kind")
 	}
 	if !filepath.IsAbs(binary) || len(binary) > 4096 || len(args) > 64 {

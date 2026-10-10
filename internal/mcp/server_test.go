@@ -82,6 +82,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 	foundRoot := false
 	foundBrowser := false
 	foundBrowserE2E := false
+	foundBrowserSessions := map[string]bool{}
 	foundBrowserStatus := false
 	foundStartJob := false
 	foundJobStatus := false
@@ -379,6 +380,37 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 					t.Fatalf("browser_status output schema missing %q: %s", field, out)
 				}
 			}
+		case "browser_session_open", "browser_session_flow", "browser_session_status", "browser_session_close":
+			foundBrowserSessions[tool.Name] = true
+			if tool.Annotations == nil {
+				t.Fatalf("%s lacks annotations", tool.Name)
+			}
+			if tool.Name == "browser_session_status" {
+				if !tool.Annotations.ReadOnlyHint || !tool.Annotations.IdempotentHint {
+					t.Fatal("Browser session status must be read-only/idempotent")
+				}
+			} else if tool.Annotations.DestructiveHint == nil || !*tool.Annotations.DestructiveHint {
+				t.Fatalf("%s can affect an open-world Browser session", tool.Name)
+			}
+			input, err := json.Marshal(tool.InputSchema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"workspace"} {
+				if !strings.Contains(string(input), `"`+field+`"`) {
+					t.Fatalf("%s missing %s: %s", tool.Name, field, input)
+				}
+			}
+			if tool.Name != "browser_session_open" && !strings.Contains(string(input), `"session_id"`) {
+				t.Fatalf("%s lacks opaque session identity: %s", tool.Name, input)
+			}
+			if tool.Name == "browser_session_flow" {
+				for _, field := range []string{"steps", "ref", "timeout_ms"} {
+					if !strings.Contains(string(input), `"`+field+`"`) {
+						t.Fatalf("session flow missing %s: %s", field, input)
+					}
+				}
+			}
 		case "browser_e2e":
 			foundBrowserE2E = true
 			if tool.Annotations == nil || tool.Annotations.DestructiveHint == nil || !*tool.Annotations.DestructiveHint ||
@@ -416,6 +448,11 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 					t.Fatalf("browser_run input schema missing %q: %s", field, in)
 				}
 			}
+		}
+	}
+	for _, name := range []string{"browser_session_open", "browser_session_flow", "browser_session_status", "browser_session_close"} {
+		if !foundBrowserSessions[name] {
+			t.Errorf("missing managed Browser tool %s", name)
 		}
 	}
 	if !foundEnvironment || !foundRoot || !foundStartJob || !foundJobStatus || !foundReadFile || !foundWriteFile || !foundWorkerStat || !foundWorkerRead || !foundWorkerWrite || !foundWorkerApplyEdits || !foundWorkspaceSearch || !foundRepositoryEnvironment || !foundRepositoryDiscover || !foundRepositoryInspect || !foundWorktreeCreate || !foundWorktreeRemove || !foundBrowserStatus || !foundBrowser || !foundBrowserE2E {

@@ -34,6 +34,7 @@ type Server struct {
 	workerGID                 uint32
 	runs                      *runLimiter
 	sessions                  *stdioSessionBroker
+	browserAdmission          browserSessionAdmission // exclusive shared profile lease
 	jobsMu                    sync.Mutex
 	lifecycleLockPath         string
 	fileWriteHooks            *fileWriteTestHooks
@@ -171,6 +172,8 @@ func (s *Server) dispatch(req Request) Response {
 		return s.debugAction(context.Background(), req)
 	case "terminal_open", "terminal_read", "terminal_write", "terminal_interrupt", "terminal_resize", "terminal_close", "terminal_reconnect":
 		return s.terminalAction(req)
+	case "browser_session_open", "browser_session_flow", "browser_session_status", "browser_session_close":
+		return s.browserSessionAction(context.Background(), req)
 	default:
 		return Response{Error: "unknown action"}
 	}

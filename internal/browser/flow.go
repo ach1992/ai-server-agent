@@ -193,16 +193,20 @@ const __asaPush = (items, entry, kind) => {
   else if (kind === 'console') __asaConsoleDropped++;
   else __asaNetworkDropped++;
 };
-page.on('console', message =>
-  __asaPush(__asaConsole, { level: message.type(), message: __asaCap(message.text()) }, 'console'));
-page.on('pageerror', error =>
-  __asaPush(__asaConsole, { level: 'pageerror', message: __asaCap(error.message) }, 'console'));
-page.on('requestfailed', request =>
+const __asaOnConsole = message =>
+  __asaPush(__asaConsole, { level: message.type(), message: __asaCap(message.text()) }, 'console');
+page.on('console', __asaOnConsole);
+const __asaOnPageError = error =>
+  __asaPush(__asaConsole, { level: 'pageerror', message: __asaCap(error.message) }, 'console');
+page.on('pageerror', __asaOnPageError);
+const __asaOnRequestFailed = request =>
   __asaPush(__asaNetwork, { method: request.method(), url: __asaURL(request.url()),
-    failure: __asaCap(request.failure()?.errorText) }, 'network'));
-page.on('response', response =>
+    failure: __asaCap(request.failure()?.errorText) }, 'network');
+page.on('requestfailed', __asaOnRequestFailed);
+const __asaOnResponse = response =>
   __asaPush(__asaNetwork, { method: response.request().method(), status: response.status(),
-    url: __asaURL(response.url()) }, 'network'));
+    url: __asaURL(response.url()) }, 'network');
+page.on('response', __asaOnResponse);
 
 // Never echo raw navigation error messages: Chromium/Playwright includes the
 // full failed URL (including query and fragment) in many failure paths.
@@ -218,9 +222,16 @@ const __asaLocator = step => step.selector
   : page.getByRole(step.role, step.name ? { name: step.name, exact: true } : {});
 // Refs are only issued from a verified, stable accessibility snapshot
 // generation. This map never survives the one browser_e2e call.
-const __asaRefs = new Map();
-let __asaRefSequence = 0;
-const __asaMaxRefs = 64;
+// A managed Node process can retain exact ElementHandles across calls.
+// The ordinary one-shot browser_e2e flow still uses a fresh isolated map.
+const __asaRefs = globalThis.__asaManagedFlowState?.refs || new Map();
+const __asaDropRefs = async () => {
+  const handles = [...__asaRefs.values()].map(entry => entry.element);
+  __asaRefs.clear();
+  await Promise.all(handles.map(handle => handle.dispose().catch(() => {})));
+};
+let __asaRefSequence = globalThis.__asaManagedFlowState?.sequence || 0;
+const __asaMaxRefs = globalThis.__asaManagedFlowState ? 4096 : 64;
 const __asaRefRoles = ['textbox','button','link','checkbox','radio','combobox','switch','tab','option','menuitem'];
 // This safety check is serialized into the browser for both issuance and use.
 // A CSS-visible aria-hidden or inert descendant must not become actionable.
@@ -345,6 +356,7 @@ const __asaVerifyFinalRefIdentities = async (target, content, staged, stable, ti
 };
 const __asaResults = [];
 let __asaFailedStep = null;
+try {
 for (let i = 0; i < __asaSteps.length; i++) {
   const step = __asaSteps[i];
   const started = Date.now();
@@ -353,11 +365,12 @@ for (let i = 0; i < __asaSteps.length; i++) {
   try {
     switch (step.action) {
       case 'goto':
-        __asaRefs.clear();
+        await __asaDropRefs();
         await page.goto(step.url, { waitUntil: 'domcontentloaded', timeout });
         item.url = __asaURL(page.url());
         break;
       case 'snapshot': {
+        if (globalThis.__asaManagedFlowState) await __asaDropRefs();
         const target = step.selector || step.role ? __asaLocator(step) : page.locator('body');
         // Guard before invoking Playwright's unbounded ariaSnapshot().
         // Count local content AND outside accessible-name/ownership references:
@@ -669,6 +682,7 @@ for (let i = 0; i < __asaSteps.length; i++) {
   __asaResults.push(item);
   if (__asaFailedStep !== null) break;
 }
+if (globalThis.__asaManagedFlowState) globalThis.__asaManagedFlowState.sequence = __asaRefSequence;
 console.log('ASA_BROWSER_E2E_RESULT ' + JSON.stringify({
   ok: __asaFailedStep === null,
   failed_step: __asaFailedStep,
@@ -678,5 +692,11 @@ console.log('ASA_BROWSER_E2E_RESULT ' + JSON.stringify({
   network_events_dropped: __asaNetworkDropped,
   output_budget_remaining_bytes: __asaOutputBudget
 }));
-if (__asaFailedStep !== null) process.exitCode = 1;
+if (__asaFailedStep !== null && !globalThis.__asaManagedFlowState) process.exitCode = 1;
+} finally {
+  page.off('console', __asaOnConsole);
+  page.off('pageerror', __asaOnPageError);
+  page.off('requestfailed', __asaOnRequestFailed);
+  page.off('response', __asaOnResponse);
+}
 `
