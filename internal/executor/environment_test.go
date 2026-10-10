@@ -104,6 +104,8 @@ func hasEnvironmentMechanism(summary RepositoryEnvironmentSummary, name string) 
 
 func TestRepositoryEnvironmentFreshGoRepoSurfacesWorkerCacheWithoutTrustingIt(t *testing.T) {
 	s, root := environmentTestServer(t)
+	// Isolate only Go discovery; host Make remains available for entrypoint tests.
+	s.environmentGoSystemPath = filepath.Join(root, "absent-system-tools")
 	repo, head := initEnvironmentFixture(t, root, map[string]string{
 		"go.mod":   "module example.invalid/project\n\ngo 1.26.0\n",
 		"Makefile": "test:\n\t@echo test\n",
@@ -139,6 +141,8 @@ func TestRepositoryEnvironmentFreshGoRepoSurfacesWorkerCacheWithoutTrustingIt(t 
 
 func TestRepositoryEnvironmentWorkerCacheHintRemainsUnverified(t *testing.T) {
 	s, root := environmentTestServer(t)
+	// A trusted host Go must not shadow this worker-cache-only fixture.
+	s.environmentGoSystemPath = filepath.Join(root, "absent-system-tools")
 	repo, _ := initEnvironmentFixture(t, root, map[string]string{
 		"go.mod": "module example.invalid/project\n\ngo 1.26.0\n",
 	})
