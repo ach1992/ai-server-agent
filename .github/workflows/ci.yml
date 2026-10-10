@@ -23,6 +23,7 @@ jobs:
       runtime_changed: ${{ steps.scope.outputs.runtime_changed }}
       reuse_validated_pr: ${{ steps.reuse.outputs.reuse_validated_pr }}
       go_changed: ${{ steps.scope.outputs.go_changed }}
+      browser_flow_changed: ${{ steps.scope.outputs.browser_flow_changed }}
       shell_changed: ${{ steps.scope.outputs.shell_changed }}
       cloudflare_security_changed: ${{ steps.scope.outputs.cloudflare_security_changed }}
       root_trust_security_changed: ${{ steps.scope.outputs.root_trust_security_changed }}
@@ -49,6 +50,29 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: bash scripts/ci-reuse-pr-validation.sh >> "$GITHUB_OUTPUT"
+
+  browser-e2e-acceptance:
+    name: Pinned Chromium Browser/E2E acceptance
+    needs: change-scope
+    if: ${{ always() && needs.change-scope.result == 'success' && needs.change-scope.outputs.reuse_validated_pr != 'true' && needs.change-scope.outputs.browser_flow_changed == 'true' }}
+    runs-on: ubuntu-22.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          # Test the actual candidate, not a synthetic PR merge commit.
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - name: Real pinned Browser/E2E acceptance for exact candidate
+        run: |
+          printf 'EXACT_CHECKED_OUT_HEAD=%s\n' "$(git rev-parse HEAD)"
+          test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
+          bash tests/browser_flow_ci.sh
 
   test:
     needs: change-scope
