@@ -258,7 +258,27 @@ func (m *Manager) Status(ctx context.Context) RuntimeStatus {
 		}
 	}
 	defer m.mu.Unlock()
-	return m.inspectStatus(ctx, false)
+	status := m.inspectStatus(ctx, false)
+	// Unit fixture Managers intentionally have no executor token. Every
+	// deployed Agent has one; availability MUST then be derived from the
+	// executor-owned lease, not merely from this Manager's short-lived mutex.
+	if m.token == "" {
+		return status
+	}
+	probeCtx, cancel := context.WithTimeout(ctx, browserStatusTimeout)
+	defer cancel()
+	resp, err := executor.ClientCallContext(probeCtx, m.cfg.ExecutorSocket, m.token, executor.Request{Action: "browser_admission_status"})
+	if err != nil || !resp.OK || (resp.Status != "reserved" && resp.Status != "available") {
+		status.InspectionComplete = false
+		status.Busy = true
+		status.Reason = "shared Browser profile admission could not be verified"
+		return status
+	}
+	if resp.Status == "reserved" {
+		status.Busy = true
+		status.Reason = "shared Browser profile reserved by an active operation or managed session"
+	}
+	return status
 }
 
 func (m *Manager) inspectStatus(ctx context.Context, busy bool) RuntimeStatus {

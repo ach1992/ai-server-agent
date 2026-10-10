@@ -354,6 +354,7 @@ func (s *Server) registerTools() {
 		return responseResult(resp)
 	})
 
+	s.registerBrowserSessionTools()
 	s.registerRepositoryEnvironmentTool()
 	s.registerWorkspaceFileTools()
 	s.registerTerminalTools()

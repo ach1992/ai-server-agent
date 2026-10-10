@@ -545,6 +545,18 @@ func (s *Server) terminalCommand(req Request, e *stdioSession, command string) e
 // The existing broker timer owns expiry; terminal expiry must terminate the
 // actual tmux session, not merely its Control Mode client process.
 func (s *Server) expireProcessSession(entry *stdioSession) {
+	if entry.browser != nil {
+		req := Request{Action: "browser_session_close", PrincipalID: entry.ownerID, PrincipalClass: entry.ownerClass, Workspace: entry.workspace, SessionID: entry.id}
+		_ = ensureRequestCorrelation(&req)
+		result := s.browserSessionAction(context.Background(), req)
+		if !result.OK && (result.ErrorCode == "resource_limit" || result.ErrorCode == "browser_session_cleanup_unverified") {
+			// Expiry may race a bounded in-flight action or a temporary audit
+			// failure. Do not drop the singleton profile lease or silently
+			// abandon this session: retry the verified close on the SAME ID.
+			time.AfterFunc(5*time.Second, func() { s.expireProcessSession(entry) })
+		}
+		return
+	}
 	if entry.dap != nil {
 		req := Request{Action: "debug_stop", PrincipalID: entry.ownerID, PrincipalClass: entry.ownerClass, Workspace: entry.workspace, SessionID: entry.id}
 		_ = ensureRequestCorrelation(&req)

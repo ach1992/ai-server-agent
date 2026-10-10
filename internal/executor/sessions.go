@@ -52,29 +52,31 @@ type stdioSessionRead struct {
 }
 
 type stdioSession struct {
-	mu         sync.Mutex
-	stopMu     sync.Mutex
-	id         string
-	kind       string
-	ownerID    string
-	ownerClass string
-	workspace  string
-	pid        int
-	pidPin     *os.File // The pidfd is a stable process identity; it does NOT reserve the numeric PGID after reaping.
-	cmd        *exec.Cmd
-	stdin      *os.File
-	closed     bool
-	exited     bool
-	exitCode   int
-	cleanupErr error
-	completed  time.Time
-	lastSeq    uint64
-	events     []stdioSessionEvent
-	bytes      int
-	done       chan struct{}
-	expiry     *time.Timer
-	terminal   *tmuxTerminalState // consumer-specific Control Mode state; broker owns its process
-	dap        *dapState          // DAP stream attaches to this same process identity and broker
+	mu           sync.Mutex
+	stopMu       sync.Mutex
+	id           string
+	kind         string
+	ownerID      string
+	ownerClass   string
+	workspace    string
+	pid          int
+	pidPin       *os.File // The pidfd is a stable process identity; it does NOT reserve the numeric PGID after reaping.
+	cmd          *exec.Cmd
+	stdin        *os.File
+	closed       bool
+	exited       bool
+	exitCode     int
+	cleanupErr   error
+	completed    time.Time
+	lastSeq      uint64
+	events       []stdioSessionEvent
+	bytes        int
+	done         chan struct{}
+	expiry       *time.Timer
+	terminal     *tmuxTerminalState       // consumer-specific Control Mode state; broker owns its process
+	dap          *dapState                // DAP stream attaches to this same process identity and broker
+	browser      *browserStdioState       // managed Browser consumer; never a second process broker
+	browserLease *browserSessionAdmission // release only after verified process cleanup, before broker deletion
 }
 
 type stdioSessionBroker struct {
@@ -106,7 +108,10 @@ func (b *stdioSessionBroker) reserve(session *stdioSession) error {
 	now := time.Now()
 	for id, entry := range b.sessions {
 		entry.mu.Lock()
-		outdated := entry.exited && entry.cleanupErr == nil && entry.pidPin == nil && now.Sub(entry.completed) >= completedSessionRetain
+		// Browser session identity is also the ONLY reconciliation record
+		// for the shared-profile lease. Only an explicit verified close
+		// removes it; generic completed-session GC must never erase it.
+		outdated := entry.kind != "browser" && entry.exited && entry.cleanupErr == nil && entry.pidPin == nil && now.Sub(entry.completed) >= completedSessionRetain
 		if outdated && entry.expiry != nil {
 			entry.expiry.Stop()
 		}
@@ -187,7 +192,7 @@ func (s *Server) startProcessSessionWithID(req Request, kind, workspace, binary 
 	if s.sessions == nil || req.PrincipalID == "" || req.PrincipalClass == "" || req.Root != (terminal != nil && terminal.root) || req.Approval != req.Root {
 		return "", errors.New("session requires authenticated worker authority")
 	}
-	if kind != "lsp" && kind != "dap" && (kind != "terminal" || terminal == nil) {
+	if kind != "lsp" && kind != "dap" && kind != "browser" && (kind != "terminal" || terminal == nil) {
 		return "", errors.New("unsupported session kind")
 	}
 	if !filepath.IsAbs(binary) || len(binary) > 4096 || len(args) > 64 {
@@ -226,6 +231,13 @@ func (s *Server) startProcessSessionWithID(req Request, kind, workspace, binary 
 		id: priorID, kind: kind,
 		ownerID: req.PrincipalID, ownerClass: req.PrincipalClass,
 		workspace: cwd, done: make(chan struct{}), exitCode: -1, terminal: terminal,
+	}
+	if kind == "browser" {
+		// Attach before broker reservation, process spawn, and completion
+		// audit. Even a post-spawn audit failure must leave the Browser
+		// entry addressable for status/close/expiry reconciliation.
+		entry.browser = &browserStdioState{}
+		entry.browserLease = &s.browserAdmission
 	}
 	if err := s.sessions.reserve(entry); err != nil {
 		return "", err
@@ -581,6 +593,13 @@ func (b *stdioSessionBroker) removeAndStop(entry *stdioSession) error {
 			}
 		}
 	}
+	// Browser has one shared-profile lease. Do not remove the last broker
+	// reconciliation identity until the verified process is dead AND the
+	// exact lease has been released; an audit-completion failure happens
+	// *later* and must not cause an unrecoverable profile lock.
+	if entry.browserLease != nil && !entry.browserLease.release(entry.id) {
+		return errors.New("browser_profile_lease_reconciliation_failed")
+	}
 	b.remove(entry)
 	return nil
 }
@@ -591,6 +610,24 @@ func (b *stdioSessionBroker) close(req Request, id string) error {
 		return err
 	}
 	return b.removeAndStop(e)
+}
+
+// cleanlyRemoved is intentionally keyed to the exact previously authorized
+// pointer, not only a reusable session ID or optimistic close response.
+// Only the broker's verified process-group reconciliation may prove the
+// Browser profile safe to release after a completion-audit failure.
+func (b *stdioSessionBroker) cleanlyRemoved(e *stdioSession) bool {
+	if b == nil || e == nil {
+		return false
+	}
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.sessions[e.id] != nil {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	return e.closed && e.exited && e.cleanupErr == nil && e.pidPin == nil
 }
 
 // Owning capability handlers must use these audit-gated entry points, never
