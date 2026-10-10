@@ -9,6 +9,7 @@ import (
 	"time"
 
 	"github.com/ach1992/ai-server-agent/internal/config"
+	"github.com/ach1992/ai-server-agent/internal/systemexec"
 )
 
 const (
@@ -68,8 +69,8 @@ func Build(c config.Config) Manifest {
 		Optional: []Component{
 			{Name: "download-utilities", Required: false, Installed: fileExists("/usr/bin/curl") && fileExists("/usr/bin/tar"), Paths: []string{"/usr/bin/curl", "/usr/bin/tar", "/usr/bin/xz"}, Notes: "Used for updates and optional browser setup. Safe to remove without stopping the running MCP core, but update/browser installation will need them restored."},
 			{Name: "terminal", Required: false, Installed: fileExists("/usr/bin/tmux"), Paths: []string{"/usr/bin/tmux"}, Notes: "Optional. AI may install tmux only when an interactive persistent terminal is needed; the MCP core does not depend on it."},
-			{Name: "go-language-server", Required: false, Installed: executableFileExists("/usr/local/bin/gopls") || executableFileExists("/usr/bin/gopls"), Paths: []string{"/usr/local/bin/gopls", "/usr/bin/gopls"}, Notes: "Optional Go semantic-code intelligence. code_* requires exact aiworker file_version and does not install gopls or a Go toolchain."},
-			{Name: "go-debugger", Required: false, Installed: executableFileExists("/usr/local/bin/dlv") || executableFileExists("/usr/bin/dlv"), Paths: []string{"/usr/local/bin/dlv", "/usr/bin/dlv"}, Notes: "Optional Go Delve DAP debugger. v1 launches only prebuilt workspace executables with matching worker file_version; requires admin-owned Delve, never silently installs/attaches/uses root."},
+			{Name: "go-language-server", Required: false, Installed: systemexec.First("/usr/local/bin/gopls", "/usr/bin/gopls") != "", Paths: []string{"/usr/local/bin/gopls", "/usr/bin/gopls"}, Notes: "Optional Go semantic-code intelligence. code_* requires exact aiworker file_version and does not install gopls or a Go toolchain."},
+			{Name: "go-debugger", Required: false, Installed: systemexec.First("/usr/local/bin/dlv", "/usr/bin/dlv") != "", Paths: []string{"/usr/local/bin/dlv", "/usr/bin/dlv"}, Notes: "Optional Go Delve DAP debugger. v1 launches only prebuilt workspace executables with matching worker file_version; requires trusted admin-owned Delve and Linux 6.9+ group-scoped pidfd signalling, validated before the debuggee launches; without support DAP fails closed (other Agent capabilities remain usable). Never silently installs/attaches/uses root."},
 			{Name: "browser", Required: false, Installed: fileExists(filepath.Join(browserEngine, "node/bin/node")), Paths: []string{browserEngine, browserData}, Notes: "Optional Playwright/Chromium capability. The executable engine is root-owned under /opt; writable browser profile data is isolated under agent state. Removing it disables browser tools but does not stop the MCP core."},
 		},
 		Rules: []string{

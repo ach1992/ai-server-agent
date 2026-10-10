@@ -5,10 +5,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ach1992/ai-server-agent/internal/systemexec"
 	"net"
 	"os"
 	"path/filepath"
-	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -29,11 +29,11 @@ func (s *Server) debugAction(ctx context.Context, req Request) Response {
 	case "debug_adapter_status":
 		_, err := s.debugBinary()
 		available := err == nil
-		detail := map[string]any{"adapter": "go/delve", "installed": available, "modes": []string{"exec"}, "attach_supported": false, "privileged": false, "provisioning": "optional_admin_owned_binary"}
+		detail := map[string]any{"adapter": "go/delve", "installed": available, "modes": []string{"exec"}, "attach_supported": false, "privileged": false, "provisioning": "optional_admin_owned_binary", "kernel_group_signal": "must_validate_against_live_adapter_before_launch"}
 		b, _ := json.Marshal(detail)
 		return Response{OK: true, Status: func() string {
 			if available {
-				return "ready"
+				return "installed_kernel_unverified"
 			}
 			return "unavailable"
 		}(), Output: string(b), OutputEncoding: "json", BytesReturned: int64(len(b)), BytesSeen: int64(len(b))}
@@ -74,19 +74,11 @@ func (s *Server) debugEntry(req Request) (*stdioSession, *dapState, error) {
 func (s *Server) debugBinary() (string, error) {
 	if s.dlvBinary != "" {
 		return s.dlvBinary, nil
-	} // tests only, never configured from a caller request
-	for _, name := range []string{"/usr/local/bin/dlv", "/usr/bin/dlv"} {
-		info, err := os.Lstat(name)
-		if err != nil || !info.Mode().IsRegular() || info.Mode().Perm()&0111 == 0 || info.Mode().Perm()&0022 != 0 {
-			continue
-		}
-		st, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || st.Uid != 0 {
-			continue
-		}
-		return name, nil
+	} // test-only fixture
+	if binary := systemexec.First("/usr/local/bin/dlv", "/usr/bin/dlv"); binary != "" {
+		return binary, nil
 	}
-	return "", errors.New("optional admin-owned /usr/local/bin/dlv or /usr/bin/dlv is unavailable")
+	return "", errors.New("optional trusted root-owned /usr/local/bin/dlv or /usr/bin/dlv unavailable")
 }
 
 // createDAPListener is private executor-owned runtime state. A worker has
@@ -121,6 +113,43 @@ func (s *Server) createDAPListener() (net.Listener, string, string, error) {
 		return cleanup(err)
 	}
 	return listener, dir, socket, nil
+}
+
+// The concrete adapter process must remain live after accepting an AF_UNIX
+// connection. Also prove group pidfd signals before any Delve launch may
+// create a tracee: on older kernels unsafe group cleanup is not attempted.
+func adapterPidfdLiveAndGroupSafe(e *stdioSession) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.pidPin == nil {
+		return false
+	}
+	fd := int(e.pidPin.Fd())
+	return unix.PidfdSendSignal(fd, 0, nil, 0) == nil &&
+		unix.PidfdSendSignal(fd, 0, nil, pidfdSignalProcessGroup) == nil
+}
+
+// Check the live pinned adapter and peer credentials while holding e.mu so
+// Cmd.Wait/reaping cannot occur between those checks. Duplicate its pidfd for
+// final validation of debuggee parent identity later in the DAP lifecycle.
+func pinnedDAPPeer(e *stdioSession, conn *net.UnixConn, uid uint32) (*os.File, error) {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.pidPin == nil {
+		return nil, errors.New("original adapter pidfd missing")
+	}
+	fd := int(e.pidPin.Fd())
+	if unix.PidfdSendSignal(fd, 0, nil, 0) != nil || unix.PidfdSendSignal(fd, 0, nil, pidfdSignalProcessGroup) != nil {
+		return nil, errors.New("adapter exited or stable group signalling unavailable")
+	}
+	if !peerIsWorkerDelve(conn, uid, e.pid) {
+		return nil, errors.New("accepted peer is not pinned adapter")
+	}
+	dup, err := unix.Dup(fd)
+	if err != nil {
+		return nil, err
+	}
+	return os.NewFile(uintptr(dup), "dap-original-adapter-pidfd"), nil
 }
 
 func peerIsWorkerDelve(conn *net.UnixConn, uid uint32, pid int) bool {
@@ -224,6 +253,12 @@ func (s *Server) debugLaunch(ctx context.Context, req Request) (response Respons
 	pid := e.pid
 	e.mu.Unlock()
 	var stream *net.UnixConn
+	var adapterPin *os.File
+	defer func() {
+		if adapterPin != nil {
+			_ = adapterPin.Close()
+		}
+	}()
 	for {
 		if ctx.Err() != nil {
 			return fileError("debug_start_cancelled", "runtime", ctx.Err())
@@ -232,17 +267,32 @@ func (s *Server) debugLaunch(ctx context.Context, req Request) (response Respons
 		if acceptErr != nil {
 			return fileError("debug_adapter_not_connected", "runtime", acceptErr)
 		}
-		if peerIsWorkerDelve(conn, s.workerUID, pid) {
+		witness, peerErr := pinnedDAPPeer(e, conn, s.workerUID)
+		if peerErr == nil {
+			adapterPin = witness
 			stream = conn
 			break
 		}
 		_ = conn.Close()
+		return fileError("debug_adapter_identity_invalid", "runtime", peerErr)
 	}
 	_ = listener.Close()
 	d := &dapState{conn: stream, workspace: workspace, adapter: "go/delve", adapterPID: pid, workerUID: s.workerUID, program: relative, sourceVersion: req.FileVersion, stage: "starting", socketDir: dir}
+	// Lock in the same order as broker wait/stop: the DAP consumer must be
+	// installed before wait() snapshots consumers, or be rejected outright.
+	e.stopMu.Lock()
 	e.mu.Lock()
+	if e.closed || e.exited {
+		e.mu.Unlock()
+		e.stopMu.Unlock()
+		_ = stream.Close()
+		return fileError("debug_adapter_exited_before_attach", "state", errors.New("adapter exited before its DAP consumer was safely registered"))
+	}
+	d.adapterPin = adapterPin
 	e.dap = d
+	adapterPin = nil
 	e.mu.Unlock()
+	e.stopMu.Unlock()
 	initCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	_, err = d.call(initCtx, "initialize", map[string]any{"adapterID": "go", "clientID": "ai-server-agent", "linesStartAt1": true, "columnsStartAt1": true, "pathFormat": "path", "supportsVariableType": true, "supportsRunInTerminalRequest": false})
@@ -285,7 +335,8 @@ func (s *Server) debugResult(req Request, d *dapState, result json.RawMessage, s
 	if err != nil {
 		return fileError("debug_result_invalid", "runtime", err)
 	}
-	stage, events, dropped := d.snapshot()
+	stage, events, dropped := d.peek()
+	originDropped := dropped
 	converted := make([]json.RawMessage, 0, len(events))
 	for _, event := range events {
 		fixed, e := normalizeDebugResult(d.workspace, event)
@@ -311,6 +362,7 @@ func (s *Server) debugResult(req Request, d *dapState, result json.RawMessage, s
 		converted = converted[1:]
 		dropped++
 	}
+	d.acknowledge(events, originDropped)
 	response := Response{OK: true, SessionID: req.SessionID, Status: stage, Output: string(body), OutputEncoding: "json", BytesSeen: int64(len(body)), BytesReturned: int64(len(body)), DurationMS: time.Since(started).Milliseconds(), FileVersion: d.sourceVersion}
 	return response
 }
@@ -322,6 +374,12 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 	}
 	d.actionMu.Lock()
 	defer d.actionMu.Unlock()
+	d.mu.Lock()
+	unusable := d.pinError != "" || d.uncertain
+	d.mu.Unlock()
+	if unusable {
+		return fileError("debug_session_uncertain", "state", errors.New("DAP state or target identity unverified; only debug_status and debug_stop are permitted"))
+	}
 	method := req.DebugMethod
 	// The executable is compiled at an exact file_version; any source
 	// changed after breakpoint registration must be surfaced, not silently
@@ -462,6 +520,8 @@ func (s *Server) debugStatus(ctx context.Context, req Request) (response Respons
 	if err != nil {
 		return fileError("debug_session_not_found", "authorization", err)
 	}
+	d.actionMu.Lock()
+	defer d.actionMu.Unlock()
 	if blocked := s.beginActionAudit(req, "debug_status", "worker", req.SessionID, "developer_debugger"); blocked != nil {
 		return *blocked
 	}

@@ -37,7 +37,7 @@ func TestDAPPartialFrameSurvivesStatusTimeout(t *testing.T) {
 	}
 	time.Sleep(110 * time.Millisecond)
 	d.drain(context.Background())
-	stage, events, dropped := d.snapshot()
+	stage, events, dropped := d.peek()
 	if stage != "stopped" || len(events) != 1 || dropped != 0 {
 		t.Fatalf("partial DAP event not reconstructed: stage=%s count=%d dropped=%d", stage, len(events), dropped)
 	}

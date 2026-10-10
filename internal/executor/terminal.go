@@ -7,6 +7,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"github.com/ach1992/ai-server-agent/internal/systemexec"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -271,6 +272,10 @@ func (s *Server) terminalOpen(req Request) Response {
 	binary := s.terminalBinary
 	if binary == "" {
 		binary = "/usr/bin/tmux"
+	}
+	if s.terminalBinary == "" && !systemexec.Trusted(binary) {
+		_ = os.Remove(dir)
+		return terminalError("tmux_untrusted", errors.New("optional tmux must be root-owned, regular, executable, and not writable by non-root"))
 	}
 	if _, err := os.Stat(binary); err != nil {
 		_ = os.Remove(dir)

@@ -60,7 +60,7 @@ type stdioSession struct {
 	ownerClass string
 	workspace  string
 	pid        int
-	pidPin     *os.File // Linux pidfd pins the process-group leader PID across Wait/reaping.
+	pidPin     *os.File // The pidfd is a stable process identity; it does NOT reserve the numeric PGID after reaping.
 	cmd        *exec.Cmd
 	stdin      *os.File
 	closed     bool
@@ -280,34 +280,42 @@ func (s *Server) startProcessSessionWithID(req Request, kind, workspace, binary 
 }
 
 func (e *stdioSession) wait() {
-	err := e.cmd.Wait()
-
-	// Cmd.Wait reaps the leader; child processes may still occupy its
-	// process group even when they closed stdout/stderr. The open pidfd
-	// prevents reuse of the group ID between reaping and cleanup.
-	// Serialize group signals with close/expiry, then mark completion
-	// before releasing the pin.
-	e.stopMu.Lock()
+	// WNOWAIT is essential: retain this DIRECT child's exit status (and
+	// therefore numeric PID reservation) while reconciling same-group
+	// descendants. Reaping first and using kill(-oldPGID) is unsafe.
 	e.mu.Lock()
 	pid, pin := e.pid, e.pidPin
 	e.mu.Unlock()
-	var cleanupErr error
+	var witnessErr error
 	if pid <= 0 || pin == nil {
-		cleanupErr = errors.New("session_pid_identity_unavailable")
+		witnessErr = errors.New("session_pid_identity_unavailable")
 	} else {
-		_, cleanupErr = terminateProcessGroup(pid)
+		witnessErr = unix.Waitid(unix.P_PIDFD, int(pin.Fd()), nil, unix.WEXITED|unix.WNOWAIT, nil)
 	}
-	// Delve's debuggee is NOT in the adapter's process group. Its separate,
-	// verified pidfd-pinned process group must be stopped after any adapter
-	// exit, including SIGKILL/crash, not only after explicit DAP disconnect.
+	e.stopMu.Lock()
+	var cleanupErr error
+	if pid > 0 && pin != nil {
+		_, cleanupErr = terminatePinnedGroup(pid, pin, witnessErr == nil)
+	} else {
+		cleanupErr = errors.New("session_pid_identity_unavailable")
+	}
+	cleanupErr = errors.Join(witnessErr, cleanupErr)
 	e.mu.Lock()
 	d := e.dap
 	e.mu.Unlock()
 	if d != nil {
 		d.mu.Lock()
 		cleanupErr = errors.Join(cleanupErr, d.stopPinnedDebuggee())
+		if d.adapterPin != nil {
+			_ = d.adapterPin.Close()
+			d.adapterPin = nil
+		}
 		d.mu.Unlock()
 	}
+	// Only after the direct child's process group has been reconciled may
+	// os/exec reap the child. The direct-child fallback is no longer valid
+	// after this point; later retries must use pidfd-only group signalling.
+	err := e.cmd.Wait()
 	e.mu.Lock()
 	e.exited = true
 	e.completed = time.Now()
@@ -457,7 +465,7 @@ func (b *stdioSessionBroker) removeAndStop(entry *stdioSession) error {
 			entry.stopMu.Unlock()
 			return errors.New("session_stop_outcome_unknown: process identity unavailable")
 		}
-		if _, err := terminateProcessGroup(pid); err != nil {
+		if _, err := terminatePinnedGroup(pid, pin, !exited); err != nil {
 			entry.stopMu.Unlock()
 			return fmt.Errorf("session_stop_outcome_unknown: %w", err)
 		}
@@ -497,6 +505,17 @@ func (b *stdioSessionBroker) removeAndStop(entry *stdioSession) error {
 		// Keep this session addressable and its PID pinned; deletion would
 		// turn an uncertain cleanup into an unauditable orphan.
 		return fmt.Errorf("session_stop_outcome_unknown: %w", finalErr)
+	}
+	// A rejected later DAP process identity is a permanent lack of cleanup
+	// proof, even if the original pinned target has already been stopped.
+	if entry.dap != nil {
+		entry.dap.mu.Lock()
+		pinError := entry.dap.pinError
+		targetStillPinned := entry.dap.debuggeePin != nil
+		entry.dap.mu.Unlock()
+		if pinError != "" || targetStillPinned {
+			return errors.New("session_stop_outcome_unknown: DAP process identity or target cleanup unproven")
+		}
 	}
 	// DAP's private socket is transport runtime state only, not a second
 	// process owner. Clean it only after pidfd-pinned broker cleanup succeeds.

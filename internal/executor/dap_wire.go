@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -26,27 +27,30 @@ const (
 )
 
 type dapState struct {
-	mu             sync.Mutex // serializes DAP frames and events
-	actionMu       sync.Mutex // serializes complete user operations and close
-	conn           net.Conn
-	pending        []byte // incomplete frame retained across status timeouts
-	workspace      string
-	adapter        string
-	program        string
-	adapterPID     int
-	workerUID      uint32
-	debuggeePID    int
-	debuggeePin    *os.File
-	pinError       string
-	sourceVersion  string
-	sourceVersions map[string]string // workspace-relative breakpoint source identities
-	seq            int
-	events         []json.RawMessage
-	eventBytes     int
-	eventsDropped  uint64
-	stage          string
-	configured     bool
-	socketDir      string
+	mu              sync.Mutex // serializes DAP frames and events
+	actionMu        sync.Mutex // serializes complete user operations and close
+	conn            net.Conn
+	pending         []byte // incomplete frame retained across status timeouts
+	workspace       string
+	adapter         string
+	program         string
+	adapterPID      int
+	adapterPin      *os.File // duplicated original adapter pidfd, not a numeric PID claim
+	workerUID       uint32
+	debuggeePID     int
+	debuggeePin     *os.File
+	pinError        string
+	uncertain       bool
+	uncertainReason string
+	sourceVersion   string
+	sourceVersions  map[string]string // workspace-relative breakpoint source identities
+	seq             int
+	events          []json.RawMessage
+	eventBytes      int
+	eventsDropped   uint64
+	stage           string
+	configured      bool
+	socketDir       string
 }
 
 func dapFrame(conn net.Conn, obj any) error {
@@ -116,22 +120,26 @@ type dapPacket struct {
 }
 
 func (d *dapState) acceptEvent(packet dapPacket) {
-	if packet.Event == "process" {
+	if packet.Event == "process" && d.pinError == "" {
 		if err := d.pinDebuggeeProcess(packet.Body); err != nil {
 			d.pinError = err.Error()
 			d.stage = "failed"
 		}
 	}
-	if packet.Event == "stopped" {
-		d.stage = "stopped"
+	// A rejected second process identity permanently poisons the session.
+	// No later continued/stopped/terminated event can undo that verdict.
+	if d.pinError != "" {
+		d.stage = "failed"
+	} else if !d.uncertain {
+		switch packet.Event {
+		case "stopped":
+			d.stage = "stopped"
+		case "continued", "process":
+			d.stage = "running"
+		case "terminated", "exited":
+			d.stage = "terminated"
+		}
 	}
-	if packet.Event == "continued" || packet.Event == "process" {
-		d.stage = "running"
-	}
-	if packet.Event == "terminated" || packet.Event == "exited" {
-		d.stage = "terminated"
-	}
-	// Do not keep unbounded debuggee console output or nested variables.
 	event, err := json.Marshal(packet)
 	if err != nil {
 		return
@@ -153,6 +161,19 @@ func (d *dapState) acceptEvent(packet dapPacket) {
 	d.eventBytes += len(event)
 }
 
+func (d *dapState) markUncertain(err error) error {
+	d.uncertain = true
+	if d.uncertainReason == "" {
+		d.uncertainReason = "dap_request_completion_unproven"
+	}
+	if d.pinError != "" {
+		d.stage = "failed"
+	} else {
+		d.stage = "uncertain"
+	}
+	return err
+}
+
 // A single request/response sequence is serialized per authenticated session.
 // Asynchronous notifications are queued within a strict total byte budget.
 func (d *dapState) call(ctx context.Context, command string, args any) (json.RawMessage, error) {
@@ -160,6 +181,14 @@ func (d *dapState) call(ctx context.Context, command string, args any) (json.Raw
 	defer d.mu.Unlock()
 	if d.conn == nil {
 		return nil, errors.New("dap_disconnected")
+	}
+	if command != "disconnect" {
+		if d.pinError != "" {
+			return nil, errors.New("dap_debuggee_identity_unproven: " + d.pinError)
+		}
+		if d.uncertain {
+			return nil, errors.New("dap_state_uncertain: stop or inspect status before restarting")
+		}
 	}
 	d.seq++
 	seq := d.seq
@@ -172,33 +201,36 @@ func (d *dapState) call(ctx context.Context, command string, args any) (json.Raw
 	}
 	defer d.conn.SetDeadline(time.Time{})
 	if err := dapFrame(d.conn, map[string]any{"seq": seq, "type": "request", "command": command, "arguments": args}); err != nil {
-		return nil, err
+		return nil, d.markUncertain(err)
 	}
 	for {
 		if err := ctx.Err(); err != nil {
-			return nil, err
+			return nil, d.markUncertain(err)
 		}
 		raw, err := d.readFrame()
 		if err != nil {
-			return nil, fmt.Errorf("dap_transport_unknown: %w", err)
+			return nil, d.markUncertain(fmt.Errorf("dap_transport_unknown: %w", err))
 		}
 		var packet dapPacket
 		if err = json.Unmarshal(raw, &packet); err != nil {
-			return nil, errors.New("dap_invalid_packet")
+			return nil, d.markUncertain(errors.New("dap_invalid_packet"))
 		}
 		switch packet.Type {
 		case "event":
 			d.acceptEvent(packet)
+			if d.pinError != "" {
+				return nil, d.markUncertain(errors.New("dap_target_identity_unproven"))
+			}
 		case "request":
 			// Explicitly reject adapter-initiated runInTerminal/other reverse
 			// commands; never add a hidden PTY or privileged process path.
 			d.seq++
 			if err := dapFrame(d.conn, map[string]any{"seq": d.seq, "type": "response", "request_seq": packet.Seq, "command": packet.Command, "success": false, "message": "unsupported_adapter_reverse_request"}); err != nil {
-				return nil, err
+				return nil, d.markUncertain(err)
 			}
 		case "response":
 			if packet.RequestSeq != seq || packet.Command != command {
-				return nil, errors.New("dap_response_identity_mismatch")
+				return nil, d.markUncertain(errors.New("dap_response_identity_mismatch"))
 			}
 			if !packet.Success {
 				msg := packet.Message
@@ -208,14 +240,14 @@ func (d *dapState) call(ctx context.Context, command string, args any) (json.Raw
 				return nil, fmt.Errorf("dap_%s_failed: %s", command, msg)
 			}
 			if len(packet.Body) > dapMaxReply {
-				return nil, errors.New("dap_result_too_large")
+				return nil, d.markUncertain(errors.New("dap_result_too_large"))
 			}
 			if len(packet.Body) == 0 {
 				return json.RawMessage(`{}`), nil
 			}
 			return packet.Body, nil
 		default:
-			return nil, errors.New("dap_invalid_packet_type")
+			return nil, d.markUncertain(errors.New("dap_invalid_packet_type"))
 		}
 	}
 }
@@ -263,15 +295,39 @@ func (d *dapState) drain(ctx context.Context) {
 	}
 }
 
-func (d *dapState) snapshot() (string, []json.RawMessage, uint64) {
+// Peek first. A failed response-envelope encoding must NOT erase the events
+// or their dropped-event accounting; only acknowledge after a validated reply.
+func (d *dapState) peek() (string, []json.RawMessage, uint64) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
 	events := append([]json.RawMessage(nil), d.events...)
-	stage, dropped := d.stage, d.eventsDropped
-	d.events = nil
-	d.eventBytes = 0
-	d.eventsDropped = 0
-	return stage, events, dropped
+	state := d.stage
+	if d.pinError != "" {
+		state = "failed"
+	} else if d.uncertain {
+		state = "uncertain"
+	}
+	return state, events, d.eventsDropped
+}
+func (d *dapState) acknowledge(events []json.RawMessage, dropped uint64) {
+	d.mu.Lock()
+	defer d.mu.Unlock()
+	if len(d.events) < len(events) {
+		return
+	}
+	for i, e := range events {
+		if !bytes.Equal(d.events[i], e) {
+			return
+		}
+	}
+	for i := range events {
+		d.eventBytes -= len(d.events[i])
+		d.events[i] = nil
+	}
+	d.events = d.events[len(events):]
+	if d.eventsDropped >= dropped {
+		d.eventsDropped -= dropped
+	}
 }
 
 // Adapter paths are untrusted output. Return workspace-relative paths only;

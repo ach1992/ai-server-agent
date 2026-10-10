@@ -91,8 +91,18 @@ func (d *dapState) pinDebuggeeProcess(body json.RawMessage) error {
 	if err != nil || !os.SameFile(targetInfo, acceptedInfo) {
 		return errors.New("dap_debuggee_executable_mismatch")
 	}
-	// The open pidfd now pins the exact process-group leader to prevent an
-	// unrelated process from acquiring its numeric ID before cleanup.
+	// The adapter itself must still be the ORIGINAL live parent, not a
+	// recycled numeric PPid. This check runs while d.mu excludes broker
+	// cleanup/reaping of the adapter. A failed check poisons the session.
+	if d.adapterPin == nil || unix.PidfdSendSignal(int(d.adapterPin.Fd()), 0, nil, 0) != nil {
+		return errors.New("dap_original_adapter_no_longer_live")
+	}
+	// A final stable-identity check closes numeric /proc TOCTOU. The group
+	// flag is also an explicit Linux 6.9+ capability check; this non-child
+	// MUST NEVER fall back to an unsafe kill(-PGID).
+	if err := unix.PidfdSendSignal(int(pin.Fd()), 0, nil, pidfdSignalProcessGroup); err != nil {
+		return fmt.Errorf("dap_debuggee_group_identity_not_live_or_unsupported: %w", err)
+	}
 	d.debuggeePID = pid
 	d.debuggeePin = pin
 	valid = true
@@ -112,13 +122,16 @@ func (d *dapState) stopPinnedDebuggee() error {
 	if d.debuggeePID <= 0 {
 		return errors.New("dap_debuggee_pin_identity_invalid")
 	}
-	_, err := terminateProcessGroup(d.debuggeePID)
+	_, err := terminatePinnedGroup(d.debuggeePID, d.debuggeePin, false)
 	if err != nil {
 		return fmt.Errorf("dap_debuggee_cleanup_unknown: %w", err)
 	}
 	_ = d.debuggeePin.Close()
 	d.debuggeePin = nil
 	d.debuggeePID = 0
+	if d.pinError != "" {
+		return fmt.Errorf("dap_untracked_debuggee_identity: %s", d.pinError)
+	}
 	return nil
 }
 

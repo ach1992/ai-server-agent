@@ -5,8 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ach1992/ai-server-agent/internal/systemexec"
 	"net/url"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -63,13 +63,7 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 	if binary == "" {
 		// Optional Go reference server must be provisioned by the operator.
 		// The default is executable code in an administrator-owned location.
-		for _, candidate := range []string{"/usr/local/bin/gopls", "/usr/bin/gopls"} {
-			info, e := os.Stat(candidate)
-			if e == nil && info.Mode().IsRegular() && info.Mode().Perm()&0111 != 0 {
-				binary = candidate
-				break
-			}
-		}
+		binary = systemexec.First("/usr/local/bin/gopls", "/usr/bin/gopls")
 	}
 	if binary == "" {
 		return fileError("gopls_unavailable", "dependency", errors.New("gopls is not installed at /usr/local/bin/gopls or /usr/bin/gopls"))
