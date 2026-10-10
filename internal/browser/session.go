@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/ach1992/ai-server-agent/internal/executor"
@@ -18,6 +19,9 @@ type SessionOptions struct {
 	IgnoreHTTPSErrors bool
 	CaptureQuality    int
 	CaptureMaxWidth   int
+	TraceOperation    string
+	TraceOffset       int64
+	TraceVersion      string
 }
 
 // Managed sessions reuse the same pinned Browser runtime, shared persistent
@@ -127,6 +131,64 @@ func (m *Manager) SessionCapture(ctx context.Context, opts SessionOptions) (exec
 	})
 	if err != nil {
 		return browserUnknown("Browser screenshot transport", err, false), nil
+	}
+	return resp, nil
+}
+
+// SessionTrace records one bounded action batch or retrieves/discards the
+// resulting per-session trace ZIP. It never exposes a filesystem path or URL.
+func (m *Manager) SessionTrace(ctx context.Context, opts SessionOptions) (executor.Response, error) {
+	if opts.SessionID == "" || opts.Workspace == "" {
+		return browserError("invalid_browser_session", "validation", "workspace and session_id required"), nil
+	}
+	var payload any
+	var limit time.Duration
+	switch opts.TraceOperation {
+	case "record":
+		if len(opts.Steps) == 0 || len(opts.Steps) > 12 || opts.TraceOffset != 0 || opts.TraceVersion != "" {
+			return browserError("invalid_browser_trace", "validation", "record requires 1..12 steps, no offset/version"), nil
+		}
+		if _, err := flowScript(opts.Steps); err != nil {
+			return browserError("invalid_browser_trace", "validation", err.Error()), nil
+		}
+		payload = struct {
+			Operation string     `json:"operation"`
+			Steps     []FlowStep `json:"steps"`
+		}{Operation: "record", Steps: opts.Steps}
+		limit = 40 * time.Second
+	case "read", "discard":
+		if len(opts.Steps) != 0 || opts.TraceOffset < 0 || opts.TraceOffset > 512<<10 ||
+			!strings.HasPrefix(opts.TraceVersion, "sha256:") || len(opts.TraceVersion) != 71 {
+			return browserError("invalid_browser_trace", "validation", "read/discard require version sha256:<64-hex> and bounded offset"), nil
+		}
+		payload = struct {
+			Operation   string `json:"operation"`
+			Offset      int64  `json:"offset"`
+			FileVersion string `json:"file_version"`
+		}{Operation: opts.TraceOperation, Offset: opts.TraceOffset, FileVersion: opts.TraceVersion}
+		limit = 10 * time.Second
+	default:
+		return browserError("invalid_browser_trace", "validation", "operation must be record, read or discard"), nil
+	}
+	content, err := json.Marshal(payload)
+	if err != nil || len(content) > 16384 {
+		return browserError("invalid_browser_trace", "validation", "trace request exceeds bounded input"), nil
+	}
+	if !m.mu.TryLock() {
+		return browserBusy("Browser session trace"), nil
+	}
+	defer m.mu.Unlock()
+	ctx, _, err = executor.EnsureRequestCorrelationContext(ctx)
+	if err != nil {
+		return browserUnknown("Browser trace correlation", err, false), nil
+	}
+	callCtx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+	resp, err := executor.ClientCallContext(callCtx, m.cfg.ExecutorSocket, m.token, executor.Request{
+		Action: "browser_session_trace", Workspace: opts.Workspace, SessionID: opts.SessionID, Content: string(content),
+	})
+	if err != nil {
+		return browserUnknown("Browser trace transport", err, false), nil
 	}
 	return resp, nil
 }

@@ -380,7 +380,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 					t.Fatalf("browser_status output schema missing %q: %s", field, out)
 				}
 			}
-		case "browser_session_open", "browser_session_flow", "browser_session_capture", "browser_session_status", "browser_session_close":
+		case "browser_session_open", "browser_session_flow", "browser_session_capture", "browser_session_trace", "browser_session_status", "browser_session_close":
 			foundBrowserSessions[tool.Name] = true
 			if tool.Annotations == nil {
 				t.Fatalf("%s lacks annotations", tool.Name)
@@ -407,6 +407,18 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			}
 			if tool.Name != "browser_session_open" && !strings.Contains(string(input), `"session_id"`) {
 				t.Fatalf("%s lacks opaque session identity: %s", tool.Name, input)
+			}
+			if tool.Name == "browser_session_trace" {
+				for _, field := range []string{"operation", "steps", "file_version", "offset", "session_id"} {
+					if !strings.Contains(string(input), `"`+field+`"`) {
+						t.Fatalf("trace schema missing %s: %s", field, input)
+					}
+				}
+				for _, field := range []string{"512 KiB", "8192", "SHA256", "discard", "session"} {
+					if !strings.Contains(tool.Description, field) {
+						t.Fatalf("trace description missing %s", field)
+					}
+				}
 			}
 			if tool.Name == "browser_session_capture" {
 				for _, field := range []string{"representation", "quality", "max_width", "session_id"} {
@@ -472,7 +484,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			}
 		}
 	}
-	for _, name := range []string{"browser_session_open", "browser_session_flow", "browser_session_capture", "browser_session_status", "browser_session_close"} {
+	for _, name := range []string{"browser_session_open", "browser_session_flow", "browser_session_capture", "browser_session_trace", "browser_session_status", "browser_session_close"} {
 		if !foundBrowserSessions[name] {
 			t.Errorf("missing managed Browser tool %s", name)
 		}

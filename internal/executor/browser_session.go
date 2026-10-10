@@ -97,6 +97,8 @@ func (s *Server) browserSessionAction(ctx context.Context, req Request) Response
 		return s.browserSessionFlow(ctx, req)
 	case "browser_session_capture":
 		return s.browserSessionCapture(ctx, req)
+	case "browser_session_trace":
+		return s.browserSessionTrace(ctx, req)
 	case "browser_session_status":
 		return s.browserSessionStatus(req)
 	case "browser_session_close":
@@ -210,16 +212,18 @@ func (s *Server) browserSessionOpen(ctx context.Context, req Request) Response {
 }
 
 type browserSessionFrame struct {
-	Event  string          `json:"event"`
-	Nonce  string          `json:"nonce,omitempty"`
-	Reason string          `json:"reason,omitempty"`
-	Result json.RawMessage `json:"result,omitempty"`
-	Mime   string          `json:"mime,omitempty"`
-	Size   int             `json:"size,omitempty"`
-	SHA256 string          `json:"sha256,omitempty"`
-	Parts  int             `json:"parts,omitempty"`
-	Index  int             `json:"index,omitempty"`
-	Data   string          `json:"data,omitempty"`
+	Event       string          `json:"event"`
+	Nonce       string          `json:"nonce,omitempty"`
+	Reason      string          `json:"reason,omitempty"`
+	Result      json.RawMessage `json:"result,omitempty"`
+	Mime        string          `json:"mime,omitempty"`
+	Size        int             `json:"size,omitempty"`
+	SHA256      string          `json:"sha256,omitempty"`
+	Parts       int             `json:"parts,omitempty"`
+	Index       int             `json:"index,omitempty"`
+	Data        string          `json:"data,omitempty"`
+	Offset      int64           `json:"offset,omitempty"`
+	ChunkSHA256 string          `json:"chunk_sha256,omitempty"`
 }
 
 // The same broker event ring/cursor used by LSP/DAP is the sole output owner.
@@ -245,7 +249,8 @@ func (s *Server) browserSessionReadFrame(ctx context.Context, req Request, state
 				return browserSessionFrame{}, true, errors.New("browser_session_not_ready")
 			}
 		} else if frame.Nonce != nonce || (frame.Event != "result" && frame.Event != "error" &&
-			frame.Event != "capture_meta" && frame.Event != "capture_part" && frame.Event != "capture_done") {
+			frame.Event != "capture_meta" && frame.Event != "capture_part" && frame.Event != "capture_done" &&
+			frame.Event != "trace_meta" && frame.Event != "trace_chunk" && frame.Event != "trace_discarded") {
 			return browserSessionFrame{}, true, errors.New("browser_session_unexpected_result")
 		}
 		return frame, true, nil
