@@ -216,59 +216,90 @@ const __asaNavigationFailure = error => {
 const __asaLocator = step => step.selector
   ? page.locator(step.selector)
   : page.getByRole(step.role, step.name ? { name: step.name, exact: true } : {});
-// Ref handles live in this ONE execution only. A new call never gets the
-// handle map, and a navigation or detached element invalidates old refs.
+// Refs are only issued from a verified, stable accessibility snapshot
+// generation. This map never survives the one browser_e2e call.
 const __asaRefs = new Map();
 let __asaRefSequence = 0;
 const __asaMaxRefs = 64;
-const __asaRefSelector = 'a,button,input:not([type="hidden"]),textarea,select,[role],[tabindex]';
+const __asaRefRoles = ['textbox','button','link','checkbox','radio','combobox','switch','tab','option','menuitem'];
+// This safety check is serialized into the browser for both issuance and use.
+// A CSS-visible aria-hidden or inert descendant must not become actionable.
+const __asaRefAccessible = el => {
+  if (!el.isConnected || el.ownerDocument !== document) return false;
+  for (let n = el; n;) {
+    if (n.nodeType === Node.ELEMENT_NODE &&
+        (n.hasAttribute('hidden') || n.inert ||
+         n.getAttribute('aria-hidden')?.toLowerCase() === 'true')) return false;
+    n = n.parentElement || n.getRootNode()?.host || null;
+  }
+  return true;
+};
 const __asaGetTarget = async step => {
   if (!step.ref) return __asaLocator(step);
   const entry = __asaRefs.get(step.ref);
   if (!entry) throw new Error('invalid_ref');
   if (entry.url !== page.url()) throw new Error('stale_ref');
-  const attached = await entry.element.evaluate(el => el.isConnected).catch(() => false);
-  if (!attached) throw new Error('stale_ref');
+  const active = await entry.element.evaluate(__asaRefAccessible).catch(() => false);
+  if (!active) throw new Error('stale_ref');
   return entry.element;
 };
-const __asaSnapshotRefs = async target => {
-  const candidates = target.locator(__asaRefSelector);
-  const root = await target.elementHandle().catch(() => null);
-  const rootMatch = root ? await root.evaluate((el, selector) => el.matches(selector),
-    __asaRefSelector).catch(() => false) : false;
-  const total = (rootMatch ? 1 : 0) + await candidates.count();
-  const maxRefs = Math.min(24, __asaMaxRefs - __asaRefSequence);
-  const refs = [];
-  // Scan no more than 64 candidates: hidden controls must never expose
-  // invisible labels/metadata that were omitted from the ARIA snapshot.
-  for (let i = 0; i < Math.min(total, 64) && refs.length < maxRefs; i++) {
-    const handle = rootMatch && i === 0 ? root :
-      await candidates.nth(i - (rootMatch ? 1 : 0)).elementHandle().catch(() => null);
-    if (!handle || !await handle.isVisible().catch(() => false)) continue;
-    // Bound DOM-derived strings before crossing the renderer boundary.
-    // Never expose form values; accessible names may be client-visible UI.
-    const info = await handle.evaluate(el => {
-      const tag = el.tagName.toLowerCase();
-      const type = el.getAttribute('type') || '';
-      const role = (el.getAttribute('role') || (
-        tag === 'button' ? 'button' : tag === 'a' ? 'link' :
-        tag === 'textarea' ? 'textbox' : tag === 'select' ? 'combobox' :
-        tag === 'input' ? (type === 'checkbox' ? 'checkbox' : type === 'radio' ? 'radio' : 'textbox') : ''
-      )).slice(0, 40);
-      const isForm = ['input','textarea','select'].includes(tag);
-      const name = (el.getAttribute('aria-label') || el.getAttribute('title') ||
-        (isForm ? (el.labels?.[0]?.innerText || el.getAttribute('placeholder')) :
-        // innerText omits hidden descendants; textContent would leak them.
-        el.innerText) || '').trim().slice(0, 80);
-      return { tag, role, name };
-    }).catch(() => null);
-    if (!info) continue;
-    const ref = 'e' + (++__asaRefSequence);
-    __asaRefs.set(ref, { element: handle, url: page.url() });
-    refs.push({ ref, ...info });
+// Playwright's getByRole() uses accessibility semantics instead of raw CSS
+// visibility. The complete, untruncated snapshot must contain the same count
+// of each emitted role; otherwise ALL refs are unavailable (never guess).
+const __asaSnapshotRoleHeaders = snapshot => {
+  const headers = new Map();
+  const expression = /^\s*- (textbox|button|link|checkbox|radio|combobox|switch|tab|option|menuitem)(?=[\s:]|$)/;
+  for (const line of snapshot.split('\n')) {
+    const match = expression.exec(line);
+    if (!match) continue;
+    if (!headers.has(match[1])) headers.set(match[1], []);
+    headers.get(match[1]).push(line.trim());
   }
-  const budgeted = __asaBudgetedEntries(refs);
-  return { entries: budgeted.entries, dropped: Math.max(0, total - refs.length) + budgeted.omitted };
+  return headers;
+};
+// Handles are staged but NOT published until the root/document mutation
+// monitor and an identical second ariaSnapshot have both been verified.
+const __asaSnapshotRefs = async (target, content, stable, timeout) => {
+  const roles = __asaSnapshotRoleHeaders(content);
+  const handles = [];
+  let dropped = 0;
+  for (const role of __asaRefRoles) {
+    const headers = roles.get(role) || [];
+    const expected = headers.length;
+    if (!expected) continue;
+    // Two identical accessible headers cannot be mapped unambiguously to
+    // distinct DOM handles, even when count and document generation match.
+    if (new Set(headers).size !== expected) return null;
+    if (!await stable()) return null;
+    const locator = target.getByRole(role);
+    const actual = await locator.count();
+    if (!await stable() || actual !== expected) return null;
+    const capacity = Math.max(0, Math.min(24 - handles.length,
+      __asaMaxRefs - __asaRefSequence - handles.length));
+    const take = Math.min(actual, capacity);
+    dropped += actual - take;
+    for (let i = 0; i < take; i++) {
+      if (!await stable()) return null;
+      const current = locator.nth(i);
+      // ARIA ownership can reorder the accessibility tree without changing
+      // DOM/getByRole order. Require the exact role+name/state header to
+      // agree with the entry at the SAME position in the returned snapshot.
+      const ownSnapshot = await current.ariaSnapshot({
+        timeout: Math.min(timeout, 1000)
+      }).catch(() => null);
+      if (!ownSnapshot || ownSnapshot.split('\n', 1)[0].trim() !== headers[i] ||
+          !await stable()) return null;
+      const handle = await current.elementHandle({
+        timeout: Math.min(timeout, 1000)
+      }).catch(() => null);
+      if (!handle || !await stable() ||
+          !await handle.evaluate(__asaRefAccessible).catch(() => false)) return null;
+      // Only static role/index metadata crosses the renderer. A candidate
+      // with an unproved or reordered accessible header receives no ref.
+      handles.push({ element: handle, role, role_index: i });
+    }
+  }
+  return { handles, dropped };
 };
 const __asaResults = [];
 let __asaFailedStep = null;
@@ -290,9 +321,35 @@ for (let i = 0; i < __asaSteps.length; i++) {
         // Count local content AND outside accessible-name/ownership references:
         // ARIA IDREFs, associated native <label>s and transitive references.
         // A tiny scoped target can otherwise pull megabytes from elsewhere.
-        const scope = await target.evaluate(element => {
+        const root = await target.elementHandle({ timeout });
+        // Install before the DOM preflight, ariaSnapshot and role lookups.
+        // A document replacement (including same-URL reload), detached root
+        // or any DOM mutation invalidates the snapshot/ref association.
+        const monitor = await root.evaluateHandle(el => {
+          const doc = el.ownerDocument;
+          let changed = false;
+          const observer = new MutationObserver(() => { changed = true; });
+          observer.observe(doc, {
+            subtree: true, childList: true, attributes: true, characterData: true
+          });
+          return {
+            stable: () => {
+              if (observer.takeRecords().length) changed = true;
+              return !changed && doc === document && el.isConnected;
+            },
+            close: () => observer.disconnect()
+          };
+        });
+        const stable = () => monitor.evaluate(m => m.stable()).catch(() => false);
+        item.refs = [];
+        item.refs_unavailable = true;
+        item.refs_dropped = null;
+        item.refs_scope = 'flow_only';
+        try {
+        const scope = await root.evaluate(element => {
           const budget = { nodes: 0, text_units: 0, attribute_units: 0,
-            state_units: 0, generated_units: 0 };
+            state_units: 0, generated_units: 0,
+            has_shadow: element.getRootNode() instanceof ShadowRoot };
           const roots = [element];
           const queued = new Set(roots);
           const visited = new Set();
@@ -356,8 +413,12 @@ for (let i = 0; i < __asaSteps.length; i++) {
                   if (add('state_units', node.value.length))
                     return { too_large: true, reason: 'control_value', ...budget };
                 }
-                if (node.shadowRoot && addRoot(node.shadowRoot))
-                  return reject('dependency_refs');
+                if (node.shadowRoot) {
+                  // A document observer cannot follow mutations in shadow
+                  // trees; fail closed on refs for this snapshot scope.
+                  budget.has_shadow = true;
+                  if (addRoot(node.shadowRoot)) return reject('dependency_refs');
+                }
                 // The same node may expose a reflected property and an IDREF
                 // attribute; consider both so neither can bypass preflight.
                 // Property paths are essential for ID-less remote Elements.
@@ -413,7 +474,7 @@ for (let i = 0; i < __asaSteps.length; i++) {
               node = walker.nextNode();
             } while (node);
           }
-          return { too_large: false };
+          return { too_large: false, has_shadow: budget.has_shadow };
         }, undefined, { timeout });
         if (scope.too_large) {
           item.snapshot = '';
@@ -423,19 +484,60 @@ for (let i = 0; i < __asaSteps.length; i++) {
           item.preflight_reason = scope.reason;
           break;
         }
+        if (!await stable()) {
+          item.snapshot = '';
+          item.truncated = true;
+          item.reason = 'dom_changed_during_preflight';
+          break;
+        }
         const content = await target.ariaSnapshot({ timeout });
         const bounded = __asaBudgeted(content);
         item.total_bytes = Buffer.byteLength(content, 'utf8');
         item.snapshot = bounded.text;
         item.truncated = bounded.truncated;
-        // Page churn must not turn a successfully bounded snapshot into a
-        // failure merely because optional ref enumeration raced navigation.
-        const refs = await __asaSnapshotRefs(target).catch(() => null);
-        item.refs = refs?.entries || [];
-        item.refs_dropped = refs?.dropped ?? null;
-        item.refs_unavailable = !refs;
-        item.refs_scope = 'flow_only';
+        // Never issue a ref to an element not present in the complete,
+        // stable accessibility snapshot. A document mutation/reload or
+        // unsupported shadow subtree yields snapshot text but no refs.
+        if (bounded.truncated || scope.has_shadow || !await stable()) {
+          item.refs_reason = bounded.truncated ? 'snapshot_truncated' :
+            scope.has_shadow ? 'shadow_scope' : 'snapshot_changed';
+          break;
+        }
+        const candidates = await __asaSnapshotRefs(target, content, stable, timeout).catch(() => null);
+        if (!candidates || !await stable()) {
+          item.refs_reason = 'snapshot_changed';
+          break;
+        }
+        // Re-check accessibility after the independent role lookups. This
+        // detects CSSOM/accessibility changes even without a DOM mutation.
+        const verify = await target.ariaSnapshot({ timeout }).catch(() => null);
+        if (verify !== content || !await stable()) {
+          item.refs_reason = 'snapshot_changed';
+          break;
+        }
+        const projected = candidates.handles.map((entry, j) => ({
+          ref: 'e' + (__asaRefSequence + j + 1),
+          role: entry.role, role_index: entry.role_index
+        }));
+        const selected = __asaBudgetedEntries(projected);
+        if (!await stable()) {
+          item.refs_reason = 'snapshot_changed';
+          break;
+        }
+        for (let j = 0; j < selected.entries.length; j++) {
+          const id = selected.entries[j].ref;
+          __asaRefs.set(id, { element: candidates.handles[j].element, url: page.url() });
+        }
+        __asaRefSequence += selected.entries.length;
+        item.refs = selected.entries;
+        item.refs_dropped = candidates.dropped + selected.omitted;
+        item.refs_unavailable = false;
         break;
+        } finally {
+          await monitor.evaluate(m => m.close()).catch(() => {});
+          await monitor.dispose().catch(() => {});
+          await root.dispose().catch(() => {});
+        }
       }
       case 'click':
         await (await __asaGetTarget(step)).click({ timeout });
@@ -499,7 +601,9 @@ for (let i = 0; i < __asaSteps.length; i++) {
     if (step.action === 'goto') {
       item.error = __asaNavigationFailure(error);
       item.url = __asaURL(step.url);
-     } else if (step.ref) {
+     } else if (step.action === 'snapshot') {
+      item.error = 'snapshot_failed';
+    } else if (step.ref) {
       // ElementHandle action failures can include the page's sensitive URL,
       // query or DOM. Ref errors are finite classifications, never raw text.
       const message = String(error?.message || error);

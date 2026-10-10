@@ -52,6 +52,6 @@ printf 'EXACT_BROWSER_ACCEPTANCE_HEAD=%s\n' "$(git rev-parse HEAD)"
 printf 'PINNED_RUNTIME node=%s playwright=%s chromium_revision=%s\n' "$node_version" "$playwright_version" "$chromium_revision"
 log="$root/browser-e2e-acceptance.log"
 AI_SERVER_AGENT_BROWSER_FLOW_RUNTIME="$root" \
-  go test ./internal/browser -run '^TestBrowserFlow(PinnedRuntimeAcceptance|ReviewAcceptance)$' -v -count=1 | tee "$log"
+  go test ./internal/browser -run '^TestBrowserFlow(PinnedRuntimeAcceptance|ReviewAcceptance|RefLifecyclePinnedRuntime|SnapshotIssuanceRacePinnedRuntime|AccessibilityPrivacyPinnedRuntime)$' -v -count=1 | tee "$log"
 printf 'PINNED_BROWSER_ACCEPTANCE_LOG_SHA256='
 sha256sum "$log" | awk '{print $1}'
