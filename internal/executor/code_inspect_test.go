@@ -2,6 +2,7 @@ package executor
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -62,6 +63,50 @@ func TestCodeGoRealWorkerReadAndGopls(t *testing.T) {
 			t.Fatalf("incorrect definition: %+v", out)
 		}
 	}
+	// A cross-file definition must carry a target version proven through
+	// the worker-authority helper, not only a validated caller version.
+	target := filepath.Join(workspace, "target.go")
+	caller := filepath.Join(workspace, "caller.go")
+	if err := os.WriteFile(target, []byte("package demo\nfunc TargetValue() int { return 42 }\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(caller, []byte("package demo\nfunc Use() int { return TargetValue() }\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	callerStat := s.workerWorkspaceFile(context.Background(), Request{Action: "workspace_stat", Workspace: workspace, Path: "caller.go"})
+	targetStat := s.workerWorkspaceFile(context.Background(), Request{Action: "workspace_stat", Workspace: workspace, Path: "target.go"})
+	if !callerStat.OK || !targetStat.OK {
+		t.Fatalf("worker stat failed: caller=%+v target=%+v", callerStat, targetStat)
+	}
+	cross := owner
+	cross.Path = "caller.go"
+	cross.FileVersion = callerStat.FileVersion
+	cross.CodeMethod = "definition"
+	cross.Line = 1
+	cross.Character = 26
+	linked := s.codeInspect(context.Background(), cross)
+	if !linked.OK || !strings.Contains(linked.Output, "\"uri\":\"target.go\"") || !strings.Contains(linked.Output, "\"file_version\":\""+targetStat.FileVersion+"\"") {
+		t.Fatalf("cross-file target missing exact worker version: %+v", linked)
+	}
+	// A deterministic writer races the second, target-overlay-bound query.
+	// The source caller.go is unchanged, so source-only validation cannot
+	// detect this; the target identity must reject the stale result.
+	s.codeTargetSnapshotHook = func() {
+		if err := os.WriteFile(target, []byte("package demo\nfunc TargetValue() int { return 43 }\n"), 0600); err != nil {
+			panic(err)
+		}
+	}
+	changedTarget := s.codeInspect(context.Background(), cross)
+	s.codeTargetSnapshotHook = nil
+	if changedTarget.OK || changedTarget.ErrorCode != "code_target_changed" || changedTarget.ErrorClass != "conflict" {
+		t.Fatalf("concurrently changed LSP target was accepted: %+v", changedTarget)
+	}
+	refreshedTarget := s.workerWorkspaceFile(context.Background(), Request{Action: "workspace_stat", Workspace: workspace, Path: "target.go"})
+	newResult := s.codeInspect(context.Background(), cross)
+	if !newResult.OK || !strings.Contains(newResult.Output, "\"file_version\":\""+refreshedTarget.FileVersion+"\"") {
+		t.Fatalf("stable target cannot be read against new exact version: %+v", newResult)
+	}
+
 	// A source error must be an actual diagnostic, not a quietly empty
 	// "success" response or a copy of stale diagnostics from an earlier file.
 	broken := "package demo\nfunc main() { neverDeclaredSymbol() }\n"
@@ -86,5 +131,28 @@ func TestCodeGoRealWorkerReadAndGopls(t *testing.T) {
 	owner.CodeMethod = "definition"
 	if out := s.codeInspect(context.Background(), owner); out.OK || out.ErrorCode != "file_changed" {
 		t.Fatalf("stale file allowed: %+v", out)
+	}
+}
+
+func TestCodeLocationVersionsRejectOutsideAndUnsafeTargets(t *testing.T) {
+	workspace := filepath.Join(t.TempDir(), "project")
+	raw := []byte(`[{"uri":"` + fileURI(filepath.Join(workspace, "pkg", "target.go")) + `","range":{"start":{"line":1,"character":2}}},{"uri":"` + fileURI("/etc/passwd") + `","range":{"start":{"line":1}}}]`)
+	normalized, err := normalizeCodeLocations(workspace, raw)
+	if err != nil {
+		t.Fatal(err)
+	}
+	paths, err := codeTargetPaths(normalized)
+	if err != nil || len(paths) != 1 || paths[0] != filepath.Join("pkg", "target.go") {
+		t.Fatalf("unsafe target collection: paths=%v err=%v", paths, err)
+	}
+	annotated, err := bindCodeLocationVersions(normalized, map[string]string{paths[0]: "v1:target-proof"})
+	if err != nil || !strings.Contains(string(annotated), "v1:target-proof") || strings.Contains(string(annotated), "/etc/passwd") || !strings.Contains(string(annotated), `"external":true`) {
+		t.Fatalf("path leak or unversioned target: %s (%v)", annotated, err)
+	}
+	if _, err := bindCodeLocationVersions(normalized, nil); !errors.Is(err, errCodeTargetUnstable) {
+		t.Fatalf("missing target version unexpectedly accepted: %v", err)
+	}
+	if _, err := codeTargetPaths([]byte(`{"uri":"../escape.go"}`)); !errors.Is(err, errCodeTargetUnstable) {
+		t.Fatalf("untrusted relative target unexpectedly accepted: %v", err)
 	}
 }

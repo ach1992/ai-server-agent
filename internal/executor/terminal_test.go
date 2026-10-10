@@ -484,6 +484,7 @@ func TestWorkerTmuxCloseKillsAllPrivateServerSessions(t *testing.T) {
 
 func TestWorkerTerminalUnixSocketPathFailsBeforeSpawn(t *testing.T) {
 	s, owner, _ := testStdioBroker(t)
+	s.terminalBinary = "/usr/bin/tmux" // Only the isolated non-root fixture uses worker-owned sockets.
 	root := filepath.Join(s.cfg.WorkspaceDir, strings.Repeat("long-namespace-", 8))
 	workspace := filepath.Join(root, "worktree")
 	if err := os.MkdirAll(workspace, 0700); err != nil {

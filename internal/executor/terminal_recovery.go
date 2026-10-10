@@ -167,9 +167,15 @@ func (s *Server) readTerminalRecord(req Request) (terminalRecord, error) {
 	if rec.Version != 1 || rec.ID != req.SessionID || rec.OwnerID != req.PrincipalID || rec.OwnerClass != req.PrincipalClass || rec.Workspace != filepath.Clean(req.Workspace) || rec.Root != req.Root || req.Approval != req.Root || !validTmuxSessionName(rec.Name) || !validTerminalID(rec.ID) || rec.Pane == "" || rec.Columns < 20 || rec.Columns > 240 || rec.Rows < 5 || rec.Rows > 80 {
 		return terminalRecord{}, errSessionNotFound
 	}
-	base := s.cfg.WorkspaceDir
+	// Production worker terminals are executor-root-controlled just like
+	// root terminals; only an explicit in-process fixture keeps the former
+	// worker-owned socket layout. Never trust a legacy worker-owned socket.
+	fixtureWorkerBackend := !rec.Root && s.terminalBinary != ""
+	base := filepath.Join(s.cfg.StateDir, "worker-terminals")
 	if rec.Root {
 		base = filepath.Join(s.cfg.StateDir, "root-terminals")
+	} else if fixtureWorkerBackend {
+		base = s.cfg.WorkspaceDir
 	}
 	if !filepath.IsAbs(rec.SocketDir) || !withinPath(base, rec.SocketDir) || !strings.HasPrefix(filepath.Base(rec.SocketDir), ".asa-tmux-") || rec.SocketDir == base {
 		return terminalRecord{}, errors.New("terminal_socket_identity_invalid")
@@ -179,9 +185,9 @@ func (s *Server) readTerminalRecord(req Request) (terminalRecord, error) {
 		return rec, errors.New("terminal_runtime_missing")
 	}
 	st, ok = info.Sys().(*syscall.Stat_t)
-	expectedUID := s.workerUID
-	if rec.Root {
-		expectedUID = 0
+	expectedUID := uint32(0)
+	if fixtureWorkerBackend {
+		expectedUID = s.workerUID
 	}
 	if !ok || !info.IsDir() || info.Mode().Perm() != 0700 || st.Uid != expectedUID {
 		return rec, errors.New("terminal_runtime_untrusted")

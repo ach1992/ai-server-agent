@@ -20,11 +20,12 @@ func testStdioBroker(t *testing.T) (*Server, Request, string) {
 	if err := os.Mkdir(workspace, 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.Mkdir(filepath.Join(root, "state"), 0700); err != nil {
+	state := t.TempDir()
+	if err := os.Mkdir(filepath.Join(state, "worker-home"), 0700); err != nil {
 		t.Fatal(err)
 	}
 	s := &Server{
-		cfg:       config.Config{WorkspaceDir: root, StateDir: filepath.Join(root, "state")},
+		cfg:       config.Config{WorkspaceDir: root, StateDir: state},
 		workerUID: uint32(os.Geteuid()), workerGID: uint32(os.Getegid()),
 		sessions: newStdioSessionBroker(),
 	}
@@ -182,7 +183,9 @@ func TestWorkerStdioSessionSecretsAndInputBounds(t *testing.T) {
 	for _, event := range read.Events {
 		content = append(content, event.Data...)
 	}
-	if bytes.Contains(content, []byte("UNTRUSTED_EXECUTOR_SECRET")) || !bytes.Contains(content, []byte("HOME="+s.cfg.WorkspaceDir)) {
+	if bytes.Contains(content, []byte("UNTRUSTED_EXECUTOR_SECRET")) || !bytes.Contains(content, []byte("HOME="+filepath.Join(s.cfg.StateDir, "worker-home"))) ||
+		bytes.Contains(content, []byte("HOME="+s.cfg.WorkspaceDir)) ||
+		!bytes.Contains(content, []byte("XDG_CACHE_HOME="+filepath.Join(s.cfg.StateDir, "worker-home", ".cache"))) {
 		t.Fatalf("session inherited unsafe env or wrong HOME: %q", content)
 	}
 	id2, err := s.workerStdioSession(owner, "lsp", workspace, "/bin/cat")
@@ -382,5 +385,41 @@ func TestStdioSessionIDDoesNotSurviveBrokerRestart(t *testing.T) {
 	restarted := newStdioSessionBroker()
 	if _, err := restarted.read(owner, id, 0, maxStdioEventBytes); !errors.Is(err, errSessionNotFound) {
 		t.Fatalf("restarted broker accepted stale session identity: %v", err)
+	}
+}
+
+func TestWorkerHomeCannotFallBackToWorkspace(t *testing.T) {
+	s, owner, workspace := testStdioBroker(t)
+	home := filepath.Join(s.cfg.StateDir, "worker-home")
+	if err := os.Chmod(home, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.workerStdioSession(owner, "lsp", workspace, "/bin/cat"); err == nil {
+		t.Fatal("nonprivate worker home accepted")
+	}
+	if err := os.Chmod(home, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(home, home+"-old"); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(home+"-old", home); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.workerStdioSession(owner, "lsp", workspace, "/bin/cat"); err == nil {
+		t.Fatal("symlinked worker home accepted")
+	}
+	if err := os.Remove(home); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.workerStdioSession(owner, "lsp", workspace, "/bin/cat"); err == nil {
+		t.Fatal("missing worker home silently fell back to project workspace")
+	}
+	if err := os.Rename(home+"-old", home); err != nil {
+		t.Fatal(err)
+	}
+	s.cfg.StateDir = s.cfg.WorkspaceDir
+	if _, err := s.workerStdioSession(owner, "lsp", workspace, "/bin/cat"); err == nil {
+		t.Fatal("stateful HOME within project workspace accepted")
 	}
 }

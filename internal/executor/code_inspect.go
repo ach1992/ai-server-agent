@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -8,6 +9,7 @@ import (
 	"github.com/ach1992/ai-server-agent/internal/systemexec"
 	"net/url"
 	"path/filepath"
+	"sort"
 	"strings"
 	"time"
 )
@@ -17,6 +19,9 @@ import (
 // Neither the privileged executor nor the network process reads project source
 // directly, and no LSP suggestion is auto-applied to disk.
 const codeMaxDocumentBytes = (lspMaxFrameBytes / 2) - 1
+const codeMaxTargetFiles = 16
+
+var errCodeTargetUnstable = errors.New("code_target_changed")
 
 func (s *Server) codeInspect(parent context.Context, req Request) Response {
 	if req.Root || req.Approval || req.Workspace == "" || req.FileVersion == "" {
@@ -70,8 +75,13 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 	}
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
-	data, err := s.workerGoInspection(ctx, req, binary, filepath.Join(workspace, path), source.Output, req.CodeMethod, req.Line, req.Character)
+	canonicalReq := req
+	canonicalReq.Path = path
+	data, err := s.workerGoInspection(ctx, canonicalReq, binary, filepath.Join(workspace, path), source.Output, req.CodeMethod, req.Line, req.Character)
 	if err != nil {
+		if errors.Is(err, errCodeTargetUnstable) {
+			return fileError("code_target_changed", "conflict", err)
+		}
 		return fileError("code_inspection_failed", "runtime", err)
 	}
 	// Recheck worker-authority file identity AFTER semantic computation. Do
@@ -125,36 +135,216 @@ func (s *Server) workerGoInspection(ctx context.Context, req Request, goplsPath,
 	}
 	doc := map[string]string{"uri": uri}
 	position := map[string]int{"line": line, "character": character}
-	var raw json.RawMessage
-	switch method {
-	case "definition":
-		raw, err = wire.call(ctx, "textDocument/definition", map[string]any{"textDocument": doc, "position": position})
-	case "references":
-		raw, err = wire.call(ctx, "textDocument/references", map[string]any{"textDocument": doc, "position": position, "context": map[string]bool{"includeDeclaration": true}})
-	case "symbols":
-		raw, err = wire.call(ctx, "textDocument/documentSymbol", map[string]any{"textDocument": doc})
-	case "diagnostics":
-		raw, err = wire.call(ctx, "textDocument/diagnostic", map[string]any{"textDocument": doc})
-	default:
-		return nil, errors.New("unsupported method")
+	query := func() (json.RawMessage, error) {
+		var raw json.RawMessage
+		var queryErr error
+		switch method {
+		case "definition":
+			raw, queryErr = wire.call(ctx, "textDocument/definition", map[string]any{"textDocument": doc, "position": position})
+		case "references":
+			raw, queryErr = wire.call(ctx, "textDocument/references", map[string]any{"textDocument": doc, "position": position, "context": map[string]bool{"includeDeclaration": true}})
+		case "symbols":
+			raw, queryErr = wire.call(ctx, "textDocument/documentSymbol", map[string]any{"textDocument": doc})
+		case "diagnostics":
+			raw, queryErr = wire.call(ctx, "textDocument/diagnostic", map[string]any{"textDocument": doc})
+		default:
+			return nil, errors.New("unsupported method")
+		}
+		if queryErr != nil {
+			return nil, queryErr
+		}
+		if len(raw) > 16<<10 || !json.Valid(raw) || strings.TrimSpace(string(raw)) == "" {
+			return nil, errors.New("invalid_or_oversized_lsp_result")
+		}
+		return normalizeCodeLocations(workspace, raw)
 	}
+	first, err := query()
 	if err != nil {
 		return nil, err
 	}
-	if len(raw) > 16<<10 {
-		// Never cut JSON mid-value and mislead callers about completeness.
-		return nil, errors.New("code_result_too_large: narrow query or use an explicit CLI range")
+	paths, err := codeTargetPaths(first)
+	if err != nil {
+		return nil, err
 	}
-	// Protect AI-visible responses from arbitrary extension/provider data and
-	// accidental unbounded nested raw objects: enforce a fixed response size.
-	if !json.Valid(raw) {
-		return nil, errors.New("invalid_lsp_result")
+	if len(paths) == 0 {
+		return first, nil
 	}
-	if strings.TrimSpace(string(raw)) == "" {
-		return nil, errors.New("empty_lsp_result")
+	versions := make(map[string]string, len(paths))
+	haveCrossFileTarget := false
+	for _, target := range paths {
+		if target == req.Path {
+			versions[target] = req.FileVersion
+			continue
+		}
+		haveCrossFileTarget = true
+		targetReq := req
+		targetReq.Path = target
+		targetReq.Action = "workspace_stat"
+		targetReq.FileVersion = ""
+		targetReq.Offset = 0
+		targetReq.Limit = 0
+		stat := s.workerWorkspaceFile(ctx, targetReq)
+		if !stat.OK || stat.FileVersion == "" || stat.FileSize == nil || *stat.FileSize > codeMaxDocumentBytes {
+			return nil, fmt.Errorf("%w: target file is not safely inspectable", errCodeTargetUnstable)
+		}
+		targetReq.Action = "workspace_read"
+		targetReq.Limit = codeMaxDocumentBytes
+		read := s.workerWorkspaceFile(ctx, targetReq)
+		if !read.OK || read.FileVersion != stat.FileVersion || read.EOF == nil || !*read.EOF || read.OutputEncoding != "utf-8" {
+			return nil, fmt.Errorf("%w: target file snapshot not stable", errCodeTargetUnstable)
+		}
+		versions[target] = stat.FileVersion
+		if err := wire.notify("textDocument/didOpen", map[string]any{
+			"textDocument": map[string]any{"uri": fileURI(filepath.Join(workspace, target)), "languageId": "go", "version": 1, "text": read.Output},
+		}); err != nil {
+			return nil, err
+		}
 	}
-	return normalizeCodeLocations(workspace, raw)
+	if haveCrossFileTarget {
+		if s.codeTargetSnapshotHook != nil {
+			s.codeTargetSnapshotHook()
+		}
+		// Re-query with explicit didOpen overlays for EVERY in-workspace
+		// target. The first query only discovers candidates; it is not
+		// returned as exact semantic truth. If results diverge, fail closed.
+		second, err := query()
+		if err != nil {
+			return nil, err
+		}
+		if !bytes.Equal(first, second) {
+			return nil, fmt.Errorf("%w: semantic targets changed across snapshot validation", errCodeTargetUnstable)
+		}
+	}
+	// A file modified during the second semantic query invalidates the
+	// returned line/range even when the request source remains identical.
+	for _, target := range paths {
+		targetReq := req
+		targetReq.Action = "workspace_stat"
+		targetReq.Path = target
+		targetReq.FileVersion = ""
+		targetReq.Limit = 0
+		targetReq.Offset = 0
+		stable := s.workerWorkspaceFile(ctx, targetReq)
+		if !stable.OK || stable.FileVersion != versions[target] {
+			return nil, fmt.Errorf("%w: target file changed during semantic resolution", errCodeTargetUnstable)
+		}
+	}
+	return bindCodeLocationVersions(first, versions)
+}
 
+// Only normalized, in-workspace Go targets may be inspected. No raw LSP
+// URI is used as a filesystem read authority, and references are bounded.
+func codeTargetPaths(normalized json.RawMessage) ([]string, error) {
+	var data any
+	if err := json.Unmarshal(normalized, &data); err != nil {
+		return nil, err
+	}
+	seen := make(map[string]bool)
+	var visit func(any, int) error
+	visit = func(value any, depth int) error {
+		if depth > 32 {
+			return errors.New("lsp_result_too_deep")
+		}
+		switch v := value.(type) {
+		case []any:
+			for _, item := range v {
+				if err := visit(item, depth+1); err != nil {
+					return err
+				}
+			}
+		case map[string]any:
+			for key, item := range v {
+				if key == "uri" || key == "targetUri" {
+					path, ok := item.(string)
+					if !ok {
+						return errors.New("invalid_normalized_location")
+					}
+					if path == "external" {
+						continue
+					}
+					relative, err := safeWorkspaceRelativeFile(path)
+					if err != nil || relative != path || filepath.Ext(path) != ".go" {
+						return fmt.Errorf("%w: unsupported semantic target", errCodeTargetUnstable)
+					}
+					seen[path] = true
+					if len(seen) > codeMaxTargetFiles {
+						return errors.New("code_target_file_limit")
+					}
+					continue
+				}
+				if err := visit(item, depth+1); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := visit(data, 0); err != nil {
+		return nil, err
+	}
+	paths := make([]string, 0, len(seen))
+	for p := range seen {
+		paths = append(paths, p)
+	}
+	// Stable order bounds resource consumption and makes repeated probes reliable.
+	sort.Strings(paths)
+	return paths, nil
+}
+
+func bindCodeLocationVersions(normalized json.RawMessage, versions map[string]string) (json.RawMessage, error) {
+	var data any
+	if err := json.Unmarshal(normalized, &data); err != nil {
+		return nil, err
+	}
+	var visit func(any, int) error
+	visit = func(value any, depth int) error {
+		if depth > 32 {
+			return errors.New("lsp_result_too_deep")
+		}
+		switch v := value.(type) {
+		case []any:
+			for _, item := range v {
+				if err := visit(item, depth+1); err != nil {
+					return err
+				}
+			}
+		case map[string]any:
+			for key, item := range v {
+				if key == "uri" || key == "targetUri" {
+					path, ok := item.(string)
+					if !ok {
+						return errors.New("invalid_normalized_location")
+					}
+					if path != "external" {
+						version, ok := versions[path]
+						if !ok || version == "" {
+							return fmt.Errorf("%w: location version unavailable", errCodeTargetUnstable)
+						}
+						if existing, has := v["file_version"]; has && existing != version {
+							return fmt.Errorf("%w: ambiguous nested location versions", errCodeTargetUnstable)
+						}
+						v["file_version"] = version
+					}
+					continue
+				}
+				if err := visit(item, depth+1); err != nil {
+					return err
+				}
+			}
+		}
+		return nil
+	}
+	if err := visit(data, 0); err != nil {
+		return nil, err
+	}
+	clean, err := json.Marshal(data)
+	if err != nil {
+		return nil, err
+	}
+	if len(clean) > 16<<10 {
+		return nil, errors.New("code_result_too_large")
+	}
+	return clean, nil
 }
 
 func fileURI(path string) string { return (&url.URL{Scheme: "file", Path: path}).String() }

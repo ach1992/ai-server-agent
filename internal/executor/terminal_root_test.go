@@ -204,10 +204,13 @@ func TestApprovedRootTmuxRealNonProduction(t *testing.T) {
 	await("ROOT_ALT_SCREEN")
 	// Exercise an interactive REPL rather than one-shot shell command emulation.
 	send("python3 -q\n")
-	send("print('ROOT_PY_REPL')\n")
+	// Use markers assembled by execution, not strings appearing verbatim
+	// in echoed input. Otherwise a pending Python REPL can falsely satisfy
+	// await() before the shell has actually resumed after exit().
+	send("print('ROOT_PY_' + 'REPL')\n")
 	await("ROOT_PY_REPL")
 	send("exit()\n")
-	send("printf 'ROOT_REPL_EXITED\\n'\n")
+	send("printf 'ROOT_%s\\n' 'REPL_EXITED'\n")
 	await("ROOT_REPL_EXITED")
 
 	// Restart the executor-owned Control Mode connection only; do NOT

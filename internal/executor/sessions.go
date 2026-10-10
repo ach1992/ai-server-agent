@@ -146,6 +146,39 @@ func (s *Server) rootTmuxProcessSession(req Request, workspace, binary string, t
 	return s.startProcessSession(req, "terminal", workspace, binary, terminal, args...)
 }
 
+// Stateful developer subprocesses must never use the project workspace as
+// HOME. The installer provisions this directory under the root-controlled
+// Agent state parent, with only the worker UID owning its contents.
+func (s *Server) workerSessionHome() (string, error) {
+	if !filepath.IsAbs(s.cfg.StateDir) || filepath.Clean(s.cfg.StateDir) != s.cfg.StateDir || s.cfg.StateDir == "/" {
+		return "", errors.New("worker home requires a trusted absolute Agent state directory")
+	}
+	home := filepath.Join(s.cfg.StateDir, "worker-home")
+	if withinPath(s.cfg.WorkspaceDir, home) {
+		return "", errors.New("worker home must not be within the project workspace")
+	}
+	if err := trustedDir(s.cfg.StateDir); err != nil {
+		return "", fmt.Errorf("worker home parent untrusted: %w", err)
+	}
+	info, err := os.Lstat(home)
+	if err != nil {
+		return "", fmt.Errorf("worker home not provisioned: %w", err)
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.IsDir() || info.Mode().Perm() != 0700 || st.Uid != s.workerUID || st.Gid != s.workerGID {
+		return "", errors.New("worker home is not an owned private directory")
+	}
+	return home, nil
+}
+
+func sanitizedSessionEnv(home string) []string {
+	return append(sanitizedCommandEnv(home),
+		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
+		"XDG_CACHE_HOME="+filepath.Join(home, ".cache"),
+		"XDG_DATA_HOME="+filepath.Join(home, ".local", "share"),
+	)
+}
+
 func (s *Server) startProcessSession(req Request, kind, workspace, binary string, terminal *tmuxTerminalState, args ...string) (string, error) {
 	return s.startProcessSessionWithID(req, kind, workspace, binary, terminal, "", args...)
 }
@@ -207,21 +240,33 @@ func (s *Server) startProcessSessionWithID(req Request, kind, workspace, binary 
 		return "", fmt.Errorf("%s: %s", blocked.ReasonCode, blocked.Error)
 	}
 	start := time.Now()
-	// The dedicated worker HOME/cache lives outside the selected worktree.
+	// The control-plane tmux process is privileged only to protect its
+	// socket. The pane command itself must drop to the requested worker UID.
+	rootControlledWorkerTmux := terminal != nil && !terminal.root && s.terminalBinary == ""
+	if rootControlledWorkerTmux && os.Geteuid() != 0 {
+		return "", errors.New("worker tmux requires root executor-owned backend")
+	}
 	cmd := exec.Command(binary, args...)
 	cmd.Dir = cwd
-	home := s.cfg.WorkspaceDir
-	if req.Root {
-		home = "/root"
+	home := "/root"
+	if !req.Root {
+		home, err = s.workerSessionHome()
+		if err != nil {
+			return "", err
+		}
 	}
-	cmd.Env = sanitizedCommandEnv(home)
+	cmd.Env = sanitizedSessionEnv(home)
+	if rootControlledWorkerTmux {
+		// Do not supply worker-writable HOME/XDG paths to the root tmux server.
+		cmd.Env = sanitizedSessionEnv("/root")
+	}
 	if terminal != nil {
 		cmd.Env = append(cmd.Env, "TERM=xterm-256color")
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
 	cmd.WaitDelay = processGroupTerminateGrace
 	if os.Geteuid() == 0 {
-		if req.Root {
+		if req.Root || rootControlledWorkerTmux {
 			cmd.SysProcAttr.Credential = &syscall.Credential{Uid: 0, Gid: 0, Groups: []uint32{0}}
 		} else {
 			cmd.SysProcAttr.Credential = &syscall.Credential{Uid: s.workerUID, Gid: s.workerGID, Groups: []uint32{s.workerGID}}

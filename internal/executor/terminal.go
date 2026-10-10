@@ -230,28 +230,41 @@ func (s *Server) terminalOpen(req Request) Response {
 		return terminalError("session_random_unavailable", err)
 	}
 	name := "asa_" + hex.EncodeToString(nonce[:])
-	// Every terminal has a distinct tmux namespace outside its Git worktree.
-	// This directory and socket are runtime state, never durable project data.
+	// Worker shells share one UID across authenticated principals. A socket
+	// owned by aiworker is therefore NOT a principal boundary: arbitrary
+	// worker code could attach to another principal's tmux server. Production
+	// runs tmux Control Mode as root in an executor-only state namespace and
+	// explicitly drops the pane process to aiworker. The old worker-owned
+	// backend is permissible only for the in-process non-root test fixture.
+	fixtureWorkerBackend := !req.Root && s.terminalBinary != ""
 	runtimeRoot := s.cfg.WorkspaceDir
-	if req.Root {
+	if !fixtureWorkerBackend {
 		if os.Geteuid() != 0 {
-			return terminalError("root_executor_unavailable", errors.New("root executor is required"))
+			if req.Root {
+				return terminalError("root_executor_unavailable", errors.New("root executor is required"))
+			}
+			return terminalError("terminal_executor_unavailable", errors.New("private tmux control requires root executor"))
 		}
-		runtimeRoot = filepath.Join(s.cfg.StateDir, "root-terminals")
+		if err := trustedDir(s.cfg.StateDir); err != nil {
+			return terminalError("terminal_state_untrusted", err)
+		}
+		folder := "worker-terminals"
+		if req.Root {
+			folder = "root-terminals"
+		}
+		runtimeRoot = filepath.Join(s.cfg.StateDir, folder)
 		if err := os.MkdirAll(runtimeRoot, 0700); err != nil {
-			return terminalError("root_terminal_runtime_unavailable", err)
+			return terminalError("terminal_runtime_unavailable", err)
 		}
-		// The root tmux socket and its parent must never become accessible
-		// to aiworker or to the network-facing aiagent process.
 		if err := trustedDir(runtimeRoot); err != nil {
-			return terminalError("root_terminal_runtime_untrusted", err)
+			return terminalError("terminal_runtime_untrusted", err)
 		}
 	}
 	dir, err := os.MkdirTemp(runtimeRoot, ".asa-tmux-")
 	if err != nil {
 		return terminalError("terminal_runtime_unavailable", err)
 	}
-	if err := os.Chmod(dir, 0700); err == nil && os.Geteuid() == 0 && !req.Root {
+	if err := os.Chmod(dir, 0700); err == nil && fixtureWorkerBackend && os.Geteuid() == 0 {
 		err = os.Chown(dir, int(s.workerUID), int(s.workerGID))
 	}
 	if err != nil {
@@ -276,6 +289,34 @@ func (s *Server) terminalOpen(req Request) Response {
 	}
 	args := []string{"-f", "/dev/null", "-S", socket, "-C", "new-session", "-s", name,
 		"-c", cwd, "-x", strconv.Itoa(req.Columns), "-y", strconv.Itoa(req.Rows)}
+	if !req.Root && !fixtureWorkerBackend {
+		// tmux accepts a command+arguments vector after new-session options:
+		// no shell interpolation, worker-controlled config, or root pane shell.
+		setpriv := systemexec.First("/usr/bin/setpriv")
+		env := systemexec.First("/usr/bin/env")
+		bash := systemexec.First("/usr/bin/bash")
+		if setpriv == "" || env == "" || bash == "" {
+			_ = os.Remove(dir)
+			return terminalError("worker_shell_unavailable", errors.New("trusted setpriv/env/bash required for isolated worker pane"))
+		}
+		home, homeErr := s.workerSessionHome()
+		if homeErr != nil {
+			_ = os.Remove(dir)
+			return terminalError("worker_home_unavailable", homeErr)
+		}
+		// The tmux server keeps root-only socket authority, while this
+		// executable drops UID/GID before starting the interactive pane.
+		args = append(args, setpriv,
+			"--reuid="+strconv.FormatUint(uint64(s.workerUID), 10),
+			"--regid="+strconv.FormatUint(uint64(s.workerGID), 10),
+			"--clear-groups", env, "-i",
+			"HOME="+home, "XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
+			"XDG_CACHE_HOME="+filepath.Join(home, ".cache"),
+			"XDG_DATA_HOME="+filepath.Join(home, ".local", "share"),
+			"PATH="+safeCommandPath, "LANG=C.UTF-8", "LC_ALL=C.UTF-8",
+			"TERM=screen-256color", "USER="+s.cfg.WorkerUser, "LOGNAME="+s.cfg.WorkerUser,
+			"AI_SERVER_AGENT=1", "SHELL="+bash, bash, "--noprofile", "--norc", "-i")
+	}
 	var id string
 	if req.Root {
 		id, err = s.rootTmuxProcessSession(req, cwd, binary, t, args...)
