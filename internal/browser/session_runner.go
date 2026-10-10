@@ -28,7 +28,7 @@ func managedSessionRunner(engine, profile, downloads string, ignoreHTTPS bool) (
 	}
 	return fmt.Sprintf(`import { createInterface } from 'node:readline';
 import { createHash } from 'node:crypto';
-import { statfsSync, mkdtempSync, rmSync, openSync, fstatSync, readFileSync, closeSync, constants, readdirSync } from 'node:fs';
+import { statfsSync, mkdtempSync, rmSync, openSync, fstatSync, readSync, closeSync, constants, readdirSync } from 'node:fs';
 import { join } from 'node:path';
 process.env.PLAYWRIGHT_BROWSERS_PATH = %s;
 const { chromium } = await import(%s);
@@ -156,9 +156,21 @@ try {
           if (info.size > traceMaxBytes) {
             response = {event:'error',nonce:input.nonce,reason:'trace_too_large',result:flowResult};
           } else {
-            payload = readFileSync(fd);
-            if (payload.length !== info.size || payload[0] !== 0x50 || payload[1] !== 0x4b)
-              throw Error('invalid_trace_zip');
+            // A size preflight followed by readFileSync(fd) is NOT a
+            // bounded read if another same-UID process grows the inode
+            // concurrently. Allocate exactly the proven cap, then read
+            // only that many bytes. Reject short reads and extra bytes.
+            payload = Buffer.allocUnsafe(info.size);
+            let offset = 0;
+            while (offset < payload.length) {
+              const n = readSync(fd, payload, offset, payload.length - offset, null);
+              if (n <= 0) throw Error('trace_zip_short_read');
+              offset += n;
+            }
+            const extra = Buffer.allocUnsafe(1);
+            if (readSync(fd, extra, 0, 1, null) !== 0 ||
+                payload[0] !== 0x50 || payload[1] !== 0x4b)
+              throw Error('invalid_or_grown_trace_zip');
             const digest = createHash('sha256').update(payload).digest('hex');
             traceData = payload; traceDigest = digest;
             response = {event:'trace_meta',nonce:input.nonce,mime:'application/zip',size:payload.length,
