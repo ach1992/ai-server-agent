@@ -125,6 +125,21 @@ func (s *Server) browserSessionCapture(ctx context.Context, req Request) Respons
 	if err != nil || config.Width < 1 || config.Width > 2048 || config.Height < 1 || config.Height > 1440 {
 		return uncertain()
 	}
+	// DecodeConfig validates only the JPEG headers/dimensions. A malicious or
+	// malfunctioning Browser worker can announce a matching SHA-256 for a
+	// truncated or corrupt scan, so the digest alone does not prove that an
+	// MCP client can actually decode the image. Bound dimensions *before*
+	// allocating a full image, then consume the complete compressed stream.
+	decoded, err := jpeg.Decode(bytes.NewReader(payload))
+	if err != nil || decoded.Bounds().Dx() != config.Width || decoded.Bounds().Dy() != config.Height {
+		// All nonce-bound frames, size and digest have been verified: the
+		// transfer completed, but the reported JPEG data is unusable. This is
+		// a known invalid artifact, not an unknown Browser action outcome.
+		resp := browserSessionError("browser_capture_invalid_image", "data", errors.New("captured JPEG cannot be fully decoded; no image delivered"))
+		resp.SessionID = entry.id
+		resp.Status = "not_captured"
+		return resp
+	}
 	return Response{OK: true, Status: "captured", SessionID: entry.id,
 		Output: b64.String(), OutputEncoding: "base64", MIMEType: "image/jpeg", BytesSeen: int64(len(payload)), BytesReturned: int64(len(payload)),
 		FileVersion: "sha256:" + start.SHA256}

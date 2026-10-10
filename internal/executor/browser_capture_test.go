@@ -81,6 +81,30 @@ func openCaptureFixture(t *testing.T, mode string) (*Server, Request, string, []
 	t.Helper()
 	s, owner, _ := browserAuditFixture(t)
 	raw := browserCaptureFixtureJPEG(t)
+	if mode == "corrupt_scan" {
+		// A complete-looking JPEG with correct SOI/EOI, parseable headers and
+		// accurate *new* digest can still be missing compressed scan data.
+		// The original implementation checked DecodeConfig but not Decode.
+		start := bytes.Index(raw, []byte{0xff, 0xda}) // start of scan marker
+		if start < 0 || start+4 >= len(raw) {
+			t.Fatal("JPEG fixture missing scan marker")
+		}
+		// The SOS segment starts with its two-byte length, inclusive of
+		// those bytes. Preserve all JPEG metadata and part of the compressed
+		// scan, but replace the remaining scan with a believable EOI marker.
+		scan := start + 2 + (int(raw[start+2])<<8 | int(raw[start+3]))
+		if scan >= len(raw)-10 {
+			t.Fatalf("JPEG fixture scan unexpectedly short: start=%d size=%d", scan, len(raw))
+		}
+		cut := scan + (len(raw)-scan-2)/2
+		raw = append(append([]byte(nil), raw[:cut]...), 0xff, 0xd9)
+		if _, err := jpeg.DecodeConfig(bytes.NewReader(raw)); err != nil {
+			t.Fatalf("corrupt JPEG must pass DecodeConfig to prove the regression: %v", err)
+		}
+		if _, err := jpeg.Decode(bytes.NewReader(raw)); err == nil {
+			t.Fatal("corrupt JPEG must fail full Decode to prove the regression")
+		}
+	}
 	if err := os.WriteFile(s.browserNodeBinary, []byte(makeCaptureScript(t, raw, mode)), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -147,6 +171,32 @@ func TestBrowserSessionCapturePrincipalAndBoundedIntegrity(t *testing.T) {
 		t.Fatal("verified screenshot session close held Browser profile")
 	}
 	s.browserAdmission.releaseRun()
+}
+
+func TestBrowserSessionCaptureSelfConsistentCorruptJPEGRejected(t *testing.T) {
+	s, owner, id, corrupt := openCaptureFixture(t, "corrupt_scan")
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	defer func() { _ = s.browserSessionAction(ctx, browserOwnerControl(owner, id, "browser_session_close")) }()
+
+	// The fixture sends the entire announced payload with matching size,
+	// SHA-256, valid JPEG markers and parseable image configuration, then
+	// capture_done. Only a complete scan decode can reject it.
+	if !bytes.HasPrefix(corrupt, []byte{0xff, 0xd8, 0xff}) || !bytes.HasSuffix(corrupt, []byte{0xff, 0xd9}) {
+		t.Fatal("invalid regression fixture JPEG marker bytes")
+	}
+	request := browserCaptureRequest(owner, id)
+	for attempt := 0; attempt < 2; attempt++ {
+		got := s.browserSessionAction(ctx, request)
+		if got.OK || got.ErrorCode != "browser_capture_invalid_image" || got.Status != "not_captured" ||
+			got.Output != "" || got.MIMEType != "" || got.SessionID != id || got.BytesReturned != 0 {
+			t.Fatalf("self-consistent corrupt JPEG cannot be reported as delivered (attempt %d): %+v", attempt, got)
+		}
+	}
+	status := s.browserSessionAction(ctx, browserOwnerControl(owner, id, "browser_session_status"))
+	if !status.OK || status.Status != "running" {
+		t.Fatalf("complete-but-invalid JPEG must remain a known failure, not a stranded/uncertain session: %+v", status)
+	}
 }
 
 func TestBrowserSessionCaptureFrameFailuresAreFailClosed(t *testing.T) {

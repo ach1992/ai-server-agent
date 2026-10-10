@@ -17,6 +17,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -29,9 +30,31 @@ func TestManagedBrowserSessionCapturePinnedRuntime(t *testing.T) {
 	if engine == "" {
 		t.Skip("pinned Chromium runtime required")
 	}
+	var transitionEffects atomic.Int64
 	web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/transition-effect" {
+			transitionEffects.Add(1)
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if r.URL.Path == "/scroll" {
+		if r.URL.Path == "/animation" {
+			fmt.Fprint(w, `<!doctype html><html><head><style>
+#moving {width:80px;height:120px;background:#147cc0;transition:width 90s linear;}
+#moving.active {width:600px;}
+</style></head><body><button id="start-transition" onclick="document.querySelector('#moving').classList.add('active')">Start slow transition</button>
+<div id="moving"></div><div id="phase">idle</div><div id="effect">not-fired</div>
+<script>
+const moving = document.querySelector('#moving');
+moving.addEventListener('transitionrun', () => {
+ document.querySelector('#phase').textContent = 'running';
+});
+moving.addEventListener('transitionend', () => {
+ document.querySelector('#effect').textContent = 'fired';
+ fetch('/transition-effect', {method:'POST',keepalive:true}).catch(() => {});
+});
+</script></body></html>`)
+		} else if r.URL.Path == "/scroll" {
 			fmt.Fprint(w, `<!doctype html><html><body style="margin:0"><div style="height:1050px;background:rgb(230,15,15)"><button id="go" onclick="window.scrollTo(0,1100)">Go down</button></div><div style="height:1050px;background:rgb(15,15,230)"></div></body></html>`)
 		} else if r.URL.Path == "/noise" {
 			fmt.Fprint(w, `<!doctype html><html><body style="margin:0"><canvas id="x" width="1024" height="720"></canvas><script>
@@ -208,6 +231,32 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 	br, _, bb := sample(bottomBytes)
 	if tr <= tb*2 || bb <= br*2 {
 		t.Fatalf("capture ignored scroll viewport (top red=%d blue=%d, bottom red=%d blue=%d)", tr, tb, br, bb)
+	}
+	// A read-only screenshot must NOT fast-forward a finite CSS transition:
+	// animations:'disabled' in Playwright completes it and can dispatch
+	// transitionend, triggering arbitrary open-world page handlers/network.
+	// The long duration prevents natural completion during this bounded test.
+	goTo(web.URL+"/animation", strings.Repeat("2", 32))
+	send(map[string]any{"type": "flow", "nonce": strings.Repeat("3", 32), "steps": []FlowStep{
+		{Action: "click", Selector: "#start-transition"},
+		{Action: "assert_text", Selector: "#phase", Expected: "running"},
+		{Action: "assert_text", Selector: "#effect", Expected: "not-fired"},
+	}})
+	started := read()
+	if started["event"] != "result" || started["result"].(map[string]any)["ok"] != true {
+		t.Fatalf("90s CSS transition must be actively running before the capture: %v", started)
+	}
+	inflight, imageBytes := capture(strings.Repeat("4", 32), 35, 320)
+	if inflight["event"] != "capture_meta" || len(imageBytes) == 0 {
+		t.Fatalf("active CSS transition prevented a bounded screenshot: %v", inflight)
+	}
+	send(map[string]any{"type": "flow", "nonce": strings.Repeat("5", 32), "steps": []FlowStep{
+		{Action: "assert_text", Selector: "#phase", Expected: "running"},
+		{Action: "assert_text", Selector: "#effect", Expected: "not-fired"},
+	}})
+	checked := read()
+	if checked["event"] != "result" || checked["result"].(map[string]any)["ok"] != true || transitionEffects.Load() != 0 {
+		t.Fatalf("read-only screenshot fast-forwarded CSS transition or triggered handler/network: result=%v network_side_effects=%d", checked, transitionEffects.Load())
 	}
 	goTo(web.URL+"/noise", strings.Repeat("c", 32))
 	fail, img := capture(strings.Repeat("d", 32), 70, 1024)

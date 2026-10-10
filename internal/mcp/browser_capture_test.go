@@ -65,10 +65,10 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 	}
 	defer ln.Close()
 	small, large := makeClientCaptureJPEG(t, false), makeClientCaptureJPEG(t, true)
-	observed := make(chan executor.Request, 4)
+	observed := make(chan executor.Request, 5)
 	serverErrors := make(chan error, 1)
 	go func() {
-		for i := 0; i < 4; i++ {
+		for i := 0; i < 5; i++ {
 			c, er := ln.Accept()
 			if er != nil {
 				serverErrors <- er
@@ -87,6 +87,12 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 			}
 			sha := sha256.Sum256(payload)
 			r := executor.Response{OK: true, Status: "captured", SessionID: "stdio_image_fixture", MIMEType: "image/jpeg", OutputEncoding: "base64", Output: base64.StdEncoding.EncodeToString(payload), BytesSeen: int64(len(payload)), BytesReturned: int64(len(payload)), FileVersion: "sha256:" + hex.EncodeToString(sha[:])}
+			if i == 4 {
+				// Executor proved the transfer was complete but the JPEG scan
+				// was not fully decodable. MCP MUST never synthesize image content
+				// or success from this explicit upstream failure.
+				r = executor.Response{OK: false, Status: "not_captured", SessionID: "stdio_image_fixture", ErrorCode: "browser_capture_invalid_image", ErrorClass: "data", Error: "captured JPEG cannot be fully decoded; no image delivered"}
+			}
 			if er = json.NewEncoder(c).Encode(r); er != nil {
 				serverErrors <- er
 				_ = c.Close()
@@ -176,5 +182,16 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 				t.Fatalf("bounded base64 text fallback incomplete: %+v", got)
 			}
 		}
+	}
+	invalid := call("image")
+	if !invalid.IsError || len(invalid.Content) != 1 {
+		t.Fatalf("invalid JPEG must be a single text-only MCP failure, not ImageContent: %+v", invalid)
+	}
+	if _, ok := invalid.Content[0].(*mcpsdk.TextContent); !ok {
+		t.Fatalf("invalid JPEG leaked typed image content: %T", invalid.Content[0])
+	}
+	failure, err := json.Marshal(invalid.StructuredContent)
+	if err != nil || !strings.Contains(string(failure), "browser_capture_invalid_image") || strings.Contains(string(failure), `"mime_type":"image/jpeg"`) {
+		t.Fatalf("invalid JPEG claimed usable MIME image data or lacked error classification: %s err=%v", failure, err)
 	}
 }

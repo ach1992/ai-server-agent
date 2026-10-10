@@ -84,7 +84,11 @@ try {
         // A viewport-only screenshot with origin (0,0) follows the current
         // scrolled view; shifting its clip by window.scrollY would cause a
         // viewport-relative double-offset and an invalid clipped region.
-        const jpeg = await page.screenshot({type:'jpeg',quality:input.quality,animations:'disabled',caret:'hide',
+        // Capture the current page state without fast-forwarding finite
+        // CSS transitions/animations. 'disabled' would fire transitionend
+        // handlers and can cause page-side effects on an otherwise read-only
+        // open-world screenshot tool.
+        const jpeg = await page.screenshot({type:'jpeg',quality:input.quality,animations:'allow',caret:'hide',
           fullPage:false,clip:{x:0,y:0,width:Math.min(vp.width,input.max_width),height:Math.min(vp.height,720)},
           timeout:10000});
         if (jpeg.length < 4 || jpeg.length > 32768) {
