@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"testing"
 
@@ -52,6 +53,30 @@ func (t bearerRoundTripper) RoundTrip(req *http.Request) (*http.Response, error)
 	return base.RoundTrip(clone)
 }
 
+func TestMCPImplementationVersionBuildIdentity(t *testing.T) {
+	revision := strings.Repeat("a", 40)
+	cases := []struct {
+		name   string
+		marker string
+		info   *debug.BuildInfo
+		want   string
+	}{
+		{name: "stable release candidate", marker: "0.1.10", want: "0.1.10"},
+		{name: "unknown source", marker: "0.1.0-dev", want: "source-unknown"},
+		{name: "clean source", marker: "0.1.0-dev", info: &debug.BuildInfo{Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: revision}, {Key: "vcs.modified", Value: "false"}}}, want: "source-" + revision},
+		{name: "dirty source", marker: "0.1.0-dev", info: &debug.BuildInfo{Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: revision}, {Key: "vcs.modified", Value: "true"}}}, want: "source-" + revision + "-dirty"},
+		{name: "missing dirty status", marker: "0.1.0-dev", info: &debug.BuildInfo{Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: revision}}}, want: "source-unknown"},
+		{name: "invalid revision", marker: "0.1.0-dev", info: &debug.BuildInfo{Settings: []debug.BuildSetting{{Key: "vcs.revision", Value: "untrusted"}, {Key: "vcs.modified", Value: "false"}}}, want: "source-unknown"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := versionForBuild(tc.marker, tc.info); got != tc.want {
+				t.Fatalf("versionForBuild() = %q, want %q", got, tc.want)
+			}
+		})
+	}
+}
+
 func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 	cfg := testConfig(t, "bearer")
 	s, err := New(cfg)
@@ -70,6 +95,9 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 		t.Fatalf("connect: %v", err)
 	}
 	defer session.Close()
+	if got := session.InitializeResult().ServerInfo.Version; got != mcpImplementationVersion() || (strings.HasSuffix(version, "-dev") && got == version) {
+		t.Fatalf("MCP initialize serverInfo.Version = %q, want truthful build identity, not stale development marker %q", got, version)
+	}
 
 	res, err := session.ListTools(ctx, &mcpsdk.ListToolsParams{})
 	if err != nil {
@@ -79,6 +107,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 		t.Fatalf("got %d tools, want at least 10", len(res.Tools))
 	}
 	foundEnvironment := false
+	foundRunCommand := false
 	foundRoot := false
 	foundBrowser := false
 	foundBrowserE2E := false
@@ -104,6 +133,11 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			foundEnvironment = true
 			if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint {
 				t.Fatal("agent_environment must advertise readOnlyHint")
+			}
+		case "run_command":
+			foundRunCommand = true
+			if tool.Annotations == nil || tool.Annotations.ReadOnlyHint || tool.Annotations.DestructiveHint == nil || !*tool.Annotations.DestructiveHint {
+				t.Fatal("run_command must advertise potentially destructive arbitrary Bash effects")
 			}
 		case "run_root_command":
 			foundRoot = true
@@ -489,7 +523,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			t.Errorf("missing managed Browser tool %s", name)
 		}
 	}
-	if !foundEnvironment || !foundRoot || !foundStartJob || !foundJobStatus || !foundReadFile || !foundWriteFile || !foundWorkerStat || !foundWorkerRead || !foundWorkerWrite || !foundWorkerApplyEdits || !foundWorkspaceSearch || !foundRepositoryEnvironment || !foundRepositoryDiscover || !foundRepositoryInspect || !foundWorktreeCreate || !foundWorktreeRemove || !foundBrowserStatus || !foundBrowser || !foundBrowserE2E {
+	if !foundEnvironment || !foundRunCommand || !foundRoot || !foundStartJob || !foundJobStatus || !foundReadFile || !foundWriteFile || !foundWorkerStat || !foundWorkerRead || !foundWorkerWrite || !foundWorkerApplyEdits || !foundWorkspaceSearch || !foundRepositoryEnvironment || !foundRepositoryDiscover || !foundRepositoryInspect || !foundWorktreeCreate || !foundWorktreeRemove || !foundBrowserStatus || !foundBrowser || !foundBrowserE2E {
 		t.Fatalf("required tools missing: environment=%v root=%v start_job=%v job_status=%v read_file=%v write_file=%v workspace_search=%v repository_environment=%v repository_discover=%v repository_inspect=%v worktree_create=%v worktree_remove=%v browser_status=%v browser=%v browser_e2e=%v", foundEnvironment, foundRoot, foundStartJob, foundJobStatus, foundReadFile, foundWriteFile, foundWorkspaceSearch, foundRepositoryEnvironment, foundRepositoryDiscover, foundRepositoryInspect, foundWorktreeCreate, foundWorktreeRemove, foundBrowserStatus, foundBrowser, foundBrowserE2E)
 	}
 }
