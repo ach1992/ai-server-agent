@@ -43,6 +43,7 @@ type tmuxTerminalState struct {
 	root          bool
 	epoch         string
 	recovered     bool
+	scoped        bool // production backend lives in its own bounded systemd scope
 	inReply       bool
 	replyLines    []string
 	lastReply     string
@@ -337,7 +338,29 @@ func (s *Server) terminalOpen(req Request) Response {
 		return Response{SessionID: id, SessionEpoch: epoch, Error: "terminal session startup outcome uncertain: " + err.Error(), ErrorCode: "terminal_start_uncertain", ErrorClass: "state"}
 	}
 	deadline := time.Now().Add(terminalCommandTimeout)
+	panePrimed := !t.scoped
 	for time.Now().Before(deadline) {
+		// Attaching to an already-detached tmux server may have no new pane
+		// output yet. After its initial Control Mode acknowledgement, obtain
+		// the original pane identity through an explicit structured reply
+		// instead of requiring a prompt or a magic keystroke.
+		if !panePrimed {
+			e.mu.Lock()
+			canQuery := t.ack > 0 && t.protocolError == "" && !e.exited
+			e.mu.Unlock()
+			if canQuery {
+				panePrimed = true
+				paneErr := s.terminalCommand(req, e, "list-panes -t "+t.name+" -F '#{pane_id}'")
+				e.mu.Lock()
+				pane := strings.TrimSpace(t.lastReply)
+				if paneErr != nil || !validTmuxPaneID(pane) || (t.pane != "" && t.pane != pane) {
+					t.protocolError = "terminal_pane_identity_unverified"
+				} else {
+					t.pane = pane
+				}
+				e.mu.Unlock()
+			}
+		}
 		e.mu.Lock()
 		ready := t.ack > 0 && t.pane != "" && t.protocolError == "" && !e.exited
 		failure := t.protocolError
@@ -487,6 +510,9 @@ func (s *Server) terminalControl(req Request) Response {
 	}
 	if err == nil && req.Action == "terminal_close" {
 		err = s.sessions.removeAndStop(e)
+		if err == nil && t.scoped {
+			err = stopScopedTerminalBackend(t.name)
+		}
 		if err == nil {
 			err = s.deleteTerminalRecord(e.id)
 		}

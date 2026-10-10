@@ -259,7 +259,8 @@ func (s *Server) terminalReconnect(req Request) Response {
 		return terminalError("terminal_epoch_unavailable", err)
 	}
 	t := &tmuxTerminalState{root: rec.Root, socketDir: rec.SocketDir, socket: filepath.Join(rec.SocketDir, "socket"),
-		name: rec.Name, pane: rec.Pane, columns: rec.Columns, rows: rec.Rows, epoch: epoch, recovered: true}
+		name: rec.Name, pane: rec.Pane, columns: rec.Columns, rows: rec.Rows, epoch: epoch, recovered: true,
+		scoped: s.terminalBinary == ""}
 	binary, err := s.resolveTmuxBinary()
 	if err != nil {
 		return terminalError("tmux_untrusted", err)

@@ -248,6 +248,17 @@ func (s *Server) startProcessSessionWithID(req Request, kind, workspace, binary 
 			s.sessions.remove(entry)
 		}
 	}()
+	// A failed Control Mode client startup must not leak its separately
+	// scoped tmux server. Keep cleanup under the same validated unit identity.
+	launchedScope := false
+	defer func() {
+		if removeOnFailure && launchedScope {
+			if stopErr := stopScopedTerminalBackend(terminal.name); stopErr != nil {
+				err = errors.Join(err, fmt.Errorf("terminal_scope_cleanup_unverified: %w", stopErr))
+				id = entry.id // preserve the identity for privileged diagnosis
+			}
+		}
+	}()
 	if blocked := s.beginActionAudit(req, "session_create", auditMode(req.Root), kind+"\x00"+cwd+"\x00"+binary, "developer_session"); blocked != nil {
 		return "", fmt.Errorf("%s: %s", blocked.ReasonCode, blocked.Error)
 	}
@@ -257,6 +268,14 @@ func (s *Server) startProcessSessionWithID(req Request, kind, workspace, binary 
 	rootControlledWorkerTmux := terminal != nil && !terminal.root && s.terminalBinary == ""
 	if rootControlledWorkerTmux && os.Geteuid() != 0 {
 		return "", errors.New("worker tmux requires root executor-owned backend")
+	}
+	if terminal != nil && s.terminalBinary == "" && !terminal.recovered {
+		if err := s.startScopedTerminalBackend(req, binary, terminal, args); err != nil {
+			s.finishActionAudit(req, "session_create", auditMode(req.Root), kind+"\x00"+cwd+"\x00"+binary, "developer_session", start, Response{Error: err.Error()})
+			return "", err
+		}
+		launchedScope = true
+		args = []string{"-f", "/dev/null", "-S", terminal.socket, "-C", "attach-session", "-t", terminal.name}
 	}
 	cmd := exec.Command(binary, args...)
 	cmd.Dir = cwd
