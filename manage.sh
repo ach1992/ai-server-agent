@@ -213,7 +213,7 @@ RUNTIME_BINARY="/usr/local/bin/ai-server-agent"
 
 runtime_setting_allowed(){
   case "${1:-}" in
-    http_read_header_timeout_seconds|http_idle_timeout_seconds|command_timeout_seconds|workspace_file_timeout_seconds|text_fallback_bytes) return 0 ;;
+    http_read_header_timeout_seconds|http_idle_timeout_seconds|command_timeout_seconds|workspace_file_timeout_seconds|text_fallback_bytes|transfer_staging_mib|transfer_session_ttl_seconds|transfer_active_sessions) return 0 ;;
     *) return 1 ;;
   esac
 }

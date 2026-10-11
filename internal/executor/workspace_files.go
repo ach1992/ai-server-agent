@@ -24,22 +24,35 @@ import (
 // executor. A purpose-specific child is necessary: Go cannot safely switch
 // per-goroutine Unix credentials inside the concurrent root executor.
 type workspaceFileOperation struct {
-	Action        string              `json:"action"`
-	WorkspaceRoot string              `json:"workspace_root"`
-	Workspace     string              `json:"workspace"`
-	Path          string              `json:"path"`
-	Offset        int64               `json:"offset,omitempty"`
-	Limit         int                 `json:"limit,omitempty"`
-	Content       string              `json:"content,omitempty"`
-	FileVersion   string              `json:"file_version,omitempty"`
-	MustNotExist  bool                `json:"must_not_exist,omitempty"`
-	Edits         []WorkspaceFileEdit `json:"edits,omitempty"`
-	Pattern       string              `json:"pattern,omitempty"`
-	SearchLimit   int                 `json:"search_limit,omitempty"`
-	SearchPaths   []string            `json:"search_paths,omitempty"`
-	Globs         []string            `json:"globs,omitempty"`
-	Literal       bool                `json:"literal,omitempty"`
-	TimeoutMS     int64               `json:"timeout_ms,omitempty"`
+	Action              string              `json:"action"`
+	TransferRoot        string              `json:"transfer_root,omitempty"`
+	PrincipalID         string              `json:"principal_id,omitempty"`
+	PrincipalClass      string              `json:"principal_class,omitempty"`
+	TransferKey         string              `json:"transfer_key,omitempty"`
+	TransferOp          string              `json:"transfer_op,omitempty"`
+	TransferID          string              `json:"transfer_id,omitempty"`
+	ExpectedSize        int64               `json:"expected_size,omitempty"`
+	SHA256              string              `json:"sha256,omitempty"`
+	ChunkBase64         string              `json:"chunk_base64,omitempty"`
+	ChunkSHA256         string              `json:"chunk_sha256,omitempty"`
+	TransferQuotaMiB    int                 `json:"transfer_quota_mib,omitempty"`
+	TransferTTLSeconds  int                 `json:"transfer_ttl_seconds,omitempty"`
+	TransferMaxSessions int                 `json:"transfer_max_sessions,omitempty"`
+	WorkspaceRoot       string              `json:"workspace_root"`
+	Workspace           string              `json:"workspace"`
+	Path                string              `json:"path"`
+	Offset              int64               `json:"offset,omitempty"`
+	Limit               int                 `json:"limit,omitempty"`
+	Content             string              `json:"content,omitempty"`
+	FileVersion         string              `json:"file_version,omitempty"`
+	MustNotExist        bool                `json:"must_not_exist,omitempty"`
+	Edits               []WorkspaceFileEdit `json:"edits,omitempty"`
+	Pattern             string              `json:"pattern,omitempty"`
+	SearchLimit         int                 `json:"search_limit,omitempty"`
+	SearchPaths         []string            `json:"search_paths,omitempty"`
+	Globs               []string            `json:"globs,omitempty"`
+	Literal             bool                `json:"literal,omitempty"`
+	TimeoutMS           int64               `json:"timeout_ms,omitempty"`
 }
 
 const (
@@ -50,8 +63,8 @@ const (
 )
 
 func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp Response) {
-	write := req.Action == "workspace_write" || req.Action == "workspace_apply_edits"
-	if req.Action != "workspace_stat" && req.Action != "workspace_read" && req.Action != "workspace_write" && req.Action != "workspace_apply_edits" && req.Action != "workspace_text_search" {
+	write := req.Action == "workspace_write" || req.Action == "workspace_apply_edits" || req.Action == "workspace_transfer"
+	if req.Action != "workspace_stat" && req.Action != "workspace_read" && req.Action != "workspace_write" && req.Action != "workspace_apply_edits" && req.Action != "workspace_transfer" && req.Action != "workspace_text_search" {
 		return fileError("invalid_action", "validation", errors.New("unsupported worker workspace action"))
 	}
 	if strings.TrimSpace(req.Workspace) == "" || (req.Action != "workspace_text_search" && req.Action != "workspace_apply_edits" && strings.TrimSpace(req.Path) == "") {
@@ -64,6 +77,10 @@ func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp 
 		probe := workspaceFileOperation{Action: req.Action, Pattern: req.Pattern, SearchLimit: req.SearchLimit, SearchPaths: req.SearchPaths, Globs: req.Globs, Literal: req.Literal, TimeoutMS: req.TimeoutMS}
 		if err := validateWorkerTextSearch(probe); err != nil {
 			return fileError("invalid_text_search", "validation", err)
+		}
+	} else if req.Action == "workspace_transfer" {
+		if err := validateWorkspaceTransferRequest(req); err != nil {
+			return fileError("invalid_transfer", "validation", err)
 		}
 	} else if req.Action == "workspace_apply_edits" {
 		if len(req.WorkspaceEdits) == 0 || len(req.WorkspaceEdits) > maxWorkspaceBatchFiles {
@@ -104,7 +121,15 @@ func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp 
 	// and subprocess side effects. Raw UTF-8 content may expand in JSON.
 	op := workspaceFileOperation{
 		Action: req.Action, WorkspaceRoot: s.cfg.WorkspaceDir,
-		Workspace: req.Workspace, Path: req.Path,
+		TransferRoot: filepath.Join(s.cfg.StateDir, "worker-home", "transfers"),
+		PrincipalID:  req.PrincipalID, PrincipalClass: req.PrincipalClass,
+		TransferKey: req.TransferKey, TransferOp: req.TransferOp, TransferID: req.TransferID,
+		ExpectedSize: req.ExpectedSize, SHA256: req.SHA256,
+		ChunkBase64: req.ChunkBase64, ChunkSHA256: req.ChunkSHA256,
+		TransferQuotaMiB:    s.cfg.EffectiveRuntime().TransferStagingMiB,
+		TransferTTLSeconds:  s.cfg.EffectiveRuntime().TransferSessionTTLSeconds,
+		TransferMaxSessions: s.cfg.EffectiveRuntime().TransferActiveSessions,
+		Workspace:           req.Workspace, Path: req.Path,
 		Offset: req.Offset, Limit: req.Limit, Content: req.Content,
 		FileVersion: req.FileVersion, MustNotExist: req.MustNotExist,
 		Edits: req.WorkspaceEdits, Pattern: req.Pattern, SearchLimit: req.SearchLimit,
@@ -222,7 +247,15 @@ func RunWorkspaceFileHelper() int {
 	}
 	// No workspace path is opened before the kernel sandbox is in place.
 	// Fail closed if this host cannot enforce the per-request boundary.
-	unlock, sandboxErr := workerLandlockRestrict(op.WorkspaceRoot, op.Workspace, op.Action == "workspace_text_search")
+	var unlock func()
+	var sandboxErr error
+	if op.Action == "workspace_transfer" {
+		if sandboxErr = prepareWorkerTransferRoot(op.TransferRoot); sandboxErr == nil {
+			unlock, sandboxErr = workerLandlockRestrictTransfer(op.WorkspaceRoot, op.Workspace, op.TransferRoot)
+		}
+	} else {
+		unlock, sandboxErr = workerLandlockRestrict(op.WorkspaceRoot, op.Workspace, op.Action == "workspace_text_search")
+	}
 	if sandboxErr != nil {
 		_ = json.NewEncoder(os.Stdout).Encode(fileError("workspace_sandbox_unavailable", "security", sandboxErr))
 		return 0
@@ -235,6 +268,8 @@ func RunWorkspaceFileHelper() int {
 		resp = writeWorkerWorkspaceFile(op)
 	} else if op.Action == "workspace_apply_edits" {
 		resp = applyWorkerWorkspaceEdits(op)
+	} else if op.Action == "workspace_transfer" {
+		resp = workerWorkspaceTransfer(op)
 	} else if op.Action == "workspace_text_search" {
 		resp = workerTextSearch(op)
 	} else {

@@ -119,6 +119,12 @@ func override(t *testing.T, r *RuntimeSettings, key string, value int) {
 		r.WorkspaceFileTimeoutSeconds = value
 	case "text_fallback_bytes":
 		r.TextFallbackBytes = value
+	case "transfer_staging_mib":
+		r.TransferStagingMiB = value
+	case "transfer_session_ttl_seconds":
+		r.TransferSessionTTLSeconds = value
+	case "transfer_active_sessions":
+		r.TransferActiveSessions = value
 	default:
 		t.Fatalf("new runtime key %q lacks boundary tests", key)
 	}

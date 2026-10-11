@@ -89,7 +89,7 @@ func connectionContext(c net.Conn) (context.Context, context.CancelFunc) {
 
 func (s *Server) dispatchContext(ctx context.Context, req Request) Response {
 	switch req.Action {
-	case "browser_admission_status", "browser_session_open", "browser_session_flow", "browser_session_capture", "browser_session_trace", "browser_session_status", "browser_session_close", "run", "code_inspect", "debug_adapter_status", "debug_launch", "debug_action", "debug_status", "debug_stop", "workspace_stat", "workspace_read", "workspace_write", "workspace_apply_edits", "workspace_text_search", "workspace_search", "repository_environment", "repository_discover", "repository_inspect", "worktree_create", "worktree_remove":
+	case "browser_admission_status", "browser_session_open", "browser_session_flow", "browser_session_capture", "browser_session_trace", "browser_session_status", "browser_session_close", "run", "code_inspect", "debug_adapter_status", "debug_launch", "debug_action", "debug_status", "debug_stop", "workspace_stat", "workspace_read", "workspace_write", "workspace_apply_edits", "workspace_transfer", "workspace_text_search", "workspace_search", "repository_environment", "repository_discover", "repository_inspect", "worktree_create", "worktree_remove":
 		if !s.auth(req.Token) {
 			return Response{Error: "unauthorized"}
 		}
@@ -107,7 +107,7 @@ func (s *Server) dispatchContext(ctx context.Context, req Request) Response {
 			return s.codeInspect(ctx, req)
 		case "debug_adapter_status", "debug_launch", "debug_action", "debug_status", "debug_stop":
 			return s.debugAction(ctx, req)
-		case "workspace_stat", "workspace_read", "workspace_write", "workspace_apply_edits", "workspace_text_search":
+		case "workspace_stat", "workspace_read", "workspace_write", "workspace_apply_edits", "workspace_transfer", "workspace_text_search":
 			return s.workerWorkspaceFile(ctx, req)
 		case "workspace_search":
 			return s.workspaceSearchContext(ctx, req)
@@ -391,7 +391,7 @@ func ClientCallContext(ctx context.Context, socket, token string, req Request) (
 	// connecting; otherwise the decoder would reject a valid raw-size batch
 	// with a transport error rather than a bounded resource result.
 	if req.Action == "workspace_write" || req.Action == "workspace_apply_edits" ||
-		req.Action == "workspace_read" || req.Action == "workspace_text_search" {
+		req.Action == "workspace_read" || req.Action == "workspace_transfer" || req.Action == "workspace_text_search" {
 		wire, err := json.Marshal(req)
 		if err != nil {
 			return fileError("invalid_request", "validation", err), nil
