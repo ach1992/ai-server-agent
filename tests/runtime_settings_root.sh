@@ -5,6 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1
 # shellcheck source=../manage.sh
 source "$ROOT/manage.sh"
+# Capture the production helper before the ordinary root fixture overrides it.
+production_restart_helper="$(declare -f restart_and_verify_local)"
 TEMP="$(mktemp -d)"
 trap 'rm -rf -- "$TEMP"' EXIT
 CONFIG_DIR="$TEMP"
@@ -59,6 +61,7 @@ snapshot="$(runtime_pending_backup)"
 [ "$(sha256sum "$snapshot" | cut -d' ' -f1)" = "$success" ] || { echo 'root: backup contents drifted' >&2; exit 1; }
 [ "$(sha256sum "$CONFIG_FILE" | cut -d' ' -f1)" = "$success" ] || { echo 'root: old config not restored' >&2; exit 1; }
 [ "$(stat -c '%u:%g:%a' "$snapshot")" = '0:0:640' ] || { echo 'root: backup protection lost' >&2; exit 1; }
+[ "$(stat -c '%u:%g:%a' "$CONFIG_FILE")" = '0:0:640' ] || { echo 'root: restored file protection drifted' >&2; exit 1; }
 grep -Fq "$snapshot" "$TEMP/unresolved.out" || { echo 'root: recovery path not reported' >&2; exit 1; }
 restart_count="$(wc -l < "$TEMP/restarts")"
 if (runtime_apply set command_timeout_seconds 650 >/dev/null 2>&1); then
@@ -71,4 +74,49 @@ fi
 rm -f -- "$TEMP/force_all_restarts_fail" "$snapshot"
 test -z "$(runtime_pending_backup)" || { echo 'root: fixture backup cleanup failed' >&2; exit 1; }
 [ "$original" != "$success" ] || { echo 'positive setting not applied' >&2; exit 1; }
+# R4: exercise the original PRODUCTION restart helper, not the above
+# replacement health fixture. Fake only external systemctl/curl so no real
+# root-host services, sockets or health endpoints can be mutated/contacted.
+eval "$production_restart_helper"
+systemctl(){
+  case "${1:-}" in
+    restart) printf 'restart\n' >> "$TEMP/r4.restart_calls"; return 42 ;;
+    is-active) printf 'is-active\n' >> "$TEMP/r4.health_probes"; return 0 ;;
+    *) echo "root: unexpected fixture systemctl: $*" >&2; return 2 ;;
+  esac
+}
+curl(){ printf 'health\n' >> "$TEMP/r4.health_probes"; return 0; }
+sleep(){ printf 'sleep\n' >> "$TEMP/r4.sleep_calls"; return 0; }
+systemctl is-active --quiet ai-server-agent.service || { echo 'root: old-service health fixture failed' >&2; exit 1; }
+curl -fsS http://127.0.0.1:3210/healthz || { echo 'root: old HTTP-health fixture failed' >&2; exit 1; }
+: > "$TEMP/r4.health_probes"
+if restart_and_verify_local >/dev/null 2>&1; then
+  echo 'root: restart helper reported success despite failed systemctl restart' >&2; exit 1
+fi
+[ "$(wc -l < "$TEMP/r4.restart_calls")" -eq 1 ] || { echo 'root: wrong direct restart count' >&2; exit 1; }
+[ ! -s "$TEMP/r4.health_probes" ] || { echo 'root: read old service health after restart error' >&2; exit 1; }
+[ ! -e "$TEMP/r4.sleep_calls" ] || { echo 'root: failed restart was not rejected immediately' >&2; exit 1; }
+
+r4_before="$(sha256sum "$CONFIG_FILE" | cut -d' ' -f1)"
+if (runtime_apply set command_timeout_seconds 700) >"$TEMP/r4.apply.out" 2>&1; then
+  echo 'root: command-level failed restart falsely accepted' >&2; exit 1
+fi
+r4_snapshot="$(runtime_pending_backup)"
+[ -n "$r4_snapshot" ] && [ -f "$r4_snapshot" ] || { echo 'root: failed systemctl restart lost rollback snapshot' >&2; exit 1; }
+[ "$(sha256sum "$CONFIG_FILE" | cut -d' ' -f1)" = "$r4_before" ] || { echo 'root: failed restart corrupted old config' >&2; exit 1; }
+[ "$(sha256sum "$r4_snapshot" | cut -d' ' -f1)" = "$r4_before" ] || { echo 'root: failed restart damaged snapshot' >&2; exit 1; }
+[ "$(stat -c '%u:%g:%a' "$CONFIG_FILE")" = '0:0:640' ] || { echo 'root: restored config trust lost' >&2; exit 1; }
+[ "$(stat -c '%u:%g:%a' "$r4_snapshot")" = '0:0:640' ] || { echo 'root: failed restart backup trust lost' >&2; exit 1; }
+[ "$(wc -l < "$TEMP/r4.restart_calls")" -eq 3 ] || { echo 'root: missing initial/rollback restart attempts' >&2; exit 1; }
+[ ! -s "$TEMP/r4.health_probes" ] || { echo 'root: old health disguised failed restart' >&2; exit 1; }
+grep -Fq 'NOT verified' "$TEMP/r4.apply.out" || { echo 'root: missing uncertain restart diagnostic' >&2; exit 1; }
+grep -Fq "$r4_snapshot" "$TEMP/r4.apply.out" || { echo 'root: missing true recovery snapshot path' >&2; exit 1; }
+if (runtime_apply reset command_timeout_seconds >/dev/null 2>&1); then
+  echo 'root: unresolved restart allowed further setting change' >&2; exit 1
+fi
+[ "$(wc -l < "$TEMP/r4.restart_calls")" -eq 3 ] || { echo 'root: blocked change started a new restart' >&2; exit 1; }
+# Clean only the isolated harness's own snapshot, never installed state.
+rm -f -- "$r4_snapshot"
+test -z "$(runtime_pending_backup)" || { echo 'root: R4 test leftover rollback state' >&2; exit 1; }
+
 echo 'Runtime settings root safety PASS'

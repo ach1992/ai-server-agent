@@ -192,7 +192,11 @@ write_config(){
 restart_and_verify_local(){
   local port
   port="$(current_port)"
-  systemctl restart ai-server-agent-executor.service ai-server-agent.service
+  # Bash errexit is suppressed when this helper is called from an if/&&
+  # condition. Always check restart itself: a failed systemctl command may
+  # leave the *old* services active with a healthy endpoint, which is NOT
+  # proof the new runtime configuration has been applied.
+  systemctl restart ai-server-agent-executor.service ai-server-agent.service || return 1
   sleep 1
   systemctl is-active --quiet ai-server-agent-executor.service || return 1
   systemctl is-active --quiet ai-server-agent.service || return 1

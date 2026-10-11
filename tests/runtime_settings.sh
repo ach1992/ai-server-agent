@@ -5,6 +5,8 @@ ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 export AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1
 # shellcheck source=../manage.sh
 source "$ROOT/manage.sh"
+# Preserve the exact production function before the regular fixture replaces it.
+production_restart_helper="$(declare -f restart_and_verify_local)"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 CONFIG_DIR="$TMP"
@@ -96,4 +98,47 @@ rm -f -- "$TMP/force_all_restarts_fail"
 # Only this isolated regression is authorized to discard its own fixture.
 rm -f -- "$unresolved_backup"
 test -z "$(find "$TMP" -maxdepth 1 -name '.runtime-*' -print)" || fail 'staged/backup files leaked on successful/verified failure paths'
+# R4: use the REAL restart helper with mocked external commands. A rejected
+# systemctl restart can leave the OLD services active and /healthz healthy.
+# It must not be treated as a successful application or verified rollback.
+eval "$production_restart_helper"
+systemctl(){
+  case "${1:-}" in
+    restart) printf 'restart\n' >> "$TMP/r4.restart_calls"; return 42 ;;
+    is-active) printf 'is-active\n' >> "$TMP/r4.health_probes"; return 0 ;;
+    *) fail "unexpected fixture systemctl operation: $*" ;;
+  esac
+}
+curl(){ printf 'health\n' >> "$TMP/r4.health_probes"; return 0; }
+sleep(){ printf 'sleep\n' >> "$TMP/r4.sleep_calls"; return 0; }
+systemctl is-active --quiet ai-server-agent.service || fail 'fixture old service is not healthy'
+curl -fsS http://127.0.0.1:3210/healthz || fail 'fixture old HTTP health is not healthy'
+: > "$TMP/r4.health_probes"
+if restart_and_verify_local >"$TMP/r4.direct.out" 2>&1; then
+  fail 'production helper ignored failed restart and trusted old healthy service'
+fi
+[ "$(wc -l < "$TMP/r4.restart_calls")" -eq 1 ] || fail 'direct restart call count incorrect'
+[ ! -s "$TMP/r4.health_probes" ] || fail 'health was queried despite failed restart request'
+[ ! -e "$TMP/r4.sleep_calls" ] || fail 'failed restart unexpectedly slept before returning'
+
+r4_before="$(sha256sum "$CONFIG_FILE" | cut -d' ' -f1)"
+if (runtime_apply set command_timeout_seconds 650) >"$TMP/r4.apply.out" 2>&1; then
+  fail 'failed systemctl restart was falsely published as effective config'
+fi
+r4_snapshot="$(runtime_pending_backup)"
+[ -n "$r4_snapshot" ] && [ -f "$r4_snapshot" ] || fail 'failed restart discarded durable recovery state'
+[ "$(sha256sum "$CONFIG_FILE" | cut -d' ' -f1)" = "$r4_before" ] || fail 'restart failure did not restore original config'
+[ "$(sha256sum "$r4_snapshot" | cut -d' ' -f1)" = "$r4_before" ] || fail 'restart failure lost exact old snapshot'
+[ "$(wc -l < "$TMP/r4.restart_calls")" -eq 3 ] || fail 'must attempt first restart and rollback restart once each'
+[ ! -s "$TMP/r4.health_probes" ] || fail 'old health improperly accepted despite restart error'
+grep -Fq 'NOT verified' "$TMP/r4.apply.out" || fail 'restart failure not reported as unverified'
+grep -Fq "$r4_snapshot" "$TMP/r4.apply.out" || fail 'operator missing actual recovery artifact'
+if (runtime_apply set command_timeout_seconds 700 >/dev/null 2>&1); then
+  fail 'runtime edit accepted despite unverified command-level restart failure'
+fi
+[ "$(wc -l < "$TMP/r4.restart_calls")" -eq 3 ] || fail 'subsequent blocked edit performed a restart'
+# The harness owns this temporary fixture; no real service or persistent config.
+rm -f -- "$r4_snapshot"
+test -z "$(runtime_pending_backup)" || fail 'isolated R4 fixture retained stale backup'
+
 echo 'Runtime settings management PASS'
