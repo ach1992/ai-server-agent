@@ -338,11 +338,6 @@ fi
 # Existing job outputs from the older worker-owned container are never trusted
 # as symlinks after migration.
 find "$STATE_DIR/jobs" -mindepth 1 -maxdepth 1 -type l -delete
-# AI_ENVIRONMENT.json is informational output written by aiagent. Its parent is
-# root-controlled, so the service can update the file but cannot replace the
-# directory entry with a symlink or another inode.
-rm -f -- "$STATE_DIR/AI_ENVIRONMENT.json"
-install -o "$AGENT_USER" -g "$AGENT_USER" -m 0640 /dev/null "$STATE_DIR/AI_ENVIRONMENT.json"
 install -d -m 0755 -o root -g root "$LIB_DIR"
 
 random_hex(){ od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; printf '\n'; }
@@ -610,7 +605,9 @@ JSON
 # every known nested key and its value. Do not copy the whole old config.
 if [ "$FRESH_INSTALL" -eq 0 ]; then
   runtime_merge_tmp="$(mktemp "$CONFIG_DIR/.config-runtime.XXXXXX")"
-  if ! jq -e --slurpfile previous "$CONFIG_FILE"       'if ($previous[0] | has("runtime")) then .runtime = $previous[0].runtime else . end'       "$config_tmp" > "$runtime_merge_tmp"; then
+  if ! jq -e --slurpfile previous "$CONFIG_FILE" \
+      'if ($previous[0] | has("runtime")) then .runtime = $previous[0].runtime else . end' \
+      "$config_tmp" > "$runtime_merge_tmp"; then
     rm -f -- "$config_tmp" "$runtime_merge_tmp"
     die "Could not retain existing operator runtime settings. Previous active configuration was preserved."
   fi
@@ -687,6 +684,14 @@ UMask=0027
 [Install]
 WantedBy=multi-user.target
 EOF_UNIT
+
+# AI_ENVIRONMENT.json is informational output written by aiagent. Its
+# root-controlled parent protects its directory entry from unprivileged
+# replacement. Defer clearing/resecuring this file until all target-binary
+# compatibility and staged-config validation has passed; a rejected update
+# must never erase the *running* Agent's valid environment manifest.
+rm -f -- "$STATE_DIR/AI_ENVIRONMENT.json"
+install -o "$AGENT_USER" -g "$AGENT_USER" -m 0640 /dev/null "$STATE_DIR/AI_ENVIRONMENT.json"
 
 systemctl daemon-reload
 systemctl enable ai-server-agent-executor.service ai-server-agent.service
