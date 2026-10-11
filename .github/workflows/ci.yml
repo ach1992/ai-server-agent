@@ -271,7 +271,9 @@ jobs:
           fi
       - name: Cloudflare Rulesets pagination contract
         if: ${{ needs.change-scope.outputs.cloudflare_security_changed != 'false' }}
-        run: bash tests/cloudflare_rulesets_pagination.sh
+        run: |
+          bash tests/cloudflare_conflict_guidance.sh
+          bash tests/cloudflare_rulesets_pagination.sh
       - name: Stable update channel contract
         if: ${{ needs.change-scope.outputs.stable_update_trust_changed != 'false' }}
         run: |
