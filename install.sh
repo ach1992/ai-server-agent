@@ -463,7 +463,9 @@ build_from_source(){ (
   curl -fsSL "$go_url" -o "$tmp/go.tgz"
   printf '%s  %s\n' "$go_sha" "$tmp/go.tgz" | sha256sum -c - >/dev/null
   mkdir "$tmp/go"; tar -xzf "$tmp/go.tgz" -C "$tmp/go" --strip-components=1
-  (cd "$tmp/src" && CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" "$tmp/go/bin/go" test ./... && CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" "$tmp/go/bin/go" build -trimpath -ldflags='-s -w' -o "$tmp/ai-server-agent" ./cmd/ai-server-agent)
+  # The immutable GitHub source archive contains no .git, so automatic Go VCS
+  # metadata cannot identify this source installation. Stamp the resolved SHA.
+  (cd "$tmp/src" && CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" "$tmp/go/bin/go" test ./... && CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" "$tmp/go/bin/go" build -trimpath -ldflags="-s -w -X github.com/ach1992/ai-server-agent/internal/mcp.buildRevision=$RESOLVED_SOURCE_REF" -o "$tmp/ai-server-agent" ./cmd/ai-server-agent)
   install -m 0755 "$tmp/ai-server-agent" "$INSTALL_BIN"
   install_helpers "$tmp/src"
 ); }
