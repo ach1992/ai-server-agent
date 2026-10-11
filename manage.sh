@@ -473,6 +473,29 @@ load_cf_token(){
   [ -n "$CF_TOKEN" ] || die "Cloudflare API token is empty."
 }
 
+# Externally owned Cloudflare resources are never deleted/adopted automatically.
+cf_conflict_guidance(){
+  local host="$1" area="$2" location
+  case "$area" in
+    dns) location="DNS > Records" ;;
+    origin) location="Rules > Origin Rules" ;;
+    ssl) location="Rules > Configuration Rules" ;;
+    *) return 1 ;;
+  esac
+  printf ' Open Cloudflare Dashboard for this domain > %s and inspect the entry for %s. If it belongs to you and is no longer needed, remove or adjust only that conflicting record/rule; otherwise choose another unused domain or subdomain and retry setup. AI Server Agent will not delete or adopt unowned Cloudflare resources automatically.' "$location" "$host"
+}
+
+cf_report_provider_conflict(){
+  local path="$1" payload="$2" location
+  case "$path" in
+    */dns_records) location="DNS > Records" ;;
+    */rulesets|*/rulesets/*) location="Rules > Origin Rules / Configuration Rules" ;;
+    *) return 0 ;;
+  esac
+  jq -e '[.errors[]? | (.message // "" | ascii_downcase) | test("already exists|already in use|duplicate")] | any' >/dev/null 2>&1 <<<"$payload" || return 0
+  warn "Cloudflare reported an existing resource. Check Cloudflare Dashboard > $location for the selected hostname. If safe, remove or adjust only your conflicting DNS record or hostname-specific Rule, or retry with another unused domain/subdomain. Existing external resources were not automatically deleted or adopted."
+}
+
 cf_report_api_errors(){
   local payload="$1"
   jq -r '.errors[]? | if .code != null then "Cloudflare API error \(.code): \(.message)" else .message end' <<<"$payload" >&2 2>/dev/null || true
@@ -487,12 +510,14 @@ cf_api(){
   if [ -n "$body" ]; then
     if ! out="$(curl -sS --fail-with-body "${retry_args[@]}" --request "$method" --config "$cfg" -H 'Content-Type: application/json' --data-binary "$body" "$CF_API$path")"; then
       cf_report_api_errors "$out"
+      cf_report_provider_conflict "$path" "$out"
       rm -f "$cfg"
       return 1
     fi
   else
     if ! out="$(curl -sS --fail-with-body "${retry_args[@]}" --request "$method" --config "$cfg" -H 'Content-Type: application/json' "$CF_API$path")"; then
       cf_report_api_errors "$out"
+      cf_report_provider_conflict "$path" "$out"
       rm -f "$cfg"
       return 1
     fi
@@ -500,6 +525,7 @@ cf_api(){
   rm -f "$cfg"
   if ! jq -e '.success == true' >/dev/null 2>&1 <<<"$out"; then
     cf_report_api_errors "$out"
+    cf_report_provider_conflict "$path" "$out"
     return 1
   fi
   printf '%s' "$out"
@@ -1053,10 +1079,10 @@ cf_reconcile_dns(){
     CF_RESULT_DNS_ID="$id"; CF_RESULT_DNS_OWNED=true; CF_RESULT_DNS_ACTION=created; CF_RESULT_DNS_FINGERPRINT="$(cf_dns_fingerprint <<<"$record")"
     return
   fi
-  [ "$count" -eq 1 ] || die "Multiple DNS records already exist for $host. Refusing ambiguous replacement."
+  [ "$count" -eq 1 ] || die "Multiple DNS records already exist for $host. Refusing ambiguous replacement.$(cf_conflict_guidance "$host" dns)"
   record="$(jq -ce '.result[0] | select(type=="object")' <<<"$res")" || die "Cloudflare DNS response was invalid."
   id="$(jq -r '.id' <<<"$record")"; type="$(jq -r '.type' <<<"$record")"; content="$(jq -r '.content' <<<"$record")"; proxied="$(jq -r '.proxied' <<<"$record")"
-  [ "$type" = "A" ] || die "$host already has a $type record. Use another hostname or resolve the DNS conflict manually."
+  [ "$type" = "A" ] || die "$host already has a $type record. Use another hostname or resolve the DNS conflict manually.$(cf_conflict_guidance "$host" dns)"
   current_fingerprint="$(cf_dns_fingerprint <<<"$record")"
   CF_RESULT_DNS_ID="$id"; CF_RESULT_DNS_FINGERPRINT="$current_fingerprint"
   if [ -n "$owned_dns_id" ]; then
@@ -1066,7 +1092,7 @@ cf_reconcile_dns(){
     [ "$content" = "$ip" ] && [ "$proxied" = "true" ] || die "The Agent-owned DNS record needs an in-place update, but Cloudflare DNS mutation has no conditional compare-and-swap used by this manager. Refusing to overwrite concurrent state; clean up or reconcile the record explicitly, then rerun setup."
     return
   fi
-  [ "$content" = "$ip" ] && [ "$proxied" = "true" ] || die "Existing A record for $host is not recorded as Agent-owned and does not match this server. Refusing to modify or adopt it automatically. Use another hostname or update/remove that record manually, then rerun setup."
+  [ "$content" = "$ip" ] && [ "$proxied" = "true" ] || die "Existing A record for $host is not recorded as Agent-owned and does not match this server. Refusing to modify or adopt it automatically. Use another hostname or update/remove that record manually, then rerun setup.$(cf_conflict_guidance "$host" dns)"
   CF_RESULT_DNS_OWNED=false
 }
 
@@ -1122,7 +1148,7 @@ cf_reconcile_origin_rule(){
       elif [ -n "$ref_match" ]; then
         die "An Origin Rule uses the Agent ref but is not the rule recorded as Agent-owned. Refusing to adopt or overwrite it."
       else
-        [ "$semantic_count" -eq 0 ] || die "The recorded Agent-owned Origin Rule is absent, but Cloudflare already has $semantic_count equivalent external Origin Rule(s) in ruleset $ruleset_id for $host:$port. Refusing to recreate a duplicate or adopt external rules automatically."
+        [ "$semantic_count" -eq 0 ] || die "The recorded Agent-owned Origin Rule is absent, but Cloudflare already has $semantic_count equivalent external Origin Rule(s) in ruleset $ruleset_id for $host:$port. Refusing to recreate a duplicate or adopt external rules automatically.$(cf_conflict_guidance "$host" origin)"
         marker="$(cf_new_ownership_marker)"
         pending_rule_body="$(jq -n --arg ref "$rule_ref" --arg host "$host" --argjson port "$port" --arg desc "AI Server Agent origin port txn:$marker" '{ref:$ref,description:$desc,expression:("http.host eq \""+$host+"\""),action:"route",action_parameters:{origin:{port:$port}},enabled:true}')"
         pending_fingerprint="$(cf_rule_intent_fingerprint <<<"$pending_rule_body")"
@@ -1137,8 +1163,8 @@ cf_reconcile_origin_rule(){
         log "Cloudflare diagnostic: Origin rule create response matched rule $CF_RESULT_ORIGIN_RULE_ID in ruleset $ruleset_id."
       fi
     else
-      [ -z "$ref_match" ] || die "An unowned Origin Rule already uses the Agent ref. Refusing to adopt or overwrite it."
-      [ "$semantic_count" -eq 0 ] || die "Cloudflare already has $semantic_count equivalent external Origin Rule(s) in ruleset $ruleset_id for $host:$port. Refusing to create a duplicate or adopt external rules automatically."
+      [ -z "$ref_match" ] || die "An unowned Origin Rule already uses the Agent ref. Refusing to adopt or overwrite it.$(cf_conflict_guidance "$host" origin)"
+      [ "$semantic_count" -eq 0 ] || die "Cloudflare already has $semantic_count equivalent external Origin Rule(s) in ruleset $ruleset_id for $host:$port. Refusing to create a duplicate or adopt external rules automatically.$(cf_conflict_guidance "$host" origin)"
       marker="$(cf_new_ownership_marker)"
       pending_rule_body="$(jq -n --arg ref "$rule_ref" --arg host "$host" --argjson port "$port" --arg desc "AI Server Agent origin port txn:$marker" '{ref:$ref,description:$desc,expression:("http.host eq \""+$host+"\""),action:"route",action_parameters:{origin:{port:$port}},enabled:true}')"
       pending_fingerprint="$(cf_rule_intent_fingerprint <<<"$pending_rule_body")"
@@ -1219,7 +1245,7 @@ cf_reconcile_ssl_config_rule(){
       elif [ -n "$ref_match" ]; then
         die "A Configuration Rule uses the Agent SSL ref but is not the rule recorded as Agent-owned. Refusing to adopt or overwrite it."
       else
-        [ "$semantic_count" -eq 0 ] || die "The recorded Agent-owned Configuration Rule is absent, but Cloudflare already has $semantic_count equivalent external strict SSL Configuration Rule(s) in ruleset $ruleset_id for $host. Refusing to recreate a duplicate or adopt external rules automatically."
+        [ "$semantic_count" -eq 0 ] || die "The recorded Agent-owned Configuration Rule is absent, but Cloudflare already has $semantic_count equivalent external strict SSL Configuration Rule(s) in ruleset $ruleset_id for $host. Refusing to recreate a duplicate or adopt external rules automatically.$(cf_conflict_guidance "$host" ssl)"
         marker="$(cf_new_ownership_marker)"
         pending_rule_body="$(jq -n --arg ref "$rule_ref" --arg host "$host" --arg desc "AI Server Agent strict SSL txn:$marker" '{ref:$ref,description:$desc,expression:("http.host eq \""+$host+"\""),action:"set_config",action_parameters:{ssl:"strict"},enabled:true}')"
         pending_fingerprint="$(cf_rule_intent_fingerprint <<<"$pending_rule_body")"
@@ -1234,8 +1260,8 @@ cf_reconcile_ssl_config_rule(){
         log "Cloudflare diagnostic: Configuration rule create response matched rule $CF_RESULT_SSL_RULE_ID in ruleset $ruleset_id."
       fi
     else
-      [ -z "$ref_match" ] || die "An unowned Configuration Rule already uses the Agent SSL ref. Refusing to adopt or overwrite it."
-      [ "$semantic_count" -eq 0 ] || die "Cloudflare already has $semantic_count equivalent external strict SSL Configuration Rule(s) in ruleset $ruleset_id for $host. Refusing to create a duplicate or adopt external rules automatically."
+      [ -z "$ref_match" ] || die "An unowned Configuration Rule already uses the Agent SSL ref. Refusing to adopt or overwrite it.$(cf_conflict_guidance "$host" ssl)"
+      [ "$semantic_count" -eq 0 ] || die "Cloudflare already has $semantic_count equivalent external strict SSL Configuration Rule(s) in ruleset $ruleset_id for $host. Refusing to create a duplicate or adopt external rules automatically.$(cf_conflict_guidance "$host" ssl)"
       marker="$(cf_new_ownership_marker)"
       pending_rule_body="$(jq -n --arg ref "$rule_ref" --arg host "$host" --arg desc "AI Server Agent strict SSL txn:$marker" '{ref:$ref,description:$desc,expression:("http.host eq \""+$host+"\""),action:"set_config",action_parameters:{ssl:"strict"},enabled:true}')"
       pending_fingerprint="$(cf_rule_intent_fingerprint <<<"$pending_rule_body")"
