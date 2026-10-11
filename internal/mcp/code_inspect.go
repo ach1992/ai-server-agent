@@ -35,7 +35,7 @@ func (s *Server) registerGoCodeTools() {
 			if err != nil {
 				return executorTransportErrorResult(err)
 			}
-			return responseResult(resp)
+			return s.responseResult(resp)
 		})
 	}
 }

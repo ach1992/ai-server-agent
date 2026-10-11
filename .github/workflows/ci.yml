@@ -182,6 +182,9 @@ jobs:
           grep -qF 'Safe uninstall (preserve data)' manage.sh
           grep -qF 'Purge Agent-owned server data' manage.sh
           grep -qF 'Remove recorded Cloudflare resources' manage.sh
+      - name: Operator runtime settings and rollback contract
+        if: ${{ needs.change-scope.outputs.runtime_changed != 'false' }}
+        run: bash tests/runtime_settings.sh
       - name: Browser trust-boundary static contract
         if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
         run: grep -qF 'Refusing symlinked browser data directory' internal/browser/browser.go

@@ -48,7 +48,7 @@ func (s *Server) registerRepositoryTools() {
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
-		return responseResult(resp)
+		return s.responseResult(resp)
 	})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
@@ -66,7 +66,7 @@ func (s *Server) registerRepositoryTools() {
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
-		return responseResult(resp)
+		return s.responseResult(resp)
 	})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
@@ -85,7 +85,7 @@ func (s *Server) registerRepositoryTools() {
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
-		return responseResult(resp)
+		return s.responseResult(resp)
 	})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
@@ -105,6 +105,6 @@ func (s *Server) registerRepositoryTools() {
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
-		return responseResult(resp)
+		return s.responseResult(resp)
 	})
 }

@@ -56,7 +56,7 @@ func (s *Server) registerTerminalTools() {
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
-		return responseResult(resp)
+		return s.responseResult(resp)
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name: "terminal_read", Description: "Read bounded incremental binary-safe terminal output, base64 encoded, with next_cursor/earliest/latest and explicit retention_truncated/disconnected state. Does not resend consumed output when passing next_cursor. Read-only, but the terminal process itself may continue executing.",
@@ -66,7 +66,7 @@ func (s *Server) registerTerminalTools() {
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
-		return responseResult(resp)
+		return s.responseResult(resp)
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name: "terminal_write", Description: "Send literal input into the existing worker or explicitly approved root PTY across MCP calls, not through a one-shot command. Input and output are not stored in audit logs. A confirmed control acknowledgement does not prove the shell command succeeded; inspect terminal_read.",
@@ -76,7 +76,7 @@ func (s *Server) registerTerminalTools() {
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
-		return responseResult(resp)
+		return s.responseResult(resp)
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name: "terminal_interrupt", Description: "Deliver Ctrl-C to an authenticated worker or explicitly approved root tmux PTY; not a separate shell invocation.", Annotations: annotations(false, true, false, true),
@@ -85,7 +85,7 @@ func (s *Server) registerTerminalTools() {
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
-		return responseResult(resp)
+		return s.responseResult(resp)
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name: "terminal_resize", Description: "Resize the existing real tmux PTY window, preserving the same workspace, principal and session.", Annotations: annotations(false, false, false, false),
@@ -94,7 +94,7 @@ func (s *Server) registerTerminalTools() {
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
-		return responseResult(resp)
+		return s.responseResult(resp)
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name: "terminal_reconnect", Description: "Reattach Control Mode to a root/executor-owned tmux runtime record after executor restart. Requires the SAME authenticated principal, explicit workspace and authority as the original session; verifies tmux socket, pane and generation. Returns a fresh session_epoch, with previous incremental output explicitly unavailable. Does not create a new terminal shell.",
@@ -104,7 +104,7 @@ func (s *Server) registerTerminalTools() {
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
-		return responseResult(resp)
+		return s.responseResult(resp)
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name: "terminal_close", Description: "Kill the entire private tmux server (including any extra panes or sessions) and close its executor-owned worker/root control connection. An uncertain close is reported, not treated as proven cleanup.", Annotations: annotations(false, true, false, false),
@@ -113,6 +113,6 @@ func (s *Server) registerTerminalTools() {
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
-		return responseResult(resp)
+		return s.responseResult(resp)
 	})
 }

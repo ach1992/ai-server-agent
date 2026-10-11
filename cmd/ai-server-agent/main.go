@@ -1,6 +1,7 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
@@ -24,7 +25,7 @@ func main() {
 	flag.Parse()
 	args := flag.Args()
 	if len(args) == 0 {
-		fatal("usage: ai-server-agent [serve|executor|print-config]")
+		fatal("usage: ai-server-agent [serve|executor|print-config|validate-config|runtime-settings]")
 	}
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
@@ -54,6 +55,21 @@ func main() {
 		}
 	case "print-config":
 		fmt.Printf("%+v\n", cfg)
+	case "validate-config":
+		fmt.Println("config valid")
+	case "runtime-settings":
+		settings := cfg.EffectiveRuntime()
+		values := make(map[string]int)
+		encoded, err := json.Marshal(settings)
+		if err != nil {
+			fatal(err.Error())
+		}
+		if err := json.Unmarshal(encoded, &values); err != nil {
+			fatal(err.Error())
+		}
+		for _, spec := range config.RuntimeSettingSpecs() {
+			fmt.Printf("%s=%d %s (default=%d, range=%d..%d, restart=agent+executor) - %s\n", spec.Key, values[spec.Key], spec.Unit, spec.Default, spec.Minimum, spec.Maximum, spec.Description)
+		}
 	default:
 		fatal("unknown command")
 	}

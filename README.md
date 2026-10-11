@@ -356,6 +356,9 @@ Useful subcommands:
 
 ```bash
 sudo ai-server-agent-manage status
+sudo ai-server-agent-manage runtime-show
+sudo ai-server-agent-manage runtime-set http_idle_timeout_seconds 300
+sudo ai-server-agent-manage runtime-reset http_idle_timeout_seconds
 sudo ai-server-agent-manage chatgpt-setup
 sudo ai-server-agent-manage configure-cloudflare
 sudo ai-server-agent-manage configure-local
@@ -366,6 +369,8 @@ sudo ai-server-agent-manage repair
 sudo ai-server-agent-manage uninstall
 sudo ai-server-agent-manage purge
 ```
+
+Runtime settings persist in the existing root-managed `/etc/ai-server-agent/config.json`. `runtime-show` lists the effective configured values, safe value ranges and units; `runtime-set` and `runtime-reset` validate with the installed binary **before** updating the config, restart Agent/Executor, verify local health, and restore the prior config on verified restart failure. Run those commands in an independent SSH/operator terminal because restarting the Agent may disconnect an MCP client. No source edit or new release is needed to change supported settings **once this capability has been installed**. A configured value is not guaranteed active until both services restart and health is checked. An invalid value never restarts them. These are per-request/network operational budgets, not a way to disable authentication, bypass approval or transfer an unlimited file in one MCP response. For large files use the existing version-pinned read ranges; resumable large/binary ingestion remains Issue #99.
 
 Privileged install/update/manage/uninstall/purge operations share a root-only lifecycle lock under `/run/lock/ai-server-agent`. A concurrent management operation fails before state mutation rather than racing another lifecycle operation.
 
