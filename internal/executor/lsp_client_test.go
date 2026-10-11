@@ -170,6 +170,22 @@ func TestWorkerGoDefinitionUsesSharedStdioBroker(t *testing.T) {
 	if !strings.HasSuffix(loc, "/main.go") || start["line"] != float64(1) {
 		t.Fatalf("unexpected location: %s", location)
 	}
+	// A real repository source larger than the original 32 KiB budget was
+	// refused before reaching gopls. Prove the same stdio framing path can
+	// deliver a complete representative 47+ KiB Go source without truncation.
+	largeSource := source + strings.Repeat("// Representative Go source for a larger semantic document\n", 900)
+	if len(largeSource) <= 47_350 || len(largeSource) > codeMaxDocumentBytes {
+		t.Fatalf("invalid larger-source fixture size: %d", len(largeSource))
+	}
+	largeLocation, err := s.workerGoDefinition(ctx, owner, script, file, largeSource, 2, 14)
+	if err != nil || !strings.Contains(string(largeLocation), `"line":1`) {
+		t.Fatalf("larger-source LSP definition: %s (%v)", largeLocation, err)
+	}
+	// Keep the bounded frame/source limit: no partial didOpen or silent read.
+	_, err = s.workerGoDefinition(ctx, owner, script, file, strings.Repeat("x", codeMaxDocumentBytes+1), 2, 14)
+	if err == nil || !strings.Contains(err.Error(), "lsp_document_too_large") {
+		t.Fatalf("oversized source must be rejected: %v", err)
+	}
 	_, err = s.workerGoDefinition(ctx, owner, script, filepath.Join(workspace, "..", "other.go"), source, 2, 14)
 	if err == nil || !strings.Contains(err.Error(), "outside_workspace") {
 		t.Fatalf("outside workspace accepted: %v", err)

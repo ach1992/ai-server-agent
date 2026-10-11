@@ -19,14 +19,21 @@ func TestCodeGoRealWorkerReadAndGopls(t *testing.T) {
 	requireWorkerLandlockV2(t)
 	s, owner, workspace := testStdioBroker(t)
 	s.runs = newRunLimiterWith(2, 1)
+	goBinary, err := exec.LookPath("go")
+	if err != nil {
+		t.Fatalf("Go is required for an explicitly enabled real-gopls proof: %v", err)
+	}
 	helper := filepath.Join(t.TempDir(), "ai-server-agent")
-	build := exec.Command("/srv/ai-workspace/.toolchains/go1.27.1/bin/go", "build", "-o", helper, "./cmd/ai-server-agent")
+	build := exec.Command(goBinary, "build", "-o", helper, "./cmd/ai-server-agent")
 	build.Dir = filepath.Join("..", "..")
 	if b, err := build.CombinedOutput(); err != nil {
 		t.Fatalf("build file helper: %v: %s", err, b)
 	}
 	s.workspaceHelperBinary = helper
-	source := "package demo\nfunc Hello() {}\nfunc main() { Hello() }\n"
+	source := "package demo\nfunc Hello() {}\nfunc main() { Hello() }\n" + strings.Repeat("// Representative Go source for a larger semantic document\n", 900)
+	if len(source) <= 47_350 || len(source) > codeMaxDocumentBytes {
+		t.Fatalf("invalid representative large source fixture: %d", len(source))
+	}
 	if err := os.WriteFile(filepath.Join(workspace, "go.mod"), []byte("module example.org/real-gopls-public\n\ngo 1.26.0\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -34,7 +41,7 @@ func TestCodeGoRealWorkerReadAndGopls(t *testing.T) {
 		t.Fatal(err)
 	}
 	wrapper := filepath.Join(workspace, "gopls-wrapper")
-	script := "#!/bin/sh\nPATH=/srv/ai-workspace/.toolchains/go1.27.1/bin:$PATH\nexport PATH\nexec \"" + gopls + "\" \"$@\"\n"
+	script := "#!/bin/sh\nPATH=\"" + filepath.Dir(goBinary) + "\":$PATH\nexport PATH\nexec \"" + gopls + "\" \"$@\"\n"
 	if err := os.WriteFile(wrapper, []byte(script), 0700); err != nil {
 		t.Fatal(err)
 	}

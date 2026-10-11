@@ -18,7 +18,7 @@ import (
 // private stdio broker instead of opening a second process/control boundary.
 // This is deliberately not a public generic JSON-RPC or MCP session API.
 const (
-	lspMaxFrameBytes  = 64 << 10
+	lspMaxFrameBytes  = 128 << 10
 	lspMaxHeaderBytes = 1024
 	lspPollInterval   = 20 * time.Millisecond
 )
@@ -222,7 +222,7 @@ func (s *Server) workerGoDefinition(ctx context.Context, req Request, goplsPath,
 	if !utf8.ValidString(source) {
 		return nil, errors.New("lsp_invalid_document_utf8")
 	}
-	if len(source) > lspMaxFrameBytes/2 {
+	if len(source) > codeMaxDocumentBytes {
 		return nil, errors.New("lsp_document_too_large")
 	}
 	workspace, err := s.workspacePath(req.Workspace, true)
