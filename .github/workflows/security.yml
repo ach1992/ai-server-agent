@@ -78,6 +78,8 @@ jobs:
         run: bash tests/worker_home_migration.sh
       - name: Build local test binary
         run: CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
+      - name: Privileged runtime-settings ownership and rollback regression
+        run: sudo env ASA_RUNTIME_TEST_BINARY=/tmp/ai-server-agent bash tests/runtime_settings_root.sh
       - name: Migrate hostile legacy state and verify root trust boundary
         run: |
           set -Eeuo pipefail

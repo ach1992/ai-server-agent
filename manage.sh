@@ -192,7 +192,11 @@ write_config(){
 restart_and_verify_local(){
   local port
   port="$(current_port)"
-  systemctl restart ai-server-agent-executor.service ai-server-agent.service
+  # Bash errexit is suppressed when this helper is called from an if/&&
+  # condition. Always check restart itself: a failed systemctl command may
+  # leave the *old* services active with a healthy endpoint, which is NOT
+  # proof the new runtime configuration has been applied.
+  systemctl restart ai-server-agent-executor.service ai-server-agent.service || return 1
   sleep 1
   systemctl is-active --quiet ai-server-agent-executor.service || return 1
   systemctl is-active --quiet ai-server-agent.service || return 1
@@ -201,6 +205,119 @@ restart_and_verify_local(){
   else
     curl -fsS "http://127.0.0.1:$port/healthz" >/dev/null
   fi
+}
+
+# Operational settings are managed locally as root through the existing
+# lifecycle lock. They are never exposed as an unauthenticated MCP mutation.
+RUNTIME_BINARY="/usr/local/bin/ai-server-agent"
+
+runtime_setting_allowed(){
+  case "${1:-}" in
+    http_read_header_timeout_seconds|http_idle_timeout_seconds|command_timeout_seconds|workspace_file_timeout_seconds|text_fallback_bytes) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+runtime_config_safe(){
+  [ -f "$CONFIG_FILE" ] && [ ! -L "$CONFIG_FILE" ] || die "Runtime configuration is missing or unsafe."
+  [ "$(stat -c '%u:%a' "$CONFIG_FILE")" = "0:640" ] || die "Runtime configuration must be root-owned and mode 0640."
+}
+runtime_binary_safe(){
+  [ -f "$RUNTIME_BINARY" ] && [ ! -L "$RUNTIME_BINARY" ] && [ -x "$RUNTIME_BINARY" ] || die "Installed Agent executable is missing or unsafe."
+  [ "$(stat -c '%u' "$RUNTIME_BINARY")" = 0 ] || die "Installed Agent executable must be root-owned."
+  [ -z "$(find "$RUNTIME_BINARY" -maxdepth 0 -perm /022 -print)" ] || die "Installed Agent executable must not be group/other writable."
+}
+runtime_pending_backup(){
+  find "$CONFIG_DIR" -maxdepth 1 -name '.runtime-old.*' -print -quit
+}
+runtime_show(){
+  runtime_config_safe
+  runtime_binary_safe
+  if [ -n "$(runtime_pending_backup)" ]; then
+    warn "A previous runtime change left protected rollback state. Inspect it and reconcile the installed config/services before new changes."
+  fi
+  printf 'Configured settings (effective only after a verified Agent+Executor restart):\n'
+  "$RUNTIME_BINARY" -config "$CONFIG_FILE" runtime-settings
+}
+runtime_menu(){
+  [ -r /dev/tty ] || die "Interactive runtime settings require a terminal."
+  while true; do
+    header
+    runtime_show
+    printf '\n  1) Set a supported setting\n  2) Reset a setting to default\n  0) Back\n'
+    local choice key value
+    read -r -p 'Choose: ' choice </dev/tty
+    case "$choice" in
+      1)
+        read -r -p 'Setting key: ' key </dev/tty
+        read -r -p 'New integer value: ' value </dev/tty
+        runtime_apply set "$key" "$value"; pause ;;
+      2)
+        read -r -p 'Setting key: ' key </dev/tty
+        runtime_apply reset "$key"; pause ;;
+      0) return ;;
+      *) warn "Choose 1, 2, or 0." ;;
+    esac
+  done
+}
+runtime_apply(){
+  local operation="$1" key="$2" value="${3:-}" staged backup restore_stage restored=false
+  runtime_setting_allowed "$key" || die "Unknown runtime setting: $key. See runtime-show."
+  if [ "$operation" = set ]; then
+    [[ "$value" =~ ^(0|[1-9][0-9]*)$ ]] || die "Runtime values must be decimal integers."
+  elif [ "$operation" != reset ]; then
+    die "Unknown runtime operation."
+  fi
+  acquire_management_lock
+  runtime_config_safe
+  runtime_binary_safe
+  [ ! -e "$CF_TXN_STATE" ] && [ ! -L "$CF_TXN_STATE" ] || die "Recover the existing Cloudflare transaction before editing runtime settings."
+  [ -z "$(runtime_pending_backup)" ] || die "A previous runtime update has an unresolved rollback snapshot. Inspect the protected .runtime-old.* file and reconcile service state before another edit."
+  staged="$(mktemp "$CONFIG_DIR/.runtime-new.XXXXXXXX")" || die "Cannot stage runtime config."
+  backup="$(mktemp "$CONFIG_DIR/.runtime-old.XXXXXXXX")" || { rm -f -- "$staged"; die "Cannot stage rollback."; }
+  if [ "$operation" = set ]; then
+    if ! jq --arg key "$key" --arg value "$value" '.runtime = ((.runtime // {}) + {($key): ($value | tonumber)})' "$CONFIG_FILE" > "$staged"; then
+      rm -f -- "$staged" "$backup"; die "Cannot prepare runtime edit."
+    fi
+  else
+    if ! jq --arg key "$key" '.runtime = ((.runtime // {}) | del(.[$key]))' "$CONFIG_FILE" > "$staged"; then
+      rm -f -- "$staged" "$backup"; die "Cannot prepare runtime reset."
+    fi
+  fi
+  if ! "$RUNTIME_BINARY" -config "$staged" validate-config >/dev/null; then
+    rm -f -- "$staged" "$backup"; die "Invalid runtime value. Original config/services unchanged; see runtime-show for supported ranges."
+  fi
+  if ! cp -p -- "$CONFIG_FILE" "$backup"; then
+    rm -f -- "$staged" "$backup"; die "Cannot preserve old runtime configuration."
+  fi
+  if ! chown root:"$AGENT_USER" "$staged" || ! chmod 0640 "$staged"; then
+    rm -f -- "$staged" "$backup"; die "Could not secure staged configuration."
+  fi
+  if ! mv -f -- "$staged" "$CONFIG_FILE"; then
+    rm -f -- "$staged" "$backup"; die "Could not commit runtime configuration."
+  fi
+  if restart_and_verify_local; then
+    rm -f -- "$backup"
+    log "Runtime $key: $operation applied; both services restarted and local health verified. No binary update was needed."
+    return 0
+  fi
+  warn "New runtime configuration failed health/restart. Restoring old config and recovering services."
+  # A failed rollback restart must NEVER consume the only persisted snapshot:
+  # keep $backup until the old config is back AND the services are healthy.
+  # Otherwise a subsequent runtime-set/reset could incorrectly proceed while
+  # the running service state remains uncertain.
+  if restore_stage="$(mktemp "$CONFIG_DIR/.runtime-restore.XXXXXXXX")"; then
+    if cp -p -- "$backup" "$restore_stage" &&
+       mv -f -- "$restore_stage" "$CONFIG_FILE" &&
+       restart_and_verify_local; then
+      restored=true
+    fi
+    rm -f -- "$restore_stage"
+  fi
+  if [ "$restored" = true ]; then
+    rm -f -- "$backup"
+    die "Runtime update failed; old config and local service health restored."
+  fi
+  die "Runtime update failed and recovery is NOT verified. Protected rollback snapshot preserved at $backup; inspect the services/config manually. Further runtime changes are blocked until reconciled."
 }
 
 status(){
@@ -1920,6 +2037,7 @@ menu(){
     printf '  %s8)%s Purge Agent-owned server data\n' "$RED" "$RESET"
     printf '  %s9)%s Remove recorded Cloudflare resources\n' "$YELLOW" "$RESET"
     printf '  %s10)%s MCP credential management\n' "$CYAN" "$RESET"
+    printf '  %s11)%s Runtime limits and timeouts\n' "$CYAN" "$RESET"
     printf '  0) Exit\n\n'
     read -r -p 'Choose: ' choice </dev/tty
     case "$choice" in
@@ -1933,6 +2051,7 @@ menu(){
       8) run_uninstall 1; return ;;
       9) cloudflare_cleanup; pause ;;
       10) credential_menu ;;
+      11) runtime_menu ;;
       0) return ;;
       *) echo "Invalid choice."; pause ;;
     esac
@@ -1948,6 +2067,9 @@ case "${1:-menu}" in
   menu) menu ;;
   first-run) first_run ;;
   status) status ;;
+  runtime-show) [ "$#" -eq 1 ] || die "Usage: ai-server-agent-manage runtime-show"; runtime_show ;;
+  runtime-set) [ "$#" -eq 3 ] || die "Usage: ai-server-agent-manage runtime-set <key> <integer>"; runtime_apply set "$2" "$3" ;;
+  runtime-reset) [ "$#" -eq 2 ] || die "Usage: ai-server-agent-manage runtime-reset <key>"; runtime_apply reset "$2" ;;
   chatgpt|chatgpt-setup) chatgpt_setup ;;
   reveal-auth) reveal_auth ;;
   credentials|credential-status) credential_status ;;
@@ -1962,5 +2084,5 @@ case "${1:-menu}" in
   repair) repair ;;
   uninstall) run_uninstall 0 ;;
   purge) run_uninstall 1 ;;
-  *) die "Unknown command: ${1:-}. Use menu, status, chatgpt-setup, credential-status, credential-rotate, credential-revoke, configure-cloudflare, configure-local, configure-manual-tls, cloudflare-cleanup, update, repair, uninstall, or purge." ;;
+  *) die "Unknown command: ${1:-}. Use menu, status, runtime-show, runtime-set, runtime-reset, chatgpt-setup, credential-status, credential-rotate, credential-revoke, configure-cloudflare, configure-local, configure-manual-tls, cloudflare-cleanup, update, repair, uninstall, or purge." ;;
 esac

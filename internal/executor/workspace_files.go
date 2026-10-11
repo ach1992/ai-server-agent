@@ -43,7 +43,6 @@ type workspaceFileOperation struct {
 }
 
 const (
-	workerWorkspaceTimeout = 30 * time.Second
 	// Same bounded wire-budget as the executor request. The parent must
 	// serialize/check before audit admission and helper process launch.
 	// JSON escaping can turn 1 MiB of valid UTF-8 content into >2 MiB.
@@ -136,7 +135,7 @@ func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp 
 	if s.workspaceHelperBinary != "" {
 		exe = s.workspaceHelperBinary
 	}
-	helperTimeout := workerWorkspaceTimeout
+	helperTimeout := time.Duration(s.cfg.EffectiveRuntime().WorkspaceFileTimeoutSeconds) * time.Second
 	if req.Action == "workspace_text_search" {
 		helperTimeout = defaultWorkspaceSearchTimeout + 5*time.Second
 		if req.TimeoutMS > 0 {

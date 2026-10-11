@@ -43,7 +43,7 @@ func (s *Server) registerWorkspaceFileTools() {
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
-		return responseResult(resp)
+		return s.responseResult(resp)
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name: "workspace_apply_edits", Description: "Apply up to 12 bounded aiworker source-file edits in one explicit workspace after preflighting EVERY path, expected version and exact replacement context. Each file commits atomically but the batch is NOT an all-or-nothing transaction: structured result reports exact applied, failed and unattempted paths, including possible unknown completion. No Git staging/commit, code execution or implicit rollback.",
@@ -53,7 +53,7 @@ func (s *Server) registerWorkspaceFileTools() {
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
-		return responseResult(resp)
+		return s.responseResult(resp)
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name: "workspace_read", Description: "Read a bounded raw-byte range from a regular source file inside one explicit workspace as aiworker, not root. For unknown/large files use workspace_stat first, then select a small explicit limit with matching file_version; the default zero limit reads up to 1 MiB and may exceed an AI client model-context budget. No symlinks, traversal or implicit Git administrative reads; returns a file_version for optimistic edits. Does not execute project code.",
@@ -63,7 +63,7 @@ func (s *Server) registerWorkspaceFileTools() {
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
-		return responseResult(resp)
+		return s.responseResult(resp)
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name: "workspace_write", Description: "Create or atomically replace one bounded regular source file using aiworker authority and descriptor-relative path confinement. Requires must_not_exist for create or exact file_version for replace; does not auto-stage/commit. Does not follow symlinks, overwrite concurrent changes silently, or run project code. Multi-file transaction semantics are not claimed.",
@@ -73,6 +73,6 @@ func (s *Server) registerWorkspaceFileTools() {
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
-		return responseResult(resp)
+		return s.responseResult(resp)
 	})
 }
