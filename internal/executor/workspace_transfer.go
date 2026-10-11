@@ -12,8 +12,19 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
 	"time"
 )
+
+// Fault injection is nil in production and is set only by isolated tests.
+// Each injected crash is a real os.Exit in a disposable child process.
+var transferFaultHook func(string)
+
+func transferFaultPoint(phase string) {
+	if transferFaultHook != nil {
+		transferFaultHook(phase)
+	}
+}
 
 const (
 	transferChunkMax    = 256 << 10
@@ -36,6 +47,9 @@ type transferRecord struct {
 	Status         string `json:"status"`
 	ExpiresUnix    int64  `json:"expires_unix"`
 	ResultVersion  string `json:"result_version,omitempty"`
+	PreparedBytes  int64  `json:"prepared_bytes,omitempty"`
+	PreparedHash   string `json:"prepared_hash,omitempty"`
+	StagedVersion  string `json:"staged_version,omitempty"`
 	PreparedDev    uint64 `json:"prepared_dev,omitempty"`
 	PreparedIno    uint64 `json:"prepared_ino,omitempty"`
 	DisplacedDev   uint64 `json:"displaced_dev,omitempty"`
@@ -47,7 +61,7 @@ func transferDigestValid(v string) bool {
 	return len(v) == 64 && strings.Trim(v, "0123456789abcdef") == ""
 }
 func transferIDValid(v string) bool {
-	return len(v) == 35 && strings.HasPrefix(v, "tr_") && strings.Trim(v[3:], "0123456789abcdef") == ""
+	return len(v) == 67 && strings.HasPrefix(v, "tr_") && strings.Trim(v[3:], "0123456789abcdef") == ""
 }
 func transferKeyValid(s string) bool {
 	if len(s) < 16 || len(s) > 128 {
@@ -64,13 +78,14 @@ func transferTempName(id string) string { return ".ai-server-agent-xfer-" + id[3
 
 func transferTempValid(name string) bool {
 	const prefix = ".ai-server-agent-xfer-"
-	return len(name) == len(prefix)+32 && strings.HasPrefix(name, prefix) && strings.Trim(name[len(prefix):], "0123456789abcdef") == ""
+	return len(name) == len(prefix)+64 && strings.HasPrefix(name, prefix) && strings.Trim(name[len(prefix):], "0123456789abcdef") == ""
 }
 
 func transferIDFor(op workspaceFileOperation) string {
-	encoded, _ := json.Marshal([]string{op.PrincipalClass, op.PrincipalID, filepath.Clean(op.Workspace), op.Path, op.TransferKey})
-	digest := sha256.Sum256(encoded)
-	return "tr_" + hex.EncodeToString(digest[:16])
+	keyInput, _ := json.Marshal([]string{op.PrincipalClass, op.PrincipalID, filepath.Clean(op.Workspace), op.Path, op.TransferKey})
+	materialInput, _ := json.Marshal([]any{op.ExpectedSize, op.SHA256, op.FileVersion, op.MustNotExist})
+	keyHash, materialHash := sha256.Sum256(keyInput), sha256.Sum256(materialInput)
+	return "tr_" + hex.EncodeToString(keyHash[:16]) + hex.EncodeToString(materialHash[:16])
 }
 func validateWorkspaceTransferRequest(req Request) error {
 	if req.PrincipalID == "" || req.PrincipalClass == "" {
@@ -151,7 +166,7 @@ func transferReceipt(r transferRecord) Response {
 	out := Response{OK: true, Status: r.Status, TransferID: r.ID, ExpectedSize: r.ExpectedSize,
 		TransferredBytes: r.Received, SHA256: r.SHA256,
 		ExpiresAt:  time.Unix(r.ExpiresUnix, 0).UTC().Format(time.RFC3339),
-		NextOffset: int64Ptr(r.Received),
+		NextOffset: int64Ptr(r.Received), PreparedBytes: r.PreparedBytes,
 	}
 	if r.Status == "committed" {
 		out.FileVersion = r.ResultVersion
@@ -183,8 +198,8 @@ func transferReadRecord(session string) (transferRecord, error) {
 	if err = json.Unmarshal(b, &r); err != nil {
 		return r, err
 	}
-	if !transferIDValid(r.ID) || !transferDigestValid(r.SHA256) || r.ExpectedSize <= 0 || r.Received < 0 || r.Received > r.ExpectedSize ||
-		(r.Status != "uploading" && r.Status != "committing" && r.Status != "committed" && r.Status != "aborted") || r.ExpiresUnix <= 0 {
+	if !transferIDValid(r.ID) || !transferDigestValid(r.SHA256) || r.ExpectedSize <= 0 || r.Received < 0 || r.Received > r.ExpectedSize || r.ExpectedSize > (int64(1)<<40) || r.PreparedBytes < 0 || r.PreparedBytes > r.ExpectedSize ||
+		(r.Status != "uploading" && r.Status != "preparing" && r.Status != "committing" && r.Status != "committed" && r.Status != "aborted") || r.ExpiresUnix <= 0 {
 		return r, errors.New("invalid transfer manifest")
 	}
 	return r, nil
@@ -238,7 +253,27 @@ func transferRemoveData(session string) error {
 	}
 	return unix.Fsync(dir)
 }
+
+// Reconcile terminal cleanup on every retry; a durable receipt must never
+// allow a leftover full staging file to evade quota accounting.
+func transferTerminalReceipt(session string, r *transferRecord) Response {
+	if r.Status != "aborted" && r.Status != "committed" {
+		return transferError("transfer_invalid_state", "state", "not a terminal record")
+	}
+	if err := transferRemoveData(session); err != nil {
+		return fileError("transfer_cleanup_failed", "io", err)
+	}
+	return transferReceipt(*r)
+}
+
 func transferRemoveSession(dir string) error {
+	var current unix.Stat_t
+	if err := unix.Lstat(dir, &current); err != nil {
+		return err
+	}
+	if current.Mode&unix.S_IFMT != unix.S_IFDIR || current.Mode&0777 != 0700 || current.Uid != uint32(os.Geteuid()) {
+		return errors.New("unexpected transfer session directory ownership or type")
+	}
 	entries, err := os.ReadDir(dir)
 	if err != nil {
 		return err
@@ -246,9 +281,10 @@ func transferRemoveSession(dir string) error {
 	if len(entries) > 128 {
 		return errors.New("unexpected number of files in transfer state")
 	}
+	// Validate the COMPLETE namespace before removing a single entry.
 	for _, entry := range entries {
 		name := entry.Name()
-		prefix := ".ai-server-agent-write-"
+		const prefix = ".ai-server-agent-write-"
 		tmp := strings.HasPrefix(name, prefix) && len(name) == len(prefix)+24 && strings.Trim(name[len(prefix):], "0123456789abcdef") == ""
 		if name != "data" && name != "manifest.json" && !tmp {
 			return errors.New("unrecognized transfer state file")
@@ -256,49 +292,67 @@ func transferRemoveSession(dir string) error {
 		if entry.Type()&os.ModeSymlink != 0 || entry.IsDir() {
 			return errors.New("unsafe transfer state entry")
 		}
-		info, err := entry.Info()
-		if err != nil || !info.Mode().IsRegular() {
+		info, e := entry.Info()
+		if e != nil || !info.Mode().IsRegular() {
 			return errors.New("non-regular transfer state entry")
 		}
-		if err = os.Remove(filepath.Join(dir, name)); err != nil {
+		if st, ok := info.Sys().(*syscall.Stat_t); ok && st.Uid != uint32(os.Geteuid()) {
+			return errors.New("transfer state entry is not worker-owned")
+		}
+	}
+	for _, entry := range entries {
+		if err = os.Remove(filepath.Join(dir, entry.Name())); err != nil {
 			return err
 		}
 	}
 	return os.Remove(dir)
 }
 
-func transferInventory(op workspaceFileOperation, now int64) (int, int64, error) {
+// A helper killed during mkdir/data creation can leave a directory without
+// a committed intent. Since the transfer ID embeds exact key+material and
+// the serialized staging lock excludes concurrent helpers, only an empty,
+// manifest-less partial begin may be reclaimed without destroying user bytes.
+func transferIncompleteBeginSafe(session string) bool {
+	if _, err := os.Lstat(filepath.Join(session, "manifest.json")); !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	data, err := os.Lstat(filepath.Join(session, "data"))
+	return errors.Is(err, os.ErrNotExist) || (err == nil && data.Mode().IsRegular() && data.Size() == 0)
+}
+
+func transferInventory(op workspaceFileOperation, now int64) (int, int64, int, error) {
 	root := op.TransferRoot
 	fd, err := os.Open(root)
 	if err != nil {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	names, err := fd.Readdirnames(transferScanMax + 1)
 	_ = fd.Close()
 	if err != nil && !errors.Is(err, io.EOF) {
-		return 0, 0, err
+		return 0, 0, 0, err
 	}
 	if len(names) > transferScanMax {
-		return 0, 0, errors.New("too many staging entries; operator cleanup required")
+		return 0, 0, 0, errors.New("too many staging entries; operator cleanup required")
 	}
 	count := 0
+	retained := 0
 	var reserved int64
 	for _, name := range names {
 		if !transferIDValid(name) {
-			return 0, 0, errors.New("unexpected entry in managed transfer storage")
+			return 0, 0, 0, errors.New("unexpected entry in managed transfer storage")
 		}
 		dir := filepath.Join(root, name)
 		info, err := os.Lstat(dir)
 		if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-			return 0, 0, errors.New("unsafe staging directory")
+			return 0, 0, 0, errors.New("unsafe staging directory")
 		}
 		rec, err := transferReadRecord(dir)
 		if err != nil || rec.ID != name {
-			if info.ModTime().Unix()+3600 > now {
-				return 0, 0, errors.New("recent interrupted transfer begin requires recovery or expiration")
+			if !transferIncompleteBeginSafe(dir) {
+				return 0, 0, 0, errors.New("unsafe or corrupt durable transfer requires investigation")
 			}
 			if err = transferRemoveSession(dir); err != nil {
-				return 0, 0, fmt.Errorf("cleanup interrupted transfer begin: %w", err)
+				return 0, 0, 0, fmt.Errorf("cleanup interrupted transfer begin: %w", err)
 			}
 			continue
 		}
@@ -307,34 +361,125 @@ func transferInventory(op workspaceFileOperation, now int64) (int, int64, error)
 			if rec.Status == "committing" {
 				result := transferReconcileCommit(cleanupOp, dir, &rec)
 				if !result.OK && result.ErrorCode != "transfer_commit_pending" {
-					return 0, 0, errors.New("uncertain transfer publication requires operator reconciliation")
+					return 0, 0, 0, errors.New("uncertain transfer publication requires operator reconciliation")
 				}
 				if result.ErrorCode == "transfer_commit_pending" {
 					if e := transferDiscardPrepared(cleanupOp, rec); e != nil {
-						return 0, 0, fmt.Errorf("uncertain transfer cannot be discarded safely: %w", e)
+						return 0, 0, 0, fmt.Errorf("uncertain transfer cannot be discarded safely: %w", e)
 					}
 				}
-			} else if rec.Status == "uploading" || rec.Status == "aborted" {
+			} else if rec.Status == "uploading" || rec.Status == "preparing" || rec.Status == "aborted" {
 				if err = transferCleanupUnpublishedTemp(cleanupOp, rec); err != nil {
-					return 0, 0, fmt.Errorf("cleanup expired staged destination: %w", err)
+					return 0, 0, 0, fmt.Errorf("cleanup expired staged destination: %w", err)
 				}
 			}
+			if err = transferRemoveData(dir); err != nil {
+				return 0, 0, 0, fmt.Errorf("cleanup terminal/expired staging bytes: %w", err)
+			}
 			if err = transferRemoveSession(dir); err != nil {
-				return 0, 0, fmt.Errorf("expire transfer safely: %w", err)
+				return 0, 0, 0, fmt.Errorf("expire transfer safely: %w", err)
 			}
 			continue
 		}
-		if rec.Status == "uploading" || rec.Status == "committing" {
+		retained++
+		if rec.Status == "uploading" || rec.Status == "preparing" || rec.Status == "committing" {
 			count++
+			// A later operator quota reduction blocks NEW admissions, not
+			// recovery or expiry cleanup of already accepted objects.
 			reserved += rec.ExpectedSize
+		} else {
+			// A terminal receipt is NOT evidence that its staged bytes were
+			// physically removed. Count the actual retained file until unlink.
+			st, e := os.Lstat(filepath.Join(dir, "data"))
+			if e == nil {
+				if !st.Mode().IsRegular() {
+					return 0, 0, 0, errors.New("terminal staging has unsafe file type")
+				}
+				if st.Size() < 0 || st.Size() > (int64(1)<<40) {
+					return 0, 0, 0, errors.New("terminal staging exceeds supported maximum size")
+				}
+				reserved += st.Size()
+			} else if !errors.Is(e, os.ErrNotExist) {
+				return 0, 0, 0, e
+			}
 		}
 	}
-	return count, reserved, nil
+	return count, reserved, retained, nil
 }
 
 // This function executes solely inside the aiworker/Landlock file helper.
 // The global flock caps concurrent disk/commit activity and serializes
 // durable progress between independent MCP calls and after restarts.
+// The directory name contains both the idempotency-key hash and material
+// fingerprint. It is therefore safe to reclaim a same-material *incomplete*
+// begin that never published a manifest, without accepting a different
+// material request at the same key or requiring another transfer to sweep.
+func transferResolveBegin(root string, op workspaceFileOperation) (Response, bool) {
+	id := transferIDFor(op)
+	listing, err := os.Open(root)
+	if err != nil {
+		return fileError("transfer_storage_invalid", "state", err), true
+	}
+	names, err := listing.Readdirnames(transferScanMax + 1)
+	_ = listing.Close()
+	if err != nil && !errors.Is(err, io.EOF) {
+		return fileError("transfer_storage_invalid", "state", err), true
+	}
+	if len(names) > transferScanMax {
+		return transferError("transfer_receipt_capacity", "resource", "bounded transfer namespace full; automatic expiry sweep runs independently"), true
+	}
+	for _, name := range names {
+		if strings.HasPrefix(name, id[:35]) && name != id {
+			return transferError("transfer_begin_conflict", "conflict", "same transfer key already reserved for a different material request"), true
+		}
+	}
+	session := filepath.Join(root, id)
+	info, err := os.Lstat(session)
+	if errors.Is(err, os.ErrNotExist) {
+		return Response{}, false
+	}
+	if err != nil {
+		return fileError("transfer_storage_invalid", "state", err), true
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return transferError("transfer_storage_invalid", "state", "unsafe existing transfer session"), true
+	}
+	var stat unix.Stat_t
+	if e := unix.Lstat(session, &stat); e != nil || stat.Uid != uint32(os.Geteuid()) || stat.Mode&0777 != 0700 {
+		return transferError("transfer_storage_invalid", "state", "transfer state owner or mode invalid"), true
+	}
+	prior, e := transferReadRecord(session)
+	if e == nil {
+		if prior.ID != id || prior.PrincipalID != op.PrincipalID || prior.PrincipalClass != op.PrincipalClass || prior.Workspace != filepath.Clean(op.Workspace) || prior.Path != op.Path || prior.ExpectedSize != op.ExpectedSize || prior.SHA256 != op.SHA256 || prior.FileVersion != op.FileVersion || prior.MustNotExist != op.MustNotExist {
+			return transferError("transfer_begin_conflict", "conflict", "idempotency key and durable material do not match"), true
+		}
+		if prior.ExpiresUnix <= time.Now().Unix() {
+			return transferError("transfer_expired", "state", "idempotent transfer has expired; use a new key after retention cleanup"), true
+		}
+		if prior.Status == "committed" || prior.Status == "aborted" {
+			return transferTerminalReceipt(session, &prior), true
+		}
+		return transferReceipt(prior), true
+	}
+	// Corrupt accepted sessions with nonempty data remain fail-closed.
+	if !transferIncompleteBeginSafe(session) {
+		return transferError("transfer_begin_unknown", "state", "existing durable transfer may contain user bytes; refuse unsafe reclamation"), true
+	}
+	if e = transferRemoveSession(session); e != nil {
+		return fileError("transfer_begin_recovery_failed", "io", e), true
+	}
+	fd, e := os.Open(root)
+	if e != nil {
+		return fileError("transfer_begin_recovery_failed", "io", e), true
+	}
+	e = fd.Sync()
+	_ = fd.Close()
+	if e != nil {
+		return fileError("transfer_begin_recovery_failed", "io", e), true
+	}
+	return Response{}, false
+}
+
 func workerWorkspaceTransfer(op workspaceFileOperation) Response {
 	req := Request{Action: "workspace_transfer", Workspace: op.Workspace, Path: op.Path, PrincipalID: op.PrincipalID, PrincipalClass: op.PrincipalClass, TransferKey: op.TransferKey,
 		TransferOp: op.TransferOp, TransferID: op.TransferID, ExpectedSize: op.ExpectedSize, SHA256: op.SHA256,
@@ -364,28 +509,17 @@ func workerWorkspaceTransfer(op workspaceFileOperation) Response {
 	defer unix.Flock(rootFD, unix.LOCK_UN)
 	now := time.Now().Unix()
 	if op.TransferOp == "begin" {
-		id := transferIDFor(op)
-		session := filepath.Join(op.TransferRoot, id)
-		if info, e := os.Lstat(session); e == nil {
-			if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
-				return transferError("transfer_storage_invalid", "state", "unsafe idempotent transfer session")
-			}
-			old, e := transferReadRecord(session)
-			if e != nil {
-				return transferError("transfer_begin_unknown", "state", "previous begin is incomplete; status may require expiry or operator cleanup")
-			}
-			if old.PrincipalID != op.PrincipalID || old.PrincipalClass != op.PrincipalClass || old.Workspace != filepath.Clean(op.Workspace) || old.Path != op.Path || old.ExpectedSize != op.ExpectedSize || old.SHA256 != op.SHA256 || old.FileVersion != op.FileVersion || old.MustNotExist != op.MustNotExist {
-				return transferError("transfer_begin_conflict", "conflict", "idempotency key was reused for a different transfer")
-			}
-			return transferReceipt(old)
-		} else if !errors.Is(e, os.ErrNotExist) {
-			return fileError("transfer_storage_invalid", "state", e)
+		if result, found := transferResolveBegin(op.TransferRoot, op); found {
+			return result
 		}
-		count, reserved, err := transferInventory(op, now)
+		count, reserved, retained, err := transferInventory(op, now)
 		if err != nil {
 			return fileError("transfer_storage_invalid", "state", err)
 		}
 		capBytes := int64(op.TransferQuotaMiB) << 20
+		if retained >= transferScanMax {
+			return transferError("transfer_receipt_capacity", "resource", "staging receipt namespace is full; bounded automatic expiry cleanup will free entries")
+		}
 		if count >= op.TransferMaxSessions || op.ExpectedSize > capBytes || reserved > capBytes-op.ExpectedSize {
 			return transferError("transfer_quota_exceeded", "resource", "configured staging quota or session capacity exhausted; reduce active transfers or change operator settings")
 		}
@@ -400,11 +534,14 @@ func workerWorkspaceTransfer(op workspaceFileOperation) Response {
 		rec.Workspace != filepath.Clean(op.Workspace) || rec.Path != op.Path {
 		return transferError("transfer_scope_mismatch", "policy", "transfer identity does not match authenticated principal, workspace and destination")
 	}
-	if rec.ExpiresUnix <= now && rec.Status != "committing" {
+	if rec.ExpiresUnix <= now && rec.Status != "committing" && rec.Status != "committed" && rec.Status != "aborted" {
 		return transferError("transfer_expired", "state", "transfer expired; begin a new upload")
 	}
 	switch op.TransferOp {
 	case "status":
+		if rec.Status == "committed" || rec.Status == "aborted" {
+			return transferTerminalReceipt(session, &rec)
+		}
 		if rec.Status == "committing" {
 			return transferReconcileCommit(op, session, &rec)
 		}
@@ -419,7 +556,10 @@ func workerWorkspaceTransfer(op workspaceFileOperation) Response {
 			return transferReconcileCommit(op, session, &rec)
 		}
 		if rec.Status == "committed" {
-			return transferReceipt(rec)
+			return transferTerminalReceipt(session, &rec)
+		}
+		if rec.Status == "preparing" {
+			return transferPrepareStep(op, session, &rec)
 		}
 		if rec.Status != "uploading" {
 			return transferError("transfer_not_uploading", "state", "transfer aborted")
@@ -430,9 +570,17 @@ func workerWorkspaceTransfer(op workspaceFileOperation) Response {
 		return transferCommit(op, session, &rec, now)
 	case "abort":
 		if rec.Status == "committed" || rec.Status == "committing" {
+			if rec.Status == "committed" {
+				if cleaned := transferTerminalReceipt(session, &rec); !cleaned.OK {
+					return cleaned
+				}
+			}
 			return transferError("transfer_already_publishing", "state", "cannot abort a committed or uncertain atomic publish; check status")
 		}
-		if rec.Status == "uploading" {
+		if rec.Status == "aborted" {
+			return transferTerminalReceipt(session, &rec)
+		}
+		if rec.Status == "uploading" || rec.Status == "preparing" {
 			if err = transferCleanupUnpublishedTemp(op, rec); err != nil {
 				return fileError("transfer_temp_cleanup_failed", "io", err)
 			}
@@ -440,11 +588,9 @@ func workerWorkspaceTransfer(op workspaceFileOperation) Response {
 			if err := transferSaveRecord(session, rec); err != nil {
 				return fileError("transfer_state_write_failed", "io", err)
 			}
-			if err := transferRemoveData(session); err != nil {
-				return fileError("transfer_cleanup_failed", "io", err)
-			}
+			transferFaultPoint("aborted_after_checkpoint")
 		}
-		return transferReceipt(rec)
+		return transferTerminalReceipt(session, &rec)
 	}
 	return transferError("invalid_transfer", "validation", "unsupported transfer operation")
 }
@@ -460,6 +606,7 @@ func transferBegin(op workspaceFileOperation, now int64) Response {
 	if err := os.Mkdir(session, 0700); err != nil {
 		return fileError("transfer_begin_failed", "io", err)
 	}
+	transferFaultPoint("begin_after_mkdir")
 	complete := false
 	defer func() {
 		if !complete {
@@ -475,6 +622,7 @@ func transferBegin(op workspaceFileOperation, now int64) Response {
 		return fileError("transfer_begin_failed", "io", err)
 	}
 	_ = data.Close()
+	transferFaultPoint("begin_after_data")
 	r := transferRecord{ID: id, PrincipalID: op.PrincipalID, PrincipalClass: op.PrincipalClass,
 		Workspace: filepath.Clean(op.Workspace), Path: op.Path, ExpectedSize: op.ExpectedSize,
 		SHA256: op.SHA256, FileVersion: op.FileVersion, MustNotExist: op.MustNotExist,
@@ -482,6 +630,7 @@ func transferBegin(op workspaceFileOperation, now int64) Response {
 	if err := transferSaveRecord(session, r); err != nil {
 		return fileError("transfer_begin_failed", "io", err)
 	}
+	transferFaultPoint("begin_after_manifest")
 	fd, err := os.Open(op.TransferRoot)
 	if err != nil {
 		return fileError("transfer_begin_failed", "io", err)
@@ -626,107 +775,19 @@ func transferCleanupUnpublishedTemp(op workspaceFileOperation, r transferRecord)
 	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Uid != uint32(os.Geteuid()) {
 		return errors.New("unexpected temp file type, mode or owner; manual inspection required")
 	}
+	if r.Status == "preparing" && (uint64(st.Dev) != r.PreparedDev || st.Ino != r.PreparedIno) {
+		return errors.New("pinned preparation identity mismatch; refuse unsafe deletion")
+	}
 	if err = unix.Unlinkat(pfd, r.TempName, 0); err != nil {
 		return err
 	}
 	return unix.Fsync(pfd)
 }
 
-func transferCommit(op workspaceFileOperation, session string, r *transferRecord, now int64) Response {
-	data, err := os.OpenFile(filepath.Join(session, "data"), os.O_RDONLY|unix.O_NOFOLLOW, 0)
-	if err != nil {
-		return fileError("transfer_storage_unavailable", "io", err)
-	}
-	defer data.Close()
-	st, err := data.Stat()
-	if err != nil || !st.Mode().IsRegular() || st.Size() != r.ExpectedSize {
-		return transferError("transfer_storage_corrupt", "state", "staged byte count differs from expected complete transfer")
-	}
-	parent, err := openWorkerParentForTransfer(op)
-	if err != nil {
-		return fileError("invalid_path", "validation", err)
-	}
-	defer parent.Close()
-	pfd := int(parent.Fd())
-	base := filepath.Base(op.Path)
-	old, exists, err := destinationState(pfd, base)
-	if err != nil {
-		return fileError("unsafe_file_type", "validation", err)
-	}
-	if r.MustNotExist && exists {
-		return transferError("file_exists", "conflict", "destination already exists")
-	}
-	if !r.MustNotExist && (!exists || fileVersion(old) != r.FileVersion) {
-		return transferError("file_changed", "conflict", "destination file_version has changed")
-	}
-	// The temp name is journaled in begin's durable record. A killed helper
-	// can leave a partial, never-published copy: retry/expiry locates ONLY this
-	// transfer's exact name, and does not unlink unrelated workspace files.
-	if err := transferCleanupUnpublishedTemp(op, *r); err != nil {
-		return fileError("transfer_temp_recovery_failed", "state", err)
-	}
-	tempName := r.TempName
-	tempFD, err := unix.Openat(pfd, tempName, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0600)
-	if err != nil {
-		return fileError("transfer_commit_io", "io", err)
-	}
-	owned := true
-	defer func() {
-		_ = unix.Close(tempFD)
-		if owned {
-			_ = unix.Unlinkat(pfd, tempName, 0)
-		}
-	}()
-	mode := uint32(0644)
-	if exists {
-		mode = old.Mode & 0777
-	}
-	temp := os.NewFile(uintptr(tempFD), "prepared transfer")
-	hasher := sha256.New()
-	copied, err := io.CopyBuffer(io.MultiWriter(temp, hasher), data, make([]byte, 64<<10))
-	if err != nil || copied != r.ExpectedSize {
-		return transferError("transfer_commit_io", "io", "staged byte stream could not be copied completely")
-	}
-	if hex.EncodeToString(hasher.Sum(nil)) != r.SHA256 {
-		return transferError("transfer_hash_mismatch", "conflict", "whole-object SHA256 verification failed; staged bytes were not published")
-	}
-	if err = unix.Fchmod(tempFD, mode); err != nil {
-		return fileError("transfer_commit_io", "io", err)
-	}
-	if err = unix.Fsync(tempFD); err != nil {
-		return fileError("transfer_commit_io", "io", err)
-	}
-	var prepared unix.Stat_t
-	if err = unix.Fstat(tempFD, &prepared); err != nil {
-		return fileError("transfer_commit_io", "io", err)
-	}
-	current, currentExists, err := destinationState(pfd, base)
-	if err != nil {
-		return fileError("unsafe_file_type", "validation", err)
-	}
-	if exists && (!currentExists || !sameFileSnapshot(old, current)) {
-		return transferError("file_changed", "conflict", "destination changed during staged copying")
-	}
-	if !exists && currentExists {
-		return transferError("file_changed", "conflict", "destination appeared during staged copying")
-	}
-	r.Status = "committing"
-	r.ExpiresUnix = now + int64(op.TransferTTLSeconds)
-	r.PreparedDev = uint64(prepared.Dev)
-	r.PreparedIno = prepared.Ino
-	r.TempName = tempName
-	if exists {
-		r.DisplacedDev = uint64(old.Dev)
-		r.DisplacedIno = old.Ino
-	}
-	if err = transferSaveRecord(session, *r); err != nil {
-		return fileError("transfer_checkpoint_failed", "io", err)
-	}
-	// A durable recovery intent now owns the prepared temp file. Even if this
-	// helper crashes, a later commit/status can distinguish before and after
-	// the atomic rename by the pinned prepared inode identity.
-	owned = false
-	return transferFinishPrepared(op, session, r)
+// Commit begins durable, bounded preparation; subsequent commit calls resume
+// at prepared_bytes without repeating already checkpointed copy/hash work.
+func transferCommit(op workspaceFileOperation, session string, r *transferRecord, _ int64) Response {
+	return transferStartPreparation(op, session, r)
 }
 
 func transferStateAtCommit(pfd int, base string, r transferRecord) (unix.Stat_t, bool, error) {
@@ -791,6 +852,7 @@ func transferFinishPrepared(op workspaceFileOperation, session string, r *transf
 			return fileError("transfer_commit_io", "io", err)
 		}
 	}
+	transferFaultPoint("published_before_receipt")
 	return transferConfirmPublished(op, session, r, pfd, base)
 }
 
@@ -811,6 +873,7 @@ func transferConfirmPublished(op workspaceFileOperation, session string, r *tran
 	if err = transferSaveRecord(session, *r); err != nil {
 		return transferError("transfer_commit_unresolved", "state", "file may be published but durable receipt failed; query status")
 	}
+	transferFaultPoint("committed_after_checkpoint")
 	if err = transferRemoveData(session); err != nil {
 		// The durable committed receipt is already written; cleanup is retryable
 		// through status/expiry, never re-publish the target.

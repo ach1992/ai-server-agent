@@ -40,6 +40,15 @@ func bytesDigest(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToSt
 func applyTransfer(t *testing.T, op workspaceFileOperation) Response {
 	t.Helper()
 	res := workerWorkspaceTransfer(op)
+	// One commit invocation may durably prepare only a bounded window;
+	// repeated calls must continue without recopying checkpointed bytes.
+	for i := 0; op.TransferOp == "commit" && res.OK && res.Status == "preparing" && i < 1024; i++ {
+		old := res.PreparedBytes
+		res = workerWorkspaceTransfer(op)
+		if res.OK && res.PreparedBytes <= old {
+			t.Fatalf("commit preparation made no forward progress: %+v", res)
+		}
+	}
 	if !res.OK {
 		t.Fatalf("transfer %s failed: code=%s error=%s", op.TransferOp, res.ErrorCode, res.Error)
 	}

@@ -63,11 +63,11 @@ const (
 )
 
 func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp Response) {
-	write := req.Action == "workspace_write" || req.Action == "workspace_apply_edits" || req.Action == "workspace_transfer"
-	if req.Action != "workspace_stat" && req.Action != "workspace_read" && req.Action != "workspace_write" && req.Action != "workspace_apply_edits" && req.Action != "workspace_transfer" && req.Action != "workspace_text_search" {
+	write := req.Action == "workspace_write" || req.Action == "workspace_apply_edits" || req.Action == "workspace_transfer" || req.Action == "workspace_transfer_gc"
+	if req.Action != "workspace_stat" && req.Action != "workspace_read" && req.Action != "workspace_write" && req.Action != "workspace_apply_edits" && req.Action != "workspace_transfer" && req.Action != "workspace_transfer_gc" && req.Action != "workspace_text_search" {
 		return fileError("invalid_action", "validation", errors.New("unsupported worker workspace action"))
 	}
-	if strings.TrimSpace(req.Workspace) == "" || (req.Action != "workspace_text_search" && req.Action != "workspace_apply_edits" && strings.TrimSpace(req.Path) == "") {
+	if strings.TrimSpace(req.Workspace) == "" || (req.Action != "workspace_text_search" && req.Action != "workspace_apply_edits" && req.Action != "workspace_transfer_gc" && strings.TrimSpace(req.Path) == "") {
 		return fileError("invalid_workspace", "validation", errors.New("workspace and relative file path are required"))
 	}
 	if req.Root || req.Approval || req.Mode != 0 {
@@ -77,6 +77,10 @@ func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp 
 		probe := workspaceFileOperation{Action: req.Action, Pattern: req.Pattern, SearchLimit: req.SearchLimit, SearchPaths: req.SearchPaths, Globs: req.Globs, Literal: req.Literal, TimeoutMS: req.TimeoutMS}
 		if err := validateWorkerTextSearch(probe); err != nil {
 			return fileError("invalid_text_search", "validation", err)
+		}
+	} else if req.Action == "workspace_transfer_gc" {
+		if req.Path != "" || req.Content != "" || req.TransferOp != "" || req.TransferID != "" || req.ChunkBase64 != "" || req.Workspace != s.cfg.WorkspaceDir {
+			return fileError("invalid_request", "validation", errors.New("sweeper takes only configured workspace root"))
 		}
 	} else if req.Action == "workspace_transfer" {
 		if err := validateWorkspaceTransferRequest(req); err != nil {
@@ -104,7 +108,7 @@ func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp 
 	} else if req.Offset < 0 || req.Limit < 0 || req.Limit > maxFileReadBytes {
 		return fileError("invalid_range", "validation", errors.New("invalid bounded read offset or limit"))
 	}
-	if req.Action != "workspace_apply_edits" && req.Action != "workspace_text_search" {
+	if req.Action != "workspace_apply_edits" && req.Action != "workspace_transfer_gc" && req.Action != "workspace_text_search" {
 		if _, err := safeWorkspaceRelativeFile(req.Path); err != nil {
 			return fileError("invalid_path", "validation", err)
 		}
@@ -245,13 +249,18 @@ func RunWorkspaceFileHelper() int {
 	if err := json.Unmarshal(raw, &op); err != nil {
 		return 2
 	}
-	// No workspace path is opened before the kernel sandbox is in place.
-	// Fail closed if this host cannot enforce the per-request boundary.
+	// The helper opens only the configured private staging anchor before
+	// installing Landlock; no client-selected workspace file is opened
+	// until confinement is active. Unsupported kernels fail closed.
 	var unlock func()
 	var sandboxErr error
-	if op.Action == "workspace_transfer" {
+	if op.Action == "workspace_transfer" || op.Action == "workspace_transfer_gc" {
+		selected := op.Workspace
+		if op.Action == "workspace_transfer_gc" {
+			selected = op.WorkspaceRoot
+		}
 		if sandboxErr = prepareWorkerTransferRoot(op.TransferRoot); sandboxErr == nil {
-			unlock, sandboxErr = workerLandlockRestrictTransfer(op.WorkspaceRoot, op.Workspace, op.TransferRoot)
+			unlock, sandboxErr = workerLandlockRestrictTransfer(op.WorkspaceRoot, selected, op.TransferRoot)
 		}
 	} else {
 		unlock, sandboxErr = workerLandlockRestrict(op.WorkspaceRoot, op.Workspace, op.Action == "workspace_text_search")
@@ -270,6 +279,8 @@ func RunWorkspaceFileHelper() int {
 		resp = applyWorkerWorkspaceEdits(op)
 	} else if op.Action == "workspace_transfer" {
 		resp = workerWorkspaceTransfer(op)
+	} else if op.Action == "workspace_transfer_gc" {
+		resp = workerWorkspaceTransferGC(op)
 	} else if op.Action == "workspace_text_search" {
 		resp = workerTextSearch(op)
 	} else {

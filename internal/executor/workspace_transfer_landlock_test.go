@@ -2,23 +2,37 @@ package executor
 
 import (
 	"bytes"
+	"context"
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/hex"
+	"golang.org/x/sys/unix"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/ach1992/ai-server-agent/internal/audit"
 	"github.com/ach1992/ai-server-agent/internal/config"
 )
 
 func TestWorkspaceTransferActualWorkerHelperLandlock(t *testing.T) {
+	required := os.Getenv("ASA_REQUIRE_TRANSFER_LANDLOCK") == "1"
 	if os.Geteuid() == 0 {
+		if required {
+			t.Fatal("real worker Landlock proof must run unprivileged")
+		}
 		t.Skip("run worker helper acceptance unprivileged; root delegation is isolated CI")
 	}
-	requireWorkerLandlockV2(t)
+	if required {
+		abi, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, 0, 0, uintptr(unix.LANDLOCK_CREATE_RULESET_VERSION))
+		if errno != 0 || abi < 2 {
+			t.Fatalf("required exact-candidate transfer proof lacks Landlock ABI v2: abi=%d errno=%v", abi, errno)
+		}
+	} else {
+		requireWorkerLandlockV2(t)
+	}
 	root, repo, _ := workspaceFixture(t)
 	state := filepath.Join(t.TempDir(), "state")
 	home := filepath.Join(state, "worker-home")
@@ -34,7 +48,7 @@ func TestWorkspaceTransferActualWorkerHelperLandlock(t *testing.T) {
 	server := &Server{cfg: config.Config{WorkspaceDir: root, StateDir: state},
 		runs: newRunLimiterWith(2, 1), workerUID: uint32(os.Geteuid()), workerGID: uint32(os.Getegid()),
 		workspaceHelperBinary: binary, audit: audit.New(filepath.Join(t.TempDir(), "audit.jsonl"))}
-	full := make([]byte, (1<<20)+87)
+	full := make([]byte, (4<<20)+87)
 	for i := range full {
 		full[i] = byte(37*i + 13)
 	}
@@ -82,11 +96,53 @@ func TestWorkspaceTransferActualWorkerHelperLandlock(t *testing.T) {
 	commit.SHA256 = ""
 	commit.MustNotExist = false
 	res := server.workerWorkspaceFile(t.Context(), commit)
+	for i := 0; res.OK && res.Status == "preparing" && i < 128; i++ {
+		res = server.workerWorkspaceFile(t.Context(), commit)
+	}
 	if !res.OK || res.Status != "committed" {
 		t.Fatalf("worker real atomic commit: %+v", res)
 	}
 	got, err := os.ReadFile(filepath.Join(repo, "src/landlock.bin"))
 	if err != nil || !bytes.Equal(got, full) {
 		t.Fatalf("worker content mismatch: %v", err)
+	}
+	// Verify actual periodic cleanup traverses the worker helper + Landlock
+	// without relying on any subsequent client begin/commit call.
+	waiting := base
+	waiting.TransferKey = "landlock-expire-02"
+	waiting.Path = "src/pending-expired.dat"
+	waiting.ExpectedSize = 17
+	waiting.SHA256 = hex.EncodeToString(sha256.New().Sum(nil))
+	created := server.workerWorkspaceFile(t.Context(), waiting)
+	if !created.OK {
+		t.Fatalf("create expiry fixture: %+v", created)
+	}
+	waitingSession := filepath.Join(state, "worker-home", "transfers", created.TransferID)
+	journal, err := transferReadRecord(waitingSession)
+	if err != nil {
+		t.Fatal(err)
+	}
+	journal.ExpiresUnix = time.Now().Add(-time.Second).Unix()
+	if err = transferSaveRecord(waitingSession, journal); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(t.Context())
+	done := make(chan struct{})
+	go func() { server.runTransferSweepLoop(ctx); close(done) }()
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) {
+		if _, e := os.Stat(waitingSession); os.IsNotExist(e) {
+			break
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("sweeper did not stop after cancellation")
+	}
+	if _, e := os.Stat(waitingSession); !os.IsNotExist(e) {
+		t.Fatalf("real worker periodic sweep left expired staging: %v", e)
 	}
 }

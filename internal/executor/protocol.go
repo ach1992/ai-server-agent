@@ -115,6 +115,7 @@ type Response struct {
 	TransferID          string                     `json:"transfer_id,omitempty"`
 	ExpectedSize        int64                      `json:"expected_size,omitempty"`
 	TransferredBytes    int64                      `json:"transferred_bytes,omitempty"`
+	PreparedBytes       int64                      `json:"prepared_bytes,omitempty"`
 	SHA256              string                     `json:"sha256,omitempty"`
 	ExpiresAt           string                     `json:"expires_at,omitempty"`
 	EOF                 *bool                      `json:"eof,omitempty"`

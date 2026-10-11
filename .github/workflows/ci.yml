@@ -106,6 +106,22 @@ jobs:
       - name: Unit tests
         if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
         run: go test -race -vet=off ./...
+      - name: Non-skipped real worker/Landlock transfer acceptance
+        if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
+        env:
+          ASA_REQUIRE_TRANSFER_LANDLOCK: '1'
+        run: |
+          set -Eeuo pipefail
+          printf 'TRANSFER_PROOF_TREE=%s\n' "$(git rev-parse HEAD^{tree})"
+          log="$(mktemp)"
+          trap 'rm -f -- "$log"' EXIT
+          go test -v ./internal/executor -run '^TestWorkspaceTransferActualWorkerHelperLandlock$' -count=1 2>&1 | tee "$log"
+          grep -Fq -- '--- PASS: TestWorkspaceTransferActualWorkerHelperLandlock' "$log"
+          if grep -Fq -- '--- SKIP: TestWorkspaceTransferActualWorkerHelperLandlock' "$log"; then
+            echo 'Real worker transfer acceptance was skipped' >&2
+            exit 1
+          fi
+          echo 'REAL_TRANSFER_WORKER_LANDLOCK_PROOF_PASS'
       - name: Real pinned gopls large-Go semantic acceptance
         if: ${{ needs.change-scope.outputs.lsp_changed == 'true' }}
         run: |
