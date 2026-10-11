@@ -23,6 +23,7 @@ jobs:
       runtime_changed: ${{ steps.scope.outputs.runtime_changed }}
       reuse_validated_pr: ${{ steps.reuse.outputs.reuse_validated_pr }}
       go_changed: ${{ steps.scope.outputs.go_changed }}
+      lsp_changed: ${{ steps.scope.outputs.lsp_changed }}
       browser_flow_changed: ${{ steps.scope.outputs.browser_flow_changed }}
       shell_changed: ${{ steps.scope.outputs.shell_changed }}
       cloudflare_security_changed: ${{ steps.scope.outputs.cloudflare_security_changed }}
@@ -105,6 +106,34 @@ jobs:
       - name: Unit tests
         if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
         run: go test -race -vet=off ./...
+      - name: Real pinned gopls large-Go semantic acceptance
+        if: ${{ needs.change-scope.outputs.lsp_changed == 'true' }}
+        run: |
+          set -Eeuo pipefail
+          # This is a REAL language server, not the optional skipped-by-default
+          # unit test or the deterministic mock stdio fixture. Go sumdb checks
+          # the version-pinned module; all installation stays in the CI runner.
+          go install golang.org/x/tools/gopls@v0.23.0
+          gopls_bin="$(go env GOPATH)/bin/gopls"
+          test -x "$gopls_bin"
+          "$gopls_bin" version
+          printf 'GOPLS_PROOF_CHECKOUT=%s\n' "$(git rev-parse HEAD)"
+          printf 'GOPLS_PROOF_TREE=%s\n' "$(git rev-parse HEAD^{tree})"
+          log="$(mktemp)"
+          trap 'rm -f -- "$log"' EXIT
+          AGENT_GOPLS_PROOF_BIN="$gopls_bin" go test -v ./internal/executor -run '^TestCodeGoRealWorkerReadAndGopls$' -count=1 2>&1 | tee "$log"
+          grep -Fq '=== RUN   TestCodeGoRealWorkerReadAndGopls' "$log"
+          grep -Fq -- '--- PASS: TestCodeGoRealWorkerReadAndGopls' "$log"
+          if grep -Fq -- '--- SKIP: TestCodeGoRealWorkerReadAndGopls' "$log"; then
+            echo 'real gopls proof was skipped' >&2
+            exit 1
+          fi
+          for method in definition references symbols diagnostics; do
+            grep -Fq "$method ok=true" "$log"
+          done
+          grep -Fq 'real diagnostics on invalid source:' "$log"
+          grep -Fq 'neverDeclaredSymbol' "$log"
+          echo 'REAL_GOPLS_EXACT_TREE_SEMANTIC_PROOF_PASS'
       - name: Build static binary
         if: ${{ needs.change-scope.outputs.go_changed != 'false' || needs.change-scope.outputs.root_trust_security_changed != 'false' }}
         run: CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
