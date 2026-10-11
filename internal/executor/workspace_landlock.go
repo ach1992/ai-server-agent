@@ -33,6 +33,14 @@ type landlockPathBeneathAttr struct {
 }
 
 func workerLandlockRestrict(workspaceRoot, selectedWorkspace string, textSearch bool) (unlock func(), err error) {
+	return workerLandlockRestrictWithStage(workspaceRoot, selectedWorkspace, "", textSearch)
+}
+
+func workerLandlockRestrictTransfer(workspaceRoot, selectedWorkspace, transferRoot string) (func(), error) {
+	return workerLandlockRestrictWithStage(workspaceRoot, selectedWorkspace, transferRoot, false)
+}
+
+func workerLandlockRestrictWithStage(workspaceRoot, selectedWorkspace, transferRoot string, textSearch bool) (unlock func(), err error) {
 	// Landlock scopes the calling thread, not arbitrary goroutines. All
 	// subsequent file operations must run on this same locked OS thread.
 	runtime.LockOSThread()
@@ -91,6 +99,18 @@ func workerLandlockRestrict(workspaceRoot, selectedWorkspace string, textSearch 
 	}
 	defer unix.Close(selectedFD)
 
+	stageFD := -1
+	if transferRoot != "" {
+		var stageErr error
+		stageFD, stageErr = unix.Openat2(unix.AT_FDCWD, transferRoot, &unix.OpenHow{
+			Flags:   uint64(unix.O_PATH | unix.O_DIRECTORY | unix.O_CLOEXEC),
+			Resolve: unix.RESOLVE_NO_SYMLINKS,
+		})
+		if stageErr != nil {
+			return nil, fmt.Errorf("open worker transfer staging: %w", stageErr)
+		}
+		defer unix.Close(stageFD)
+	}
 	handled := uint64(workerLandlockHandled)
 	if abi >= 3 {
 		handled |= unix.LANDLOCK_ACCESS_FS_TRUNCATE
@@ -105,7 +125,7 @@ func workerLandlockRestrict(workspaceRoot, selectedWorkspace string, textSearch 
 		return nil, fmt.Errorf("prevent privilege escalation in worker helper: %w", err)
 	}
 	for _, anchorFD := range []int{rootFD, selectedFD} {
-		if err := applyWorkerLandlockLayer(anchorFD, handled, textSearch); err != nil {
+		if err := applyWorkerLandlockLayer(anchorFD, stageFD, handled, textSearch); err != nil {
 			return nil, err
 		}
 	}
@@ -115,7 +135,7 @@ func workerLandlockRestrict(workspaceRoot, selectedWorkspace string, textSearch 
 // Each call creates an independent Landlock layer. A filesystem action must
 // be permitted by every layer: the configured-root and selected-checkout
 // bounds cannot be bypassed by reparenting one of these directories.
-func applyWorkerLandlockLayer(anchorFD int, handled uint64, textSearch bool) error {
+func applyWorkerLandlockLayer(anchorFD, stageFD int, handled uint64, textSearch bool) error {
 	attr := landlockRulesetAttr{HandledAccessFS: handled}
 	ruleset, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr), 0)
 	if errno != 0 {
@@ -126,6 +146,16 @@ func applyWorkerLandlockLayer(anchorFD int, handled uint64, textSearch bool) err
 	_, _, errno = unix.Syscall6(unix.SYS_LANDLOCK_ADD_RULE, ruleset, uintptr(unix.LANDLOCK_RULE_PATH_BENEATH), uintptr(unsafe.Pointer(&rule)), 0, 0, 0)
 	if errno != 0 {
 		return fmt.Errorf("add worker workspace confinement: %w", errno)
+	}
+	if stageFD >= 0 {
+		// Same worker-only privileges for a state-dir staging subtree, added
+		// to BOTH independent workspace containment layers. Stage is not
+		// reachable through normal workspace_read/search structured tools.
+		stage := landlockPathBeneathAttr{AllowedAccess: handled, ParentFD: int32(stageFD)}
+		_, _, e := unix.Syscall6(unix.SYS_LANDLOCK_ADD_RULE, ruleset, uintptr(unix.LANDLOCK_RULE_PATH_BENEATH), uintptr(unsafe.Pointer(&stage)), 0, 0, 0)
+		if e != 0 {
+			return fmt.Errorf("add worker transfer staging rights: %w", e)
+		}
 	}
 	if textSearch {
 		// The search executable and shared libraries are read-only exceptions

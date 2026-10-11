@@ -59,6 +59,13 @@ type Request struct {
 	SearchLimit      int                 `json:"search_limit,omitempty"`
 	Literal          bool                `json:"literal,omitempty"`
 	WorkspaceEdits   []WorkspaceFileEdit `json:"workspace_edits,omitempty"`
+	TransferKey      string              `json:"transfer_key,omitempty"`
+	TransferOp       string              `json:"transfer_op,omitempty"`
+	TransferID       string              `json:"transfer_id,omitempty"`
+	ExpectedSize     int64               `json:"expected_size,omitempty"`
+	SHA256           string              `json:"sha256,omitempty"`
+	ChunkBase64      string              `json:"chunk_base64,omitempty"`
+	ChunkSHA256      string              `json:"chunk_sha256,omitempty"`
 }
 
 type Response struct {
@@ -105,6 +112,12 @@ type Response struct {
 	CurrentEnd          int64                      `json:"current_end,omitempty"`
 	FileSize            *int64                     `json:"file_size,omitempty"`
 	FileVersion         string                     `json:"file_version,omitempty"`
+	TransferID          string                     `json:"transfer_id,omitempty"`
+	ExpectedSize        int64                      `json:"expected_size,omitempty"`
+	TransferredBytes    int64                      `json:"transferred_bytes,omitempty"`
+	PreparedBytes       int64                      `json:"prepared_bytes,omitempty"`
+	SHA256              string                     `json:"sha256,omitempty"`
+	ExpiresAt           string                     `json:"expires_at,omitempty"`
 	EOF                 *bool                      `json:"eof,omitempty"`
 	RetentionTruncated  bool                       `json:"retention_truncated,omitempty"`
 	Repository          *RepositoryState           `json:"repository,omitempty"`

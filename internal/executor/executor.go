@@ -96,6 +96,9 @@ func (s *Server) Serve() error {
 			_ = os.Chown(s.cfg.ExecutorSocket, 0, gid)
 		}
 	}
+	sweepContext, stopSweep := context.WithCancel(context.Background())
+	defer stopSweep()
+	go s.runTransferSweepLoop(sweepContext)
 	for {
 		c, err := ln.Accept()
 		if err != nil {
