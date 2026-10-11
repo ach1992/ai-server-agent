@@ -3,6 +3,7 @@ set -Eeuo pipefail
 
 runtime_changed=false
 go_changed=false
+lsp_changed=false
 browser_flow_changed=false
 shell_changed=false
 platform_changed=false
@@ -15,6 +16,7 @@ stable_update_trust_changed=false
 set_all(){
   runtime_changed=true
   go_changed=true
+  lsp_changed=true
   browser_flow_changed=true
   shell_changed=true
   platform_changed=true
@@ -35,6 +37,7 @@ set_security_all(){
 emit_scope(){
   printf 'runtime_changed=%s\n' "$runtime_changed"
   printf 'go_changed=%s\n' "$go_changed"
+  printf 'lsp_changed=%s\n' "$lsp_changed"
   printf 'browser_flow_changed=%s\n' "$browser_flow_changed"
   printf 'shell_changed=%s\n' "$shell_changed"
   printf 'platform_changed=%s\n' "$platform_changed"
@@ -59,6 +62,12 @@ classify_paths(){
         runtime_changed=true
         go_changed=true
         browser_flow_changed=true
+        ;;
+      internal/executor/lsp_*|internal/executor/code_inspect*|internal/mcp/code_inspect*)
+        runtime_changed=true
+        go_changed=true
+        lsp_changed=true
+        set_security_all
         ;;
       internal/audit/*|internal/config/*|internal/credential/*|internal/executor/*|internal/mcp/*|internal/policy/*|cmd/*)
         runtime_changed=true
