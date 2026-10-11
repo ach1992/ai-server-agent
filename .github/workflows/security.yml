@@ -25,7 +25,7 @@ jobs:
       stable_provenance_changed: ${{ steps.scope.outputs.stable_provenance_changed }}
       stable_update_trust_changed: ${{ steps.scope.outputs.stable_update_trust_changed }}
     steps:
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
       - name: Syntax-check change-scope evidence selection
@@ -48,7 +48,7 @@ jobs:
     steps:
       - name: Require successful change classification
         run: test "${{ needs.change-scope.result }}" = success
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Shell syntax
         run: bash -n manage.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh
       - name: Cloudflare mutation rollback and ownership recovery
@@ -67,8 +67,8 @@ jobs:
     steps:
       - name: Require successful change classification
         run: test "${{ needs.change-scope.result }}" = success
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26.x'
           cache: false
@@ -98,8 +98,8 @@ jobs:
     steps:
       - name: Require successful change classification
         run: test "${{ needs.change-scope.result }}" = success
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-      - uses: actions/setup-go@40f1582b2485089dde7abd97c1529aa768e1baff # v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26.x'
           cache: false
@@ -171,7 +171,7 @@ jobs:
     steps:
       - name: Require successful change classification
         run: test "${{ needs.change-scope.result }}" = success
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       - name: Stable plan does not require unpublished release
         run: |
           state="$(mktemp)"
