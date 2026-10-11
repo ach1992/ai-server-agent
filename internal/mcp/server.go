@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"time"
 
@@ -20,8 +21,60 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
+// The release packager substitutes its immutable release-version candidate into
+// this marker in a temporary source tree. Normal source builds instead report
+// their embedded VCS revision, never this old development placeholder.
 const version = "0.1.0-dev"
 const synchronousCommandTimeout = 5 * time.Minute
+
+// Stamped by the existing release builder from the exact Git checkout. Go's
+// automatic VCS build settings are optional (and absent in some -trimpath
+// builds), so never infer a revision from the old development version marker.
+var buildRevision string
+
+func mcpImplementationVersion() string {
+	info, _ := debug.ReadBuildInfo()
+	return versionForBuild(version, buildRevision, info)
+}
+
+func versionForBuild(releaseMarker, stampedRevision string, info *debug.BuildInfo) string {
+	var revision, modified string
+	if stampedRevision != "" {
+		revision, modified = stampedRevision, "false"
+		if strings.HasSuffix(revision, "-dirty") {
+			revision = strings.TrimSuffix(revision, "-dirty")
+			modified = "true"
+		}
+	} else if info != nil {
+		for _, setting := range info.Settings {
+			switch setting.Key {
+			case "vcs.revision":
+				revision = setting.Value
+			case "vcs.modified":
+				modified = setting.Value
+			}
+		}
+	}
+	validRevision := len(revision) == 40 && strings.Trim(revision, "0123456789abcdef") == "" &&
+		(modified == "true" || modified == "false")
+	if strings.HasSuffix(releaseMarker, "-dev") {
+		if !validRevision {
+			return "source-unknown"
+		}
+		if modified == "true" {
+			return "source-" + revision + "-dirty"
+		}
+		return "source-" + revision
+	}
+	if !validRevision {
+		return releaseMarker
+	}
+	identity := releaseMarker + "+g" + revision
+	if modified == "true" {
+		identity += ".dirty"
+	}
+	return identity
+}
 
 type Server struct {
 	cfg             config.Config
@@ -122,7 +175,7 @@ func New(cfg config.Config) (*Server, error) {
 		browser:         browser.New(cfg, executorToken),
 	}
 	s.mcp = mcpsdk.NewServer(
-		&mcpsdk.Implementation{Name: "ai-server-agent", Version: version},
+		&mcpsdk.Implementation{Name: "ai-server-agent", Version: mcpImplementationVersion()},
 		&mcpsdk.ServerOptions{
 			Instructions: instructions(cfg.WorkspaceDir),
 			Capabilities: &mcpsdk.ServerCapabilities{},
@@ -240,8 +293,8 @@ func (s *Server) registerTools() {
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "run_command",
-		Description: "Run an arbitrary Bash command as the unprivileged aiworker user in the dedicated workspace. Use for normal project work, builds, tests, Git, package managers inside the project, and diagnostics that do not require host privileges. Synchronous execution is bounded to five minutes; use start_job for work expected to run longer or produce high output.",
-		Annotations: annotations(false, false, false, true),
+		Description: "Run an arbitrary Bash command as the unprivileged aiworker user in the dedicated workspace. Commands can change files or external systems; MCP hints do not replace server-side permissions. Use for normal project work, builds, tests, Git, package managers inside the project, and diagnostics that do not require host privileges. Synchronous execution is bounded to five minutes; use start_job for work expected to run longer or produce high output.",
+		Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input RunInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "run", Command: input.Command, TimeoutMS: int64(synchronousCommandTimeout / time.Millisecond)})
 		if err != nil {
