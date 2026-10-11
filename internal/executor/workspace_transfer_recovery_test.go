@@ -29,6 +29,16 @@ func TestTransferFaultChild(t *testing.T) {
 	}
 	phase := os.Getenv("ASA_TRANSFER_FAULT_PHASE")
 	transferFaultHook = func(point string) {
+		if point == "before_existing_exchange" && os.Getenv("ASA_TRANSFER_RACE_REPLACE") == "1" {
+			dest := filepath.Join(op.Workspace, op.Path)
+			rival := dest + ".concurrent"
+			if e := os.WriteFile(rival, []byte("concurrent writer must be preserved"), 0644); e != nil {
+				t.Fatal(e)
+			}
+			if e := os.Rename(rival, dest); e != nil {
+				t.Fatal(e)
+			}
+		}
 		if point == phase {
 			os.Exit(73)
 		}
@@ -38,6 +48,9 @@ func TestTransferFaultChild(t *testing.T) {
 }
 
 func transferCrashAt(t *testing.T, op workspaceFileOperation, phase string) {
+	transferCrashAtWithRace(t, op, phase, false)
+}
+func transferCrashAtWithRace(t *testing.T, op workspaceFileOperation, phase string, race bool) {
 	t.Helper()
 	dir := t.TempDir()
 	spec := filepath.Join(dir, "operation.json")
@@ -50,6 +63,9 @@ func transferCrashAt(t *testing.T, op workspaceFileOperation, phase string) {
 	}
 	cmd := exec.Command(os.Args[0], "-test.run=^TestTransferFaultChild$", "-test.count=1")
 	cmd.Env = append(os.Environ(), "ASA_TRANSFER_FAULT_SPEC="+spec, "ASA_TRANSFER_FAULT_PHASE="+phase)
+	if race {
+		cmd.Env = append(cmd.Env, "ASA_TRANSFER_RACE_REPLACE=1")
+	}
 	output, err := cmd.CombinedOutput()
 	if e, ok := err.(*exec.ExitError); !ok || e.ExitCode() != 73 {
 		t.Fatalf("expected abrupt helper exit 73 at %s, error=%v output=%s", phase, err, output)
@@ -175,7 +191,7 @@ func TestTransferCrashRecoveryBoundedPreparation(t *testing.T) {
 }
 
 func TestTransferCrashRecoveryInitialTempAndCommitRename(t *testing.T) {
-	for _, phase := range []string{"prepare_temp_before_checkpoint", "committing_after_checkpoint", "published_before_receipt"} {
+	for _, phase := range []string{"prepare_temp_before_checkpoint", "prepare_checkpoint_before_link", "prepare_link_after_checkpoint", "committing_after_checkpoint", "published_before_receipt"} {
 		t.Run(phase, func(t *testing.T) {
 			op, target, data := transferSeedReady(t, 128<<10)
 			transferCrashAt(t, op, phase)
@@ -185,6 +201,12 @@ func TestTransferCrashRecoveryInitialTempAndCommitRename(t *testing.T) {
 			}
 			if phase == "prepare_temp_before_checkpoint" && state.Status != "uploading" {
 				t.Fatalf("prepared before manifest checkpoint: %+v", state)
+			}
+			if phase == "prepare_checkpoint_before_link" && state.Status != "preparing" {
+				t.Fatalf("durable unnamed inode intent missing: %+v", state)
+			}
+			if phase == "prepare_link_after_checkpoint" && state.Status != "preparing" {
+				t.Fatalf("durable linked inode intent missing: %+v", state)
 			}
 			if phase == "committing_after_checkpoint" && state.Status != "committing" {
 				t.Fatalf("missing commit intent: %+v", state)
@@ -305,13 +327,13 @@ func TestTransferTTLCheckpointUsesActualCompletionTime(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	oldTime := time.Now().Add(-3 * time.Hour).Unix()
-	res := transferCommit(op, session, &rec, oldTime)
+	checkpointStart := time.Now().Unix()
+	res := transferCommit(op, session, &rec)
 	if !res.OK || res.Status != "committed" {
 		t.Fatalf("expired commit from stale operation time: %+v", res)
 	}
-	if rec.ExpiresUnix <= time.Now().Unix() {
-		t.Fatalf("commit receipt expired during valid prepare: %+v", rec)
+	if rec.ExpiresUnix < checkpointStart+int64(op.TransferTTLSeconds) {
+		t.Fatalf("commit receipt did not use a current durable checkpoint clock: %+v", rec)
 	}
 	assertBytes(t, target, data)
 }
@@ -382,20 +404,349 @@ func TestTransferSweepAfterQuotaReductionAndInterruptedBegin(t *testing.T) {
 		}
 	})
 	t.Run("incomplete_manifestless_begin", func(t *testing.T) {
-		op, _ := transferFixture(t)
-		op.TransferOp = "begin"
-		op.ExpectedSize = 16
-		op.SHA256 = bytesDigest(make([]byte, 16))
-		transferCrashAt(t, op, "begin_after_data")
-		session := filepath.Join(op.TransferRoot, transferIDFor(op))
-		gc := op
-		gc.Workspace = op.WorkspaceRoot
-		gc.Action = "workspace_transfer_gc"
-		if resp := workerWorkspaceTransferGC(gc); !resp.OK {
-			t.Fatalf("independent sweep blocked by interrupted begin: %+v", resp)
-		}
-		if _, err := os.Stat(session); !os.IsNotExist(err) {
-			t.Fatal("manifestless interrupted begin leaked state")
+		for _, phase := range []string{"begin_after_mkdir", "begin_after_data"} {
+			t.Run(phase, func(t *testing.T) {
+				op, _ := transferFixture(t)
+				op.TransferOp = "begin"
+				op.ExpectedSize = 16
+				op.SHA256 = bytesDigest(make([]byte, 16))
+				op.TransferTTLSeconds = 60
+				transferCrashAt(t, op, phase)
+				session := filepath.Join(op.TransferRoot, transferIDFor(op))
+				gc := op
+				gc.Workspace = op.WorkspaceRoot
+				gc.Action = "workspace_transfer_gc"
+				if resp := workerWorkspaceTransferGC(gc); !resp.OK {
+					t.Fatalf("GC failed: %+v", resp)
+				}
+				if _, err := os.Stat(session); err != nil {
+					t.Fatalf("unexpired material reservation erased: %v", err)
+				}
+				other := op
+				other.SHA256 = bytesDigest([]byte("different"))
+				if response := workerWorkspaceTransfer(other); response.OK || response.ErrorCode != "transfer_begin_conflict" {
+					t.Fatalf("GC lost key-material reservation: %+v", response)
+				}
+				recovered := applyTransfer(t, op)
+				if recovered.TransferID != transferIDFor(op) {
+					t.Fatal("same-key recovery changed transfer ID")
+				}
+				record, err := transferReadRecord(session)
+				if err != nil {
+					t.Fatal(err)
+				}
+				record.ExpiresUnix = time.Now().Add(-time.Second).Unix()
+				if err := transferSaveRecord(session, record); err != nil {
+					t.Fatal(err)
+				}
+				if resp := workerWorkspaceTransferGC(gc); !resp.OK {
+					t.Fatalf("post-retention GC failed: %+v", resp)
+				}
+				if _, err := os.Stat(session); !os.IsNotExist(err) {
+					t.Fatalf("expired reservation was not reclaimed: %v", err)
+				}
+				different := applyTransfer(t, other)
+				if different.TransferID == recovered.TransferID {
+					t.Fatal("different material reused old opaque handle")
+				}
+			})
 		}
 	})
+}
+
+// A slow commit was already covered; begin and chunk must likewise use the
+// clock at the durable checkpoint rather than the call-entry timestamp.
+func TestTransferBeginChunkExpiryUsesCheckpointClock(t *testing.T) {
+	op, _ := transferFixture(t)
+	op.TransferTTLSeconds = 60
+	op.TransferOp = "begin"
+	op.ExpectedSize = 3
+	op.SHA256 = bytesDigest([]byte("abc"))
+	initial := time.Now().Unix()
+	transferFaultHook = func(phase string) {
+		if phase == "begin_before_checkpoint" {
+			time.Sleep(2200 * time.Millisecond)
+		}
+	}
+	began := workerWorkspaceTransfer(op)
+	transferFaultHook = nil
+	if !began.OK {
+		t.Fatalf("begin failed: %+v", began)
+	}
+	record, err := transferReadRecord(filepath.Join(op.TransferRoot, began.TransferID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.ExpiresUnix < initial+61 {
+		t.Fatalf("begin TTL stale: initial=%d expires=%d", initial, record.ExpiresUnix)
+	}
+	appendOp := transferFollowup(op, began.TransferID, "chunk")
+	appendOp.ChunkBase64 = "YWJj"
+	appendOp.ChunkSHA256 = bytesDigest([]byte("abc"))
+	secondStart := time.Now().Unix()
+	transferFaultHook = func(phase string) {
+		if phase == "chunk_before_checkpoint" {
+			time.Sleep(2200 * time.Millisecond)
+		}
+	}
+	appended := workerWorkspaceTransfer(appendOp)
+	transferFaultHook = nil
+	if !appended.OK {
+		t.Fatalf("chunk failed: %+v", appended)
+	}
+	record, err = transferReadRecord(filepath.Join(op.TransferRoot, began.TransferID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if record.ExpiresUnix < secondStart+61 {
+		t.Fatalf("chunk TTL stale: initial=%d expires=%d", secondStart, record.ExpiresUnix)
+	}
+}
+
+// A worker-owned inode at the transfer temp path is not proof of ownership.
+// The crash here leaves an UNNAMED inode (automatically reclaimed by the
+// kernel), so an unrelated named inode must survive all cleanup attempts.
+func TestTransferUnprovenTempIsNeverDeleted(t *testing.T) {
+	for _, operation := range []string{"commit", "abort", "gc"} {
+		t.Run(operation, func(t *testing.T) {
+			op, target, _ := transferSeedReady(t, 4096)
+			transferCrashAt(t, op, "prepare_temp_before_checkpoint")
+			session := filepath.Join(op.TransferRoot, op.TransferID)
+			record, err := transferReadRecord(session)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if record.Status != "uploading" || record.PreparedIno != 0 {
+				t.Fatal("unnamed inode unexpectedly journaled")
+			}
+			fake := filepath.Join(filepath.Dir(target), record.TempName)
+			payload := []byte("OTHER WORKER DATA: do not unlink")
+			if err := os.WriteFile(fake, payload, 0600); err != nil {
+				t.Fatal(err)
+			}
+			original, err := os.Stat(fake)
+			if err != nil {
+				t.Fatal(err)
+			}
+			switch operation {
+			case "commit":
+				resp := workerWorkspaceTransfer(op)
+				if resp.OK || resp.ErrorCode != "transfer_temp_recovery_failed" {
+					t.Fatalf("unsafe retry accepted: %+v", resp)
+				}
+			case "abort":
+				resp := workerWorkspaceTransfer(transferFollowup(op, op.TransferID, "abort"))
+				if resp.OK || resp.ErrorCode != "transfer_temp_cleanup_failed" {
+					t.Fatalf("unsafe abort accepted: %+v", resp)
+				}
+			case "gc":
+				record.ExpiresUnix = time.Now().Add(-time.Second).Unix()
+				if err := transferSaveRecord(session, record); err != nil {
+					t.Fatal(err)
+				}
+				gc := op
+				gc.Action = "workspace_transfer_gc"
+				gc.Workspace = op.WorkspaceRoot
+				resp := workerWorkspaceTransferGC(gc)
+				if resp.OK || resp.ErrorCode != "transfer_cleanup_failed" {
+					t.Fatalf("unsafe expiry cleanup accepted: %+v", resp)
+				}
+			}
+			assertBytes(t, fake, payload)
+			after, err := os.Stat(fake)
+			if err != nil || !os.SameFile(original, after) {
+				t.Fatalf("unrelated inode replaced or deleted: %v", err)
+			}
+			if _, err := os.Stat(target); !os.IsNotExist(err) {
+				t.Fatalf("unproven temp published: %v", err)
+			}
+		})
+	}
+}
+
+func transferSeedReplacement(t *testing.T) (workspaceFileOperation, string, []byte) {
+	t.Helper()
+	op, target := transferFixture(t)
+	if err := os.WriteFile(target, []byte("prior authorized destination"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	st := readWorkerWorkspaceFile(workspaceFileOperation{Action: "workspace_stat", WorkspaceRoot: op.WorkspaceRoot, Workspace: op.Workspace, Path: op.Path})
+	if !st.OK {
+		t.Fatal(st)
+	}
+	body := bytes.Repeat([]byte("new verified upload "), 8192)
+	op.TransferOp = "begin"
+	op.MustNotExist = false
+	op.FileVersion = st.FileVersion
+	op.ExpectedSize = int64(len(body))
+	op.SHA256 = bytesDigest(body)
+	began := applyTransfer(t, op)
+	for pos := 0; pos < len(body); {
+		n := 256 << 10
+		if n > len(body)-pos {
+			n = len(body) - pos
+		}
+		putTransferChunk(t, op, began.TransferID, int64(pos), body[pos:pos+n])
+		pos += n
+	}
+	return transferFollowup(op, began.TransferID, "commit"), target, body
+}
+
+func TestTransferReplacementCrashBetweenExchangeAndVerification(t *testing.T) {
+	for _, phase := range []string{"exchange_after_rename_before_displaced_check", "exchange_after_rollback_before_checkpoint"} {
+		t.Run(phase, func(t *testing.T) {
+			op, target, _ := transferSeedReplacement(t)
+			transferCrashAtWithRace(t, op, phase, true)
+			session := filepath.Join(op.TransferRoot, op.TransferID)
+			record, err := transferReadRecord(session)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if record.Status != "committing" || record.ExchangeVerified {
+				t.Fatalf("unexpected unverified exchange checkpoint: %+v", record)
+			}
+			conflict := workerWorkspaceTransfer(transferFollowup(op, op.TransferID, "status"))
+			if conflict.OK || conflict.ErrorCode != "file_changed" {
+				t.Fatalf("recovery did not reject raced destination: %+v", conflict)
+			}
+			assertBytes(t, target, []byte("concurrent writer must be preserved"))
+			receipt := applyTransfer(t, transferFollowup(op, op.TransferID, "status"))
+			if receipt.Status != "conflicted" {
+				t.Fatalf("lost durable conflict: %+v", receipt)
+			}
+			repeated := workerWorkspaceTransfer(op)
+			if repeated.OK || repeated.ErrorCode != "file_changed" {
+				t.Fatalf("conflicted commit retried publication: %+v", repeated)
+			}
+			assertBytes(t, target, []byte("concurrent writer must be preserved"))
+			if _, err := os.Stat(filepath.Join(filepath.Dir(target), record.TempName)); !os.IsNotExist(err) {
+				t.Fatalf("candidate temp survived safe conflict cleanup: %v", err)
+			}
+			if _, err := os.Stat(filepath.Join(session, "data")); !os.IsNotExist(err) {
+				t.Fatalf("staged transfer not released after conflict: %v", err)
+			}
+		})
+	}
+}
+
+func TestTransferReplacementExchangeDurableVerificationBeforeCleanup(t *testing.T) {
+	op, target, body := transferSeedReplacement(t)
+	transferCrashAt(t, op, "exchange_verified_before_cleanup")
+	session := filepath.Join(op.TransferRoot, op.TransferID)
+	rec, err := transferReadRecord(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Status != "committing" || !rec.ExchangeVerified {
+		t.Fatalf("missing durable displaced-original proof: %+v", rec)
+	}
+	committed := applyTransfer(t, transferFollowup(op, op.TransferID, "status"))
+	if committed.Status != "committed" {
+		t.Fatal(committed)
+	}
+	assertBytes(t, target, body)
+	if _, err = os.Stat(filepath.Join(filepath.Dir(target), rec.TempName)); !os.IsNotExist(err) {
+		t.Fatalf("displaced original not cleaned: %v", err)
+	}
+}
+
+func TestTransferReplacementRefusesMissingUnverifiedDisplaced(t *testing.T) {
+	op, target, _ := transferSeedReplacement(t)
+	transferCrashAt(t, op, "exchange_after_rename_before_displaced_check")
+	rec, err := transferReadRecord(filepath.Join(op.TransferRoot, op.TransferID))
+	if err != nil {
+		t.Fatal(err)
+	}
+	displacedPath := filepath.Join(filepath.Dir(target), rec.TempName)
+	if err = os.Remove(displacedPath); err != nil {
+		t.Fatal(err)
+	}
+	result := workerWorkspaceTransfer(transferFollowup(op, op.TransferID, "status"))
+	if result.OK || result.ErrorCode != "transfer_commit_unresolved" {
+		t.Fatalf("publication accepted without displaced proof: %+v", result)
+	}
+}
+
+func TestTransferExpiredRacedExchangeGCRecoversConcurrentDestination(t *testing.T) {
+	op, target, _ := transferSeedReplacement(t)
+	transferCrashAtWithRace(t, op, "exchange_after_rename_before_displaced_check", true)
+	session := filepath.Join(op.TransferRoot, op.TransferID)
+	rec, err := transferReadRecord(session)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rec.Status != "committing" {
+		t.Fatal(rec)
+	}
+	rec.ExpiresUnix = time.Now().Add(-time.Second).Unix()
+	if err = transferSaveRecord(session, rec); err != nil {
+		t.Fatal(err)
+	}
+	gc := op
+	gc.Action = "workspace_transfer_gc"
+	gc.Workspace = op.WorkspaceRoot
+	if response := workerWorkspaceTransferGC(gc); !response.OK {
+		t.Fatalf("GC failed to reconcile verified rollback: %+v", response)
+	}
+	assertBytes(t, target, []byte("concurrent writer must be preserved"))
+	if _, err := os.Stat(session); !os.IsNotExist(err) {
+		t.Fatalf("expired resolved transfer retained: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(filepath.Dir(target), rec.TempName)); !os.IsNotExist(err) {
+		t.Fatalf("prepared temp retained: %v", err)
+	}
+}
+
+func TestTransferVerifiedExchangeRefusesToOverwriteLaterWriter(t *testing.T) {
+	op, target, _ := transferSeedReplacement(t)
+	transferCrashAt(t, op, "exchange_verified_before_cleanup")
+	if err := os.WriteFile(target+".later", []byte("later writer owns destination"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(target+".later", target); err != nil {
+		t.Fatal(err)
+	}
+	follow := workerWorkspaceTransfer(op)
+	if follow.OK || follow.ErrorCode != "transfer_commit_unresolved" {
+		t.Fatalf("verified publication must not be replayed over later writer: %+v", follow)
+	}
+	assertBytes(t, target, []byte("later writer owns destination"))
+}
+
+func TestTransferInterruptedBeginRetentionExpiresOnlyAtTTL(t *testing.T) {
+	op, _ := transferFixture(t)
+	op.TransferOp = "begin"
+	op.TransferTTLSeconds = 60
+	op.ExpectedSize = 16
+	op.SHA256 = bytesDigest(make([]byte, 16))
+	transferCrashAt(t, op, "begin_after_mkdir")
+	session := filepath.Join(op.TransferRoot, transferIDFor(op))
+	gc := op
+	gc.Workspace = op.WorkspaceRoot
+	gc.Action = "workspace_transfer_gc"
+	if response := workerWorkspaceTransferGC(gc); !response.OK {
+		t.Fatal(response)
+	}
+	if _, err := os.Stat(session); err != nil {
+		t.Fatalf("fresh reservation was deleted: %v", err)
+	}
+	changed := op
+	changed.SHA256 = bytesDigest([]byte("different-16-byte"))
+	if response := workerWorkspaceTransfer(changed); response.OK || response.ErrorCode != "transfer_begin_conflict" {
+		t.Fatalf("same-key alternate material accepted before TTL: %+v", response)
+	}
+	expired := time.Now().Add(-2 * time.Minute)
+	if err := os.Chtimes(session, expired, expired); err != nil {
+		t.Fatal(err)
+	}
+	if response := workerWorkspaceTransferGC(gc); !response.OK {
+		t.Fatal(response)
+	}
+	if _, err := os.Stat(session); !os.IsNotExist(err) {
+		t.Fatalf("expired partial reservation not reclaimed: %v", err)
+	}
+	accepted := applyTransfer(t, changed)
+	if accepted.TransferID == transferIDFor(op) {
+		t.Fatal("material fingerprint was reused")
+	}
 }

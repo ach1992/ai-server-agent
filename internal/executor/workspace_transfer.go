@@ -34,27 +34,29 @@ const (
 )
 
 type transferRecord struct {
-	ID             string `json:"id"`
-	PrincipalID    string `json:"principal_id"`
-	PrincipalClass string `json:"principal_class"`
-	Workspace      string `json:"workspace"`
-	Path           string `json:"path"`
-	ExpectedSize   int64  `json:"expected_size"`
-	SHA256         string `json:"sha256"`
-	Received       int64  `json:"received"`
-	FileVersion    string `json:"file_version,omitempty"`
-	MustNotExist   bool   `json:"must_not_exist"`
-	Status         string `json:"status"`
-	ExpiresUnix    int64  `json:"expires_unix"`
-	ResultVersion  string `json:"result_version,omitempty"`
-	PreparedBytes  int64  `json:"prepared_bytes,omitempty"`
-	PreparedHash   string `json:"prepared_hash,omitempty"`
-	StagedVersion  string `json:"staged_version,omitempty"`
-	PreparedDev    uint64 `json:"prepared_dev,omitempty"`
-	PreparedIno    uint64 `json:"prepared_ino,omitempty"`
-	DisplacedDev   uint64 `json:"displaced_dev,omitempty"`
-	DisplacedIno   uint64 `json:"displaced_ino,omitempty"`
-	TempName       string `json:"temp_name,omitempty"`
+	ID                string `json:"id"`
+	PrincipalID       string `json:"principal_id"`
+	PrincipalClass    string `json:"principal_class"`
+	Workspace         string `json:"workspace"`
+	Path              string `json:"path"`
+	ExpectedSize      int64  `json:"expected_size"`
+	SHA256            string `json:"sha256"`
+	Received          int64  `json:"received"`
+	FileVersion       string `json:"file_version,omitempty"`
+	MustNotExist      bool   `json:"must_not_exist"`
+	Status            string `json:"status"`
+	ExpiresUnix       int64  `json:"expires_unix"`
+	ResultVersion     string `json:"result_version,omitempty"`
+	PreparedBytes     int64  `json:"prepared_bytes,omitempty"`
+	PreparedHash      string `json:"prepared_hash,omitempty"`
+	StagedVersion     string `json:"staged_version,omitempty"`
+	PreparedDev       uint64 `json:"prepared_dev,omitempty"`
+	PreparedIno       uint64 `json:"prepared_ino,omitempty"`
+	DisplacedDev      uint64 `json:"displaced_dev,omitempty"`
+	DisplacedIno      uint64 `json:"displaced_ino,omitempty"`
+	DisplacedSnapshot string `json:"displaced_snapshot,omitempty"`
+	ExchangeVerified  bool   `json:"exchange_verified,omitempty"`
+	TempName          string `json:"temp_name,omitempty"`
 }
 
 func transferDigestValid(v string) bool {
@@ -87,6 +89,21 @@ func transferIDFor(op workspaceFileOperation) string {
 	keyHash, materialHash := sha256.Sum256(keyInput), sha256.Sum256(materialInput)
 	return "tr_" + hex.EncodeToString(keyHash[:16]) + hex.EncodeToString(materialHash[:16])
 }
+
+// A namespace exchange can update ctime; these are exactly the stable
+// write-relevant inode fields compared by sameFileCommitState. Persist them
+// as a digest so recovery after an exchange/crash can distinguish the
+// ORIGINAL authorized destination from a concurrently replaced object.
+func transferDisplacedDigest(st unix.Stat_t) string {
+	data, _ := json.Marshal([]any{uint64(st.Dev), st.Ino, st.Size, st.Mode, st.Uid, st.Gid, st.Mtim.Sec, st.Mtim.Nsec})
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:])
+}
+func transferDisplacedMatches(r transferRecord, st unix.Stat_t) bool {
+	return !r.MustNotExist && transferDigestValid(r.DisplacedSnapshot) &&
+		uint64(st.Dev) == r.DisplacedDev && st.Ino == r.DisplacedIno && transferDisplacedDigest(st) == r.DisplacedSnapshot
+}
+
 func validateWorkspaceTransferRequest(req Request) error {
 	if req.PrincipalID == "" || req.PrincipalClass == "" {
 		return errors.New("authenticated principal identity required for durable transfer")
@@ -199,7 +216,8 @@ func transferReadRecord(session string) (transferRecord, error) {
 		return r, err
 	}
 	if !transferIDValid(r.ID) || !transferDigestValid(r.SHA256) || r.ExpectedSize <= 0 || r.Received < 0 || r.Received > r.ExpectedSize || r.ExpectedSize > (int64(1)<<40) || r.PreparedBytes < 0 || r.PreparedBytes > r.ExpectedSize ||
-		(r.Status != "uploading" && r.Status != "preparing" && r.Status != "committing" && r.Status != "committed" && r.Status != "aborted") || r.ExpiresUnix <= 0 {
+		(r.Status != "uploading" && r.Status != "preparing" && r.Status != "committing" && r.Status != "committed" && r.Status != "aborted" && r.Status != "conflicted") ||
+		(!r.MustNotExist && (r.Status == "preparing" || r.Status == "committing") && !transferDigestValid(r.DisplacedSnapshot)) || r.ExpiresUnix <= 0 {
 		return r, errors.New("invalid transfer manifest")
 	}
 	return r, nil
@@ -256,9 +274,14 @@ func transferRemoveData(session string) error {
 
 // Reconcile terminal cleanup on every retry; a durable receipt must never
 // allow a leftover full staging file to evade quota accounting.
-func transferTerminalReceipt(session string, r *transferRecord) Response {
-	if r.Status != "aborted" && r.Status != "committed" {
+func transferTerminalReceipt(op workspaceFileOperation, session string, r *transferRecord) Response {
+	if r.Status != "aborted" && r.Status != "committed" && r.Status != "conflicted" {
 		return transferError("transfer_invalid_state", "state", "not a terminal record")
+	}
+	if r.Status == "conflicted" {
+		if err := transferCleanupUnpublishedTemp(op, *r); err != nil {
+			return fileError("transfer_temp_cleanup_failed", "state", err)
+		}
 	}
 	if err := transferRemoveData(session); err != nil {
 		return fileError("transfer_cleanup_failed", "io", err)
@@ -348,11 +371,18 @@ func transferInventory(op workspaceFileOperation, now int64) (int, int64, int, e
 		}
 		rec, err := transferReadRecord(dir)
 		if err != nil || rec.ID != name {
+			// An empty, manifest-less begin is a durable key+material
+			// reservation. Do not let startup/periodic GC make the SAME
+			// key reusable with DIFFERENT material before its retention TTL.
 			if !transferIncompleteBeginSafe(dir) {
 				return 0, 0, 0, errors.New("unsafe or corrupt durable transfer requires investigation")
 			}
+			if info.ModTime().Unix()+int64(op.TransferTTLSeconds) > now {
+				retained++
+				continue
+			}
 			if err = transferRemoveSession(dir); err != nil {
-				return 0, 0, 0, fmt.Errorf("cleanup interrupted transfer begin: %w", err)
+				return 0, 0, 0, fmt.Errorf("cleanup expired interrupted transfer begin: %w", err)
 			}
 			continue
 		}
@@ -360,7 +390,7 @@ func transferInventory(op workspaceFileOperation, now int64) (int, int64, int, e
 			cleanupOp := workspaceFileOperation{WorkspaceRoot: op.WorkspaceRoot, Workspace: rec.Workspace, Path: rec.Path, TransferOp: "status"}
 			if rec.Status == "committing" {
 				result := transferReconcileCommit(cleanupOp, dir, &rec)
-				if !result.OK && result.ErrorCode != "transfer_commit_pending" {
+				if !result.OK && result.ErrorCode != "transfer_commit_pending" && !(result.ErrorCode == "file_changed" && rec.Status == "conflicted") {
 					return 0, 0, 0, errors.New("uncertain transfer publication requires operator reconciliation")
 				}
 				if result.ErrorCode == "transfer_commit_pending" {
@@ -368,7 +398,7 @@ func transferInventory(op workspaceFileOperation, now int64) (int, int64, int, e
 						return 0, 0, 0, fmt.Errorf("uncertain transfer cannot be discarded safely: %w", e)
 					}
 				}
-			} else if rec.Status == "uploading" || rec.Status == "preparing" || rec.Status == "aborted" {
+			} else if rec.Status == "uploading" || rec.Status == "preparing" || rec.Status == "aborted" || rec.Status == "conflicted" {
 				if err = transferCleanupUnpublishedTemp(cleanupOp, rec); err != nil {
 					return 0, 0, 0, fmt.Errorf("cleanup expired staged destination: %w", err)
 				}
@@ -456,8 +486,8 @@ func transferResolveBegin(root string, op workspaceFileOperation) (Response, boo
 		if prior.ExpiresUnix <= time.Now().Unix() {
 			return transferError("transfer_expired", "state", "idempotent transfer has expired; use a new key after retention cleanup"), true
 		}
-		if prior.Status == "committed" || prior.Status == "aborted" {
-			return transferTerminalReceipt(session, &prior), true
+		if prior.Status == "committed" || prior.Status == "aborted" || prior.Status == "conflicted" {
+			return transferTerminalReceipt(op, session, &prior), true
 		}
 		return transferReceipt(prior), true
 	}
@@ -509,12 +539,15 @@ func workerWorkspaceTransfer(op workspaceFileOperation) Response {
 	defer unix.Flock(rootFD, unix.LOCK_UN)
 	now := time.Now().Unix()
 	if op.TransferOp == "begin" {
-		if result, found := transferResolveBegin(op.TransferRoot, op); found {
-			return result
-		}
+		// Expire old material reservations FIRST. A still-live partial begin
+		// stays in inventory and rejects different-material key reuse; an
+		// expired one is reclaimable even without a future unrelated begin.
 		count, reserved, retained, err := transferInventory(op, now)
 		if err != nil {
 			return fileError("transfer_storage_invalid", "state", err)
+		}
+		if result, found := transferResolveBegin(op.TransferRoot, op); found {
+			return result
 		}
 		capBytes := int64(op.TransferQuotaMiB) << 20
 		if retained >= transferScanMax {
@@ -523,7 +556,7 @@ func workerWorkspaceTransfer(op workspaceFileOperation) Response {
 		if count >= op.TransferMaxSessions || op.ExpectedSize > capBytes || reserved > capBytes-op.ExpectedSize {
 			return transferError("transfer_quota_exceeded", "resource", "configured staging quota or session capacity exhausted; reduce active transfers or change operator settings")
 		}
-		return transferBegin(op, now)
+		return transferBegin(op)
 	}
 	session := filepath.Join(op.TransferRoot, op.TransferID)
 	rec, err := transferReadRecord(session)
@@ -534,13 +567,13 @@ func workerWorkspaceTransfer(op workspaceFileOperation) Response {
 		rec.Workspace != filepath.Clean(op.Workspace) || rec.Path != op.Path {
 		return transferError("transfer_scope_mismatch", "policy", "transfer identity does not match authenticated principal, workspace and destination")
 	}
-	if rec.ExpiresUnix <= now && rec.Status != "committing" && rec.Status != "committed" && rec.Status != "aborted" {
+	if rec.ExpiresUnix <= now && rec.Status != "committing" && rec.Status != "committed" && rec.Status != "aborted" && rec.Status != "conflicted" {
 		return transferError("transfer_expired", "state", "transfer expired; begin a new upload")
 	}
 	switch op.TransferOp {
 	case "status":
-		if rec.Status == "committed" || rec.Status == "aborted" {
-			return transferTerminalReceipt(session, &rec)
+		if rec.Status == "committed" || rec.Status == "aborted" || rec.Status == "conflicted" {
+			return transferTerminalReceipt(op, session, &rec)
 		}
 		if rec.Status == "committing" {
 			return transferReconcileCommit(op, session, &rec)
@@ -550,13 +583,19 @@ func workerWorkspaceTransfer(op workspaceFileOperation) Response {
 		if rec.Status != "uploading" {
 			return transferError("transfer_not_uploading", "state", "transfer is not accepting bytes; inspect status")
 		}
-		return transferChunk(op, session, &rec, now)
+		return transferChunk(op, session, &rec)
 	case "commit":
 		if rec.Status == "committing" {
 			return transferReconcileCommit(op, session, &rec)
 		}
 		if rec.Status == "committed" {
-			return transferTerminalReceipt(session, &rec)
+			return transferTerminalReceipt(op, session, &rec)
+		}
+		if rec.Status == "conflicted" {
+			if result := transferTerminalReceipt(op, session, &rec); !result.OK {
+				return result
+			}
+			return transferError("file_changed", "conflict", "transfer conflict restored the concurrent destination; use a new begin/version")
 		}
 		if rec.Status == "preparing" {
 			return transferPrepareStep(op, session, &rec)
@@ -567,18 +606,18 @@ func workerWorkspaceTransfer(op workspaceFileOperation) Response {
 		if rec.Received != rec.ExpectedSize {
 			return transferError("transfer_incomplete", "validation", "all declared bytes must arrive before commit")
 		}
-		return transferCommit(op, session, &rec, now)
+		return transferCommit(op, session, &rec)
 	case "abort":
 		if rec.Status == "committed" || rec.Status == "committing" {
 			if rec.Status == "committed" {
-				if cleaned := transferTerminalReceipt(session, &rec); !cleaned.OK {
+				if cleaned := transferTerminalReceipt(op, session, &rec); !cleaned.OK {
 					return cleaned
 				}
 			}
 			return transferError("transfer_already_publishing", "state", "cannot abort a committed or uncertain atomic publish; check status")
 		}
-		if rec.Status == "aborted" {
-			return transferTerminalReceipt(session, &rec)
+		if rec.Status == "aborted" || rec.Status == "conflicted" {
+			return transferTerminalReceipt(op, session, &rec)
 		}
 		if rec.Status == "uploading" || rec.Status == "preparing" {
 			if err = transferCleanupUnpublishedTemp(op, rec); err != nil {
@@ -590,12 +629,12 @@ func workerWorkspaceTransfer(op workspaceFileOperation) Response {
 			}
 			transferFaultPoint("aborted_after_checkpoint")
 		}
-		return transferTerminalReceipt(session, &rec)
+		return transferTerminalReceipt(op, session, &rec)
 	}
 	return transferError("invalid_transfer", "validation", "unsupported transfer operation")
 }
 
-func transferBegin(op workspaceFileOperation, now int64) Response {
+func transferBegin(op workspaceFileOperation) Response {
 	parent, err := openWorkerParentForTransfer(op)
 	if err != nil {
 		return fileError("invalid_path", "validation", err)
@@ -623,10 +662,11 @@ func transferBegin(op workspaceFileOperation, now int64) Response {
 	}
 	_ = data.Close()
 	transferFaultPoint("begin_after_data")
+	transferFaultPoint("begin_before_checkpoint")
 	r := transferRecord{ID: id, PrincipalID: op.PrincipalID, PrincipalClass: op.PrincipalClass,
 		Workspace: filepath.Clean(op.Workspace), Path: op.Path, ExpectedSize: op.ExpectedSize,
 		SHA256: op.SHA256, FileVersion: op.FileVersion, MustNotExist: op.MustNotExist,
-		Status: "uploading", ExpiresUnix: now + int64(op.TransferTTLSeconds), TempName: transferTempName(id)}
+		Status: "uploading", ExpiresUnix: time.Now().Unix() + int64(op.TransferTTLSeconds), TempName: transferTempName(id)}
 	if err := transferSaveRecord(session, r); err != nil {
 		return fileError("transfer_begin_failed", "io", err)
 	}
@@ -661,7 +701,7 @@ func openWorkerParentForTransfer(op workspaceFileOperation) (*os.File, error) {
 	return parent, nil
 }
 
-func transferChunk(op workspaceFileOperation, session string, r *transferRecord, now int64) Response {
+func transferChunk(op workspaceFileOperation, session string, r *transferRecord) Response {
 	raw, err := base64.StdEncoding.Strict().DecodeString(op.ChunkBase64)
 	if err != nil || len(raw) == 0 || len(raw) > transferChunkMax {
 		return transferError("invalid_chunk", "validation", "chunk is not valid, nonempty and bounded base64")
@@ -718,7 +758,8 @@ func transferChunk(op workspaceFileOperation, session string, r *transferRecord,
 		return fileError("transfer_chunk_io", "io", err)
 	}
 	r.Received += int64(len(raw))
-	r.ExpiresUnix = now + int64(op.TransferTTLSeconds)
+	transferFaultPoint("chunk_before_checkpoint")
+	r.ExpiresUnix = time.Now().Unix() + int64(op.TransferTTLSeconds)
 	if err = transferSaveRecord(session, *r); err != nil {
 		return transferError("transfer_checkpoint_unknown", "state", "staged bytes may exist but durable progress is unknown; query status")
 	}
@@ -775,8 +816,10 @@ func transferCleanupUnpublishedTemp(op workspaceFileOperation, r transferRecord)
 	if st.Mode&unix.S_IFMT != unix.S_IFREG || st.Uid != uint32(os.Geteuid()) {
 		return errors.New("unexpected temp file type, mode or owner; manual inspection required")
 	}
-	if r.Status == "preparing" && (uint64(st.Dev) != r.PreparedDev || st.Ino != r.PreparedIno) {
-		return errors.New("pinned preparation identity mismatch; refuse unsafe deletion")
+	// Never delete even a worker-owned regular file at a deterministic path
+	// unless a BEFORE-LINK durable journal proves its inode identity.
+	if r.PreparedDev == 0 || r.PreparedIno == 0 || uint64(st.Dev) != r.PreparedDev || st.Ino != r.PreparedIno {
+		return errors.New("unproven prepared-temp inode; refuse deletion of worker-owned unrelated file")
 	}
 	if err = unix.Unlinkat(pfd, r.TempName, 0); err != nil {
 		return err
@@ -786,8 +829,25 @@ func transferCleanupUnpublishedTemp(op workspaceFileOperation, r transferRecord)
 
 // Commit begins durable, bounded preparation; subsequent commit calls resume
 // at prepared_bytes without repeating already checkpointed copy/hash work.
-func transferCommit(op workspaceFileOperation, session string, r *transferRecord, _ int64) Response {
+func transferCommit(op workspaceFileOperation, session string, r *transferRecord) Response {
 	return transferStartPreparation(op, session, r)
+}
+
+// Publish conflict is durable BEFORE releasing staged/prepared bytes.
+// A crash while cleaning then repeats only identity-checked cleanup, never
+// re-publishes an object over a concurrently changed destination.
+func transferMarkConflict(op workspaceFileOperation, session string, r *transferRecord) Response {
+	r.Status = "conflicted"
+	r.ExchangeVerified = false
+	r.ExpiresUnix = time.Now().Unix() + int64(op.TransferTTLSeconds)
+	if err := transferSaveRecord(session, *r); err != nil {
+		return fileError("transfer_commit_unresolved", "state", err)
+	}
+	transferFaultPoint("conflict_after_checkpoint")
+	if result := transferTerminalReceipt(op, session, r); !result.OK {
+		return result
+	}
+	return transferError("file_changed", "conflict", "destination precondition changed; candidate not committed and concurrent destination preserved")
 }
 
 func transferStateAtCommit(pfd int, base string, r transferRecord) (unix.Stat_t, bool, error) {
@@ -825,22 +885,39 @@ func transferFinishPrepared(op workspaceFileOperation, session string, r *transf
 	}
 	old, existed, err := transferStateAtCommit(pfd, base, *r)
 	if err != nil {
-		return transferError("file_changed", "conflict", "destination changed since commit intent; no data published by this retry")
+		// The PREPARED temp is still at its pinned name. No publication
+		// occurred; checkpoint the conflict so retries never re-publish.
+		return transferMarkConflict(op, session, r)
 	}
 	if existed {
+		transferFaultPoint("before_existing_exchange")
 		if err = unix.Renameat2(pfd, r.TempName, pfd, base, unix.RENAME_EXCHANGE); err != nil {
 			return fileError("transfer_commit_io", "io", err)
 		}
+		transferFaultPoint("exchange_after_rename_before_displaced_check")
 		displaced, found, e := pathState(pfd, r.TempName)
 		if e != nil || !found {
 			return transferError("transfer_commit_unresolved", "state", "displaced destination identity could not be verified; query status")
 		}
-		if !sameFileCommitState(old, displaced) {
+		if !transferDisplacedMatches(*r, displaced) || !sameFileCommitState(old, displaced) {
 			if rollbackErr := rollbackExistingExchange(pfd, base, r.TempName, prepared, displaced); rollbackErr != nil {
 				return transferError("transfer_commit_unresolved", "state", "concurrent exchange conflict; rollback unproven")
 			}
-			return transferError("file_changed", "conflict", "destination changed during atomic exchange; original restored")
+			transferFaultPoint("exchange_after_rollback_before_checkpoint")
+			return transferMarkConflict(op, session, r)
 		}
+		// Pin a DURABLE proof of the displaced original before unlinking it.
+		// A killed helper before this checkpoint must verify the displaced
+		// snapshot itself before declaring published success.
+		if err = unix.Fsync(pfd); err != nil {
+			return fileError("transfer_commit_unresolved", "io", err)
+		}
+		r.ExchangeVerified = true
+		r.ExpiresUnix = time.Now().Unix() + int64(op.TransferTTLSeconds)
+		if err = transferSaveRecord(session, *r); err != nil {
+			return fileError("transfer_commit_unresolved", "state", err)
+		}
+		transferFaultPoint("exchange_verified_before_cleanup")
 		if err = unix.Unlinkat(pfd, r.TempName, 0); err != nil {
 			return transferError("transfer_commit_unresolved", "state", "displaced file cleanup failed; inspect durable commit status")
 		}
@@ -884,6 +961,10 @@ func transferConfirmPublished(op workspaceFileOperation, session string, r *tran
 
 // A recovered committing state is not evidence that target bytes were
 // published. Compare pinned inode IDs to avoid blind duplicate publication.
+// Reconcile the durable commit record against BOTH atomic-exchange names.
+// A prepared inode at the final pathname is not proof of a valid overwrite:
+// the displaced inode must match the journaled original snapshot, and this
+// fact must be durably checkpointed before the displaced name can be unlinked.
 func transferReconcileCommit(op workspaceFileOperation, session string, r *transferRecord) Response {
 	parent, err := openWorkerParentForTransfer(op)
 	if err != nil {
@@ -897,26 +978,69 @@ func transferReconcileCommit(op workspaceFileOperation, session string, r *trans
 		return fileError("unsafe_file_type", "validation", err)
 	}
 	if exists && uint64(final.Dev) == r.PreparedDev && final.Ino == r.PreparedIno && final.Size == r.ExpectedSize {
-		if r.TempName != "" {
-			displaced, found, e := pathState(pfd, r.TempName)
-			if e != nil {
-				return transferError("transfer_commit_unresolved", "state", "displaced-file identity check failed")
-			}
-			if found {
-				if uint64(displaced.Dev) != r.DisplacedDev || displaced.Ino != r.DisplacedIno {
-					return transferError("transfer_commit_unresolved", "state", "unexpected data at staged commit temp; never delete blindly")
+		displaced, found, e := pathState(pfd, r.TempName)
+		if e != nil {
+			return transferError("transfer_commit_unresolved", "state", "displaced pathname could not be inspected")
+		}
+		if !r.MustNotExist {
+			if !found {
+				if !r.ExchangeVerified {
+					return transferError("transfer_commit_unresolved", "state", "displaced original absent without durable exchange verification")
+				}
+			} else {
+				if !transferDisplacedMatches(*r, displaced) {
+					if r.ExchangeVerified {
+						return transferError("transfer_commit_unresolved", "state", "previously verified displaced path changed; refuse unsafe deletion")
+					}
+					if e = rollbackExistingExchange(pfd, base, r.TempName, final, displaced); e != nil {
+						return transferError("transfer_commit_unresolved", "state", "failed to verify/restored raced destination after interrupted exchange")
+					}
+					transferFaultPoint("exchange_after_rollback_before_checkpoint")
+					return transferMarkConflict(op, session, r)
+				}
+				if !r.ExchangeVerified {
+					if e = unix.Fsync(pfd); e != nil {
+						return fileError("transfer_commit_unresolved", "io", e)
+					}
+					r.ExchangeVerified = true
+					r.ExpiresUnix = time.Now().Unix() + int64(op.TransferTTLSeconds)
+					if e = transferSaveRecord(session, *r); e != nil {
+						return fileError("transfer_commit_unresolved", "state", e)
+					}
+					transferFaultPoint("exchange_verified_before_cleanup")
 				}
 				if e = unix.Unlinkat(pfd, r.TempName, 0); e != nil {
 					return fileError("transfer_cleanup_failed", "io", e)
 				}
+				if e = unix.Fsync(pfd); e != nil {
+					return fileError("transfer_cleanup_failed", "io", e)
+				}
 			}
+		} else if found {
+			return transferError("transfer_commit_unresolved", "state", "unexpected temp pathname after create-only publication")
 		}
 		return transferConfirmPublished(op, session, r, pfd, base)
 	}
+	if r.ExchangeVerified {
+		// A completed, verified exchange must NEVER be attempted again if
+		// a subsequent writer has changed the published target pathname.
+		return transferError("transfer_commit_unresolved", "state", "previously verified published inode is no longer at destination; refuse duplicate publication")
+	}
+	// If the pinned temp remains at its original pathname, an exchange did
+	// not publish it (or a verified rollback restored it). If the destination
+	// no longer satisfies the original precondition, record an idempotent
+	// conflict and preserve the unrelated/concurrent target.
+	prepared, found, e := pathState(pfd, r.TempName)
+	if e != nil {
+		return transferError("transfer_commit_unresolved", "state", "prepared inode recovery inspection failed")
+	}
+	if found && uint64(prepared.Dev) == r.PreparedDev && prepared.Ino == r.PreparedIno && !r.ExchangeVerified {
+		if _, _, e = transferStateAtCommit(pfd, base, *r); e != nil {
+			return transferMarkConflict(op, session, r)
+		}
+	}
 	if op.TransferOp == "commit" {
-		// Lost response before atomic publication. The still-pinned prepared
-		// file and original destination precondition permit an exact safe retry.
 		return transferFinishPrepared(op, session, r)
 	}
-	return transferError("transfer_commit_pending", "state", "not yet proven published; use commit with this same handle or inspect destination")
+	return transferError("transfer_commit_pending", "state", "not proven published; use commit with original handle")
 }

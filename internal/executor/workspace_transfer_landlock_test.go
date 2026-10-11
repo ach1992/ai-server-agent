@@ -106,6 +106,47 @@ func TestWorkspaceTransferActualWorkerHelperLandlock(t *testing.T) {
 	if err != nil || !bytes.Equal(got, full) {
 		t.Fatalf("worker content mismatch: %v", err)
 	}
+	// Exercise the existing-file RENAME_EXCHANGE path through the actual
+	// unprivileged subprocess/Landlock boundary, not only through unit code.
+	stat := server.workerWorkspaceFile(t.Context(), Request{Action: "workspace_stat", Workspace: repo, Path: "src/landlock.bin"})
+	if !stat.OK || stat.FileVersion == "" {
+		t.Fatalf("versioned replacement stat failed: %+v", stat)
+	}
+	replaced := []byte("verified real Landlock replacement")
+	newSum := sha256.Sum256(replaced)
+	replacement := base
+	replacement.TransferKey = "worker-replacement-03"
+	replacement.ExpectedSize = int64(len(replaced))
+	replacement.SHA256 = hex.EncodeToString(newSum[:])
+	replacement.MustNotExist = false
+	replacement.FileVersion = stat.FileVersion
+	replacementBegin := server.workerWorkspaceFile(t.Context(), replacement)
+	if !replacementBegin.OK {
+		t.Fatalf("worker replacement begin failed: %+v", replacementBegin)
+	}
+	c := replacement
+	c.TransferOp = "chunk"
+	c.TransferKey = ""
+	c.TransferID = replacementBegin.TransferID
+	c.ExpectedSize = 0
+	c.SHA256 = ""
+	c.FileVersion = ""
+	c.ChunkBase64 = base64.StdEncoding.EncodeToString(replaced)
+	c.ChunkSHA256 = hex.EncodeToString(newSum[:])
+	if chunked := server.workerWorkspaceFile(t.Context(), c); !chunked.OK {
+		t.Fatalf("replacement chunk failed: %+v", chunked)
+	}
+	c.TransferOp = "commit"
+	c.ChunkBase64 = ""
+	c.ChunkSHA256 = ""
+	final := server.workerWorkspaceFile(t.Context(), c)
+	if !final.OK || final.Status != "committed" {
+		t.Fatalf("real worker RENAME_EXCHANGE failed: %+v", final)
+	}
+	current, err := os.ReadFile(filepath.Join(repo, "src/landlock.bin"))
+	if err != nil || !bytes.Equal(current, replaced) {
+		t.Fatalf("real worker replacement bytes mismatch: %v", err)
+	}
 	// Verify actual periodic cleanup traverses the worker helper + Landlock
 	// without relying on any subsequent client begin/commit call.
 	waiting := base

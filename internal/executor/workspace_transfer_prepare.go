@@ -9,6 +9,7 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"strconv"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -95,9 +96,13 @@ func transferStartPreparation(op workspaceFileOperation, session string, r *tran
 	if err = transferCleanupUnpublishedTemp(op, *r); err != nil {
 		return fileError("transfer_temp_recovery_failed", "state", err)
 	}
-	p, err := unix.Openat(pfd, r.TempName, unix.O_CREAT|unix.O_EXCL|unix.O_NOFOLLOW|unix.O_CLOEXEC|unix.O_RDWR, 0600)
+	// Allocate an UNNAMED inode in the destination filesystem. The kernel
+	// discards it on helper death before journal persistence, eliminating the
+	// unidentifiable named-temp crash window. Never unlink an inode based on
+	// a deterministic filename and matching Unix UID alone.
+	p, err := unix.Openat(pfd, ".", unix.O_TMPFILE|unix.O_RDWR|unix.O_CLOEXEC, 0600)
 	if err != nil {
-		return fileError("transfer_prepare_failed", "io", err)
+		return fileError("transfer_prepare_unavailable", "resource", fmt.Errorf("destination filesystem must support unnamed temporary files: %w", err))
 	}
 	defer unix.Close(p)
 	mode := uint32(0644)
@@ -110,16 +115,12 @@ func transferStartPreparation(op workspaceFileOperation, session string, r *tran
 	if err = unix.Fsync(p); err != nil {
 		return fileError("transfer_prepare_failed", "io", err)
 	}
-	if err = unix.Fsync(pfd); err != nil {
-		return fileError("transfer_prepare_failed", "io", err)
-	}
 	transferFaultPoint("prepare_temp_before_checkpoint")
 	var prepared unix.Stat_t
 	if err = unix.Fstat(p, &prepared); err != nil {
 		return fileError("transfer_prepare_failed", "io", err)
 	}
-	h := sha256.New()
-	state, err := transferSHAState(h)
+	hashState, err := transferSHAState(sha256.New())
 	if err != nil {
 		return fileError("transfer_prepare_failed", "state", err)
 	}
@@ -127,16 +128,33 @@ func transferStartPreparation(op workspaceFileOperation, session string, r *tran
 	r.PreparedDev = uint64(prepared.Dev)
 	r.PreparedIno = prepared.Ino
 	r.PreparedBytes = 0
-	r.PreparedHash = state
+	r.PreparedHash = hashState
 	r.Status = "preparing"
 	if exists {
 		r.DisplacedDev = uint64(original.Dev)
 		r.DisplacedIno = original.Ino
+		r.DisplacedSnapshot = transferDisplacedDigest(original)
 	}
 	r.ExpiresUnix = time.Now().Unix() + int64(op.TransferTTLSeconds)
 	if err = transferSaveRecord(session, *r); err != nil {
-		return transferError("transfer_checkpoint_unknown", "state", "preparation intent may have persisted; check status")
+		return transferError("transfer_checkpoint_unknown", "state", "preparation journal may have persisted; retry status")
 	}
+	transferFaultPoint("prepare_checkpoint_before_link")
+	// Only after an fsynced journal binds this exact dev/ino may its
+	// destination-side pathname become visible. Direct AT_EMPTY_PATH is
+	// preferred; /proc/self/fd works on kernels/filesystems which reject the
+	// direct form for O_TMPFILE, without changing worker authority.
+	err = unix.Linkat(p, "", pfd, r.TempName, unix.AT_EMPTY_PATH)
+	if errors.Is(err, unix.ENOENT) || errors.Is(err, unix.EPERM) {
+		err = unix.Linkat(unix.AT_FDCWD, "/proc/self/fd/"+strconv.Itoa(p), pfd, r.TempName, unix.AT_SYMLINK_FOLLOW)
+	}
+	if err != nil {
+		return fileError("transfer_prepare_link_failed", "io", fmt.Errorf("failed to link durably journaled prepared inode: %w", err))
+	}
+	if err = unix.Fsync(pfd); err != nil {
+		return fileError("transfer_prepare_link_failed", "io", err)
+	}
+	transferFaultPoint("prepare_link_after_checkpoint")
 	return transferPrepareStep(op, session, r)
 }
 
@@ -172,6 +190,20 @@ func transferPrepareStep(op workspaceFileOperation, session string, r *transferR
 		return transferError("transfer_storage_corrupt", "state", "invalid pinned preparation name")
 	}
 	fd, err := unix.Openat(pfd, r.TempName, unix.O_RDWR|unix.O_NOFOLLOW|unix.O_CLOEXEC, 0)
+	if errors.Is(err, unix.ENOENT) && r.PreparedBytes == 0 {
+		// Crash after journaling the unnamed inode but before linking it:
+		// kernel closed/reclaimed the unlinked inode on helper death.
+		// A preparing state has never been published, so restart safely
+		// after writing an uploading checkpoint. No named object is deleted.
+		r.Status = "uploading"
+		r.PreparedDev, r.PreparedIno, r.DisplacedDev, r.DisplacedIno = 0, 0, 0, 0
+		r.PreparedHash, r.StagedVersion = "", ""
+		r.ExpiresUnix = time.Now().Unix() + int64(op.TransferTTLSeconds)
+		if e := transferSaveRecord(session, *r); e != nil {
+			return fileError("transfer_prepare_recovery_failed", "io", e)
+		}
+		return transferStartPreparation(op, session, r)
+	}
 	if err != nil {
 		return fileError("transfer_prepare_unavailable", "state", err)
 	}
