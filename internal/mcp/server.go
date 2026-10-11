@@ -25,7 +25,8 @@ import (
 // this marker in a temporary source tree. Normal source builds instead report
 // their embedded VCS revision, never this old development placeholder.
 const version = "0.1.0-dev"
-const synchronousCommandTimeout = 5 * time.Minute
+
+// Synchronous command duration is operator-tunable; longer operations use jobs.
 
 // Stamped by the existing release builder from the exact Git checkout. Go's
 // automatic VCS build settings are optional (and absent in some -trimpath
@@ -222,7 +223,14 @@ func textResult(text string, isError bool) *mcpsdk.CallToolResult {
 }
 
 func responseResult(resp executor.Response) (*mcpsdk.CallToolResult, executor.Response, error) {
-	const maxTextFallbackBytes = 32 << 10
+	return responseResultWithLimit(resp, config.DefaultRuntimeSettings().TextFallbackBytes)
+}
+
+func (s *Server) responseResult(resp executor.Response) (*mcpsdk.CallToolResult, executor.Response, error) {
+	return responseResultWithLimit(resp, s.cfg.EffectiveRuntime().TextFallbackBytes)
+}
+
+func responseResultWithLimit(resp executor.Response, maxTextFallbackBytes int) (*mcpsdk.CallToolResult, executor.Response, error) {
 	if len(resp.Output) <= maxTextFallbackBytes {
 		b, err := json.MarshalIndent(resp, "", "  ")
 		if err != nil {
@@ -278,6 +286,16 @@ func executorTransportErrorResult(err error) (*mcpsdk.CallToolResult, executor.R
 	return textResult(err.Error(), true), resp, nil
 }
 
+func (s *Server) commandTimeoutMS() int64 {
+	return int64(s.cfg.EffectiveRuntime().CommandTimeoutSeconds) * 1000
+}
+
+func (s *Server) commandTimeoutDescription() string {
+	// Tool metadata is part of the client contract. The value advertised to
+	// the model must match the timeout effective for this Agent instance.
+	return fmt.Sprintf("Synchronous execution is limited to %d seconds for this Agent (operator-configured, default 300 seconds, supported 10..1800 seconds); use start_job for longer or high-output work.", s.cfg.EffectiveRuntime().CommandTimeoutSeconds)
+}
+
 func (s *Server) registerTools() {
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "agent_environment",
@@ -293,26 +311,26 @@ func (s *Server) registerTools() {
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "run_command",
-		Description: "Run an arbitrary Bash command as the unprivileged aiworker user in the dedicated workspace. Commands can change files or external systems; MCP hints do not replace server-side permissions. Use for normal project work, builds, tests, Git, package managers inside the project, and diagnostics that do not require host privileges. Synchronous execution is bounded to five minutes; use start_job for work expected to run longer or produce high output.",
+		Description: "Run an arbitrary Bash command as the unprivileged aiworker user in the dedicated workspace. Commands can change files or external systems; MCP hints do not replace server-side permissions. Use for normal project work, builds, tests, Git, package managers inside the project, and diagnostics that do not require host privileges. " + s.commandTimeoutDescription(),
 		Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input RunInput) (*mcpsdk.CallToolResult, executor.Response, error) {
-		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "run", Command: input.Command, TimeoutMS: int64(synchronousCommandTimeout / time.Millisecond)})
+		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "run", Command: input.Command, TimeoutMS: s.commandTimeoutMS()})
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
-		return responseResult(resp)
+		return s.responseResult(resp)
 	})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "run_root_command",
-		Description: "Run an arbitrary Bash command as root. Use for apt packages, services, Docker, aaPanel, networking, system configuration, deployment setup, and tests that genuinely need root. Synchronous execution is bounded to five minutes; use a root persistent job for work expected to run longer or produce high output. Connection-risk and destructive commands return approval_required until the user explicitly confirms and approval=true is supplied.",
+		Description: "Run an arbitrary Bash command as root. Use for apt packages, services, Docker, aaPanel, networking, system configuration, deployment setup, and tests that genuinely need root. " + s.commandTimeoutDescription() + " Connection-risk and destructive commands return approval_required until the user explicitly confirms and approval=true is supplied.",
 		Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input RootRunInput) (*mcpsdk.CallToolResult, executor.Response, error) {
-		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "run", Command: input.Command, Root: true, Approval: input.Approval, TimeoutMS: int64(synchronousCommandTimeout / time.Millisecond)})
+		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "run", Command: input.Command, Root: true, Approval: input.Approval, TimeoutMS: s.commandTimeoutMS()})
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
-		return responseResult(resp)
+		return s.responseResult(resp)
 	})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
@@ -324,7 +342,7 @@ func (s *Server) registerTools() {
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
-		return responseResult(resp)
+		return s.responseResult(resp)
 	})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "job_status", Description: "Read and reconcile the current state and exit status of a persistent job. Reconciliation may persist an unknown-completion marker and retire a stale protected command handoff after the transient unit is gone.", Annotations: annotations(false, false, true, false)},
@@ -333,7 +351,7 @@ func (s *Server) registerTools() {
 			if err != nil {
 				return executorTransportErrorResult(err)
 			}
-			return responseResult(resp)
+			return s.responseResult(resp)
 		})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "job_output", Description: "Read a chunk of persistent job stdout/stderr without requiring the original MCP connection to remain open.", Annotations: annotations(true, false, true, false)},
@@ -342,7 +360,7 @@ func (s *Server) registerTools() {
 			if err != nil {
 				return executorTransportErrorResult(err)
 			}
-			return responseResult(resp)
+			return s.responseResult(resp)
 		})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "job_stop", Description: "Stop a persistent background job.", Annotations: annotations(false, true, true, false)},
@@ -351,7 +369,7 @@ func (s *Server) registerTools() {
 			if err != nil {
 				return executorTransportErrorResult(err)
 			}
-			return responseResult(resp)
+			return s.responseResult(resp)
 		})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "read_file", Description: "Read a bounded raw-byte range from a regular host file through the root executor. This is broad root-readable host-file access, not a low-privilege sandbox. Binary data is returned with explicit base64 encoding; Agent-protected aliases still require approval.", Annotations: annotations(true, false, true, false)},
@@ -360,7 +378,7 @@ func (s *Server) registerTools() {
 			if err != nil {
 				return executorTransportErrorResult(err)
 			}
-			return responseResult(resp)
+			return s.responseResult(resp)
 		})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "write_file", Description: "Atomically replace a bounded regular host file through the root executor. This is root-capable host mutation, not a safer substitute for run_root_command. The parent must already exist; optional file_version/must_not_exist preconditions prevent accidental lost updates; Agent-protected aliases require approval.", Annotations: annotations(false, true, false, false)},
@@ -369,7 +387,7 @@ func (s *Server) registerTools() {
 			if err != nil {
 				return executorTransportErrorResult(err)
 			}
-			return responseResult(resp)
+			return s.responseResult(resp)
 		})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_status", Description: "Inspect bounded non-secret browser runtime readiness and pinned Node/Playwright/Chromium versions. The persistent browser profile is Agent-wide shared state, not per-client or per-user isolation.", Annotations: annotations(true, false, true, false)},
@@ -384,7 +402,7 @@ func (s *Server) registerTools() {
 			if err != nil {
 				return executorTransportErrorResult(err)
 			}
-			return responseResult(resp)
+			return s.responseResult(resp)
 		})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_run", Description: "Run bounded Playwright JavaScript in headless Chromium using the Agent-wide shared persistent browser profile. Variables browser, context, and page are pre-created; use console.log for observations. HTTPS certificate validation is enabled by default; ignore_https_errors is an explicit request-scoped development exception. Browser execution is action-capable and may reuse cookies/local-storage/session state created by other authorized browser callers.", Annotations: annotations(false, true, false, true)},
@@ -393,7 +411,7 @@ func (s *Server) registerTools() {
 			if err != nil {
 				return executorTransportErrorResult(err)
 			}
-			return responseResult(resp)
+			return s.responseResult(resp)
 		})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
@@ -404,7 +422,7 @@ func (s *Server) registerTools() {
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
-		return responseResult(resp)
+		return s.responseResult(resp)
 	})
 
 	s.registerBrowserSessionTools()
@@ -477,6 +495,20 @@ func (s *Server) Handler() http.Handler {
 	return mux
 }
 
+// Both plain HTTP and native TLS use exactly the same validated timeout
+// profile. These are network idle/header budgets, not MCP credential or
+// executor session expiry.
+func newHTTPServer(cfg config.Config, handler http.Handler) *http.Server {
+	r := cfg.EffectiveRuntime()
+	return &http.Server{
+		Addr:              cfg.ListenAddress,
+		Handler:           handler,
+		ReadHeaderTimeout: time.Duration(r.HTTPReadHeaderTimeoutSeconds) * time.Second,
+		IdleTimeout:       time.Duration(r.HTTPIdleTimeoutSeconds) * time.Second,
+		MaxHeaderBytes:    1 << 20,
+	}
+}
+
 func Serve(cfg config.Config) error {
 	s, err := New(cfg)
 	if err != nil {
@@ -488,13 +520,7 @@ func Serve(cfg config.Config) error {
 	if err := manifest.Write(filepath.Join(cfg.StateDir, "AI_ENVIRONMENT.json"), manifest.Build(cfg)); err != nil {
 		return err
 	}
-	httpServer := &http.Server{
-		Addr:              cfg.ListenAddress,
-		Handler:           s.Handler(),
-		ReadHeaderTimeout: 10 * time.Second,
-		IdleTimeout:       90 * time.Second,
-		MaxHeaderBytes:    1 << 20,
-	}
+	httpServer := newHTTPServer(cfg, s.Handler())
 	fmt.Printf("ai-server-agent listening on %s%s\n", cfg.ListenAddress, cfg.MCPPath)
 	return httpServer.ListenAndServe()
 }

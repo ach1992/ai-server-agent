@@ -236,7 +236,7 @@ For unfamiliar or large source files, `workspace_stat` reports size and file ver
 
 ### Ordinary commands and root commands
 
-Use `run_command` for normal development work, builds, tests, Git, project package managers and diagnostics that do not require host privilege. It runs as `aiworker` with `/srv/ai-workspace` as HOME/CWD. Synchronous `run_command` / `run_root_command` calls are limited to five minutes; work expected to run longer or produce high output should use `start_job`. Command bodies are limited to 256 KiB and are delivered to Bash through stdin rather than being copied into the spawned process argv. Synchronous stdout/stderr is captured with a 1 MiB production-time head/tail bound and returns explicit encoding, raw-byte, truncation and duration/timeout metadata; binary output is base64-encoded instead of being treated as UTF-8. Active synchronous worker and root execution have separate bounded capacity and fail immediately with a structured `busy/resource_limit` result instead of entering a hidden queue. Cancellation/timeout terminates the command process group with TERM followed by a bounded KILL fallback, and ordinary same-process-group background children are cleaned up; a command that deliberately escapes that process group cannot be claimed as stopped, so durable/background work belongs in `start_job` or an intentionally managed service.
+Use `run_command` for normal development work, builds, tests, Git, project package managers and diagnostics that do not require host privilege. It runs as `aiworker` with `/srv/ai-workspace` as HOME/CWD. Synchronous `run_command` / `run_root_command` calls use the administrator-configured `command_timeout_seconds` (default 300 seconds; validated range 10–1800 seconds); the effective value is advertised to the model in both tool descriptions. Work expected to exceed the configured limit or produce high output should use `start_job`. Command bodies are limited to 256 KiB and are delivered to Bash through stdin rather than being copied into the spawned process argv. Synchronous stdout/stderr is captured with a 1 MiB production-time head/tail bound and returns explicit encoding, raw-byte, truncation and duration/timeout metadata; binary output is base64-encoded instead of being treated as UTF-8. Active synchronous worker and root execution have separate bounded capacity and fail immediately with a structured `busy/resource_limit` result instead of entering a hidden queue. Cancellation/timeout terminates the command process group with TERM followed by a bounded KILL fallback, and ordinary same-process-group background children are cleaned up; a command that deliberately escapes that process group cannot be claimed as stopped, so durable/background work belongs in `start_job` or an intentionally managed service.
 
 `/srv/ai-workspace` is persistent. Connected models are instructed to inspect and reuse existing repositories, worktrees and task environments before creating duplicates, prefer `git worktree` when another checkout of the same repository is appropriate, and never treat dirty, untracked, ambiguous or unknown workspace state as safe to delete.
 
@@ -356,6 +356,9 @@ Useful subcommands:
 
 ```bash
 sudo ai-server-agent-manage status
+sudo ai-server-agent-manage runtime-show
+sudo ai-server-agent-manage runtime-set http_idle_timeout_seconds 300
+sudo ai-server-agent-manage runtime-reset http_idle_timeout_seconds
 sudo ai-server-agent-manage chatgpt-setup
 sudo ai-server-agent-manage configure-cloudflare
 sudo ai-server-agent-manage configure-local
@@ -366,6 +369,8 @@ sudo ai-server-agent-manage repair
 sudo ai-server-agent-manage uninstall
 sudo ai-server-agent-manage purge
 ```
+
+Runtime settings persist in the existing root-managed `/etc/ai-server-agent/config.json`. `runtime-show` lists the effective configured values, safe value ranges and units; `runtime-set` and `runtime-reset` validate with the installed binary **before** updating the config, restart Agent/Executor, verify local health, and restore the prior config on verified restart failure. Run those commands in an independent SSH/operator terminal because restarting the Agent may disconnect an MCP client. No source edit or new release is needed to change supported settings **once this capability has been installed**. A configured value is not guaranteed active until both services restart and health is checked. An invalid value never restarts them. These are per-request/network operational budgets, not a way to disable authentication, bypass approval or transfer an unlimited file in one MCP response. For large files use the existing version-pinned read ranges; resumable large/binary ingestion remains Issue #99.
 
 Privileged install/update/manage/uninstall/purge operations share a root-only lifecycle lock under `/run/lock/ai-server-agent`. A concurrent management operation fails before state mutation rather than racing another lifecycle operation.
 

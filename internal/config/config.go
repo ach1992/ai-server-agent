@@ -1,6 +1,7 @@
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -9,27 +10,30 @@ import (
 )
 
 type Config struct {
-	ListenAddress       string `json:"listen_address"`
-	MCPPath             string `json:"mcp_path"`
-	HealthPath          string `json:"health_path"`
-	AuthMode            string `json:"auth_mode"`
-	BearerTokenFile     string `json:"bearer_token_file,omitempty"`
-	CredentialStoreFile string `json:"credential_store_file,omitempty"`
-	TLSCertFile         string `json:"tls_cert_file,omitempty"`
-	TLSKeyFile          string `json:"tls_key_file,omitempty"`
-	ExecutorSocket      string `json:"executor_socket"`
-	ExecutorToken       string `json:"executor_token_file"`
-	StateDir            string `json:"state_dir"`
-	LogDir              string `json:"log_dir"`
-	WorkspaceDir        string `json:"workspace_dir"`
-	WorkerUser          string `json:"worker_user"`
-	AgentUser           string `json:"agent_user"`
-	PublicBaseURL       string `json:"public_base_url,omitempty"`
-	InstanceID          string `json:"instance_id,omitempty"`
+	ListenAddress       string           `json:"listen_address"`
+	MCPPath             string           `json:"mcp_path"`
+	HealthPath          string           `json:"health_path"`
+	AuthMode            string           `json:"auth_mode"`
+	BearerTokenFile     string           `json:"bearer_token_file,omitempty"`
+	CredentialStoreFile string           `json:"credential_store_file,omitempty"`
+	TLSCertFile         string           `json:"tls_cert_file,omitempty"`
+	TLSKeyFile          string           `json:"tls_key_file,omitempty"`
+	ExecutorSocket      string           `json:"executor_socket"`
+	ExecutorToken       string           `json:"executor_token_file"`
+	StateDir            string           `json:"state_dir"`
+	LogDir              string           `json:"log_dir"`
+	WorkspaceDir        string           `json:"workspace_dir"`
+	WorkerUser          string           `json:"worker_user"`
+	AgentUser           string           `json:"agent_user"`
+	PublicBaseURL       string           `json:"public_base_url,omitempty"`
+	InstanceID          string           `json:"instance_id,omitempty"`
+	Runtime             *RuntimeSettings `json:"runtime,omitempty"`
 }
 
 func Default() Config {
+	defaults := DefaultRuntimeSettings()
 	return Config{
+		Runtime:         &defaults,
 		ListenAddress:   "127.0.0.1:3210",
 		MCPPath:         "/mcp",
 		HealthPath:      "/healthz",
@@ -45,11 +49,25 @@ func Default() Config {
 	}
 }
 
+// EffectiveRuntime preserves current defaults for legacy/internal configs that
+// have no optional runtime section; loaded configurations validate explicit overrides.
+func (c Config) EffectiveRuntime() RuntimeSettings {
+	if c.Runtime == nil {
+		return DefaultRuntimeSettings()
+	}
+	return *c.Runtime
+}
+
 func (c Config) TLSConfigured() bool {
 	return c.TLSCertFile != "" && c.TLSKeyFile != ""
 }
 
 func (c Config) Validate() error {
+	if c.Runtime != nil {
+		if err := c.Runtime.Validate(); err != nil {
+			return err
+		}
+	}
 	if c.ListenAddress == "" || c.MCPPath == "" || c.ExecutorSocket == "" || c.ExecutorToken == "" || c.StateDir == "" || c.WorkspaceDir == "" {
 		return errors.New("config contains empty required values")
 	}
@@ -87,6 +105,13 @@ func Load(path string) (Config, error) {
 	}
 	if err := json.Unmarshal(b, &authSources); err != nil {
 		return c, fmt.Errorf("parse config: %w", err)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(b, &fields); err != nil {
+		return c, fmt.Errorf("parse config fields: %w", err)
+	}
+	if raw, ok := fields["runtime"]; ok && bytes.Equal(bytes.TrimSpace(raw), []byte("null")) {
+		return c, errors.New("runtime settings cannot be null; omit the section to use defaults")
 	}
 	if authSources.CredentialStoreFile != nil && authSources.BearerTokenFile == nil {
 		c.BearerTokenFile = ""

@@ -118,5 +118,5 @@ func (s *Server) callDebug(ctx context.Context, req executor.Request) (*mcpsdk.C
 	if err != nil {
 		return executorTransportErrorResult(err)
 	}
-	return responseResult(response)
+	return s.responseResult(response)
 }

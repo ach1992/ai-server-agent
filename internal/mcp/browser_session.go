@@ -49,26 +49,26 @@ func (s *Server) registerBrowserSessionTools() {
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
-		return responseResult(resp)
+		return s.responseResult(resp)
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_flow", Description: "Execute 1..12 ordered validated Browser/E2E actions against an existing authenticated session. A complete, stable snapshot may issue bounded exact ElementHandle refs usable in a later MCP call. Refs become stale on navigation, next snapshot, or element detachment. Action failure/unknown completion is not safe to replay automatically.", Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionFlowInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := s.browser.SessionFlow(ctx, browser.SessionOptions{Workspace: in.Workspace, SessionID: in.SessionID, Steps: in.Steps, TimeoutMS: in.TimeoutMS})
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
-		return responseResult(resp)
+		return s.responseResult(resp)
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_capture", Description: "Capture an explicitly requested bounded viewport JPEG of the current authenticated managed Browser session: up to 1024 CSS-pixel width cropped from the current viewport left edge, at most 720 height, never a full-page, resized, or disk artifact. Uses the existing private Browser subprocess/broker and shared profile admission; no file or public resource URL. Default representation=image returns typed MCP image content plus small text/structured metadata with SHA256. If the client hides image content, request representation=base64 after reducing max_width/quality to fit a 16 KiB raw-byte text fallback. Images over the 32 KiB raw cap return too_large; an uncertain transfer poisons the session until close. Screenshots may contain sensitive on-page information; do not call without an intentional user workflow.", Annotations: annotations(true, false, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionCaptureInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		if in.Representation != "" && in.Representation != "image" && in.Representation != "base64" {
 			resp := executor.Response{Error: "representation must be image or base64", ErrorCode: "invalid_browser_capture", ErrorClass: "validation"}
-			return responseResult(resp)
+			return s.responseResult(resp)
 		}
 		resp, err := s.browser.SessionCapture(ctx, browser.SessionOptions{Workspace: in.Workspace, SessionID: in.SessionID, CaptureQuality: in.Quality, CaptureMaxWidth: in.MaxWidth})
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
 		if !resp.OK {
-			return responseResult(resp)
+			return s.responseResult(resp)
 		}
 		raw, err := base64.StdEncoding.Strict().DecodeString(resp.Output)
 		if err != nil || resp.MIMEType != "image/jpeg" || len(raw) == 0 || len(raw) > 32<<10 || int64(len(raw)) != resp.BytesReturned {
@@ -77,9 +77,9 @@ func (s *Server) registerBrowserSessionTools() {
 		if in.Representation == "base64" {
 			if len(raw) > 16<<10 {
 				denied := executor.Response{Error: "JPEG exceeds 16 KiB text-only delivery budget; use typed image or retry with quality=15,max_width=320", ErrorCode: "too_large", ErrorClass: "resource", ReasonCode: "too_large", Status: "not_delivered", SessionID: resp.SessionID, FileVersion: resp.FileVersion, MIMEType: "image/jpeg", BytesSeen: int64(len(raw))}
-				return responseResult(denied)
+				return s.responseResult(denied)
 			}
-			return responseResult(resp)
+			return s.responseResult(resp)
 		}
 		// Do not duplicate the base64 payload into structuredContent: a
 		// text-only AI client should see concise metadata, never a silently
@@ -95,20 +95,20 @@ func (s *Server) registerBrowserSessionTools() {
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
-		return responseResult(resp)
+		return s.responseResult(resp)
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_status", Description: "Inspect own Browser session running/uncertain state with principal/workspace checks. No profile or page data is returned.", Annotations: annotations(true, false, true, false)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionIDInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := s.browser.SessionStatus(ctx, browser.SessionOptions{Workspace: in.Workspace, SessionID: in.SessionID})
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
-		return responseResult(resp)
+		return s.responseResult(resp)
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_close", Description: "Close own managed Browser session; free the shared Browser profile only after the executor verifies pinned process-group termination. An uncertain cleanup remains reserved and requires recovery.", Annotations: annotations(false, true, false, false)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionIDInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := s.browser.SessionClose(ctx, browser.SessionOptions{Workspace: in.Workspace, SessionID: in.SessionID})
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
-		return responseResult(resp)
+		return s.responseResult(resp)
 	})
 }
