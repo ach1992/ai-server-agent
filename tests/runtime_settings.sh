@@ -40,7 +40,7 @@ acquire_management_lock(){ :; }
 chown(){ :; }
 restart_and_verify_local(){
   echo restart >> "$TMP/restarts"
-  [ "$(jq -r '.runtime.http_idle_timeout_seconds // 90' "$CONFIG_FILE")" != 999 ]
+  [ ! -e "$TMP/force_all_restarts_fail" ] && [ "$(jq -r '.runtime.http_idle_timeout_seconds // 90' "$CONFIG_FILE")" != 999 ]
 }
 default="$(runtime_show)"
 grep -Fq 'http_idle_timeout_seconds=90 seconds' <<<"$default" || fail 'legacy default is wrong'
@@ -70,5 +70,30 @@ if (runtime_apply set command_timeout_seconds 600 >/dev/null 2>&1); then
   fail 'abandoned prior rollback snapshot was ignored'
 fi
 rm -f -- "$CONFIG_DIR/.runtime-old.abandoned"
+# R1: BOTH activation and rollback health fail. The old config must be
+# restored on disk, but its backup must remain as durable unresolved state.
+unresolved_before="$(sha256sum "$CONFIG_FILE" | cut -d' ' -f1)"
+touch "$TMP/force_all_restarts_fail"
+if (runtime_apply set command_timeout_seconds 600) >"$TMP/unresolved.out" 2>&1; then
+  fail 'double failure falsely reported success'
+fi
+unresolved_backup="$(runtime_pending_backup)"
+[ -n "$unresolved_backup" ] && [ -f "$unresolved_backup" ] || fail 'double failure consumed rollback snapshot'
+[ "$(sha256sum "$CONFIG_FILE" | cut -d' ' -f1)" = "$unresolved_before" ] || fail 'rollback did not restore old config'
+[ "$(sha256sum "$unresolved_backup" | cut -d' ' -f1)" = "$unresolved_before" ] || fail 'preserved snapshot differs from old config'
+grep -Fq "$unresolved_backup" "$TMP/unresolved.out" || fail 'operator was not given real recovery path'
+grep -Fq 'NOT verified' "$TMP/unresolved.out" || fail 'uncertain recovery was called successful'
+restarts_at_failure="$(wc -l < "$TMP/restarts")"
+if (runtime_apply set command_timeout_seconds 300) >"$TMP/blocked.out" 2>&1; then
+  fail 'second set bypassed unverified recovery interlock'
+fi
+if (runtime_apply reset command_timeout_seconds) >>"$TMP/blocked.out" 2>&1; then
+  fail 'second reset bypassed unverified recovery interlock'
+fi
+[ "$(wc -l < "$TMP/restarts")" = "$restarts_at_failure" ] || fail 'blocked operation restarted services'
+grep -Fq 'unresolved rollback snapshot' "$TMP/blocked.out" || fail 'missing actionable blocked-state guidance'
+rm -f -- "$TMP/force_all_restarts_fail"
+# Only this isolated regression is authorized to discard its own fixture.
+rm -f -- "$unresolved_backup"
 test -z "$(find "$TMP" -maxdepth 1 -name '.runtime-*' -print)" || fail 'staged/backup files leaked on successful/verified failure paths'
 echo 'Runtime settings management PASS'

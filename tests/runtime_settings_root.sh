@@ -16,7 +16,7 @@ AGENT_USER=root
 acquire_management_lock(){ :; }
 restart_and_verify_local(){
   printf 'restart\n' >> "$TEMP/restarts"
-  [ "$(jq -r '.runtime.command_timeout_seconds // 300' "$CONFIG_FILE")" != 800 ]
+  [ ! -e "$TEMP/force_all_restarts_fail" ] && [ "$(jq -r '.runtime.command_timeout_seconds // 300' "$CONFIG_FILE")" != 800 ]
 }
 install -o root -g root -m 0755 "${ASA_RUNTIME_TEST_BINARY:?required pinned local source binary}" "$RUNTIME_BINARY"
 cat > "$CONFIG_FILE" <<'JSON'
@@ -48,5 +48,27 @@ rm -- "$CF_TXN_STATE"
 touch "$CONFIG_DIR/.runtime-old.abandoned"
 if (runtime_apply set command_timeout_seconds 600 >/dev/null 2>&1); then echo 'abandoned rollback accepted' >&2; exit 1; fi
 rm -f -- "$CONFIG_DIR/.runtime-old.abandoned"
+# R1 root: both service health checks fail; leave a REAL root-owned
+# recovery snapshot, and refuse subsequent set/reset while unverified.
+touch "$TEMP/force_all_restarts_fail"
+if (runtime_apply set command_timeout_seconds 650) >"$TEMP/unresolved.out" 2>&1; then
+  echo 'root: double health failure was accepted' >&2; exit 1
+fi
+snapshot="$(runtime_pending_backup)"
+[ -n "$snapshot" ] && [ -f "$snapshot" ] || { echo 'root: missing durable backup' >&2; exit 1; }
+[ "$(sha256sum "$snapshot" | cut -d' ' -f1)" = "$success" ] || { echo 'root: backup contents drifted' >&2; exit 1; }
+[ "$(sha256sum "$CONFIG_FILE" | cut -d' ' -f1)" = "$success" ] || { echo 'root: old config not restored' >&2; exit 1; }
+[ "$(stat -c '%u:%g:%a' "$snapshot")" = '0:0:640' ] || { echo 'root: backup protection lost' >&2; exit 1; }
+grep -Fq "$snapshot" "$TEMP/unresolved.out" || { echo 'root: recovery path not reported' >&2; exit 1; }
+restart_count="$(wc -l < "$TEMP/restarts")"
+if (runtime_apply set command_timeout_seconds 650 >/dev/null 2>&1); then
+  echo 'root: unverified recovery allowed second set' >&2; exit 1
+fi
+if (runtime_apply reset command_timeout_seconds >/dev/null 2>&1); then
+  echo 'root: unverified recovery allowed reset' >&2; exit 1
+fi
+[ "$(wc -l < "$TEMP/restarts")" = "$restart_count" ] || { echo 'root: refused edit tried restart' >&2; exit 1; }
+rm -f -- "$TEMP/force_all_restarts_fail" "$snapshot"
+test -z "$(runtime_pending_backup)" || { echo 'root: fixture backup cleanup failed' >&2; exit 1; }
 [ "$original" != "$success" ] || { echo 'positive setting not applied' >&2; exit 1; }
 echo 'Runtime settings root safety PASS'

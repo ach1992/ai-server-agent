@@ -290,6 +290,12 @@ func (s *Server) commandTimeoutMS() int64 {
 	return int64(s.cfg.EffectiveRuntime().CommandTimeoutSeconds) * 1000
 }
 
+func (s *Server) commandTimeoutDescription() string {
+	// Tool metadata is part of the client contract. The value advertised to
+	// the model must match the timeout effective for this Agent instance.
+	return fmt.Sprintf("Synchronous execution is limited to %d seconds for this Agent (operator-configured, default 300 seconds, supported 10..1800 seconds); use start_job for longer or high-output work.", s.cfg.EffectiveRuntime().CommandTimeoutSeconds)
+}
+
 func (s *Server) registerTools() {
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "agent_environment",
@@ -305,7 +311,7 @@ func (s *Server) registerTools() {
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "run_command",
-		Description: "Run an arbitrary Bash command as the unprivileged aiworker user in the dedicated workspace. Commands can change files or external systems; MCP hints do not replace server-side permissions. Use for normal project work, builds, tests, Git, package managers inside the project, and diagnostics that do not require host privileges. Synchronous execution is bounded to five minutes; use start_job for work expected to run longer or produce high output.",
+		Description: "Run an arbitrary Bash command as the unprivileged aiworker user in the dedicated workspace. Commands can change files or external systems; MCP hints do not replace server-side permissions. Use for normal project work, builds, tests, Git, package managers inside the project, and diagnostics that do not require host privileges. " + s.commandTimeoutDescription(),
 		Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input RunInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "run", Command: input.Command, TimeoutMS: s.commandTimeoutMS()})
@@ -317,7 +323,7 @@ func (s *Server) registerTools() {
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "run_root_command",
-		Description: "Run an arbitrary Bash command as root. Use for apt packages, services, Docker, aaPanel, networking, system configuration, deployment setup, and tests that genuinely need root. Synchronous execution is bounded to five minutes; use a root persistent job for work expected to run longer or produce high output. Connection-risk and destructive commands return approval_required until the user explicitly confirms and approval=true is supplied.",
+		Description: "Run an arbitrary Bash command as root. Use for apt packages, services, Docker, aaPanel, networking, system configuration, deployment setup, and tests that genuinely need root. " + s.commandTimeoutDescription() + " Connection-risk and destructive commands return approval_required until the user explicitly confirms and approval=true is supplied.",
 		Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input RootRunInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "run", Command: input.Command, Root: true, Approval: input.Approval, TimeoutMS: s.commandTimeoutMS()})

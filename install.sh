@@ -466,6 +466,7 @@ build_from_source(){ (
   # The immutable GitHub source archive contains no .git, so automatic Go VCS
   # metadata cannot identify this source installation. Stamp the resolved SHA.
   (cd "$tmp/src" && CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" "$tmp/go/bin/go" test ./... && CGO_ENABLED=0 GOOS=linux GOARCH="$GOARCH" "$tmp/go/bin/go" build -trimpath -ldflags="-s -w -X github.com/ach1992/ai-server-agent/internal/mcp.buildRevision=$RESOLVED_SOURCE_REF" -o "$tmp/ai-server-agent" ./cmd/ai-server-agent)
+  verify_existing_runtime_compatibility "$tmp/ai-server-agent"
   install -m 0755 "$tmp/ai-server-agent" "$INSTALL_BIN"
   install_helpers "$tmp/src"
 ); }
@@ -484,12 +485,28 @@ download_release(){ (
   bin="$(find "$tmp" -type f -name ai-server-agent -print -quit)"
   [ -n "$bin" ] || die "release archive does not contain ai-server-agent"
   payload_root="$(dirname "$bin")"
+  verify_existing_runtime_compatibility "$bin"
   install -m 0755 "$bin" "$INSTALL_BIN"
   install_helpers "$payload_root"
 ); }
 
+# Before replacing the installed executable, prove that a target-version
+# binary accepts the existing operator configuration. A source/stable version
+# that cannot understand a known runtime override MUST fail visibly instead of
+# silently discarding that setting during a state-preserving update.
+verify_existing_runtime_compatibility(){
+  local candidate="$1"
+  [ "$FRESH_INSTALL" -eq 0 ] || return 0
+  if jq -e 'has("runtime")' "$CONFIG_FILE" >/dev/null; then
+    if ! "$candidate" -config "$CONFIG_FILE" validate-config >/dev/null; then
+      die "Existing operator runtime settings are incompatible with the target Agent binary. No service or active config was switched. Select a compatible version or explicitly reconcile config.json runtime settings before retrying."
+    fi
+  fi
+}
+
 if [ -n "${AI_SERVER_AGENT_BINARY:-}" ]; then
   [ -x "$AI_SERVER_AGENT_BINARY" ] || die "AI_SERVER_AGENT_BINARY is not executable"
+  verify_existing_runtime_compatibility "$AI_SERVER_AGENT_BINARY"
   install -m 0755 "$AI_SERVER_AGENT_BINARY" "$INSTALL_BIN"
   if [ -n "$SCRIPT_DIR" ] && [ -f "$SCRIPT_DIR/manage.sh" ]; then install_helpers "$SCRIPT_DIR"; else die "AI_SERVER_AGENT_BINARY installs require manage.sh/update.sh/uninstall.sh beside install.sh"; fi
   RESOLVED_SOURCE_REF="${AI_SERVER_AGENT_REF:-binary}"
@@ -587,7 +604,23 @@ cat > "$config_tmp" <<JSON
   "instance_id": "$INSTANCE_ID"
 }
 JSON
+# The generated base config intentionally reuses the current installer
+# migration decisions for credentials/TLS/instance. Carry forward ONLY the
+# existing operator "runtime" member, and let the TARGET Go binary validate
+# every known nested key and its value. Do not copy the whole old config.
+if [ "$FRESH_INSTALL" -eq 0 ]; then
+  runtime_merge_tmp="$(mktemp "$CONFIG_DIR/.config-runtime.XXXXXX")"
+  if ! jq -e --slurpfile previous "$CONFIG_FILE"       'if ($previous[0] | has("runtime")) then .runtime = $previous[0].runtime else . end'       "$config_tmp" > "$runtime_merge_tmp"; then
+    rm -f -- "$config_tmp" "$runtime_merge_tmp"
+    die "Could not retain existing operator runtime settings. Previous active configuration was preserved."
+  fi
+  mv -f -- "$runtime_merge_tmp" "$config_tmp"
+fi
 chown root:"$AGENT_USER" "$config_tmp"; chmod 0640 "$config_tmp"
+if ! "$INSTALL_BIN" -config "$config_tmp" validate-config >/dev/null; then
+  rm -f -- "$config_tmp"
+  die "The target Agent rejected the staged installation configuration, including preserved runtime settings. Refusing to publish an incompatible configuration; inspect your operator settings and version compatibility."
+fi
 mv -f "$config_tmp" "$CONFIG_FILE"
 if [ "$MCP_CREDENTIAL_ORIGIN" = legacy ]; then MCP_MIGRATION_SWITCHED=1; fi
 

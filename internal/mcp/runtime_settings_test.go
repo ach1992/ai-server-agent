@@ -1,6 +1,9 @@
 package mcp
 
 import (
+	"context"
+	"fmt"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
@@ -67,5 +70,62 @@ func TestOperatorTextFallbackBudgetAndStructuredCompleteness(t *testing.T) {
 	}
 	if structured.Output != raw {
 		t.Fatal("higher text budget changed structured content")
+	}
+}
+
+func TestConfiguredSynchronousTimeoutExposedInRealMCPToolCatalog(t *testing.T) {
+	// Tool descriptions are consumed by the model, not just by a Go caller.
+	// Prove nondefault low and high values as well as the legacy default.
+	for _, seconds := range []int{10, 300, 900, 1800} {
+		t.Run(fmt.Sprintf("%d_seconds", seconds), func(t *testing.T) {
+			cfg := testConfig(t, "bearer")
+			cfg.Runtime.CommandTimeoutSeconds = seconds
+			if err := cfg.Validate(); err != nil {
+				t.Fatal(err)
+			}
+			server, err := New(cfg)
+			if err != nil {
+				t.Fatal(err)
+			}
+			httpServer := httptest.NewServer(server.Handler())
+			defer httpServer.Close()
+			client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "settings-metadata-test", Version: "v0"}, nil)
+			httpClient := httpServer.Client()
+			httpClient.Transport = bearerRoundTripper{base: httpClient.Transport, token: "mcp-token"}
+			session, err := client.Connect(context.Background(), &mcpsdk.StreamableClientTransport{
+				Endpoint:   httpServer.URL + cfg.MCPPath,
+				HTTPClient: httpClient,
+			}, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer session.Close()
+			tools, err := session.ListTools(context.Background(), &mcpsdk.ListToolsParams{})
+			if err != nil {
+				t.Fatal(err)
+			}
+			found := map[string]bool{}
+			for _, tool := range tools.Tools {
+				if tool.Name != "run_command" && tool.Name != "run_root_command" {
+					continue
+				}
+				found[tool.Name] = true
+				for _, expected := range []string{
+					fmt.Sprintf("limited to %d seconds", seconds),
+					"operator-configured", "default 300 seconds",
+					"supported 10..1800 seconds", "start_job",
+				} {
+					if !strings.Contains(tool.Description, expected) {
+						t.Fatalf("%s tool description does not reflect configured timeout (%d): missing %q in %q", tool.Name, seconds, expected, tool.Description)
+					}
+				}
+				if strings.Contains(tool.Description, "bounded to five minutes") {
+					t.Fatalf("%s still advertises obsolete fixed five-minute timeout", tool.Name)
+				}
+			}
+			if !found["run_command"] || !found["run_root_command"] {
+				t.Fatalf("tool catalog lacks command tools: %v", found)
+			}
+		})
 	}
 }

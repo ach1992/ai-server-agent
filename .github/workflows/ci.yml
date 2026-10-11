@@ -405,6 +405,33 @@ jobs:
           sudo test -x /usr/local/lib/ai-server-agent/update.sh
           sudo test -x /usr/local/lib/ai-server-agent/ensure-lifecycle-lock.sh
           sudo jq -e '.channel == "source" and .version == "source"' /etc/ai-server-agent/control/install-state.json >/dev/null
+          # R2: real operator configuration followed by normal state-preserving
+          # installer invocation, using the already-built exact-source binary.
+          identity_before="$(sudo jq -c '[.listen_address,.mcp_path,.auth_mode,.credential_store_file,.tls_cert_file,.tls_key_file,.instance_id]' /etc/ai-server-agent/config.json)"
+          sudo ai-server-agent-manage runtime-set command_timeout_seconds 900
+          sudo ai-server-agent-manage runtime-set text_fallback_bytes 65536
+          sudo env AI_SERVER_AGENT_BINARY=/tmp/ai-server-agent AI_SERVER_AGENT_NONINTERACTIVE=1 bash install.sh
+          test "$(sudo jq -c '[.listen_address,.mcp_path,.auth_mode,.credential_store_file,.tls_cert_file,.tls_key_file,.instance_id]' /etc/ai-server-agent/config.json)" = "$identity_before"
+          sudo jq -e '.runtime.command_timeout_seconds==900 and .runtime.text_fallback_bytes==65536' /etc/ai-server-agent/config.json >/dev/null
+          sudo /usr/local/bin/ai-server-agent -config /etc/ai-server-agent/config.json validate-config
+
+          # Reject target-version-incompatible runtime config without losing
+          # operator overrides or reinitializing any service identity.
+          sudo cp -p /etc/ai-server-agent/config.json /etc/ai-server-agent/.ci-valid-runtime-config
+          sudo jq '.runtime.command_timeout_seconds=3601' /etc/ai-server-agent/config.json >/tmp/ci-incompatible-runtime.json
+          sudo install -o root -g aiagent -m 0640 /tmp/ci-incompatible-runtime.json /etc/ai-server-agent/config.json
+          bad_digest="$(sudo sha256sum /etc/ai-server-agent/config.json | awk '{print $1}')"
+          if sudo env AI_SERVER_AGENT_BINARY=/tmp/ai-server-agent AI_SERVER_AGENT_NONINTERACTIVE=1 bash install.sh >/tmp/ci-incompatible-runtime.out 2>&1; then
+            echo 'incompatible persisted runtime unexpectedly permitted an update' >&2
+            exit 1
+          fi
+          grep -qF 'Existing operator runtime settings are incompatible with the target Agent binary' /tmp/ci-incompatible-runtime.out
+          test "$(sudo sha256sum /etc/ai-server-agent/config.json | awk '{print $1}')" = "$bad_digest"
+          sudo systemctl is-active --quiet ai-server-agent.service
+          sudo systemctl is-active --quiet ai-server-agent-executor.service
+          sudo mv -f /etc/ai-server-agent/.ci-valid-runtime-config /etc/ai-server-agent/config.json
+          sudo /usr/local/bin/ai-server-agent -config /etc/ai-server-agent/config.json validate-config
+          sudo rm -f -- /tmp/ci-incompatible-runtime.json /tmp/ci-incompatible-runtime.out
           sudo bash tests/root_trust_boundary.sh
 
           # Model a reboot-cleared /run namespace. Executor startup must recreate
@@ -587,6 +614,8 @@ jobs:
           sudo test -s /etc/ai-server-agent/audit-fingerprint.key
           test "$(sudo sha256sum /etc/ai-server-agent/audit-fingerprint.key | awk '{print $1}')" = "$audit_key_before"
           test "$(sudo jq -er '.instance_id' /etc/ai-server-agent/config.json)" = "$instance_id_before"
+          # A safe uninstall followed by reinstall must preserve operator tuning.
+          sudo jq -e '.runtime.command_timeout_seconds==900 and .runtime.text_fallback_bytes==65536' /etc/ai-server-agent/config.json >/dev/null
           sudo test -e /srv/ai-workspace/lifecycle-workspace-sentinel
 
           sudo env AI_SERVER_AGENT_YES=1 bash uninstall.sh --purge

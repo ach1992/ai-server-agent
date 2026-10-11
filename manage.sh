@@ -256,7 +256,7 @@ runtime_menu(){
   done
 }
 runtime_apply(){
-  local operation="$1" key="$2" value="${3:-}" staged backup restored=false
+  local operation="$1" key="$2" value="${3:-}" staged backup restore_stage restored=false
   runtime_setting_allowed "$key" || die "Unknown runtime setting: $key. See runtime-show."
   if [ "$operation" = set ]; then
     [[ "$value" =~ ^(0|[1-9][0-9]*)$ ]] || die "Runtime values must be decimal integers."
@@ -297,11 +297,23 @@ runtime_apply(){
     return 0
   fi
   warn "New runtime configuration failed health/restart. Restoring old config and recovering services."
-  if mv -f -- "$backup" "$CONFIG_FILE" && restart_and_verify_local; then restored=true; fi
+  # A failed rollback restart must NEVER consume the only persisted snapshot:
+  # keep $backup until the old config is back AND the services are healthy.
+  # Otherwise a subsequent runtime-set/reset could incorrectly proceed while
+  # the running service state remains uncertain.
+  if restore_stage="$(mktemp "$CONFIG_DIR/.runtime-restore.XXXXXXXX")"; then
+    if cp -p -- "$backup" "$restore_stage" &&
+       mv -f -- "$restore_stage" "$CONFIG_FILE" &&
+       restart_and_verify_local; then
+      restored=true
+    fi
+    rm -f -- "$restore_stage"
+  fi
   if [ "$restored" = true ]; then
+    rm -f -- "$backup"
     die "Runtime update failed; old config and local service health restored."
   fi
-  die "Runtime update failed; recovery not proven. Check the services and protected rollback file $backup locally."
+  die "Runtime update failed and recovery is NOT verified. Protected rollback snapshot preserved at $backup; inspect the services/config manually. Further runtime changes are blocked until reconciled."
 }
 
 status(){
