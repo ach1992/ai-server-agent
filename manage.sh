@@ -417,11 +417,11 @@ chatgpt_setup(){
     printf '%sServer-side setup is complete.%s\n' "$GREEN" "$RESET"
     printf 'MCP URL: %s%s%s\n\n' "$BOLD" "$endpoint" "$RESET"
     printf 'In ChatGPT Business on web:\n'
-    printf '  1. Enable Developer mode if required by your workspace.\n'
-    printf '  2. Open Workspace Settings -> Apps -> Create.\n'
-    printf '  3. Enter the MCP URL above and choose the available bearer/auth option.\n'
-    printf '  4. Use a current direct/default Authorization value only when ChatGPT asks for it.\n'
-    printf '  5. Scan tools, create the app, then test agent_environment and run_command.\n\n'
+    printf '  1. Open ChatGPT Plugins and use the current Add custom MCP server flow.\n'
+    printf '  2. If this flow is unavailable, check workspace permissions or the current official client instructions; legacy Apps controls may differ.\n'
+    printf '  3. Enter the MCP URL above, and configure bearer authentication in the trusted connection UI.\n'
+    printf '  4. Use a current direct/default Authorization value only when the client requests it.\n'
+    printf '  5. Refresh/discover tools, then test agent_environment and run_command.\n\n'
     printf 'Existing bearer plaintext is not stored for re-display.\n'
     printf 'To issue a fresh value, run: sudo ai-server-agent-manage credential-rotate direct-default\n'
   else

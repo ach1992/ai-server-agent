@@ -76,7 +76,7 @@ For the current ChatGPT web flow:
 
 Managed workspaces may expose plugin administration under **Admin/Workspace settings → Plugins**, while the underlying app/custom-MCP configuration may also remain visible through complementary or legacy **Apps** controls. Do not fail setup merely because an older `Apps → Create` or `Developer mode` label is absent; follow the current official product surface instead.
 
-If the Agent tool schema changes after publication, follow the current ChatGPT refresh/update/recreate behavior documented by OpenAI. Do not assume that a historical in-place-update limitation or menu sequence is permanent.
+If the installed Agent tool schema changes, first use the current ChatGPT Plugins **Refresh** action on the existing custom MCP server connection where supported; confirm tool names, descriptions and schemas are now discoverable in a new client context. Recreate the integration only when its current platform behavior actually requires it. A source merge alone cannot refresh an older installed Agent or an older client catalog. Follow current official OpenAI guidance rather than assuming a fixed UI/menu sequence.
 
 ChatGPT-side action permissions and confirmations are separate from Agent-side authorization. Client permissions may require confirmation or deny an action, but they must never be used as a reason to weaken Agent bearer authentication, tool safety metadata, root/file authority truth, or server-side policy/approval guardrails.
 
