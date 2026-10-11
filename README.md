@@ -198,7 +198,7 @@ Existing installations migrate the current bearer into `direct/default` without 
 
 ## MCP capability surface
 
-Once a supported MCP client is connected, the Agent exposes a compact tool surface designed for real server work:
+`main` defines the complete MCP tool inventory in `internal/mcp/`; the connected client sees only the inventory advertised by the **installed** Agent build after client tool refresh. The latest published Stable release may expose fewer tools than `main`. These grouped entries describe source-level capabilities, not a claim that every connected installation has passed acceptance:
 
 | Tool | Purpose |
 | --- | --- |
@@ -219,6 +219,14 @@ Once a supported MCP client is connected, the Agent exposes a compact tool surfa
 | `browser_setup` | install the optional private Node.js + Playwright + Chromium runtime and required shared libraries |
 | `browser_e2e` | run a bounded structured Browser/E2E sequence (navigate, accessible snapshot with flow-only refs, fill/click by role/CSS/ref, assert, inspect console/network) on the existing managed Chromium/profile |
 | `browser_run` | run Playwright JavaScript in server-side headless Chromium using a persistent browser profile |
+| `browser_status` | report optional Browser runtime readiness and the shared profile state |
+| `browser_session_open` / `browser_session_flow` / `browser_session_status` / `browser_session_close` | manage principal/workspace-bound cross-call Chromium interaction and verified cleanup; session refs are not durable handles |
+| `browser_session_capture` / `browser_session_trace` | opt-in bounded typed JPEG or version-pinned ZIP trace retrieval; actual client/model visibility is a separate acceptance requirement (#99) |
+| `terminal_open` / `terminal_read` / `terminal_write` / `terminal_resize` / `terminal_interrupt` / `terminal_reconnect` / `terminal_close` | optional bounded interactive worker/root tmux Control Mode with principal/workspace/epoch checks; real root terminal requires separate authorization (#60) |
+| `code_definition` / `code_references` / `code_symbols` / `code_diagnostics` | optional Go/gopls semantic inspection using an exact worker file version; initial source-size and result budgets are narrow (#56) |
+| `debug_adapter_status` / `debug_*` | optional worker-authority Delve/DAP debugging; require verified containment before target launch; evaluation may change execution state (#57) |
+
+The source-level presence of a tool does **not** prove availability on a particular kernel, compatible optional tool installation, installed server, connected client, or Stable release. Use `agent_environment`, the capability's status/error response and the current installation to check readiness; verify changed tool discovery using the current ChatGPT plugin refresh flow. Accepted architecture and remaining delivery gates: [Developer Runtime](docs/DEVELOPER-RUNTIME.md), [#59](https://github.com/ach1992/ai-server-agent/issues/59), [#99](https://github.com/ach1992/ai-server-agent/issues/99).
 
 ### Structured worker workspace editing
 
