@@ -1,6 +1,6 @@
 # Developer Runtime Target Architecture
 
-> Status: **the principal source capabilities shipped in immutable Stable `v0.1.10` and passed integrated tests on one dedicated host; full cross-client, optional-platform and extended acceptance remains tracked by Issues #59/#99**.
+> Status: **the principal source capabilities shipped in published immutable Stable and passed real installed direct-MCP tests on one dedicated host; full cross-client, optional-platform and extended acceptance remains tracked by Issues #59/#99**. GitHub Releases and the current Issue #59 receipt identify the exact latest Stable.
 >
 > Current runtime behavior is documented by `README.md` and the current implementation. This document defines the accepted Developer Runtime target delivered by the relevant workstreams tracked under Issues #54-#66 and the cross-cutting data-delivery Issue #99. Phase A architecture/documentation is integrated and its execution boundary was owner-accepted on 2026-10-07; optional/deferred workstreams in that range are explicitly non-blocking below.
 

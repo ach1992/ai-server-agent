@@ -6,9 +6,13 @@ The project is intentionally a **development/test-server control plane**, not a 
 
 The Agent is a standalone product: every supported host capability is available through direct MCP access. MCP Gateway is an optional future upstream integration; its development or availability is not required for Agent installation, operation, capability delivery or standalone release. Future Gateway compatibility is validated separately against the same Agent tools and bounded contracts.
 
+## How an AI client discovers and uses this Agent
+
+The MCP server supplies **server instructions** plus per-tool descriptions, arguments and safety annotations. Compatible clients can discover the capabilities without a separately pasted global prompt; what the model actually receives and can render remains client-dependent. The **server-level instructions** recommend `agent_environment` before host-wide changes, `run_command` for bounded worker tasks, `start_job` for long work, version-aware `workspace_stat`/`workspace_read` and code search, LSP for semantic analysis, and optional tmux for interactive workflows. DAP and Browser are instead discoverable through their **per-tool descriptions and schemas**; they are not explicitly named in the current server-level instructions. Use `run_root_command` only when genuinely necessary, and obtain explicit human authorization before retrying an `approval_required` operation. These hints do not grant permissions or replace project-specific repository instructions.
+
 ## Platform support
 
-Published immutable Stable [`v0.1.10`](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.10) and the current `main` branch support:
+Published immutable Stable [`v0.1.11`](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.11) and the current `main` branch support:
 
 - **Ubuntu 22.04 or newer**
 - **Debian 11 or newer** (Debian 11 application compatibility is retained, but upstream Debian LTS ended on 2026-08-31; use Debian 12+ for an officially security-maintained base unless you have an ELTS arrangement)
@@ -24,18 +28,18 @@ AI Server Agent does not require nginx, Apache, Caddy, Docker, PHP, a database, 
 
 ## Install the latest stable release
 
-Stable installation starts with a small bootstrap loaded from an **immutable published release tag**, separate from the release `install.sh` asset it authenticates. The current verified trust anchor is the immutable [`v0.1.10` release](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.10), not the mutable `main` branch. GitHub Releases, rather than this page, remain authoritative if a newer version is published.
+Stable installation starts with a small bootstrap loaded from an **immutable published release tag**, separate from the release `install.sh` asset it authenticates. The current verified trust anchor is the immutable [`v0.1.11` release](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.11), not the mutable `main` branch. GitHub Releases, rather than this page, remain authoritative if a newer version is published.
 
 To install the **latest immutable Stable** identified by the GitHub Releases API using that pinned bootstrap:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.10/scripts/install-stable.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.11/scripts/install-stable.sh | bash
 ```
 
-To install **exactly `v0.1.10`** instead of following future latest releases:
+To install **exactly `v0.1.11`** instead of following future latest releases:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.10/scripts/install-stable.sh | bash -s -- v0.1.10
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.11/scripts/install-stable.sh | bash -s -- v0.1.11
 ```
 
 The bootstrap authenticates the release-scoped installer digest **before** privileged execution. The first command resolves GitHub's current latest immutable release; the second requires the named release. On the next release, update the documented bootstrap trust anchor only after its tag is immutable and its bootstrap has been verified.
@@ -498,6 +502,14 @@ bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh scr
 Cloudflare, privileged lifecycle and release-provenance changes also have dedicated High Assurance Security coverage.
 
 ### Live acceptance baseline
+
+#### Published `v0.1.11` delivery and validation
+
+[Immutable Stable `v0.1.11`](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.11) is the published non-draft/non-prerelease GitHub latest Stable at exact protected tag/commit `8c85a48d3e8559d0bf16e366f00ddeee6927dc47`. The [official Release workflow #38304046568](https://github.com/ach1992/ai-server-agent/actions/runs/38304046568) completed successfully after exact-main CI and Security validation, including immutable-release and asset attestation verification. The release contains the authenticated `install.sh`, `SHA256SUMS`, and amd64/arm64 archives.
+
+On the authorized disposable Ubuntu 24.04 amd64 Test Server, the *published* `v0.1.11` Stable was installed with the existing verified Stable updater. Both running Agent and Executor process executables match SHA-256 `819aac1ae8888b6ee71275b57f95eec2833c7f6bdbb675610c62e22b5dc46370`, independently matched to the executable extracted from the actual GitHub release archive. Install-state is pinned to `stable/v0.1.11`; service health and identity passed. The protected configuration and MCP credential files were verified byte-identical to their pre-upgrade backups; the retained Browser profile remained present, and the pinned Browser reported `ready=true`.
+
+Direct connected MCP acceptance included real HTTPS Browser navigation/assertions, multi-call managed Browser interaction and bounded JPEG capture, versioned workspace operations, multi-chunk binary transfer with SHA-256 integrity, Go `gopls` symbols, an actual `Delve` DAP session, and persistent `tmux` terminal recovery across a real Executor restart. The previously tested offline source-preview-to-`v0.1.10` rollback snapshot remains retained and verified; **a new live downgrade from `v0.1.11` to `v0.1.10` was not rehearsed**. This host-specific evidence does not prove native ChatGPT model-visible file/JPEG attachments, every supported host's optional tools, all abnormal-recovery cases or long-soak/performance targets. See the [exact installed release evidence in Issue #59](https://github.com/ach1992/ai-server-agent/issues/59#issuecomment-6132301377).
 
 #### Published `v0.1.10` delivery and validation
 
