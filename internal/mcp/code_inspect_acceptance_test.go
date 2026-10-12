@@ -7,6 +7,7 @@ import (
 	"crypto/sha256"
 	"encoding/hex"
 	"encoding/json"
+	"io"
 	"net"
 	"net/http/httptest"
 	"os"
@@ -37,8 +38,41 @@ func TestDirectMCPGoSemanticClientAcceptance(t *testing.T) {
 	}
 	// Deliberately use the same trusted path and optional dependency as
 	// production; do not weaken binary trust for the test.
-	if systemexec.First("/usr/local/bin/gopls", "/usr/bin/gopls") == "" {
+	// Resolve the exact same ordered candidates as production, not merely
+	// the presence of any trusted gopls. In pinned CI, the selected pathname
+	// and raw executable SHA-256 are mandatory and any mismatch is fatal.
+	selected := systemexec.First("/usr/local/bin/gopls", "/usr/bin/gopls")
+	wantPath := os.Getenv("ASA_MCP_GOPLS_EXPECT_BINARY")
+	wantSHA := os.Getenv("ASA_MCP_GOPLS_EXPECT_SHA256")
+	if selected == "" {
+		if wantPath != "" || wantSHA != "" {
+			t.Fatalf("pinned gopls missing from production trusted lookup (expected %q)", wantPath)
+		}
 		t.Skip("trusted root-owned optional gopls not found at either production path")
+	}
+	if wantPath != "" && selected != wantPath {
+		t.Fatalf("production gopls selection %q shadows expected pinned %q", selected, wantPath)
+	}
+	if wantSHA != "" {
+		bytesSHA, err := hex.DecodeString(wantSHA)
+		if err != nil || len(bytesSHA) != sha256.Size {
+			t.Fatal("invalid expected pinned gopls SHA-256")
+		}
+		binary, err := os.Open(selected)
+		if err != nil {
+			t.Fatal(err)
+		}
+		digest := sha256.New()
+		_, copyErr := io.Copy(digest, binary)
+		closeErr := binary.Close()
+		if copyErr != nil || closeErr != nil {
+			t.Fatalf("hash selected gopls: copy=%v close=%v", copyErr, closeErr)
+		}
+		got := hex.EncodeToString(digest.Sum(nil))
+		if got != wantSHA {
+			t.Fatalf("selected production gopls SHA-256 %s differs from pinned %s", got, wantSHA)
+		}
+		t.Logf("GOPLS_SELECTED_BINARY_PATH=%s SHA256=%s", selected, got)
 	}
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Fatalf("required Go toolchain is absent: %v", err)

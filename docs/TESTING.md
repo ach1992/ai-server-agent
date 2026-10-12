@@ -2,6 +2,18 @@
 
 This document describes the validation model that applies to the current v0.1 codebase. It is not a historical release log.
 
+## Direct MCP transfer source acceptance
+
+The `TestDirectMCPTransferSourceAcceptance` test exercises the **real compiled Agent executor and sandboxed worker helper** behind an authenticated, official MCP SDK Streamable HTTP client. It uses unique disposable local workspaces and control-state files; it does not install, restart, or modify the host's running Agent services.
+
+```bash
+go test -count=1 -run '^TestDirectMCPTransferSourceAcceptance$' -v -timeout=5m ./internal/mcp
+```
+
+The non-short test verifies 32 KiB UTF-8 and >5 MiB / >33 MiB binary uploads through actual bounded chunks, stable begin and duplicate-chunk replay, invalid chunk SHA-256 rejection, reconnect/resume via a new MCP session, incomplete-target invisibility, concurrent-writer preservation on stale destination preconditions, bounded resumable commit, whole-object SHA-256, version-pinned ranged reads, small SDK-visible MCP TextContent fallback versus large structured-only payload, and idempotent committed receipts. The subtest logs call counts and elapsed time as **source-fixture timings**, not installed service CPU/RSS/wire-size measurements. Go's ordinary suite exercises this test on compatible non-root Linux/Landlock CI runners; `-short` intentionally omits its higher-cost real-process fixture.
+
+**Evidence boundary:** this is a local, unprivileged **same-UID test fixture**. It validates the production client/protocol/helper data path and that only its disposable fixtures are altered; it does **not** prove real root-to-worker privilege separation, a particular installed build, native ChatGPT attachment/rendering behavior, non-ChatGPT client compatibility, actual production network latency, service restarts, or Stable release installation. Real root/Landlock validation belongs to the existing worker/security CI; installed direct-client and model-visible acceptance remains under Issues #99 and #59 and requires separately authorized Agent maintenance.
+
 ## 1. Supported platform policy and validation matrix
 
 The stable platform policy validated by current `main` is:
@@ -354,7 +366,7 @@ The opt-in `TestDirectMCPGoSemanticClientAcceptance` verifies the actual **publi
 ASA_MCP_GOPLS_ACCEPTANCE=1 go test -count=1 -timeout=5m -v ./internal/mcp -run '^TestDirectMCPGoSemanticClientAcceptance$'
 ```
 
-This requires non-root Linux, working Landlock, a Go toolchain on the worker's standard safe PATH and an operator-provided trusted `/usr/local/bin/gopls` or `/usr/bin/gopls`. Standard unit tests intentionally skip the optional real-language-server test. The `lsp_changed` CI job provisions **version-pinned gopls v0.23.0** in the disposable GitHub-hosted runner's root-owned `/usr/bin/gopls` production-like path and explicitly **fails if the public-client proof is skipped**. It preserves the existing private executor real-gopls proof too.
+This requires non-root Linux, working Landlock, a Go toolchain on the worker's standard safe PATH and an operator-provided trusted `/usr/local/bin/gopls` or `/usr/bin/gopls`. Standard unit tests intentionally skip the optional real-language-server test. The `lsp_changed` CI job provisions **version-pinned gopls v0.23.0** in the disposable GitHub-hosted runner's root-owned `/usr/bin/gopls` production-like path; CI rejects any higher-priority `/usr/local/bin/gopls`, proves the selected executable is byte-identical (SHA-256) to the version-pinned build and trusted by the unchanged production lookup, and explicitly **fails if the public-client proof is skipped**. It preserves the existing private executor real-gopls proof too.
 
 The complete consumer scenario covers a real 53,153-byte Go document; `code_definition`, `code_references`, `code_symbols` and `code_diagnostics`; SDK-visible typed structured responses and bounded complete small text fallbacks; reconnecting a fresh MCP session; worker-derived cross-file target versions before and after a separate version-pinned workspace edit; stale source rejection; changed-source diagnostics; and refusal of out-of-workspace source paths. It logs a sample elapsed duration and source SHA-256, **not** installed-server CPU/RSS/wire-size metrics. This is a direct Go MCP SDK *source-build* acceptance, not proof of native ChatGPT UI model visibility, installed-current-main readiness, arbitrary-size LSP, root-to-worker privilege separation or Stable publication. The installed/client/restart/resource delivery gates remain owned by #56 and #59.
 

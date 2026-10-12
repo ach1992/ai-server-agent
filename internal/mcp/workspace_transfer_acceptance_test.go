@@ -1,0 +1,380 @@
+package mcp
+
+import (
+	"bytes"
+	"context"
+	cryptorand "crypto/rand"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/hex"
+	"encoding/json"
+	"math/rand"
+	"net"
+	"net/http/httptest"
+	"os"
+	"os/exec"
+	"os/user"
+	"path/filepath"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/ach1992/ai-server-agent/internal/config"
+	"github.com/ach1992/ai-server-agent/internal/executor"
+	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
+)
+
+// This is a real, bearer-authenticated MCP SDK -> HTTP Agent -> Unix executor
+// -> unprivileged Landlock helper -> filesystem round trip. It deliberately
+// does not upgrade or restart either system-installed Agent service.
+func TestDirectMCPTransferSourceAcceptance(t *testing.T) {
+	if testing.Short() {
+		t.Skip("real worker and multi-MiB MCP acceptance")
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("must prove the worker path as an unprivileged user")
+	}
+	current, err := user.Current()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	cfg := testConfig(t, "bearer")
+	root := t.TempDir()
+	cfg.WorkspaceDir = filepath.Join(root, "workspace")
+	cfg.StateDir = filepath.Join(root, "state")
+	cfg.LogDir = filepath.Join(root, "logs")
+	cfg.ExecutorSocket = filepath.Join(root, "executor.sock")
+	cfg.WorkerUser, cfg.AgentUser = current.Username, current.Username
+	for _, dir := range []string{cfg.WorkspaceDir, cfg.StateDir, cfg.LogDir, filepath.Join(cfg.StateDir, "worker-home")} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	key := make([]byte, 32)
+	if _, err := cryptorand.Read(key); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(filepath.Dir(cfg.ExecutorToken), "audit-fingerprint.key"), []byte("v1:"+hex.EncodeToString(key)+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := cfg.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	configPath := filepath.Join(root, "config.json")
+	if err := config.Save(configPath, cfg); err != nil {
+		t.Fatal(err)
+	}
+
+	binary := filepath.Join(root, "ai-server-agent")
+	build := exec.Command("go", "build", "-trimpath", "-o", binary, "./cmd/ai-server-agent")
+	build.Dir = filepath.Join("..", "..")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build actual workspace helper/executor binary: %v: %s", err, output)
+	}
+
+	processCtx, stop := context.WithCancel(context.Background())
+	command := exec.CommandContext(processCtx, binary, "-config", configPath, "executor")
+	var processLog bytes.Buffer
+	command.Stdout, command.Stderr = &processLog, &processLog
+	if err := command.Start(); err != nil {
+		stop()
+		t.Fatal(err)
+	}
+	processDone := make(chan error, 1)
+	go func() { processDone <- command.Wait() }()
+	t.Cleanup(func() {
+		stop()
+		select {
+		case <-processDone:
+		case <-time.After(5 * time.Second):
+			t.Error("fixture executor did not terminate on cancel")
+		}
+	})
+
+	deadline := time.Now().Add(7 * time.Second)
+	for {
+		socket, dialErr := net.DialTimeout("unix", cfg.ExecutorSocket, 100*time.Millisecond)
+		if dialErr == nil {
+			_ = socket.Close()
+			break
+		}
+		select {
+		case err := <-processDone:
+			t.Fatalf("isolated executor exited: %v, log=%q", err, processLog.String())
+		default:
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("fixture executor socket not ready: %v", dialErr)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+
+	agent, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	httpServer := httptest.NewServer(agent.Handler())
+	t.Cleanup(httpServer.Close)
+	clientCtx, cancel := context.WithTimeout(context.Background(), 150*time.Second)
+	t.Cleanup(cancel)
+	httpClient := httpServer.Client()
+	httpClient.Transport = bearerRoundTripper{base: httpClient.Transport, token: "mcp-token"}
+	connect := func() *mcpsdk.ClientSession {
+		t.Helper()
+		client := mcpsdk.NewClient(&mcpsdk.Implementation{Name: "worker-transfer-source-acceptance", Version: "v1"}, nil)
+		session, err := client.Connect(clientCtx, &mcpsdk.StreamableClientTransport{
+			Endpoint: httpServer.URL + cfg.MCPPath, HTTPClient: httpClient,
+		}, nil)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return session
+	}
+	session := connect()
+	defer func() { _ = session.Close() }()
+
+	call := func(tool string, args map[string]any) (*mcpsdk.CallToolResult, executor.Response) {
+		t.Helper()
+		result, err := session.CallTool(clientCtx, &mcpsdk.CallToolParams{Name: tool, Arguments: args})
+		if err != nil {
+			t.Fatalf("%s MCP call: %v", tool, err)
+		}
+		var resp executor.Response
+		raw, err := json.Marshal(result.StructuredContent)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err = json.Unmarshal(raw, &resp); err != nil {
+			t.Fatalf("%s structured result is missing: %v", tool, err)
+		}
+		if resp.OK == result.IsError {
+			t.Fatalf("%s MCP error hint and executor state disagree: ok=%t isError=%t", tool, resp.OK, result.IsError)
+		}
+		if len(result.Content) != 1 {
+			t.Fatalf("%s missing text fallback", tool)
+		}
+		if _, ok := result.Content[0].(*mcpsdk.TextContent); !ok {
+			t.Fatalf("%s unexpected text fallback type %T", tool, result.Content[0])
+		}
+		return result, resp
+	}
+
+	for _, sample := range []struct {
+		name    string
+		size    int
+		textual bool
+	}{
+		{"small-text", 32 << 10, true},
+		{"binary-five-mib", (5 << 20) + 43, false},
+		{"binary-thirtythree-mib", (33 << 20) + 13, false},
+	} {
+		t.Run(sample.name, func(t *testing.T) {
+			started := time.Now()
+			raw := make([]byte, sample.size)
+			if sample.textual {
+				for offset := 0; offset < len(raw); offset++ {
+					raw[offset] = "A"[0]
+				}
+			} else {
+				_, _ = rand.New(rand.NewSource(7381)).Read(raw)
+				raw[0], raw[len(raw)-1] = 0, 0xff
+			}
+			sum := sha256.Sum256(raw)
+			digest := hex.EncodeToString(sum[:])
+			path := sample.name + ".fixture"
+			base := map[string]any{"workspace": cfg.WorkspaceDir, "path": path}
+			begin := map[string]any{"workspace": cfg.WorkspaceDir, "path": path,
+				"operation": "begin", "transfer_key": "source-client-" + sample.name + "-stable",
+				"expected_size": len(raw), "sha256": digest, "must_not_exist": true}
+			_, begun := call("workspace_transfer", begin)
+			if !begun.OK || begun.TransferID == "" {
+				t.Fatalf("begin: %+v", begun)
+			}
+			_, replayBegin := call("workspace_transfer", begin)
+			if !replayBegin.OK || replayBegin.TransferID != begun.TransferID {
+				t.Fatalf("idempotent begin: %+v", replayBegin)
+			}
+
+			follow := func(op string) map[string]any {
+				return map[string]any{"workspace": cfg.WorkspaceDir, "path": path, "operation": op, "transfer_id": begun.TransferID}
+			}
+			chunks := 0
+			for offset := 0; offset < len(raw); {
+				end := offset + (256 << 10)
+				if end > len(raw) {
+					end = len(raw)
+				}
+				part := raw[offset:end]
+				checksum := sha256.Sum256(part)
+				args := follow("chunk")
+				args["offset"] = offset
+				args["chunk_base64"] = base64.StdEncoding.EncodeToString(part)
+				args["chunk_sha256"] = hex.EncodeToString(checksum[:])
+				if offset == 0 {
+					invalid := follow("chunk")
+					invalid["chunk_base64"] = args["chunk_base64"]
+					invalid["chunk_sha256"] = strings.Repeat("0", 64)
+					_, rejected := call("workspace_transfer", invalid)
+					if rejected.OK || rejected.ErrorCode != "chunk_hash_mismatch" {
+						t.Fatalf("invalid chunk digest unexpectedly advanced transfer: %+v", rejected)
+					}
+				}
+				_, uploaded := call("workspace_transfer", args)
+				if !uploaded.OK || uploaded.TransferredBytes != int64(end) || uploaded.NextOffset == nil || *uploaded.NextOffset != int64(end) {
+					t.Fatalf("chunk receipt offset %d: %+v", offset, uploaded)
+				}
+				if offset == 0 {
+					_, replay := call("workspace_transfer", args)
+					if !replay.OK || replay.TransferredBytes != uploaded.TransferredBytes {
+						t.Fatalf("duplicate chunk changed progress: %+v", replay)
+					}
+					session.Close()
+					session = connect() // a real client transport reconnect, same authenticated principal.
+					_, recovered := call("workspace_transfer", follow("status"))
+					if !recovered.OK || recovered.TransferredBytes != uploaded.TransferredBytes || recovered.TransferID != begun.TransferID {
+						t.Fatalf("MCP reconnect lost durable worker identity: %+v", recovered)
+					}
+				}
+				chunks++
+				offset = end
+			}
+
+			_, before := call("workspace_stat", base)
+			if before.OK {
+				t.Fatal("target became visible before verified commit")
+			}
+			_, stat := call("workspace_transfer", follow("status"))
+			if !stat.OK || stat.TransferredBytes != int64(len(raw)) {
+				t.Fatalf("incomplete status: %+v", stat)
+			}
+			steps := 0
+			var committed executor.Response
+			for {
+				_, committed = call("workspace_transfer", follow("commit"))
+				if !committed.OK {
+					t.Fatalf("commit failed: %+v", committed)
+				}
+				if committed.Status == "committed" {
+					break
+				}
+				if committed.Status != "preparing" || committed.PreparedBytes <= 0 {
+					t.Fatalf("non-progress preparation: %+v", committed)
+				}
+				_, before = call("workspace_stat", base)
+				if before.OK {
+					t.Fatal("incomplete destination published during preparation")
+				}
+				steps++
+				if steps > (len(raw)/(4<<20))+2 {
+					t.Fatal("commit failed to converge with bounded steps")
+				}
+			}
+			if committed.FileVersion == "" {
+				t.Fatalf("commit lacks file version: %+v", committed)
+			}
+			_, metadata := call("workspace_stat", base)
+			if !metadata.OK || metadata.FileSize == nil || *metadata.FileSize != int64(len(raw)) || metadata.FileVersion != committed.FileVersion {
+				t.Fatalf("stat/commit disagree: %+v %+v", committed, metadata)
+			}
+
+			// A small selected model-visible range must survive text-only fallback
+			// even when its binary bytes cannot be rendered as UTF-8.
+			previewArgs := map[string]any{"workspace": cfg.WorkspaceDir, "path": path, "limit": 4096, "file_version": metadata.FileVersion}
+			visible, preview := call("workspace_read", previewArgs)
+			text := visible.Content[0].(*mcpsdk.TextContent).Text
+			var fallback executor.Response
+			if err := json.Unmarshal([]byte(text), &fallback); err != nil || !fallback.OK || fallback.Output == "" {
+				t.Fatalf("small text-only range is not visible: %v; fallback=%q", err, text)
+			}
+			if preview.NextOffset == nil || *preview.NextOffset != 4096 {
+				t.Fatalf("small structured continuation absent: %+v", preview)
+			}
+			hasher := sha256.New()
+			offset := int64(0)
+			reads := 0
+			for offset < int64(len(raw)) {
+				args := map[string]any{"workspace": cfg.WorkspaceDir, "path": path,
+					"offset": offset, "limit": 128 << 10, "file_version": metadata.FileVersion}
+				result, window := call("workspace_read", args)
+				if !window.OK || window.NextOffset == nil || *window.NextOffset <= offset || window.FileVersion != metadata.FileVersion {
+					t.Fatalf("unusable egress offset %d: %+v", offset, window)
+				}
+				if window.BytesReturned >= 64<<10 {
+					summary := result.Content[0].(*mcpsdk.TextContent).Text
+					if !strings.Contains(summary, "structuredContent") || !strings.Contains(summary, "next_offset=") || strings.Contains(summary, window.Output) {
+						t.Fatalf("large raw-byte range leaked into text fallback or lacked continuation")
+					}
+				}
+				var payload []byte
+				switch window.OutputEncoding {
+				case "utf-8":
+					payload = []byte(window.Output)
+				case "base64":
+					payload, err = base64.StdEncoding.DecodeString(window.Output)
+					if err != nil {
+						t.Fatal(err)
+					}
+				default:
+					t.Fatalf("unexpected window encoding %s", window.OutputEncoding)
+				}
+				if int64(len(payload)) != *window.NextOffset-offset {
+					t.Fatal("raw-byte window length/cursor mismatch")
+				}
+				_, _ = hasher.Write(payload)
+				offset = *window.NextOffset
+				reads++
+			}
+			if got := hex.EncodeToString(hasher.Sum(nil)); got != digest {
+				t.Fatalf("complete direct-MCP readback digest %s != source %s", got, digest)
+			}
+			_, duplicateCommit := call("workspace_transfer", follow("commit"))
+			if !duplicateCommit.OK || duplicateCommit.FileVersion != committed.FileVersion {
+				t.Fatalf("committed terminal retry changed destination: %+v", duplicateCommit)
+			}
+			t.Logf("transport+worker: bytes=%d upload_chunks=%d commit_calls=%d read_windows=%d elapsed=%s", len(raw), chunks, steps+1, reads, time.Since(started))
+		})
+	}
+
+	// A competing worker client cannot be overwritten by a stale staged
+	// destination precondition, even when all upload chunks were accepted.
+	t.Run("concurrent-destination-wins", func(t *testing.T) {
+		const path = "concurrent-writer.fixture"
+		body := []byte("staged file must never replace a later independent writer")
+		digest := sha256.Sum256(body)
+		beginArgs := map[string]any{"workspace": cfg.WorkspaceDir, "path": path,
+			"operation": "begin", "transfer_key": "source-client-raced-destination",
+			"expected_size": len(body), "sha256": hex.EncodeToString(digest[:]), "must_not_exist": true}
+		_, begun := call("workspace_transfer", beginArgs)
+		if !begun.OK || begun.TransferID == "" {
+			t.Fatalf("begin: %+v", begun)
+		}
+		follow := func(op string) map[string]any {
+			return map[string]any{"workspace": cfg.WorkspaceDir, "path": path, "operation": op, "transfer_id": begun.TransferID}
+		}
+		chunk := follow("chunk")
+		chunk["chunk_base64"] = base64.StdEncoding.EncodeToString(body)
+		chunk["chunk_sha256"] = hex.EncodeToString(digest[:])
+		_, received := call("workspace_transfer", chunk)
+		if !received.OK {
+			t.Fatalf("stage conflicting body: %+v", received)
+		}
+		_, winner := call("workspace_write", map[string]any{"workspace": cfg.WorkspaceDir, "path": path,
+			"content": "independent writer", "must_not_exist": true})
+		if !winner.OK {
+			t.Fatalf("independent writer rejected: %+v", winner)
+		}
+		_, conflicted := call("workspace_transfer", follow("commit"))
+		if conflicted.OK || conflicted.ErrorCode != "file_exists" {
+			t.Fatalf("stale begin unexpectedly published: %+v", conflicted)
+		}
+		_, content := call("workspace_read", map[string]any{"workspace": cfg.WorkspaceDir, "path": path, "limit": 64})
+		if !content.OK || content.Output != "independent writer" {
+			t.Fatalf("independent destination changed after transfer rejection: %+v", content)
+		}
+		_, aborted := call("workspace_transfer", follow("abort"))
+		if !aborted.OK {
+			t.Fatalf("abort conflicted staged ingress: %+v", aborted)
+		}
+	})
+}
