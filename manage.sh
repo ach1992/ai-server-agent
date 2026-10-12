@@ -287,10 +287,13 @@ runtime_show(){
   if [ -n "$(runtime_pending_backup)" ]; then
     warn "A previous runtime change left protected rollback state. Inspect it and reconcile the installed config/services before new changes."
   fi
+  local width
+  width="$(ui_width)"
   printf '%sRuntime settings%s\n' "$BOLD" "$RESET"
-  printf '  Current values are shown as key=value.\n'
-  printf '  Changes apply only after a verified Agent + Executor restart.\n\n'
-  "$RUNTIME_BINARY" -config "$CONFIG_FILE" runtime-settings
+  ui_wrap '  ' 'Current values are shown as key=value.' "$width"
+  ui_wrap '  ' 'Changes apply only after a verified Agent + Executor restart.' "$width"
+  printf '\n'
+  COLUMNS="$width" "$RUNTIME_BINARY" -config "$CONFIG_FILE" runtime-settings
 }
 runtime_menu(){
   [ -r /dev/tty ] || die "Interactive runtime settings require a terminal."

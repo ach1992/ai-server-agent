@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"strconv"
 	"strings"
 
 	"github.com/ach1992/ai-server-agent/internal/config"
@@ -67,27 +68,42 @@ func main() {
 		if err := json.Unmarshal(encoded, &values); err != nil {
 			fatal(err.Error())
 		}
+		width := runtimeSettingsOutputWidth()
 		for i, spec := range config.RuntimeSettingSpecs() {
 			if i > 0 {
 				fmt.Println()
 			}
-			printRuntimeSetting(spec, values[spec.Key])
+			printRuntimeSetting(spec, values[spec.Key], width)
 		}
 	default:
 		fatal("unknown command")
 	}
 }
 
-const runtimeSettingsOutputWidth = 96
+func runtimeSettingsOutputWidth() int {
+	width := 96
+	if raw := strings.TrimSpace(os.Getenv("COLUMNS")); raw != "" {
+		if parsed, err := strconv.Atoi(raw); err == nil {
+			width = parsed
+		}
+	}
+	if width < 60 {
+		return 60
+	}
+	if width > 100 {
+		return 100
+	}
+	return width
+}
 
-func printRuntimeSetting(spec config.RuntimeSettingSpec, value int) {
+func printRuntimeSetting(spec config.RuntimeSettingSpec, value, width int) {
 	// Keep the first line backward-compatible for simple operator greps while
 	// moving explanatory metadata onto short, visually grouped lines.
 	fmt.Printf("%s=%d %s\n", spec.Key, value, spec.Unit)
 	fmt.Printf("  Default : %d %s\n", spec.Default, spec.Unit)
 	fmt.Printf("  Range   : %d..%d %s\n", spec.Minimum, spec.Maximum, spec.Unit)
 	fmt.Println("  Applies : Agent + Executor restart required")
-	printWrappedField("  Purpose : ", spec.Description, runtimeSettingsOutputWidth)
+	printWrappedField("  Purpose : ", spec.Description, width)
 }
 
 func printWrappedField(prefix, text string, width int) {

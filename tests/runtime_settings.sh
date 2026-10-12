@@ -56,6 +56,10 @@ if grep -Fq '(default=' <<<"$default"; then fail 'legacy dense single-line metad
 if awk 'length($0) > 100 { bad=1 } END { exit bad ? 0 : 1 }' <<<"$default"; then
   fail 'runtime-show contains overlong terminal lines'
 fi
+narrow="$(COLUMNS=60 runtime_show)"
+if awk 'length($0) > 60 { bad=1 } END { exit bad ? 0 : 1 }' <<<"$narrow"; then
+  fail 'runtime-show did not honor the bounded terminal width'
+fi
 wrapped="$(ui_wrap '  ' 'This is a deliberately long operator-facing message that must wrap with a stable indent instead of becoming an unreadable terminal-width sentence.' 48)"
 if awk 'length($0) > 48 { bad=1 } END { exit bad ? 0 : 1 }' <<<"$wrapped"; then
   fail 'shared UI wrapper exceeded its requested width'
