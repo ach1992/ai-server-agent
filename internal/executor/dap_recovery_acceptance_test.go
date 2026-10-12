@@ -6,6 +6,7 @@ import (
 	"errors"
 	"io"
 	"net"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -50,13 +51,13 @@ func statusBody(t *testing.T, resp Response) map[string]any {
 
 func TestDAPCleanAdapterCrashStatusAndRecovery(t *testing.T) {
 	s, owner, peer := completedDAPSession(t, "stopped", nil)
-	// Deliberately invalid queued transport bytes: after the broker has
-	// completed exit/cleanup they must NOT be read and poison the outcome.
+	// A cleanly exited adapter without terminal protocol evidence must
+	// report failed after its already-consumed DAP stream is reconciled.
 	entry, err := s.sessions.get(owner, owner.SessionID)
 	if err != nil {
 		t.Fatal(err)
 	}
-	entry.dap.pending = []byte("Content-Length: nonsense\r\n\r\n")
+	_ = peer.Close() // the real adapter has exited and closed its stream
 	entry.dap.acceptEvent(dapPacket{Type: "event", Event: "stopped", Body: json.RawMessage(`{"reason":"exception"}`)})
 	owner.Action = "debug_status"
 	status := s.debugAction(context.Background(), owner)
@@ -71,8 +72,8 @@ func TestDAPCleanAdapterCrashStatusAndRecovery(t *testing.T) {
 	if !ok || len(events) != 1 {
 		t.Fatalf("queued crash evidence disappeared: %v", body)
 	}
-	if entry.dap.uncertain || len(entry.dap.pending) == 0 {
-		t.Fatal("dead adapter transport was read and falsely poisoned before clean status")
+	if entry.dap.uncertain || len(entry.dap.pending) != 0 {
+		t.Fatal("clean EOF was misclassified or an unread partial frame was invented")
 	}
 
 	owner.Action, owner.DebugMethod = "debug_action", "continue"
@@ -85,7 +86,7 @@ func TestDAPCleanAdapterCrashStatusAndRecovery(t *testing.T) {
 	// target left to control, and session reuse must be explicit.
 	_ = peer.SetReadDeadline(time.Now().Add(30 * time.Millisecond))
 	var unexpected [1]byte
-	if n, err := peer.Read(unexpected[:]); n != 0 || !isReadTimeout(err) {
+	if n, err := peer.Read(unexpected[:]); n != 0 || (!isReadTimeout(err) && !errors.Is(err, io.ErrClosedPipe) && !errors.Is(err, io.EOF)) {
 		t.Fatalf("dead adapter received unexpected protocol traffic: n=%d err=%v", n, err)
 	}
 	owner.Action = "debug_stop"
@@ -146,7 +147,8 @@ func TestDAPRecoveryEvidenceDoesNotLeakAcrossPrincipalsOrPrematurelyClaimCleanup
 }
 
 func TestDAPNormalTerminationRetainsProtocolState(t *testing.T) {
-	s, owner, _ := completedDAPSession(t, "terminated", nil)
+	s, owner, peer := completedDAPSession(t, "terminated", nil)
+	_ = peer.Close()
 	resp := s.debugAction(context.Background(), owner)
 	body := statusBody(t, resp)
 	if body["state"] != "terminated" || body["cleanup_verified"] != true || body["adapter_exited"] != true {
@@ -315,6 +317,7 @@ func TestDAPUnknownSentEvaluateRemainsUncertainAfterVerifiedAdapterExit(t *testi
 
 func TestDAPConcurrentVerifiedStopAndStatusDoNotDoubleRetire(t *testing.T) {
 	s, owner, peer := completedDAPSession(t, "terminated", nil)
+	_ = peer.Close()
 	stop := owner
 	stop.Action = "debug_stop"
 	results := make(chan Response, 3)
@@ -343,7 +346,173 @@ func TestDAPConcurrentVerifiedStopAndStatusDoNotDoubleRetire(t *testing.T) {
 	}
 	_ = peer.SetReadDeadline(time.Now().Add(35 * time.Millisecond))
 	var unexpected [1]byte
-	if n, err := peer.Read(unexpected[:]); n != 0 || (!isReadTimeout(err) && !errors.Is(err, io.EOF)) {
+	if n, err := peer.Read(unexpected[:]); n != 0 || (!isReadTimeout(err) && !errors.Is(err, io.EOF) && !errors.Is(err, io.ErrClosedPipe)) {
 		t.Fatalf("post-exit DAP packet was sent: n=%d err=%v", n, err)
+	}
+}
+
+// net.Pipe is synchronous and cannot prove the reviewer R3 ordering in which
+// the adapter completes its write and the broker publishes exit BEFORE any
+// status poll. An actual buffered AF_UNIX socket supplies that guarantee.
+func completedBufferedDAPSession(t *testing.T, stage string, cleanupErr error) (*Server, Request, *net.UnixConn) {
+	t.Helper()
+	s, owner, oldPeer := completedDAPSession(t, stage, cleanupErr)
+	l, err := net.ListenUnix("unix", &net.UnixAddr{Name: filepath.Join(t.TempDir(), "dap.sock"), Net: "unix"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer l.Close()
+	peer, err := net.DialUnix("unix", nil, l.Addr().(*net.UnixAddr))
+	if err != nil {
+		t.Fatal(err)
+	}
+	recv, err := l.AcceptUnix()
+	if err != nil {
+		_ = peer.Close()
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = recv.Close(); _ = peer.Close() })
+	e, err := s.sessions.get(owner, owner.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.dap.mu.Lock()
+	_ = e.dap.conn.Close()
+	e.dap.conn = recv
+	e.dap.mu.Unlock()
+	_ = oldPeer.Close()
+	return s, owner, peer
+}
+
+func TestDAPBrokerFirstBufferedTerminationPreservesFinalEvent(t *testing.T) {
+	s, owner, peer := completedBufferedDAPSession(t, "running", nil)
+	event := map[string]any{"seq": 55, "type": "event", "event": "terminated", "body": map[string]any{"reason": "completed"}}
+	if err := dapFrame(peer, event); err != nil {
+		t.Fatal(err)
+	}
+	// This Close proves complete framed bytes are in the kernel receive
+	// buffer before debugStatus (and debugEntry) runs for the first time.
+	if err := peer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	body := statusBody(t, s.debugAction(context.Background(), owner))
+	if body["state"] != "terminated" || body["adapter_exited"] != true || body["cleanup_verified"] != true {
+		t.Fatalf("broker-first valid final event was discarded: %v", body)
+	}
+	events, ok := body["events"].([]any)
+	if !ok || len(events) != 1 || events[0].(map[string]any)["event"] != "terminated" || body["events_dropped"] != float64(0) {
+		t.Fatalf("valid final termination evidence missing from bounded delivery: %v", body)
+	}
+	again := statusBody(t, s.debugAction(context.Background(), owner))
+	if again["state"] != "terminated" || len(again["events"].([]any)) != 0 {
+		t.Fatalf("broker-first classification did not persist or delivered event replayed: %v", again)
+	}
+}
+
+func TestDAPBrokerFirstPartialFrameAfterTerminationPoisonsProtocol(t *testing.T) {
+	for _, mode := range []string{"truncated_body", "invalid_header"} {
+		t.Run(mode, func(t *testing.T) {
+			s, owner, peer := completedBufferedDAPSession(t, "running", nil)
+			complete := map[string]any{"seq": 77, "type": "event", "event": "terminated"}
+			if err := dapFrame(peer, complete); err != nil {
+				t.Fatal(err)
+			}
+			var tail []byte
+			if mode == "truncated_body" {
+				tail = []byte("Content-Length: 25\r\n\r\n{")
+			} else {
+				tail = []byte("Content-Length: invalid\r\n\r\n")
+			}
+			if _, err := peer.Write(tail); err != nil {
+				t.Fatal(err)
+			}
+			_ = peer.Close() // complete event + invalid tail BEFORE first status
+			body := statusBody(t, s.debugAction(context.Background(), owner))
+			if body["state"] != "uncertain" || body["adapter_exited"] != true || body["cleanup_verified"] != true {
+				t.Fatalf("incomplete post-reap protocol was silently called clean: %v", body)
+			}
+			events := body["events"].([]any)
+			if len(events) != 1 || events[0].(map[string]any)["event"] != "terminated" {
+				t.Fatalf("previously valid terminal event lost after corrupt suffix: %v", body)
+			}
+			e, err := s.sessions.get(owner, owner.SessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			e.dap.mu.Lock()
+			poisoned := e.dap.uncertain
+			e.dap.mu.Unlock()
+			if !poisoned {
+				t.Fatal("invalid post-exit final frame did not permanently poison stream integrity")
+			}
+			again := statusBody(t, s.debugAction(context.Background(), owner))
+			if again["state"] != "uncertain" {
+				t.Fatalf("later poll hid malformed tail: %v", again)
+			}
+		})
+	}
+}
+
+func TestDAPBrokerFirstUnexpectedExitWithoutFinalEventFails(t *testing.T) {
+	s, owner, peer := completedBufferedDAPSession(t, "stopped", nil)
+	_ = peer.Close()
+	body := statusBody(t, s.debugAction(context.Background(), owner))
+	if body["state"] != "failed" || body["adapter_exited"] != true || body["cleanup_verified"] != true {
+		t.Fatalf("no terminal evidence after clean broker exit was incorrectly classified: %v", body)
+	}
+}
+
+func TestDAPBrokerFirstFinalDrainBudgetResumesWithoutFalseSuccess(t *testing.T) {
+	s, owner, peer := completedBufferedDAPSession(t, "running", nil)
+	for i := 0; i < 16; i++ {
+		event := "output"
+		if i == 15 {
+			event = "terminated"
+		}
+		if err := dapFrame(peer, map[string]any{"seq": i + 1, "type": "event", "event": event}); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_ = peer.Close()
+	first := statusBody(t, s.debugAction(context.Background(), owner))
+	if first["state"] != "uncertain" || first["adapter_exited"] != true || first["cleanup_verified"] != true {
+		t.Fatalf("exhausted 12-frame scan falsely claimed final protocol state: %v", first)
+	}
+	if len(first["events"].([]any)) != 12 {
+		t.Fatalf("first bounded scan delivered wrong event prefix: %v", first)
+	}
+	final := statusBody(t, s.debugAction(context.Background(), owner))
+	if final["state"] != "terminated" || final["cleanup_verified"] != true || final["adapter_exited"] != true {
+		t.Fatalf("subsequent status failed to complete bounded final scan: %v", final)
+	}
+	if len(final["events"].([]any)) != 4 || final["events"].([]any)[3].(map[string]any)["event"] != "terminated" {
+		t.Fatalf("remaining terminal evidence missing: %v", final)
+	}
+	third := statusBody(t, s.debugAction(context.Background(), owner))
+	if third["state"] != "terminated" || len(third["events"].([]any)) != 0 {
+		t.Fatalf("final status repeated acknowledged events or regressed: %v", third)
+	}
+}
+
+func TestDAPBrokerFirstReverseRequestNeverTransmits(t *testing.T) {
+	s, owner, peer := completedBufferedDAPSession(t, "running", nil)
+	if err := dapFrame(peer, map[string]any{"seq": 42, "type": "request", "command": "runInTerminal"}); err != nil {
+		t.Fatal(err)
+	}
+	// Close the adapter's transmit direction but keep receive open to
+	// detect any forbidden post-reap rejection/response from the executor.
+	if err := peer.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	body := statusBody(t, s.debugAction(context.Background(), owner))
+	if body["state"] != "uncertain" || body["adapter_exited"] != true || body["cleanup_verified"] != true {
+		t.Fatalf("unexpected reverse request was silently accepted: %v", body)
+	}
+	if err := peer.SetReadDeadline(time.Now().Add(45 * time.Millisecond)); err != nil {
+		t.Fatal(err)
+	}
+	var unexpected [1]byte
+	if n, err := peer.Read(unexpected[:]); n != 0 || !isReadTimeout(err) {
+		t.Fatalf("post-reap parser transmitted forbidden DAP response: bytes=%d err=%v", n, err)
 	}
 }

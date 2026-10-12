@@ -262,55 +262,77 @@ func (d *dapState) call(ctx context.Context, command string, args any) (json.Raw
 }
 
 func (d *dapState) drain(ctx context.Context) {
+	d.drainFrames(ctx, false)
+}
+
+// After the broker has reaped the adapter, only receive already buffered
+// frames; never transmit DAP responses/requests to a dead or untrusted peer.
+// A false result means the bounded scan did not yet reach clean stream EOF;
+// status must report provisional uncertainty and a later poll may continue.
+func (d *dapState) drainAfterExit(ctx context.Context) bool {
+	return d.drainFrames(ctx, true)
+}
+
+func (d *dapState) drainFrames(ctx context.Context, afterExit bool) bool {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.conn == nil || d.passiveClosed {
-		return
+	if d.passiveClosed {
+		return true
+	}
+	if d.conn == nil {
+		if afterExit {
+			d.markUncertain(errors.New("dap_final_stream_unavailable"))
+		}
+		return false
 	}
 	defer d.conn.SetReadDeadline(time.Time{})
 	for i := 0; i < 12; i++ {
 		if ctx.Err() != nil {
-			return
+			return false
 		}
 		_ = d.conn.SetReadDeadline(time.Now().Add(25 * time.Millisecond))
 		raw, err := d.readFrame()
 		if err != nil {
 			var netErr net.Error
 			if errors.As(err, &netErr) && netErr.Timeout() {
-				return
+				return false
 			}
-			// Passive status is not a transmitted control/evaluate request.
-			// An intact frame stream closing at adapter exit has no unknown
-			// side-effecting command completion. Hold a provisional closed
-			// state until the broker proves OS cleanup; keep all commands
-			// blocked in the meantime. A truncated/malformed frame still
-			// poisons protocol integrity permanently.
+			// Complete-stream EOF from a passive poll is not an unknown
+			// transmitted command. But an EOF with pending bytes proves
+			// truncation and remains permanently fail-closed.
 			if len(d.pending) == 0 && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed)) {
 				d.passiveClosed = true
-				return
+				return true
 			}
 			d.markUncertain(fmt.Errorf("dap_drain_transport_unproven: %w", err))
-			return
+			return true
 		}
 		var packet dapPacket
 		if json.Unmarshal(raw, &packet) != nil {
 			d.markUncertain(errors.New("dap_drain_invalid_packet"))
-			return
+			return true
 		}
 		if packet.Type == "event" {
 			d.acceptEvent(packet)
 		} else if packet.Type == "request" {
+			if afterExit {
+				// There is no live authenticated adapter to acknowledge any
+				// reverse request. Never write even a rejection after exit.
+				d.markUncertain(errors.New("dap_post_exit_reverse_request"))
+				return true
+			}
 			d.seq++
 			_ = d.conn.SetWriteDeadline(time.Now().Add(time.Second))
 			if err := dapFrame(d.conn, map[string]any{"seq": d.seq, "type": "response", "request_seq": packet.Seq, "command": packet.Command, "success": false, "message": "unsupported_adapter_reverse_request"}); err != nil {
 				d.markUncertain(fmt.Errorf("dap_drain_reverse_request_failed: %w", err))
-				return
+				return true
 			}
 		} else {
 			d.markUncertain(errors.New("dap_drain_unexpected_response_or_packet"))
-			return
+			return true
 		}
 	}
+	return false // bounded work; no final EOF proof yet
 }
 
 // Peek first. A failed response-envelope encoding must NOT erase the events

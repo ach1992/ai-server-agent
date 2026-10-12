@@ -58,20 +58,13 @@ func (s *Server) debugEntry(req Request) (*stdioSession, *dapState, error) {
 	e.mu.Lock()
 	d := e.dap
 	kind := e.kind
-	exited := e.exited
 	e.mu.Unlock()
 	if kind != "dap" || d == nil {
 		return nil, nil, errSessionNotFound
 	}
-	if exited {
-		d.mu.Lock()
-		// Preserve a genuine terminated event and any uncertain command
-		// outcome rather than rewriting every adapter exit as a failure.
-		if d.stage != "terminated" && d.pinError == "" && !d.uncertain {
-			d.stage = "failed"
-		}
-		d.mu.Unlock()
-	}
+	// A broker exit is not yet a final DAP protocol classification:
+	// complete terminal frames may still be buffered in the Unix socket.
+	// Only debugStatus reconciles them under the per-session action lock.
 	return e, d, nil
 }
 
@@ -373,9 +366,10 @@ func (s *Server) debugLaunch(ctx context.Context, req Request) (response Respons
 // The adapter's own protocol events do not prove OS-level cleanup.
 // Only broker-owned status queries may publish that separate evidence.
 type dapRuntimeEvidence struct {
-	adapterExited   bool
-	cleanupVerified bool
-	adapterExitCode int
+	adapterExited        bool
+	cleanupVerified      bool
+	adapterExitCode      int
+	finalDrainIncomplete bool // final buffered frames not yet fully reconciled
 }
 
 func (s *Server) debugResult(req Request, d *dapState, result json.RawMessage, started time.Time, evidence ...*dapRuntimeEvidence) Response {
@@ -384,6 +378,12 @@ func (s *Server) debugResult(req Request, d *dapState, result json.RawMessage, s
 		return fileError("debug_result_invalid", "runtime", err)
 	}
 	stage, events, dropped := d.peek()
+	if len(evidence) > 0 && evidence[0] != nil && evidence[0].finalDrainIncomplete && stage != "failed" {
+		// Do not advertise a final protocol outcome while the bounded
+		// post-reap scan has more inbound bytes or an unresolved partial
+		// frame. The broker's OS cleanup evidence remains independent.
+		stage = "uncertain"
+	}
 	originDropped := dropped
 	converted := make([]json.RawMessage, 0, len(events))
 	for _, event := range events {
@@ -605,8 +605,10 @@ func (s *Server) debugStatus(ctx context.Context, req Request) (response Respons
 	defer func() {
 		response = s.finishActionAudit(req, "debug_status", "worker", req.SessionID, "developer_debugger", started, response)
 	}()
-	// A reaped adapter has no live DAP stream to drain. Reading its closed
-	// socket would invent an uncertainty and obscure verified containment.
+	// A reaped adapter cannot execute another request, but its authenticated
+	// Unix socket may still hold valid terminal events or a truncated final
+	// frame. Consume only inbound frames under a bounded, nontransmitting
+	// exit drain before publishing the final protocol classification.
 	e.mu.Lock()
 	exited, exitCode, cleanupErr := e.exited, e.exitCode, e.cleanupErr
 	e.mu.Unlock()
@@ -616,15 +618,16 @@ func (s *Server) debugStatus(ctx context.Context, req Request) (response Respons
 		exited, exitCode, cleanupErr = e.exited, e.exitCode, e.cleanupErr
 		e.mu.Unlock()
 	}
+	finalDrainComplete := false
 	if exited {
+		finalDrainComplete = d.drainAfterExit(ctx)
 		d.mu.Lock()
 		if cleanupErr != nil {
 			d.uncertain = true
 			d.stage = "uncertain"
-		} else {
-			// A passive status-poll EOF is transient pending proof, NOT a
-			// permanently unknown control/evaluate result. Reconcile it only
-			// when the broker has actually verified process containment.
+		} else if finalDrainComplete {
+			// Passive EOF is NOT an unknown sent command. The final stream
+			// must be reconciled before classifying successful OS cleanup.
 			d.passiveClosed = false
 			if d.stage != "terminated" && !d.uncertain && d.pinError == "" {
 				d.stage = "failed"
@@ -634,6 +637,7 @@ func (s *Server) debugStatus(ctx context.Context, req Request) (response Respons
 	}
 	result := s.debugResult(req, d, json.RawMessage(`{}`), started, &dapRuntimeEvidence{
 		adapterExited: exited, cleanupVerified: exited && cleanupErr == nil, adapterExitCode: exitCode,
+		finalDrainIncomplete: exited && !finalDrainComplete,
 	})
 	result.Running = boolPtr(!exited)
 	result.ExitCode = exitCode
