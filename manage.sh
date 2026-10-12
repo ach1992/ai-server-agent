@@ -1881,8 +1881,9 @@ configure_cloudflare(){ (
   [ -z "$previous_cert" ] || die "A previous Cloudflare Origin CA certificate still needs cleanup. Run 'sudo ai-server-agent-manage cloudflare-cleanup' first."
   host="${AI_SERVER_AGENT_HOSTNAME:-}"; [ -n "$host" ] || host="$(prompt_value 'Public MCP hostname' "${old_host:-mcp.example.com}")"; host="${host,,}"; validate_hostname "$host"
   port="${AI_SERVER_AGENT_PORT:-$(current_port)}"; [[ "$port" =~ ^[0-9]+$ ]] && [ "$port" -ge 1024 ] && [ "$port" -le 65535 ] || die "Port must be between 1024 and 65535."
-  printf '\nCloudflare will manage only this MCP hostname: proxied DNS, an origin-port rule, a hostname-scoped strict SSL Configuration Rule, and an Origin CA certificate.\n'
-  printf 'The whole-zone SSL mode will not be changed.\n'
+  printf '\n'
+  ui_wrap '' 'Cloudflare will manage only this MCP hostname: proxied DNS, an origin-port rule, a hostname-scoped strict SSL Configuration Rule, and an Origin CA certificate.'
+  ui_wrap '' 'The whole-zone SSL mode will not be changed.'
   print_cf_token_guidance "$host"
   load_cf_token
   zone_pair="$(cf_find_zone "$host")"; IFS='|' read -r zone_id zone_name <<<"$zone_pair"; log "Cloudflare zone: $zone_name"
@@ -2029,7 +2030,7 @@ cloudflare_cleanup(){ (
 update_agent(){ [ -x "$UPDATE_HELPER" ] || die "Update helper is missing: $UPDATE_HELPER"; "$UPDATE_HELPER"; }
 
 repair(){
-  printf 'Repair restarts and validates the services. If local health still fails, it runs the channel-aware updater.\n'
+  ui_wrap '' 'Repair restarts and validates the services. If local health still fails, it runs the channel-aware updater.'
   if restart_and_verify_local; then log "Services and local health are healthy."; else warn "Local health failed; attempting channel-aware reinstall/update."; update_agent; fi
 }
 
@@ -2043,7 +2044,7 @@ run_uninstall(){
     confirm "Purge Agent-owned server data?" no || { echo "Cancelled."; return 0; }
     AI_SERVER_AGENT_YES=1 "$UNINSTALL_HELPER" --purge
   else
-    printf 'Safe uninstall removes services, binary, and management command while preserving config/state/users/workspace.\n'
+    ui_wrap '' 'Safe uninstall removes services, binary, and management command while preserving config/state/users/workspace.'
     confirm "Uninstall AI Server Agent?" no || { echo "Cancelled."; return 0; }
     AI_SERVER_AGENT_YES=1 "$UNINSTALL_HELPER"
   fi
@@ -2084,7 +2085,9 @@ first_run(){
     0) printf '\nSetup deferred. The Agent remains installed and healthy in local mode.\n'; return 20 ;;
     *) die "Invalid choice." ;;
   esac
-  printf '\n%sDone.%s Use %ssudo ai-server-agent-manage%s any time to change settings.\n\n' "$GREEN" "$RESET" "$BOLD" "$RESET"
+  printf '\n%sDone.%s\n' "$GREEN" "$RESET"
+  ui_wrap '' 'Use sudo ai-server-agent-manage any time to change settings.'
+  printf '\n'
   chatgpt_setup
 }
 
