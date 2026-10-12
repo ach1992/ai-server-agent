@@ -96,6 +96,7 @@ A separate first-run test proves that choosing "Configure later" is a successful
 
 `tests/cloudflare_transaction.sh` exercises production shell functions with a mocked Cloudflare provider. It covers, among other things:
 
+- fresh-install bearer handoff via one-use fd without the deleted `mcp.authorization` legacy file, fail-closed invalid/wrong credentials before Cloudflare writes, and authenticated PUBLIC MCP initialize verification;
 - rollback of transaction-created resources;
 - preserved recovery state after incomplete rollback;
 - current-representation fingerprints before destructive cleanup;

@@ -136,7 +136,9 @@ The manager creates/reconciles only the selected hostname's resources:
 
 The Cloudflare API token is entered in a **hidden terminal prompt**. Do not paste it into ChatGPT, chat, tickets, screenshots, logs or source control.
 
-The interactive manager uses the token only for the current command and does not store it in Agent managed state. Noninteractive automation can supply a protected token file through the documented environment variable instead of putting the token on a command line.
+The interactive manager uses the Cloudflare API token only for the current command and does not store it in Agent managed state. Noninteractive automation can supply a protected Cloudflare API token file through the documented environment variable instead of putting the token on a command line.
+
+Cloudflare verification separately requires an **active MCP bearer**, not the Cloudflare API token. A fresh installer supplies its newly issued direct/default bearer to the manager over a one-use inherited file descriptor; no recoverable plaintext file is created. Later interactive Cloudflare reconfiguration requests the current MCP bearer in a hidden terminal prompt and validates it against the local Agent **before any Cloudflare mutation**, then proves public HTTPS `/healthz`, unauthorized MCP rejection, and authenticated MCP initialization. Existing bearer plaintext is not recoverable from `mcp-credentials.json` (verifier digests only); if lost, use `sudo ai-server-agent-manage credential-rotate direct-default`, securely update the connected client, and retry. Do **not** recreate legacy `/etc/ai-server-agent/mcp.authorization`. For noninteractive reconfiguration with an existing credential, provision a one-use descriptor 3 to `AI_SERVER_AGENT_MCP_AUTH_FD=3` using your automation secret store; never put a bearer in an argument, environment value or repository.
 
 ### Ownership and recovery
 

@@ -732,16 +732,26 @@ MCP_MIGRATION_SWITCHED=0
 
 log "Core installation is healthy."
 
+manage_connection_setup(){
+  # The named credential store contains a verifier only. Pass a newly issued
+  # bearer over an inherited one-use descriptor, not argv, env, or a file.
+  if [ -n "$MCP_ACTIVATION_TOKEN" ]; then
+    AI_SERVER_AGENT_MCP_AUTH_FD=3 "$MANAGE_BIN" "$@" 3<<<"$MCP_ACTIVATION_TOKEN"
+  else
+    "$MANAGE_BIN" "$@"
+  fi
+}
+
 if [ "$NONINTERACTIVE" = "1" ]; then
   case "$SETUP_MODE" in
     ""|keep) ;;
     local) "$MANAGE_BIN" configure-local ;;
-    cloudflare) "$MANAGE_BIN" configure-cloudflare ;;
+    cloudflare) manage_connection_setup configure-cloudflare ;;
     manual) "$MANAGE_BIN" configure-manual-tls ;;
     *) die "AI_SERVER_AGENT_SETUP_MODE must be local, cloudflare, manual, keep, or empty" ;;
   esac
 elif [ "$FRESH_INSTALL" -eq 1 ] && [ -r /dev/tty ] && [ -z "${AI_SERVER_AGENT_BIND_MODE+x}" ]; then
-  if ! "$MANAGE_BIN" first-run; then
+  if ! manage_connection_setup first-run; then
     SETUP_INCOMPLETE=1
     warn "Core installation succeeded, but connection setup was not completed. The Agent remains installed and healthy in its last verified mode."
     warn "Resume setup with: sudo ai-server-agent-manage"
