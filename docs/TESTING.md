@@ -2,17 +2,11 @@
 
 This document describes the validation model that applies to the current v0.1 codebase. It is not a historical release log.
 
-## Direct MCP transfer source acceptance
+## Direct MCP transfer acceptance
 
-The `TestDirectMCPTransferSourceAcceptance` test exercises the **real compiled Agent executor and sandboxed worker helper** behind an authenticated, official MCP SDK Streamable HTTP client. It uses unique disposable local workspaces and control-state files; it does not install, restart, or modify the host's running Agent services.
+Run `TestDirectMCPTransferSourceAcceptance` for the normal unprivileged official MCP SDK integration suite. For an **opt-in existing installed executable**, run `TestDirectMCPTransferInstalledAcceptance` with its absolute executable path and pinned SHA256; this launches isolated real Agent and Executor subprocesses rather than touching protected services. Both modes verify 32 KiB text, 5 MiB+43-byte and 33 MiB+13-byte binary transfers, resumability, exact integrity, versioned ranged egress and atomic commit. Installed mode additionally tests isolated Executor restart, different principals/workspaces, malformed requests, security boundaries, resource budgets, measured HTTP bodies and worker process resources, and runs a **separate compiled example MCP client** that resumes an interrupted upload and reconstructs a new local binary file.
 
-```bash
-go test -count=1 -run '^TestDirectMCPTransferSourceAcceptance$' -v -timeout=5m ./internal/mcp
-```
-
-The non-short test verifies 32 KiB UTF-8 and >5 MiB / >33 MiB binary uploads through actual bounded chunks, stable begin and duplicate-chunk replay, invalid chunk SHA-256 rejection, reconnect/resume via a new MCP session, incomplete-target invisibility, concurrent-writer preservation on stale destination preconditions, bounded resumable commit, whole-object SHA-256, version-pinned ranged reads, small SDK-visible MCP TextContent fallback versus large structured-only payload, and idempotent committed receipts. The subtest logs call counts and elapsed time as **source-fixture timings**, not installed service CPU/RSS/wire-size measurements. Go's ordinary suite exercises this test on compatible non-root Linux/Landlock CI runners; `-short` intentionally omits its higher-cost real-process fixture.
-
-**Evidence boundary:** this is a local, unprivileged **same-UID test fixture**. It validates the production client/protocol/helper data path and that only its disposable fixtures are altered; it does **not** prove real root-to-worker privilege separation, a particular installed build, native ChatGPT attachment/rendering behavior, non-ChatGPT client compatibility, actual production network latency, service restarts, or Stable release installation. Real root/Landlock validation belongs to the existing worker/security CI; installed direct-client and model-visible acceptance remains under Issues #99 and #59 and requires separately authorized Agent maintenance.
+The exact commands, acceptance criteria and honest limitations are maintained once in [WORKSPACE-TRANSFER-ACCEPTANCE.md](WORKSPACE-TRANSFER-ACCEPTANCE.md). The runnable consumer is [`examples/workspace-transfer-client`](../examples/workspace-transfer-client). `-short` omits the expensive real-process suite. Neither mode requires root, service restart or Stable publication. Both modes use disposable same-UID test state; **neither** proves the protected live root/worker split, connected ChatGPT UI attachment presentation or Stable deployment. These remain separately gated under #99/#59.
 
 ## 1. Supported platform policy and validation matrix
 
