@@ -129,3 +129,81 @@ func TestWorkspaceEditBatchRejectsDuplicatesOversizeAndExternalPaths(t *testing.
 		t.Fatalf("preflight rejection changed file: %v %q", err, result)
 	}
 }
+
+// A create can lose a race after the batch-wide preflight. Never overwrite
+// the other writer or claim that the entire batch rolled back; a retry must
+// reconcile the already-applied edit before planning new changes.
+func TestWorkspaceEditBatchConcurrentCreateReconciliation(t *testing.T) {
+	root, repo, _ := workspaceFixture(t)
+	firstPath := filepath.Join(repo, "src", "a.txt")
+	newPath := filepath.Join(repo, "src", "new.txt")
+	if err := os.WriteFile(firstPath, []byte("before"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	initial := readWorkerWorkspaceFile(workspaceFileOperation{
+		WorkspaceRoot: root, Workspace: repo, Path: "src/a.txt",
+	})
+	if !initial.OK || initial.FileVersion == "" {
+		t.Fatalf("initial version unavailable: %+v", initial)
+	}
+	batch := workspaceFileOperation{
+		Action: "workspace_apply_edits", WorkspaceRoot: root, Workspace: repo,
+		Edits: []WorkspaceFileEdit{
+			{Path: "src/a.txt", FileVersion: initial.FileVersion, Replacements: []WorkspaceReplace{{Old: "before", New: "after"}}},
+			{Path: "src/new.txt", MustNotExist: true, Content: editPtr("our new file")},
+		},
+	}
+	// A pre-existing destination is detected before the first write.
+	if err := os.WriteFile(newPath, []byte("pre-existing"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	preflight := applyWorkerWorkspaceEdits(batch)
+	if preflight.OK || preflight.ErrorCode != "workspace_preflight_failed" {
+		t.Fatalf("existing destination accepted: %+v", preflight)
+	}
+	if got, err := os.ReadFile(firstPath); err != nil || string(got) != "before" {
+		t.Fatalf("preflight unexpectedly changed first file: %v %q", err, got)
+	}
+	if err := os.Remove(newPath); err != nil {
+		t.Fatal(err)
+	}
+
+	// Race: the destination appears after preflight, just before commit 2.
+	raced := applyWorkerWorkspaceEditsWithHook(batch, func(i int) {
+		if i == 1 {
+			if err := os.WriteFile(newPath, []byte("concurrent writer"), 0600); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	if raced.OK || raced.Status != "partial" || raced.ErrorCode != "partial_workspace_edit" {
+		t.Fatalf("create race not truthfully reported: %+v", raced)
+	}
+	outcome, err := decodeWorkspaceEditResult(raced)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !outcome.Partial || outcome.Applied != 1 || len(outcome.Files) != 2 ||
+		outcome.Files[0].Status != "applied" || outcome.Files[0].FileVersion == "" ||
+		outcome.Files[1].Status != "failed" || outcome.Files[1].ErrorCode != "file_exists" {
+		t.Fatalf("incorrect per-file race outcome: %+v", outcome)
+	}
+	for path, want := range map[string]string{firstPath: "after", newPath: "concurrent writer"} {
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != want {
+			t.Fatalf("race clobbered %s: %v %q", path, err, got)
+		}
+	}
+	// Replaying a stale batch must not undo the applied change or overwrite
+	// the concurrent writer; fresh versions are required to resume safely.
+	retry := applyWorkerWorkspaceEdits(batch)
+	if retry.OK || retry.ErrorCode != "workspace_preflight_failed" {
+		t.Fatalf("stale retry unexpectedly accepted: %+v", retry)
+	}
+	for path, want := range map[string]string{firstPath: "after", newPath: "concurrent writer"} {
+		got, err := os.ReadFile(path)
+		if err != nil || string(got) != want {
+			t.Fatalf("stale retry clobbered %s: %v %q", path, err, got)
+		}
+	}
+}
