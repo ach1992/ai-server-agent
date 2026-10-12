@@ -49,4 +49,20 @@ grep -qF manifest-sentinel "$scratch/manifest-target"
 test ! -e "$STATE_DIR/install-state.env"
 jq -e '.channel=="source" and .version=="source"' /etc/ai-server-agent/control/install-state.json >/dev/null
 
+# A legacy real Browser data parent can survive an ordinary update with
+# aiworker:aiworker 0750. That blocks aiagent from even lstat'ing the
+# worker-private profile and makes browser_status report it missing/unsafe.
+# Repair only the exact Agent-owned parent while preserving profile bytes and
+# worker ownership/mode.
+install -d -m 0750 -o aiworker -g aiworker "$STATE_DIR/runtime/browser"
+install -d -m 0700 -o aiworker -g aiworker "$STATE_DIR/runtime/browser/profile"
+printf 'browser-profile-sentinel\n' > "$STATE_DIR/runtime/browser/profile/sentinel"
+chown aiworker:aiworker "$STATE_DIR/runtime/browser/profile/sentinel"
+AI_SERVER_AGENT_BINARY="$BINARY" AI_SERVER_AGENT_NONINTERACTIVE=1 bash "$ROOT/install.sh"
+
+test "$(stat -c '%U:%G:%a' "$STATE_DIR/runtime/browser")" = root:root:755
+test "$(stat -c '%U:%G:%a' "$STATE_DIR/runtime/browser/profile")" = aiworker:aiworker:700
+test "$(stat -c '%U:%G' "$STATE_DIR/runtime/browser/profile/sentinel")" = aiworker:aiworker
+grep -qF browser-profile-sentinel "$STATE_DIR/runtime/browser/profile/sentinel"
+
 echo "root trust migration tests passed"

@@ -335,6 +335,14 @@ fi
 if [ -e "$STATE_DIR/runtime/browser" ] && [ ! -d "$STATE_DIR/runtime/browser" ]; then
   die "Browser runtime-data path is not a real directory: $STATE_DIR/runtime/browser"
 fi
+if [ -d "$STATE_DIR/runtime/browser" ]; then
+  # Older Browser setup revisions created this parent as aiworker:aiworker
+  # 0750. Current Agent readiness inspection runs as aiagent and must be able
+  # to traverse the root-owned container while the profile/tmp children stay
+  # worker-private. Reconcile only the exact Agent-owned parent; install -d
+  # preserves its existing children and Browser profile data.
+  install -d -m 0755 -o root -g root "$STATE_DIR/runtime/browser"
+fi
 # Existing job outputs from the older worker-owned container are never trusted
 # as symlinks after migration.
 find "$STATE_DIR/jobs" -mindepth 1 -maxdepth 1 -type l -delete
