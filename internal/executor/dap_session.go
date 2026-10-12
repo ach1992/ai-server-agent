@@ -58,16 +58,13 @@ func (s *Server) debugEntry(req Request) (*stdioSession, *dapState, error) {
 	e.mu.Lock()
 	d := e.dap
 	kind := e.kind
-	exited := e.exited
 	e.mu.Unlock()
 	if kind != "dap" || d == nil {
 		return nil, nil, errSessionNotFound
 	}
-	if exited {
-		d.mu.Lock()
-		d.stage = "failed"
-		d.mu.Unlock()
-	}
+	// A broker exit is not yet a final DAP protocol classification:
+	// complete terminal frames may still be buffered in the Unix socket.
+	// Only debugStatus reconciles them under the per-session action lock.
 	return e, d, nil
 }
 
@@ -366,12 +363,27 @@ func (s *Server) debugLaunch(ctx context.Context, req Request) (response Respons
 	return out
 }
 
-func (s *Server) debugResult(req Request, d *dapState, result json.RawMessage, started time.Time) Response {
+// The adapter's own protocol events do not prove OS-level cleanup.
+// Only broker-owned status queries may publish that separate evidence.
+type dapRuntimeEvidence struct {
+	adapterExited        bool
+	cleanupVerified      bool
+	adapterExitCode      int
+	finalDrainIncomplete bool // final buffered frames not yet fully reconciled
+}
+
+func (s *Server) debugResult(req Request, d *dapState, result json.RawMessage, started time.Time, evidence ...*dapRuntimeEvidence) Response {
 	out, err := normalizeDebugResult(d.workspace, result)
 	if err != nil {
 		return fileError("debug_result_invalid", "runtime", err)
 	}
 	stage, events, dropped := d.peek()
+	if len(evidence) > 0 && evidence[0] != nil && evidence[0].finalDrainIncomplete && stage != "failed" {
+		// Do not advertise a final protocol outcome while the bounded
+		// post-reap scan has more inbound bytes or an unresolved partial
+		// frame. The broker's OS cleanup evidence remains independent.
+		stage = "uncertain"
+	}
 	originDropped := dropped
 	converted := make([]json.RawMessage, 0, len(events))
 	for _, event := range events {
@@ -384,7 +396,15 @@ func (s *Server) debugResult(req Request, d *dapState, result json.RawMessage, s
 	}
 	var body []byte
 	for {
-		body, err = json.Marshal(map[string]any{"result": json.RawMessage(out), "events": converted, "events_dropped": dropped, "adapter": d.adapter, "state": stage})
+		payload := map[string]any{"result": json.RawMessage(out), "events": converted, "events_dropped": dropped, "adapter": d.adapter, "state": stage}
+		if len(evidence) > 0 && evidence[0] != nil {
+			payload["adapter_exited"] = evidence[0].adapterExited
+			if evidence[0].adapterExited {
+				payload["cleanup_verified"] = evidence[0].cleanupVerified
+				payload["adapter_exit_code"] = evidence[0].adapterExitCode
+			}
+		}
+		body, err = json.Marshal(payload)
 		if err != nil {
 			return fileError("debug_response_invalid", "runtime", err)
 		}
@@ -404,14 +424,28 @@ func (s *Server) debugResult(req Request, d *dapState, result json.RawMessage, s
 }
 
 func (s *Server) debugControl(ctx context.Context, req Request) (response Response) {
-	_, d, err := s.debugEntry(req)
+	e, d, err := s.debugEntry(req)
 	if err != nil {
 		return fileError("debug_session_not_found", "authorization", err)
 	}
 	d.actionMu.Lock()
 	defer d.actionMu.Unlock()
+	// A competing stop can retire the broker entry while this caller
+	// waits for the per-DAP operation lock. Never act on a stale pointer.
+	if _, err := s.sessions.get(req, req.SessionID); err != nil {
+		return fileError("debug_session_not_found", "authorization", err)
+	}
+	e.mu.Lock()
+	exited, cleanupErr := e.exited, e.cleanupErr
+	e.mu.Unlock()
+	if exited {
+		if cleanupErr != nil {
+			return fileError("debug_cleanup_uncertain", "state", errors.New("debugger adapter exited but contained process cleanup is unverified; inspect debug_status and reconcile with debug_stop"))
+		}
+		return fileError("debug_session_ended", "state", errors.New("debugger adapter exited; inspect debug_status then use debug_stop to retire its session before launching a new one"))
+	}
 	d.mu.Lock()
-	unusable := d.pinError != "" || d.uncertain
+	unusable := d.pinError != "" || d.uncertain || d.passiveClosed
 	d.mu.Unlock()
 	if unusable {
 		return fileError("debug_session_uncertain", "state", errors.New("DAP state or target identity unverified; only debug_status and debug_stop are permitted"))
@@ -558,6 +592,12 @@ func (s *Server) debugStatus(ctx context.Context, req Request) (response Respons
 	}
 	d.actionMu.Lock()
 	defer d.actionMu.Unlock()
+	// Recheck ownership/presence after waiting for a concurrent stop.
+	// Otherwise a stale in-memory pointer could report a retired session
+	// as live, or attempt a second broker removal with false uncertainty.
+	if _, err := s.sessions.get(req, req.SessionID); err != nil {
+		return fileError("debug_session_not_found", "authorization", err)
+	}
 	if blocked := s.beginActionAudit(req, "debug_status", "worker", req.SessionID, "developer_debugger"); blocked != nil {
 		return *blocked
 	}
@@ -565,17 +605,40 @@ func (s *Server) debugStatus(ctx context.Context, req Request) (response Respons
 	defer func() {
 		response = s.finishActionAudit(req, "debug_status", "worker", req.SessionID, "developer_debugger", started, response)
 	}()
-	d.drain(ctx)
+	// A reaped adapter cannot execute another request, but its authenticated
+	// Unix socket may still hold valid terminal events or a truncated final
+	// frame. Consume only inbound frames under a bounded, nontransmitting
+	// exit drain before publishing the final protocol classification.
 	e.mu.Lock()
-	exited := e.exited
-	exitCode := e.exitCode
+	exited, exitCode, cleanupErr := e.exited, e.exitCode, e.cleanupErr
 	e.mu.Unlock()
+	if !exited {
+		d.drain(ctx)
+		e.mu.Lock()
+		exited, exitCode, cleanupErr = e.exited, e.exitCode, e.cleanupErr
+		e.mu.Unlock()
+	}
+	finalDrainComplete := false
 	if exited {
+		finalDrainComplete = d.drainAfterExit(ctx)
 		d.mu.Lock()
-		d.stage = "failed"
+		if cleanupErr != nil {
+			d.uncertain = true
+			d.stage = "uncertain"
+		} else if finalDrainComplete {
+			// Passive EOF is NOT an unknown sent command. The final stream
+			// must be reconciled before classifying successful OS cleanup.
+			d.passiveClosed = false
+			if d.stage != "terminated" && !d.uncertain && d.pinError == "" {
+				d.stage = "failed"
+			}
+		}
 		d.mu.Unlock()
 	}
-	result := s.debugResult(req, d, json.RawMessage(`{}`), started)
+	result := s.debugResult(req, d, json.RawMessage(`{}`), started, &dapRuntimeEvidence{
+		adapterExited: exited, cleanupVerified: exited && cleanupErr == nil, adapterExitCode: exitCode,
+		finalDrainIncomplete: exited && !finalDrainComplete,
+	})
 	result.Running = boolPtr(!exited)
 	result.ExitCode = exitCode
 	return result
@@ -588,6 +651,12 @@ func (s *Server) debugStop(ctx context.Context, req Request) (response Response)
 	}
 	d.actionMu.Lock()
 	defer d.actionMu.Unlock()
+	// Recheck ownership/presence after waiting for a concurrent stop.
+	// Otherwise a stale in-memory pointer could report a retired session
+	// as live, or attempt a second broker removal with false uncertainty.
+	if _, err := s.sessions.get(req, req.SessionID); err != nil {
+		return fileError("debug_session_not_found", "authorization", err)
+	}
 	if blocked := s.beginActionAudit(req, "debug_stop", "worker", req.SessionID, "developer_debugger"); blocked != nil {
 		return *blocked
 	}
@@ -595,9 +664,22 @@ func (s *Server) debugStop(ctx context.Context, req Request) (response Response)
 	defer func() {
 		response = s.finishActionAudit(req, "debug_stop", "worker", req.SessionID, "developer_debugger", started, response)
 	}()
-	stopCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
-	defer cancel()
-	_, dapErr := d.call(stopCtx, "disconnect", map[string]any{"terminateDebuggee": true})
+	e.mu.Lock()
+	alreadyExited := e.exited
+	e.mu.Unlock()
+	// An already-reaped adapter cannot acknowledge disconnect. Only the
+	// broker's actual process/containment cleanup can prove a safe stop.
+	var dapErr error
+	d.mu.Lock()
+	passiveClosed := d.passiveClosed
+	d.mu.Unlock()
+	// No wire request is valid after passive EOF; the broker remains the
+	// sole process-containment cleanup authority in this case.
+	if !alreadyExited && !passiveClosed {
+		stopCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
+		defer cancel()
+		_, dapErr = d.call(stopCtx, "disconnect", map[string]any{"terminateDebuggee": true})
+	}
 	err = s.workerStdioClose(req, e.id)
 	if err != nil {
 		return fileError("debug_stop_uncertain", "state", err)
@@ -605,6 +687,14 @@ func (s *Server) debugStop(ctx context.Context, req Request) (response Response)
 	// The pidfd-pinned broker removes this session's private socket only
 	// after confirmed process-group cleanup; do not race a second removal.
 	response = Response{OK: dapErr == nil, SessionID: req.SessionID, Status: "terminated", DurationMS: time.Since(started).Milliseconds()}
+	if alreadyExited {
+		response.Status = "cleanup_confirmed_adapter_already_exited"
+		return response
+	}
+	if passiveClosed {
+		response.Status = "cleanup_confirmed_adapter_stream_closed"
+		return response
+	}
 	if dapErr != nil {
 		response.OK = false
 		response.Status = "cleanup_confirmed_dap_disconnect_uncertain"

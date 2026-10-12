@@ -28,7 +28,11 @@ func TestReviewR2DrainFailurePoisonsActionState(t *testing.T) {
 				_ = send.Close()
 			}
 			d.drain(context.Background())
-			if !d.uncertain || d.stage != "uncertain" {
+			if mode == "transport_closed" {
+				if d.uncertain || !d.passiveClosed || d.stage != "running" {
+					t.Fatalf("passive EOF was misclassified as a transmitted command: stage=%s uncertain=%v passiveClosed=%v", d.stage, d.uncertain, d.passiveClosed)
+				}
+			} else if !d.uncertain || d.stage != "uncertain" {
 				t.Fatalf("%s did not permanently poison protocol: stage=%s uncertain=%v", mode, d.stage, d.uncertain)
 			}
 			if _, err := d.call(context.Background(), "evaluate", map[string]any{"expression": "1+2"}); err == nil || !strings.Contains(err.Error(), "dap_state_uncertain") {
