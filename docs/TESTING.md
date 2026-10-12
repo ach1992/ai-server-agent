@@ -2,6 +2,18 @@
 
 This document describes the validation model that applies to the current v0.1 codebase. It is not a historical release log.
 
+## Direct MCP transfer source acceptance
+
+The `TestDirectMCPTransferSourceAcceptance` test exercises the **real compiled Agent executor and sandboxed worker helper** behind an authenticated, official MCP SDK Streamable HTTP client. It uses unique disposable local workspaces and control-state files; it does not install, restart, or modify the host's running Agent services.
+
+```bash
+go test -count=1 -run '^TestDirectMCPTransferSourceAcceptance$' -v -timeout=5m ./internal/mcp
+```
+
+The non-short test verifies 32 KiB UTF-8 and >5 MiB / >33 MiB binary uploads through actual bounded chunks, stable begin and duplicate-chunk replay, invalid chunk SHA-256 rejection, reconnect/resume via a new MCP session, incomplete-target invisibility, concurrent-writer preservation on stale destination preconditions, bounded resumable commit, whole-object SHA-256, version-pinned ranged reads, small model-visible text fallback versus large structured-only payload, and idempotent committed receipts. The subtest logs call counts and elapsed time as **source-fixture timings**, not installed service CPU/RSS/wire-size measurements. Go's ordinary suite exercises this test on compatible non-root Linux/Landlock CI runners; `-short` intentionally omits its higher-cost real-process fixture.
+
+**Evidence boundary:** this is a local, unprivileged **same-UID test fixture**. It validates the production client/protocol/helper data path and that only its disposable fixtures are altered; it does **not** prove real root-to-worker privilege separation, a particular installed build, native ChatGPT attachment/rendering behavior, non-ChatGPT client compatibility, actual production network latency, service restarts, or Stable release installation. Real root/Landlock validation belongs to the existing worker/security CI; installed direct-client and model-visible acceptance remains under Issues #99 and #59 and requires separately authorized Agent maintenance.
+
 ## 1. Supported platform policy and validation matrix
 
 The stable platform policy validated by current `main` is:
