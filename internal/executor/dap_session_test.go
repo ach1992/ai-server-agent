@@ -259,8 +259,32 @@ func main(){
 		if cleanupErr != nil {
 			t.Fatalf("crashed Delve left cleanup unverified: %v", cleanupErr)
 		}
-		if err := s.workerStdioClose(owner, opened.SessionID); err != nil {
-			t.Fatalf("crash session cleanup: %v", err)
+		// Exercise the same authenticated control/status/stop path that a
+		// real MCP client uses after abrupt adapter death. The broker has
+		// already reconciled the adapter and its debuggee before e.done.
+		owner.Action = "debug_status"
+		crashed := s.debugAction(ctx, owner)
+		if !crashed.OK || crashed.Running == nil || *crashed.Running {
+			t.Fatalf("crashed Delve status was not inspectable: %+v", crashed)
+		}
+		var crashBody struct {
+			AdapterExited   bool   `json:"adapter_exited"`
+			CleanupVerified bool   `json:"cleanup_verified"`
+			State           string `json:"state"`
+		}
+		if err := json.Unmarshal([]byte(crashed.Output), &crashBody); err != nil ||
+			!crashBody.AdapterExited || !crashBody.CleanupVerified || crashBody.State != "failed" {
+			t.Fatalf("crashed Delve did not distinguish OS cleanup from protocol failure: %v %+v", err, crashed)
+		}
+		owner.Action = "debug_action"
+		owner.DebugMethod = "threads"
+		if rejected := s.debugAction(ctx, owner); rejected.OK || rejected.ErrorCode != "debug_session_ended" {
+			t.Fatalf("late DAP command was accepted after adapter crash: %+v", rejected)
+		}
+		owner.Action = "debug_stop"
+		retired := s.debugAction(ctx, owner)
+		if !retired.OK || retired.Status != "cleanup_confirmed_adapter_already_exited" {
+			t.Fatalf("verified crash could not be retired via public debug_stop: %+v", retired)
 		}
 	case "manual":
 		stop := s.debugAction(ctx, owner)

@@ -391,6 +391,7 @@ Exercise as applicable:
 - concurrent file change during structured edit;
 - structural/LSP result bounding;
 - LSP/DAP crash and restart;
+- DAP adapter/debuggee abnormal exit with actual worker/Delve when supported: public breakpoint/stack baseline, single-use target identity, crash/exception evidence, `debug_status` `adapter_exited`/`cleanup_verified`/`adapter_exit_code`, fail-closed post-exit actions, verified `debug_stop` session retirement, new worker session capacity, and unverified cleanup remaining addressable; protocol `terminated` differs from an unexpected adapter crash. `TestDAP*Recovery*` and `TestDAP*Termination*` run without optional Delve; the opt-in `TestRealGoDelveCrashKillsDebuggee` follows real Delve and worker process identities. On Linux kernels lacking group-scoped pidfd signalling (for example a 6.8 test host), the non-root real fixture fails closed; do not disable process containment to make it pass or infer production failure from this fixture alone. Production DAP uses root-owned cgroup v2 containment, requiring separately authorized installed-client acceptance; a green generic CI is not equivalent to this installed proof.
 - stateful-session stale ID/principal mismatch;
 - PTY output flood, reconnect, resize and long-lived soak;
 - browser hang/output/artifact bounds;
