@@ -150,6 +150,49 @@ jobs:
           grep -Fq 'real diagnostics on invalid source:' "$log"
           grep -Fq 'neverDeclaredSymbol' "$log"
           echo 'REAL_GOPLS_EXACT_TREE_SEMANTIC_PROOF_PASS'
+          # The public client must exercise the same production trust path,
+          # not a test-only gopls override. This changes ONLY the disposable
+          # GitHub-hosted runner; it does not install anything on an Agent host.
+          # Production selects /usr/local/bin BEFORE /usr/bin. Fail closed
+          # if a runner image already provides a higher-priority binary;
+          # never treat another gopls version as the pinned CI proof.
+          if [ -e /usr/local/bin/gopls ] || [ -L /usr/local/bin/gopls ]; then
+            echo 'higher-priority gopls would shadow pinned /usr/bin/gopls' >&2
+            exit 1
+          fi
+          sudo install -m 0755 -o root -g root "$gopls_bin" /usr/bin/gopls
+          cmp -s -- "$gopls_bin" /usr/bin/gopls || {
+            echo 'installed gopls differs from verified pinned build' >&2
+            exit 1
+          }
+          pinned_sha="$(sha256sum "$gopls_bin" | cut -d ' ' -f 1)"
+          selected_sha="$(sha256sum /usr/bin/gopls | cut -d ' ' -f 1)"
+          test "$pinned_sha" = "$selected_sha"
+          printf 'GOPLS_PINNED_SOURCE_SHA256=%s\nGOPLS_SELECTED_PATH=%s\nGOPLS_SELECTED_SHA256=%s\n' "$pinned_sha" /usr/bin/gopls "$selected_sha"
+          /usr/bin/gopls version
+          for trusted in / /usr /usr/bin /usr/bin/gopls; do
+            stat -c "GOPLS_TRUST_PATH=%n UID=%u MODE=%a TYPE=%F" "$trusted"
+          done
+          ci_go="$(command -v go)"
+          if [ "$ci_go" != "/usr/local/bin/go" ]; then
+            go_shim="$(mktemp)"
+            printf '#!/bin/sh\nexec "%s" "$@"\n' "$ci_go" > "$go_shim"
+            sudo install -m 0755 -o root -g root "$go_shim" /usr/local/bin/go
+            rm -f -- "$go_shim"
+          fi
+          test -x /usr/local/bin/go
+          test -x /usr/bin/gopls
+          : > "$log"
+          ASA_MCP_GOPLS_ACCEPTANCE=1 ASA_MCP_GOPLS_EXPECT_BINARY=/usr/bin/gopls ASA_MCP_GOPLS_EXPECT_SHA256="$pinned_sha" go test -v ./internal/mcp -run '^TestDirectMCPGoSemanticClientAcceptance$' -count=1 2>&1 | tee "$log"
+          grep -Fq '=== RUN   TestDirectMCPGoSemanticClientAcceptance' "$log"
+          grep -Fq -- '--- PASS: TestDirectMCPGoSemanticClientAcceptance' "$log"
+          if grep -Fq -- '--- SKIP: TestDirectMCPGoSemanticClientAcceptance' "$log"; then
+            echo 'Direct real-gopls MCP acceptance was skipped' >&2
+            exit 1
+          fi
+          grep -Fq "GOPLS_SELECTED_BINARY_PATH=/usr/bin/gopls SHA256=$pinned_sha" "$log"
+          grep -Fq 'DIRECT_REAL_GOPLS_PASS' "$log"
+          echo 'REAL_GOPLS_DIRECT_MCP_CLIENT_PROOF_PASS'
       - name: Build static binary
         if: ${{ needs.change-scope.outputs.go_changed != 'false' || needs.change-scope.outputs.root_trust_security_changed != 'false' }}
         run: CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
