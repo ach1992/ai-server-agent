@@ -27,7 +27,15 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
           fetch-depth: 0
+      - name: Verify exact checked-out commit
+        env:
+          EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          actual_sha="$(git rev-parse HEAD)"
+          printf 'EXACT_CHECKED_OUT_HEAD=%s\n' "$actual_sha"
+          test "$actual_sha" = "$EXPECTED_SOURCE_SHA"
       - name: Syntax-check change-scope evidence selection
         run: |
           bash -n scripts/ci-change-scope.sh
@@ -49,6 +57,15 @@ jobs:
       - name: Require successful change classification
         run: test "${{ needs.change-scope.result }}" = success
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify exact checked-out commit
+        env:
+          EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          actual_sha="$(git rev-parse HEAD)"
+          printf 'EXACT_CHECKED_OUT_HEAD=%s\n' "$actual_sha"
+          test "$actual_sha" = "$EXPECTED_SOURCE_SHA"
       - name: Shell syntax
         run: bash -n manage.sh tests/cloudflare_transaction.sh tests/cloudflare_crash_recovery.sh tests/cloudflare_phase_recovery.sh
       - name: Cloudflare mutation rollback and ownership recovery
@@ -68,6 +85,15 @@ jobs:
       - name: Require successful change classification
         run: test "${{ needs.change-scope.result }}" = success
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify exact checked-out commit
+        env:
+          EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          actual_sha="$(git rev-parse HEAD)"
+          printf 'EXACT_CHECKED_OUT_HEAD=%s\n' "$actual_sha"
+          test "$actual_sha" = "$EXPECTED_SOURCE_SHA"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26.x'
@@ -99,6 +125,15 @@ jobs:
       - name: Require successful change classification
         run: test "${{ needs.change-scope.result }}" = success
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify exact checked-out commit
+        env:
+          EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          actual_sha="$(git rev-parse HEAD)"
+          printf 'EXACT_CHECKED_OUT_HEAD=%s\n' "$actual_sha"
+          test "$actual_sha" = "$EXPECTED_SOURCE_SHA"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26.x'
@@ -172,6 +207,15 @@ jobs:
       - name: Require successful change classification
         run: test "${{ needs.change-scope.result }}" = success
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify exact checked-out commit
+        env:
+          EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          actual_sha="$(git rev-parse HEAD)"
+          printf 'EXACT_CHECKED_OUT_HEAD=%s\n' "$actual_sha"
+          test "$actual_sha" = "$EXPECTED_SOURCE_SHA"
       - name: Stable plan does not require unpublished release
         run: |
           state="$(mktemp)"
