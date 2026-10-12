@@ -104,6 +104,9 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 	if got := session.InitializeResult().ServerInfo.Version; got != mcpImplementationVersion() || (strings.HasSuffix(version, "-dev") && got == version) {
 		t.Fatalf("MCP initialize serverInfo.Version = %q, want truthful build identity, not stale development marker %q", got, version)
 	}
+	if got := session.InitializeResult().Instructions; got != instructions(cfg.WorkspaceDir) {
+		t.Fatalf("MCP initialize instructions did not expose server tool-routing guidance: got %q", got)
+	}
 
 	res, err := session.ListTools(ctx, &mcpsdk.ListToolsParams{})
 	if err != nil {
@@ -534,22 +537,39 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 	}
 }
 
-func TestInstructionsDescribePersistentWorkspace(t *testing.T) {
+func TestInstructionsRouteToolsConciselyAndPreserveSafety(t *testing.T) {
 	got := instructions("/srv/ai-workspace")
+	if words := len(strings.Fields(got)); words > 180 {
+		t.Fatalf("MCP instructions use %d words, want at most 180; move details to tool descriptions", words)
+	}
 	for _, want := range []string{
 		"/srv/ai-workspace is persistent",
-		"task environments",
-		"prefer git worktree",
-		"never delete dirty, untracked, ambiguous, or unknown workspace state",
-		"workspace_stat to inspect size/version without content",
-		"workspace_search mode=text for bounded literal/regex text occurrences",
-		"workspace_search mode=structural for syntax-tree patterns",
-		"LSP for semantic symbol/type/reference meaning",
-		"rg/git grep through run_command as the advanced/unstructured CLI fallback",
-		"Landlock ABI v2",
+		"repository_discover/repository_inspect",
+		"worktree_create/worktree_remove",
+		"run_command for bounded unprivileged",
+		"start_job with job_status/job_output",
+		"workspace_* for bounded worker",
+		"code_* for Go/LSP",
+		"terminal_* for interactive PTY",
+		"debug_* for Go/DAP",
+		"browser_e2e for single-call",
+		"browser_session_* for multi-call",
+		"browser_run for custom Playwright",
+		"Check optional runtime availability",
+		"agent_environment and preserve Agent access",
+		"never delete dirty, untracked, unknown or ambiguous state",
+		"run_root_command or privileged host read_file/write_file only when necessary",
+		"approval_required",
+		"explicit human authorization",
+		"instructions grant no additional permissions",
 	} {
 		if !strings.Contains(got, want) {
-			t.Fatalf("instructions missing %q", want)
+			t.Fatalf("MCP instructions missing %q", want)
+		}
+	}
+	for _, implementationDetail := range []string{"Landlock ABI", "ports 80/443", "nginx", "managed state", "Node.js"} {
+		if strings.Contains(got, implementationDetail) {
+			t.Errorf("MCP instructions duplicate implementation detail %q", implementationDetail)
 		}
 	}
 }
