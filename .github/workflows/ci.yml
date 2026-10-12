@@ -153,7 +153,10 @@ jobs:
           # The public client must exercise the same production trust path,
           # not a test-only gopls override. This changes ONLY the disposable
           # GitHub-hosted runner; it does not install anything on an Agent host.
-          sudo install -m 0755 -o root -g root "$gopls_bin" /usr/local/bin/gopls
+          sudo install -m 0755 -o root -g root "$gopls_bin" /usr/bin/gopls
+          for trusted in / /usr /usr/bin /usr/bin/gopls; do
+            stat -c "GOPLS_TRUST_PATH=%n UID=%u MODE=%a TYPE=%F" "$trusted"
+          done
           ci_go="$(command -v go)"
           if [ "$ci_go" != "/usr/local/bin/go" ]; then
             go_shim="$(mktemp)"
@@ -162,7 +165,7 @@ jobs:
             rm -f -- "$go_shim"
           fi
           test -x /usr/local/bin/go
-          test -x /usr/local/bin/gopls
+          test -x /usr/bin/gopls
           : > "$log"
           ASA_MCP_GOPLS_ACCEPTANCE=1 go test -v ./internal/mcp -run '^TestDirectMCPGoSemanticClientAcceptance$' -count=1 2>&1 | tee "$log"
           grep -Fq '=== RUN   TestDirectMCPGoSemanticClientAcceptance' "$log"

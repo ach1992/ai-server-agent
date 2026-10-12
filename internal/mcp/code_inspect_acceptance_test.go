@@ -20,6 +20,7 @@ import (
 
 	"github.com/ach1992/ai-server-agent/internal/config"
 	"github.com/ach1992/ai-server-agent/internal/executor"
+	"github.com/ach1992/ai-server-agent/internal/systemexec"
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
@@ -36,9 +37,8 @@ func TestDirectMCPGoSemanticClientAcceptance(t *testing.T) {
 	}
 	// Deliberately use the same trusted path and optional dependency as
 	// production; do not weaken binary trust for the test.
-	binaryPath := "/usr/local/bin/gopls"
-	if st, err := os.Stat(binaryPath); err != nil || !st.Mode().IsRegular() {
-		t.Skip("root-owned optional gopls is not installed at the production path")
+	if systemexec.First("/usr/local/bin/gopls", "/usr/bin/gopls") == "" {
+		t.Skip("trusted root-owned optional gopls not found at either production path")
 	}
 	if _, err := exec.LookPath("go"); err != nil {
 		t.Fatalf("required Go toolchain is absent: %v", err)
