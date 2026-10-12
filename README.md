@@ -8,7 +8,7 @@ The Agent is a standalone product: every supported host capability is available 
 
 ## Platform support
 
-Stable `v0.1.9` and the current `main` branch support:
+Published immutable Stable [`v0.1.10`](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.10) and the current `main` branch support:
 
 - **Ubuntu 22.04 or newer**
 - **Debian 11 or newer** (Debian 11 application compatibility is retained, but upstream Debian LTS ended on 2026-08-31; use Debian 12+ for an officially security-maintained base unless you have an ELTS arrangement)
@@ -24,19 +24,21 @@ AI Server Agent does not require nginx, Apache, Caddy, Docker, PHP, a database, 
 
 ## Install the latest stable release
 
-Stable installation starts with a small bootstrap loaded from an **immutable published release tag**, separate from the release `install.sh` asset it authenticates. The current v0.1 bootstrap trust anchor is the immutable `v0.1.9` release tag. GitHub locks the associated tag when an immutable release is published, so this path does not depend on a feature branch or merge strategy.
+Stable installation starts with a small bootstrap loaded from an **immutable published release tag**, separate from the release `install.sh` asset it authenticates. The current verified trust anchor is the immutable [`v0.1.10` release](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.10), not the mutable `main` branch. GitHub Releases, rather than this page, remain authoritative if a newer version is published.
 
-`v0.1.9` is published as an immutable release. Install the latest stable release with:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.9/scripts/install-stable.sh | bash
-```
-
-For exact `v0.1.9` installation through the same immutable bootstrap:
+To install the **latest immutable Stable** identified by the GitHub Releases API using that pinned bootstrap:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.9/scripts/install-stable.sh | bash -s -- v0.1.9
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.10/scripts/install-stable.sh | bash
 ```
+
+To install **exactly `v0.1.10`** instead of following future latest releases:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.10/scripts/install-stable.sh | bash -s -- v0.1.10
+```
+
+The bootstrap authenticates the release-scoped installer digest **before** privileged execution. The first command resolves GitHub's current latest immutable release; the second requires the named release. On the next release, update the documented bootstrap trust anchor only after its tag is immutable and its bootstrap has been verified.
 
 Do **not** use `releases/latest/download/install.sh | sudo bash` as the stable trust path: that executes release-supplied code as root before the same asset can be authenticated.
 
@@ -198,7 +200,7 @@ Existing installations migrate the current bearer into `direct/default` without 
 
 ## MCP capability surface
 
-`main` defines the complete MCP tool inventory in `internal/mcp/`; the connected client sees only the inventory advertised by the **installed** Agent build after client tool refresh. The latest published Stable release may expose fewer tools than `main`. These grouped entries describe source-level capabilities, not a claim that every connected installation has passed acceptance:
+`main` defines the complete MCP tool inventory in `internal/mcp/`; the connected client sees only the inventory advertised by the **installed** Agent build after client tool refresh. The published Stable and `main` can differ after new code merges; compare the installed build with the current release and refresh the MCP client catalog when necessary. These grouped entries describe the current source capability surface, not a guarantee that each optional tool works on every server/client:
 
 | Tool | Purpose |
 | --- | --- |
@@ -497,6 +499,16 @@ Cloudflare, privileged lifecycle and release-provenance changes also have dedica
 
 ### Live acceptance baseline
 
+#### Published `v0.1.10` delivery and validation
+
+[Stable `v0.1.10`](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.10) is a **published, non-prerelease immutable release** from the [verified release workflow](https://github.com/ach1992/ai-server-agent/actions/runs/38259516653), with Linux amd64/arm64 archives, the checksum manifest, the verified bootstrap-facing `install.sh` asset and GitHub release attestations.
+
+On one **authorized disposable Ubuntu 24.04 amd64 Test Server**, the released installer was exercised against the protected Agent/Executor services. Actual running executable SHA-256, install-state `stable/v0.1.10`, HTTPS health and preserved instance identity/config/credentials were verified. An independent protected backup was integrity-checked, and actual candidate-to-prior-install rollback was successfully rehearsed before publication. Direct MCP workspace/transfer, worker/root PTY restart/reconnect, gopls, Delve and the pinned Playwright Browser were tested against the same release candidate; after stable promotion, Browser `browser_run` passed again. This is **installed-host acceptance**, not automatic readiness of optional developer tools on every supported host. See the [controlling acceptance Issue #59](https://github.com/ach1992/ai-server-agent/issues/59) and [Browser evidence #63](https://github.com/ach1992/ai-server-agent/issues/63).
+
+Remaining **non-blocking or separately scoped** limits include native ChatGPT model-visible typed-image/attachment presentation, some extended soak/resource and abnormal-recovery scenarios, optional tool provisioning on other hosts, and vendor-CDN availability for new browser installations in some locations. The portable Browser setup must retain exact version/content hash checks; never disable TLS or substitute a different Chromium build merely to work around a CDN `403`. Track open work in Issues #59/#99 and the relevant child Issues. A published release is not a claim that these future or client-owned contracts are complete.
+
+#### Historical `v0.1.5` acceptance
+
 Immutable `v0.1.5` received a real end-to-end acceptance on the supported dedicated VPS path, including:
 
 - supported stable update and installed identity/health;
@@ -533,7 +545,7 @@ For future work, use the repository as a graph of authoritative sources rather t
 - **README.md** — supported installation, operation, capabilities and safety overview;
 - **[AGENTS.md](AGENTS.md)** — stable engineering invariants, development rules and validation expectations for coding agents/contributors;
 - **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — trust boundaries and implementation architecture;
-- **[docs/DEVELOPER-RUNTIME.md](docs/DEVELOPER-RUNTIME.md)** — accepted target AI-native Developer Runtime architecture; clearly target-state documentation, not a claim that every capability is already shipped;
+- **[docs/DEVELOPER-RUNTIME.md](docs/DEVELOPER-RUNTIME.md)** — accepted target and shipped Developer Runtime composition, with explicitly deferred capabilities and host/client-specific acceptance limits;
 - **[docs/TESTING.md](docs/TESTING.md)** — validation model, behavioral coverage and known limits;
 - **[docs/CONNECT_CHATGPT.md](docs/CONNECT_CHATGPT.md)** — ChatGPT connection topologies and client-side validation guidance; current OpenAI UI/docs override stale UI wording;
 - **Issue #37** — historical decision record for the AI-client/vendor-neutral invariant now owned by `AGENTS.md` and `docs/ARCHITECTURE.md`;
