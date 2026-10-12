@@ -267,7 +267,8 @@ jobs:
         run: |
           grep -qF 'MANAGE_BIN="/usr/local/sbin/ai-server-agent-manage"' install.sh
           grep -qF 'AI_SERVER_AGENT_SETUP_MODE' install.sh
-          grep -qF 'if ! "$MANAGE_BIN" first-run; then' install.sh
+          grep -qF 'if ! manage_connection_setup first-run; then' install.sh
+          grep -qF 'AI_SERVER_AGENT_MCP_AUTH_FD=3 "$MANAGE_BIN" "$@" 3<<<"$MCP_ACTIVATION_TOKEN"' install.sh
           grep -qF 'SETUP_INCOMPLETE=1' install.sh
           grep -qF 'Core installation succeeded, but connection setup was not completed.' install.sh
           grep -qF 'Resume setup with: sudo ai-server-agent-manage' install.sh
