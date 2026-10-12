@@ -43,6 +43,7 @@ type dapState struct {
 	containmentProven   bool
 	launchMayHaveTarget bool
 	pinError            string
+	passiveClosed       bool // status-drain EOF; not an unknown in-flight command
 	uncertain           bool
 	uncertainReason     string
 	sourceVersion       string
@@ -189,7 +190,7 @@ func (d *dapState) call(ctx context.Context, command string, args any) (json.Raw
 		if d.pinError != "" {
 			return nil, errors.New("dap_debuggee_identity_unproven: " + d.pinError)
 		}
-		if d.uncertain {
+		if d.uncertain || d.passiveClosed {
 			return nil, errors.New("dap_state_uncertain: stop or inspect status before restarting")
 		}
 	}
@@ -263,7 +264,7 @@ func (d *dapState) call(ctx context.Context, command string, args any) (json.Raw
 func (d *dapState) drain(ctx context.Context) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
-	if d.conn == nil {
+	if d.conn == nil || d.passiveClosed {
 		return
 	}
 	defer d.conn.SetReadDeadline(time.Time{})
@@ -278,8 +279,16 @@ func (d *dapState) drain(ctx context.Context) {
 			if errors.As(err, &netErr) && netErr.Timeout() {
 				return
 			}
-			// Non-timeout transport and malformed framing cannot recover
-			// ordering guarantees; status stays queryable, actions poison.
+			// Passive status is not a transmitted control/evaluate request.
+			// An intact frame stream closing at adapter exit has no unknown
+			// side-effecting command completion. Hold a provisional closed
+			// state until the broker proves OS cleanup; keep all commands
+			// blocked in the meantime. A truncated/malformed frame still
+			// poisons protocol integrity permanently.
+			if len(d.pending) == 0 && (errors.Is(err, io.EOF) || errors.Is(err, io.ErrClosedPipe) || errors.Is(err, net.ErrClosed)) {
+				d.passiveClosed = true
+				return
+			}
 			d.markUncertain(fmt.Errorf("dap_drain_transport_unproven: %w", err))
 			return
 		}
@@ -313,7 +322,7 @@ func (d *dapState) peek() (string, []json.RawMessage, uint64) {
 	state := d.stage
 	if d.pinError != "" {
 		state = "failed"
-	} else if d.uncertain {
+	} else if d.uncertain || d.passiveClosed {
 		state = "uncertain"
 	}
 	return state, events, d.eventsDropped

@@ -323,10 +323,7 @@ func main(){
 	if strings.Contains(string(data), "1+2") || strings.Contains(string(data), "ANSWER") {
 		t.Fatal("DAP expression or debuggee values leaked into audit")
 	}
-	expectedActions := []string{"debug_launch", "debug_action", "debug_status"}
-	if shutdown != "crash" {
-		expectedActions = append(expectedActions, "debug_stop")
-	}
+	expectedActions := []string{"debug_launch", "debug_action", "debug_status", "debug_stop"}
 	for _, action := range expectedActions {
 		if strings.Count(string(data), `"action":"`+action+`"`) < 2 {
 			t.Fatalf("DAP audit missing start/completion for %s", action)

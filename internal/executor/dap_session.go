@@ -430,6 +430,11 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 	}
 	d.actionMu.Lock()
 	defer d.actionMu.Unlock()
+	// A competing stop can retire the broker entry while this caller
+	// waits for the per-DAP operation lock. Never act on a stale pointer.
+	if _, err := s.sessions.get(req, req.SessionID); err != nil {
+		return fileError("debug_session_not_found", "authorization", err)
+	}
 	e.mu.Lock()
 	exited, cleanupErr := e.exited, e.cleanupErr
 	e.mu.Unlock()
@@ -440,7 +445,7 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 		return fileError("debug_session_ended", "state", errors.New("debugger adapter exited; inspect debug_status then use debug_stop to retire its session before launching a new one"))
 	}
 	d.mu.Lock()
-	unusable := d.pinError != "" || d.uncertain
+	unusable := d.pinError != "" || d.uncertain || d.passiveClosed
 	d.mu.Unlock()
 	if unusable {
 		return fileError("debug_session_uncertain", "state", errors.New("DAP state or target identity unverified; only debug_status and debug_stop are permitted"))
@@ -587,6 +592,12 @@ func (s *Server) debugStatus(ctx context.Context, req Request) (response Respons
 	}
 	d.actionMu.Lock()
 	defer d.actionMu.Unlock()
+	// Recheck ownership/presence after waiting for a concurrent stop.
+	// Otherwise a stale in-memory pointer could report a retired session
+	// as live, or attempt a second broker removal with false uncertainty.
+	if _, err := s.sessions.get(req, req.SessionID); err != nil {
+		return fileError("debug_session_not_found", "authorization", err)
+	}
 	if blocked := s.beginActionAudit(req, "debug_status", "worker", req.SessionID, "developer_debugger"); blocked != nil {
 		return *blocked
 	}
@@ -610,8 +621,14 @@ func (s *Server) debugStatus(ctx context.Context, req Request) (response Respons
 		if cleanupErr != nil {
 			d.uncertain = true
 			d.stage = "uncertain"
-		} else if d.stage != "terminated" && !d.uncertain && d.pinError == "" {
-			d.stage = "failed"
+		} else {
+			// A passive status-poll EOF is transient pending proof, NOT a
+			// permanently unknown control/evaluate result. Reconcile it only
+			// when the broker has actually verified process containment.
+			d.passiveClosed = false
+			if d.stage != "terminated" && !d.uncertain && d.pinError == "" {
+				d.stage = "failed"
+			}
 		}
 		d.mu.Unlock()
 	}
@@ -630,6 +647,12 @@ func (s *Server) debugStop(ctx context.Context, req Request) (response Response)
 	}
 	d.actionMu.Lock()
 	defer d.actionMu.Unlock()
+	// Recheck ownership/presence after waiting for a concurrent stop.
+	// Otherwise a stale in-memory pointer could report a retired session
+	// as live, or attempt a second broker removal with false uncertainty.
+	if _, err := s.sessions.get(req, req.SessionID); err != nil {
+		return fileError("debug_session_not_found", "authorization", err)
+	}
 	if blocked := s.beginActionAudit(req, "debug_stop", "worker", req.SessionID, "developer_debugger"); blocked != nil {
 		return *blocked
 	}
@@ -643,7 +666,12 @@ func (s *Server) debugStop(ctx context.Context, req Request) (response Response)
 	// An already-reaped adapter cannot acknowledge disconnect. Only the
 	// broker's actual process/containment cleanup can prove a safe stop.
 	var dapErr error
-	if !alreadyExited {
+	d.mu.Lock()
+	passiveClosed := d.passiveClosed
+	d.mu.Unlock()
+	// No wire request is valid after passive EOF; the broker remains the
+	// sole process-containment cleanup authority in this case.
+	if !alreadyExited && !passiveClosed {
 		stopCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
 		defer cancel()
 		_, dapErr = d.call(stopCtx, "disconnect", map[string]any{"terminateDebuggee": true})
@@ -657,6 +685,10 @@ func (s *Server) debugStop(ctx context.Context, req Request) (response Response)
 	response = Response{OK: dapErr == nil, SessionID: req.SessionID, Status: "terminated", DurationMS: time.Since(started).Milliseconds()}
 	if alreadyExited {
 		response.Status = "cleanup_confirmed_adapter_already_exited"
+		return response
+	}
+	if passiveClosed {
+		response.Status = "cleanup_confirmed_adapter_stream_closed"
 		return response
 	}
 	if dapErr != nil {

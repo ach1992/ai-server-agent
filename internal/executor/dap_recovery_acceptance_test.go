@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"io"
 	"net"
 	"strings"
 	"testing"
@@ -176,5 +177,173 @@ func TestDAPUnverifiedCleanupRemainsAddressableAndNonExecutable(t *testing.T) {
 	owner.Action = "debug_status"
 	if result := s.debugAction(context.Background(), owner); !result.OK {
 		t.Fatalf("uncertain session lost its addressable reconciliation identity: %+v", result)
+	}
+}
+
+// A passive status poll can observe a complete terminal event and then EOF
+// before the broker publishes adapter-exit/containment evidence. That EOF
+// cannot permanently poison a received valid protocol termination.
+func TestDAPStatusPollTerminationEOFReconcilesAfterBrokerExit(t *testing.T) {
+	s, owner, peer := completedDAPSession(t, "running", nil)
+	e, err := s.sessions.get(owner, owner.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.mu.Lock()
+	e.exited = false
+	e.exitCode = 0
+	e.mu.Unlock()
+	sent := make(chan error, 1)
+	go func() {
+		err := dapFrame(peer, map[string]any{
+			"seq": 33, "type": "event", "event": "terminated",
+			"body": map[string]any{"reason": "completed"},
+		})
+		_ = peer.Close()
+		sent <- err
+	}()
+	var interim map[string]any
+	for i := 0; i < 5; i++ {
+		interim = statusBody(t, s.debugAction(context.Background(), owner))
+		e.dap.mu.Lock()
+		closed := e.dap.passiveClosed
+		e.dap.mu.Unlock()
+		if closed {
+			break
+		}
+		if i == 4 {
+			t.Fatal("status never observed the stream close during adapter shutdown")
+		}
+	}
+	if err := <-sent; err != nil {
+		t.Fatal(err)
+	}
+	if interim["state"] != "uncertain" || interim["adapter_exited"] != false {
+		t.Fatalf("unreaped adapter with closed status stream was falsely proven: %v", interim)
+	}
+	e.dap.mu.Lock()
+	if e.dap.uncertain || e.dap.stage != "terminated" {
+		t.Fatalf("passive EOF poisoned a genuine terminal event: stage=%s uncertain=%v", e.dap.stage, e.dap.uncertain)
+	}
+	e.dap.mu.Unlock()
+
+	// Broker publication happens AFTER the stream closed and the event was
+	// already delivered/acknowledged. Status must retain terminal evidence.
+	e.mu.Lock()
+	e.exited = true
+	e.exitCode = 0
+	e.cleanupErr = nil
+	e.mu.Unlock()
+	final := statusBody(t, s.debugAction(context.Background(), owner))
+	if final["state"] != "terminated" || final["adapter_exited"] != true ||
+		final["cleanup_verified"] != true || final["adapter_exit_code"] != float64(0) {
+		t.Fatalf("normal termination overwritten by stale passive transport closure: %v", final)
+	}
+}
+
+func TestDAPStatusPollAbruptEOFBecomesFailedAfterVerifiedCleanup(t *testing.T) {
+	s, owner, peer := completedDAPSession(t, "stopped", nil)
+	e, err := s.sessions.get(owner, owner.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.mu.Lock()
+	e.exited = false
+	e.mu.Unlock()
+	if err := peer.Close(); err != nil {
+		t.Fatal(err)
+	}
+	pending := statusBody(t, s.debugAction(context.Background(), owner))
+	if pending["state"] != "uncertain" || pending["adapter_exited"] != false {
+		t.Fatalf("premature certainty before broker cleanup proof: %v", pending)
+	}
+	e.dap.mu.Lock()
+	if e.dap.uncertain || !e.dap.passiveClosed {
+		t.Fatalf("passive crash EOF was conflated with a transmitted request: uncertain=%v passiveClosed=%v", e.dap.uncertain, e.dap.passiveClosed)
+	}
+	e.dap.mu.Unlock()
+	e.mu.Lock()
+	e.exited, e.exitCode, e.cleanupErr = true, 137, nil
+	e.mu.Unlock()
+	final := statusBody(t, s.debugAction(context.Background(), owner))
+	if final["state"] != "failed" || final["adapter_exited"] != true ||
+		final["cleanup_verified"] != true || final["adapter_exit_code"] != float64(137) {
+		t.Fatalf("verified abrupt crash was not reported failed: %v", final)
+	}
+}
+
+func TestDAPUnknownSentEvaluateRemainsUncertainAfterVerifiedAdapterExit(t *testing.T) {
+	s, owner, peer := completedDAPSession(t, "stopped", nil)
+	e, err := s.sessions.get(owner, owner.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.mu.Lock()
+	e.exited = false
+	e.dap.configured = true
+	e.mu.Unlock()
+	gotWire := make(chan bool, 1)
+	go func() {
+		var packet [4096]byte
+		n, _ := peer.Read(packet[:])
+		gotWire <- n > 0 && strings.Contains(string(packet[:n]), `"command":"evaluate"`)
+		_ = peer.Close() // response/side-effect completion becomes unknown
+	}()
+	owner.Action, owner.DebugMethod = "debug_action", "evaluate"
+	owner.DebugFrameID, owner.DebugExpression = 1000, "couldMutate()"
+	resp := s.debugAction(context.Background(), owner)
+	if resp.OK || resp.ErrorCode != "debug_action_uncertain" {
+		t.Fatalf("lost evaluate acknowledgement was accepted: %+v", resp)
+	}
+	if !<-gotWire {
+		t.Fatal("did not actually transmit the potentially side-effecting evaluate request")
+	}
+	e.dap.mu.Lock()
+	if !e.dap.uncertain {
+		t.Fatal("unknown post-send evaluation did not remain permanently uncertain")
+	}
+	e.dap.mu.Unlock()
+	e.mu.Lock()
+	e.exited, e.cleanupErr = true, nil
+	e.mu.Unlock()
+	owner.Action = "debug_status"
+	final := statusBody(t, s.debugAction(context.Background(), owner))
+	if final["state"] != "uncertain" || final["cleanup_verified"] != true {
+		t.Fatalf("verified OS cleanup incorrectly cleared unknown evaluate outcome: %v", final)
+	}
+}
+
+func TestDAPConcurrentVerifiedStopAndStatusDoNotDoubleRetire(t *testing.T) {
+	s, owner, peer := completedDAPSession(t, "terminated", nil)
+	stop := owner
+	stop.Action = "debug_stop"
+	results := make(chan Response, 3)
+	go func() { results <- s.debugAction(context.Background(), stop) }()
+	go func() { results <- s.debugAction(context.Background(), stop) }()
+	go func() { results <- s.debugAction(context.Background(), owner) }()
+	okStops := 0
+	for i := 0; i < 3; i++ {
+		select {
+		case resp := <-results:
+			if resp.OK && resp.Status == "cleanup_confirmed_adapter_already_exited" {
+				okStops++
+			} else if !resp.OK && resp.ErrorCode == "debug_session_not_found" {
+				// A simultaneous status/stop after retirement is expected.
+			} else if resp.OK && (resp.Status == "terminated" || resp.Status == "failed") {
+				// Status won the action lock before stop, and is still valid.
+			} else {
+				t.Fatalf("inconsistent concurrent stop/status: %+v", resp)
+			}
+		case <-time.After(2 * time.Second):
+			t.Fatal("concurrent status and stop deadlocked")
+		}
+	}
+	if okStops != 1 {
+		t.Fatalf("duplicate or missing retirement: successful_stops=%d", okStops)
+	}
+	_ = peer.SetReadDeadline(time.Now().Add(35 * time.Millisecond))
+	var unexpected [1]byte
+	if n, err := peer.Read(unexpected[:]); n != 0 || (!isReadTimeout(err) && !errors.Is(err, io.EOF)) {
+		t.Fatalf("post-exit DAP packet was sent: n=%d err=%v", n, err)
 	}
 }
