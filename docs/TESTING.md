@@ -346,6 +346,18 @@ recover exact repository/worktree
 
 A gated real-engine acceptance (`AST_GREP_ACCEPTANCE_BIN`) runs the same production wrapper against an explicitly supplied ast-grep binary. The #62 candidate evidence exercised both the minimum-supported 0.40.5 contract and 0.45.3 with release-asset SHA-256 verification before execution. A separate rewrite-plan evaluation proves ast-grep can calculate a replacement while the source checksum remains unchanged; the first-class tool exposes no automatic apply path. Managed installation is intentionally not performed merely to satisfy a read-only search call.
 
+### Direct MCP / real gopls semantic acceptance
+
+The opt-in `TestDirectMCPGoSemanticClientAcceptance` verifies the actual **public** bearer-authenticated MCP Streamable HTTP path, its private Unix Executor transport, worker-only Landlock file inspection, root-owned trusted gopls binary and response presentation. The source-built Agent/Executor and workspace are disposable test fixtures; **no installed Agent or Executor service is upgraded or restarted**. A local accepted-host command is:
+
+```bash
+ASA_MCP_GOPLS_ACCEPTANCE=1 go test -count=1 -timeout=5m -v ./internal/mcp -run '^TestDirectMCPGoSemanticClientAcceptance$'
+```
+
+This requires non-root Linux, working Landlock, a Go toolchain on the worker's standard safe PATH and an operator-provided trusted `/usr/local/bin/gopls`. Standard unit tests intentionally skip the optional real-language-server test. The `lsp_changed` CI job provisions **version-pinned gopls v0.23.0** in the disposable GitHub-hosted runner's root-owned production-like path and explicitly **fails if the public-client proof is skipped**. It preserves the existing private executor real-gopls proof too.
+
+The complete consumer scenario covers a real 53,153-byte Go document; `code_definition`, `code_references`, `code_symbols` and `code_diagnostics`; SDK-visible typed structured responses and bounded complete small text fallbacks; reconnecting a fresh MCP session; worker-derived cross-file target versions before and after a separate version-pinned workspace edit; stale source rejection; changed-source diagnostics; and refusal of out-of-workspace source paths. It logs a sample elapsed duration and source SHA-256, **not** installed-server CPU/RSS/wire-size metrics. This is a direct Go MCP SDK *source-build* acceptance, not proof of native ChatGPT UI model visibility, installed-current-main readiness, arbitrary-size LSP, root-to-worker privilege separation or Stable publication. The installed/client/restart/resource delivery gates remain owned by #56 and #59.
+
 ### Repository environment/toolchain discovery
 
 `internal/executor/environment_test.go` validates the lightweight #64 discovery/reuse boundary against real temporary Git repositories. Coverage includes fresh-repository recovery from tracked manifests, compatible/incompatible worker-cache toolchain reuse, native language and package-manager declarations, package scripts without execution, mise/devenv/Dev Container/Dagger detection without automatic provisioning, explicit multi-mechanism/package-manager selection state, conflicting exact pins, untracked declaration durability warnings, workspace path-escape/symlink rejection, and bounded tool-version output. `internal/mcp/server_test.go` also keeps the public tool read-only, idempotent, local-only and bound to an explicit repository path with a typed output schema.

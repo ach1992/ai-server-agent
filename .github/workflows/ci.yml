@@ -150,6 +150,29 @@ jobs:
           grep -Fq 'real diagnostics on invalid source:' "$log"
           grep -Fq 'neverDeclaredSymbol' "$log"
           echo 'REAL_GOPLS_EXACT_TREE_SEMANTIC_PROOF_PASS'
+          # The public client must exercise the same production trust path,
+          # not a test-only gopls override. This changes ONLY the disposable
+          # GitHub-hosted runner; it does not install anything on an Agent host.
+          sudo install -m 0755 -o root -g root "$gopls_bin" /usr/local/bin/gopls
+          ci_go="$(command -v go)"
+          if [ "$ci_go" != "/usr/local/bin/go" ]; then
+            go_shim="$(mktemp)"
+            printf '#!/bin/sh\nexec "%s" "$@"\n' "$ci_go" > "$go_shim"
+            sudo install -m 0755 -o root -g root "$go_shim" /usr/local/bin/go
+            rm -f -- "$go_shim"
+          fi
+          test -x /usr/local/bin/go
+          test -x /usr/local/bin/gopls
+          : > "$log"
+          ASA_MCP_GOPLS_ACCEPTANCE=1 go test -v ./internal/mcp -run '^TestDirectMCPGoSemanticClientAcceptance$' -count=1 2>&1 | tee "$log"
+          grep -Fq '=== RUN   TestDirectMCPGoSemanticClientAcceptance' "$log"
+          grep -Fq -- '--- PASS: TestDirectMCPGoSemanticClientAcceptance' "$log"
+          if grep -Fq -- '--- SKIP: TestDirectMCPGoSemanticClientAcceptance' "$log"; then
+            echo 'Direct real-gopls MCP acceptance was skipped' >&2
+            exit 1
+          fi
+          grep -Fq 'DIRECT_REAL_GOPLS_PASS' "$log"
+          echo 'REAL_GOPLS_DIRECT_MCP_CLIENT_PROOF_PASS'
       - name: Build static binary
         if: ${{ needs.change-scope.outputs.go_changed != 'false' || needs.change-scope.outputs.root_trust_security_changed != 'false' }}
         run: CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
