@@ -48,9 +48,61 @@ CF_COMMIT_DNS_FINGERPRINT=""
 CF_COMMIT_ORIGIN_FINGERPRINT=""
 CF_COMMIT_SSL_FINGERPRINT=""
 
+ui_width(){
+  local width="${COLUMNS:-}"
+  if ! [[ "$width" =~ ^[0-9]+$ ]]; then width=""; fi
+  if [ -z "$width" ] && command -v tput >/dev/null 2>&1 && [ -t 1 ]; then
+    width="$(tput cols 2>/dev/null || true)"
+  fi
+  [[ "$width" =~ ^[0-9]+$ ]] || width=96
+  [ "$width" -lt 60 ] && width=60
+  [ "$width" -gt 100 ] && width=100
+  printf '%s\n' "$width"
+}
+
+ui_wrap(){
+  local indent="$1" text="$2" width="${3:-}" line word
+  local -a words=()
+  [ -n "$width" ] || width="$(ui_width)"
+  read -r -a words <<<"$text"
+  line="$indent"
+  if [ "${#words[@]}" -eq 0 ]; then
+    printf '%s\n' "$indent"
+    return 0
+  fi
+  for word in "${words[@]}"; do
+    if [ "${#line}" -gt "${#indent}" ] && [ $((${#line} + 1 + ${#word})) -gt "$width" ]; then
+      printf '%s\n' "$line"
+      line="$indent$word"
+    elif [ "${#line}" -eq "${#indent}" ]; then
+      line+="$word"
+    else
+      line+=" $word"
+    fi
+  done
+  printf '%s\n' "$line"
+}
+
 log(){ printf '[ai-server-agent] %s\n' "$*"; }
-warn(){ printf '[ai-server-agent] WARNING: %s\n' "$*" >&2; }
-die(){ printf '[ai-server-agent] ERROR: %s\n' "$*" >&2; exit 1; }
+warn(){
+  if [ -t 2 ]; then
+    printf '\n%s%sWARNING%s\n' "${YELLOW:-}" "${BOLD:-}" "${RESET:-}" >&2
+    ui_wrap '  ' "$*" >&2
+    printf '\n' >&2
+  else
+    printf '[ai-server-agent] WARNING: %s\n' "$*" >&2
+  fi
+}
+die(){
+  if [ -t 2 ]; then
+    printf '\n%s%sERROR%s\n' "${RED:-}" "${BOLD:-}" "${RESET:-}" >&2
+    ui_wrap '  ' "$*" >&2
+    printf '\n' >&2
+  else
+    printf '[ai-server-agent] ERROR: %s\n' "$*" >&2
+  fi
+  exit 1
+}
 need_root(){ [ "$(id -u)" -eq 0 ] || die "Run as root (for example: sudo ai-server-agent-manage)."; }
 need_cmd(){ command -v "$1" >/dev/null 2>&1 || die "$1 is required. Run the installer/update repair path first."; }
 
@@ -235,7 +287,9 @@ runtime_show(){
   if [ -n "$(runtime_pending_backup)" ]; then
     warn "A previous runtime change left protected rollback state. Inspect it and reconcile the installed config/services before new changes."
   fi
-  printf 'Configured settings (effective only after a verified Agent+Executor restart):\n'
+  printf '%sRuntime settings%s\n' "$BOLD" "$RESET"
+  printf '  Current values are shown as key=value.\n'
+  printf '  Changes apply only after a verified Agent + Executor restart.\n\n'
   "$RUNTIME_BINARY" -config "$CONFIG_FILE" runtime-settings
 }
 runtime_menu(){
@@ -410,9 +464,19 @@ credential_restart_and_wait(){
 credential_status(){
   need_cmd jq
   validate_credential_store_file
-  printf '%sMCP credentials%s\n' "$BOLD" "$RESET"
-  jq -r '.credentials[] | "  \(.principal.name): id=\(.principal.id) class=\(.principal.class) state=\(if .enabled then "active" else "revoked" end) created=\(.created_at)\(if (.rotated_at // "") != "" then " rotated="+.rotated_at else "" end)\(if (.revoked_at // "") != "" then " revoked="+.revoked_at else "" end)"' "$CREDENTIAL_STORE"
-  printf '  Stored secrets: verifier digests only; existing bearer plaintext is not re-displayable.\n'
+  printf '%sMCP credentials%s\n\n' "$BOLD" "$RESET"
+  jq -r '.credentials[] |
+    ([
+      "  \(.principal.name)",
+      "    ID:      \(.principal.id)",
+      "    Class:   \(.principal.class)",
+      "    State:   \(if .enabled then "active" else "revoked" end)",
+      "    Created: \(.created_at)"
+    ]
+    + (if (.rotated_at // "") != "" then ["    Rotated: \(.rotated_at)"] else [] end)
+    + (if (.revoked_at // "") != "" then ["    Revoked: \(.revoked_at)"] else [] end)
+    + [""]) | .[]' "$CREDENTIAL_STORE"
+  ui_wrap '  ' 'Stored secrets: verifier digests only; existing bearer plaintext is not re-displayable.'
 }
 
 credential_issue(){ (
@@ -463,8 +527,8 @@ credential_issue(){ (
   fi
   rm -f "$backup"
   rm -f -- "$AUTH_HEADER_FILE" "$CONFIG_DIR/mcp.token"
-  printf '%sCredential cutover verified.%s The previous credential for %s is no longer accepted by the active store.\n' "$GREEN" "$RESET" "$name"
-  printf '%sThis newly issued bearer is shown only now. Do not copy it into chat, logs, tickets, screenshots, shell history, or Git.%s\n' "$YELLOW" "$RESET"
+  log "Credential cutover verified. The previous credential for $name is no longer accepted by the active store."
+  warn "This newly issued bearer is shown only now. Do not copy it into chat, logs, tickets, screenshots, shell history, or Git."
   printf 'Authorization: Bearer %s\n' "$token" >/dev/tty
   token=""
 ) }
@@ -516,7 +580,7 @@ credential_menu(){
       3) confirm "Revoke direct/default now?" no && credential_revoke direct-default; pause ;;
       4) confirm "Revoke mcp-gateway now?" no && credential_revoke mcp-gateway; pause ;;
       0) return ;;
-      *) echo "Invalid choice."; pause ;;
+      *) warn "Invalid choice."; pause ;;
     esac
   done
 }
@@ -535,7 +599,8 @@ chatgpt_setup(){
     printf 'MCP URL: %s%s%s\n\n' "$BOLD" "$endpoint" "$RESET"
     printf 'In ChatGPT Business on web:\n'
     printf '  1. Open ChatGPT Plugins and use the current Add custom MCP server flow.\n'
-    printf '  2. If this flow is unavailable, check workspace permissions or the current official client instructions; legacy Apps controls may differ.\n'
+    printf '  2. If this flow is unavailable, check workspace permissions or the current official\n'
+    printf '     client instructions; legacy Apps controls may differ.\n'
     printf '  3. Enter the MCP URL above, and configure bearer authentication in the trusted connection UI.\n'
     printf '  4. Use a current direct/default Authorization value only when the client requests it.\n'
     printf '  5. Refresh/discover tools, then test agent_environment and run_command.\n\n'
@@ -1998,7 +2063,7 @@ connection_menu(){
       2) configure_local; pause; return ;;
       3) configure_manual_tls; pause; return ;;
       0) return ;;
-      *) echo "Invalid choice."; pause ;;
+      *) warn "Invalid choice."; pause ;;
     esac
   done
 }
@@ -2053,7 +2118,7 @@ menu(){
       10) credential_menu ;;
       11) runtime_menu ;;
       0) return ;;
-      *) echo "Invalid choice."; pause ;;
+      *) warn "Invalid choice."; pause ;;
     esac
   done
 }

@@ -45,8 +45,21 @@ restart_and_verify_local(){
   [ ! -e "$TMP/force_all_restarts_fail" ] && [ "$(jq -r '.runtime.http_idle_timeout_seconds // 90' "$CONFIG_FILE")" != 999 ]
 }
 default="$(runtime_show)"
+grep -Fq 'Runtime settings' <<<"$default" || fail 'runtime settings heading missing'
 grep -Fq 'http_idle_timeout_seconds=90 seconds' <<<"$default" || fail 'legacy default is wrong'
 grep -Fq 'text_fallback_bytes=32768 bytes' <<<"$default" || fail 'text fallback default is wrong'
+grep -Fq '  Default : 90 seconds' <<<"$default" || fail 'default value is not visually separated'
+grep -Fq '  Range   : 10..3600 seconds' <<<"$default" || fail 'supported range is not visually separated'
+grep -Fq '  Applies : Agent + Executor restart required' <<<"$default" || fail 'restart requirement is not explicit'
+grep -Fq '  Purpose : Idle HTTP keep-alive timeout;' <<<"$default" || fail 'setting purpose is not clearly labeled'
+if grep -Fq '(default=' <<<"$default"; then fail 'legacy dense single-line metadata still rendered'; fi
+if awk 'length($0) > 100 { bad=1 } END { exit bad ? 0 : 1 }' <<<"$default"; then
+  fail 'runtime-show contains overlong terminal lines'
+fi
+wrapped="$(ui_wrap '  ' 'This is a deliberately long operator-facing message that must wrap with a stable indent instead of becoming an unreadable terminal-width sentence.' 48)"
+if awk 'length($0) > 48 { bad=1 } END { exit bad ? 0 : 1 }' <<<"$wrapped"; then
+  fail 'shared UI wrapper exceeded its requested width'
+fi
 runtime_apply set http_idle_timeout_seconds 300 >/dev/null
 [ "$(jq -r '.runtime.http_idle_timeout_seconds' "$CONFIG_FILE")" = 300 ] || fail 'set was not persisted'
 [ "$(jq -r '.bearer_token_file' "$CONFIG_FILE")" = /tmp/nonexistent-test-token ] || fail 'unrelated config was changed'

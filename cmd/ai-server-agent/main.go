@@ -67,12 +67,53 @@ func main() {
 		if err := json.Unmarshal(encoded, &values); err != nil {
 			fatal(err.Error())
 		}
-		for _, spec := range config.RuntimeSettingSpecs() {
-			fmt.Printf("%s=%d %s (default=%d, range=%d..%d, restart=agent+executor) - %s\n", spec.Key, values[spec.Key], spec.Unit, spec.Default, spec.Minimum, spec.Maximum, spec.Description)
+		for i, spec := range config.RuntimeSettingSpecs() {
+			if i > 0 {
+				fmt.Println()
+			}
+			printRuntimeSetting(spec, values[spec.Key])
 		}
 	default:
 		fatal("unknown command")
 	}
+}
+
+const runtimeSettingsOutputWidth = 96
+
+func printRuntimeSetting(spec config.RuntimeSettingSpec, value int) {
+	// Keep the first line backward-compatible for simple operator greps while
+	// moving explanatory metadata onto short, visually grouped lines.
+	fmt.Printf("%s=%d %s\n", spec.Key, value, spec.Unit)
+	fmt.Printf("  Default : %d %s\n", spec.Default, spec.Unit)
+	fmt.Printf("  Range   : %d..%d %s\n", spec.Minimum, spec.Maximum, spec.Unit)
+	fmt.Println("  Applies : Agent + Executor restart required")
+	printWrappedField("  Purpose : ", spec.Description, runtimeSettingsOutputWidth)
+}
+
+func printWrappedField(prefix, text string, width int) {
+	words := strings.Fields(text)
+	if len(words) == 0 {
+		fmt.Println(prefix)
+		return
+	}
+	if width <= len(prefix) {
+		width = len(prefix) + 1
+	}
+	continuation := strings.Repeat(" ", len(prefix))
+	line := prefix
+	for _, word := range words {
+		separator := ""
+		if len(line) > len(prefix) {
+			separator = " "
+		}
+		if len(line) > len(prefix) && len(line)+len(separator)+len(word) > width {
+			fmt.Println(line)
+			line = continuation + word
+			continue
+		}
+		line += separator + word
+	}
+	fmt.Println(line)
 }
 
 func fatal(s string) {
