@@ -429,10 +429,10 @@ is the **sole detailed implementation and acceptance contract**. The
 existing released Stable descriptions above still describe shipped behavior.
 
 One Agent/Executor and shared systemd/toolchains/Playwright installation serve
-multiple different projects. Each project has one sequentially succeeded
-Master; GitHub remains source/code/approval/review/CI truth. The Agent is only
-a bounded runtime execution/discovery plane, not a project database or
-Master-election service.
+multiple different projects. Different projects may have concurrent
+Masters, but each individual project has only one active Master at a time;
+successor chats recover from GitHub. The Agent is a bounded runtime
+execution/discovery plane, not a project database or Master-election service.
 
 | Planned minimal behavior | Reused boundary |
 | --- | --- |
@@ -453,8 +453,9 @@ A successor chat recovers the owning Issue/PR from GitHub, verifies exact
 remote/HEAD/dirty worktree, reads the bounded runtime snapshot and connects
 only to a valid same-owner session before starting new side effects.
 Terminal lifetime is still bounded to one hour. Unpushed work, expired PTYs
-and lost-host Browser sessions cannot be reconstructed automatically. Reuse the existing Go executor, session
-broker and Playwright runner; **no replacement platform, extra daemon, new
+and lost-host Browser sessions cannot be reconstructed automatically.
+Reuse the existing Go executor, session broker and Playwright runner;
+**no replacement platform, extra daemon, new
 queue/database, generic port broker, duplicate Browser or historical
 compatibility matrix**.
 

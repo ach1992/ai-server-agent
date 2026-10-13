@@ -422,9 +422,10 @@ The authoritative acceptance cases are maintained only in
 After source implementation, validate on an **authorized clean disposable
 Agent host** (hDE01 only after verifying it can be freshly provisioned):
 two Git worktrees plus a valid non-Git workdir; correct worker CWD,
-shared private worker HOME/XDG across Command/Job/PTY and root/workspace
-mismatch rejection;
-lost-chat new-job and same-principal terminal discovery; material start
+shared private worker HOME/XDG across Command/Job/Terminal/LSP/DAP and
+root/workspace mismatch rejection;
+lost-chat new-job and same-principal terminal discovery via passive
+read-only `runtime_list` (no cleanup or cross-principal leaks); material start
 idempotency and unknown crash status; independently bounded task/service
 slots (with service labels) on the same systemd engine; protected
 uninstall/purge; Browser shared/isolated storage and its **existing
