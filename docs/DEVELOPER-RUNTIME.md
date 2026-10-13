@@ -436,10 +436,10 @@ Master-election service.
 
 | Planned minimal behavior | Reused boundary |
 | --- | --- |
-| Workspace-aware commands | Optional canonical existing worker CWD on `run_command` and `start_job`; retain safe default CWD/HOME and existing Git identity tools; reject worker-only `workspace` on root jobs rather than silently ignoring it. |
-| Recoverable Job records | One small protected record **for every new job**, even without caller `operation_id`; retain principal, CWD, kind, bounded status, a short required service label (optional for task) and new-baseline material idempotency. Unknown completion is not automatically replayed. |
-| `runtime_list` | One bounded read-only snapshot for **task/service records and same-principal recoverable Terminal handles**; workspace/kind filters, honest unknown/truncation; no new scheduler, registry or pagination initially. |
-| Task versus Service | Use the **same existing `ai-job-*` systemd runner**, record/claim/log/stop path and lifecycle lock, with independently bounded admission and shared resource/disk safeguards. Transient services need not restart on host reboot. |
+| Workspace-aware commands | Optional canonical existing worker CWD on `run_command` and `start_job`; retain safe default CWD/HOME; non-Git directories are valid, and Git identity is separately checked only for Git-backed work; reject worker-only `workspace` on root jobs. |
+| Recoverable Job records | One small protected record **for every new job**, even without caller `operation_id`; retain principal, CWD, kind, bounded status, a short required service label (optional for task) and new-baseline material idempotency; callers sharing a principal choose distinct project/task operation IDs. Unknown completion is not automatically replayed. |
+| `runtime_list` | One bounded read-only snapshot for **task/service records and same-principal recoverable Terminal handles**; workspace/kind filters, active-first bounded results and honest unknown/truncation; no mutating reconciliation or raw systemd command descriptions in inventory. |
+| Task versus Service | Use the **same existing `ai-job-*` systemd runner**, record/claim/log/stop path and lifecycle lock, with independently bounded admission and shared resource/disk safeguards. Services run in foreground; launch acknowledgement is not application readiness. Transient services need not restart on host reboot. |
 | Isolated Browser state | Shared-profile default and one Browser admission remain. Opt-in temporary private cookies/storage with the **same pinned engine**; preserve the shared profile and verify cleanup. Use **existing `browser_status`** for readiness/busy rather than duplicating it in `runtime_list`. |
 
 Workspace selection is operational correctness, **not** a filesystem sandbox
@@ -452,8 +452,8 @@ server-side data.
 A successor chat recovers the owning Issue/PR from GitHub, verifies exact
 remote/HEAD/dirty worktree, reads the bounded runtime snapshot and connects
 only to a valid same-owner session before starting new side effects.
-Unpushed work, expired PTYs and lost-host browser sessions cannot be
-reconstructed automatically. Reuse the existing Go executor, session
+Terminal lifetime is still bounded to one hour. Unpushed work, expired PTYs
+and lost-host Browser sessions cannot be reconstructed automatically. Reuse the existing Go executor, session
 broker and Playwright runner; **no replacement platform, extra daemon, new
 queue/database, generic port broker, duplicate Browser or historical
 compatibility matrix**.

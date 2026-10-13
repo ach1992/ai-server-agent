@@ -421,7 +421,8 @@ The authoritative acceptance cases are maintained only in
 [Issue #137](https://github.com/ach1992/ai-server-agent/issues/137).
 After source implementation, validate on an **authorized clean disposable
 Agent host** (hDE01 only after verifying it can be freshly provisioned):
-two Git worktrees; correct worker CWD and root/workspace mismatch rejection;
+two Git worktrees plus a valid non-Git workdir; correct worker CWD and
+root/workspace mismatch rejection;
 lost-chat new-job and same-principal terminal discovery; material start
 idempotency and unknown crash status; independently bounded task/service
 slots (with service labels) on the same systemd engine; protected
@@ -432,5 +433,5 @@ full GitHub code/build/test/push/recovery acceptance separate.
 **Do not create historical upgrade/migration test fixtures** for previous
 Agent installations, claims, profiles, tool schemas or old client state.
 Observe exact candidate/installed identity, cross-project safety and
-resource footprint. Critical security/data-loss regressions block
-acceptance independently of the informal ~90% routine scenario target.
+resource footprint. The ~90% goal guides simple high-value scope, **not**
+permission to skip required acceptance items; security/data-loss defects block.
