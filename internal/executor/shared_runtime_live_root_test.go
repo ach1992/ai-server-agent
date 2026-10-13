@@ -2,6 +2,8 @@ package executor
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"fmt"
 	"net"
 	"os"
@@ -66,6 +68,11 @@ func TestSharedRuntimeRealIsolatedSystemd(t *testing.T) {
 		if err := os.Mkdir(dir.path, dir.mode); err != nil {
 			t.Fatal(err)
 		}
+		// Root test runners can have umask 0077. Restore each intended
+		// traversal mode explicitly so aiworker can reach job files.
+		if err := os.Chmod(dir.path, dir.mode); err != nil {
+			t.Fatal(err)
+		}
 		if dir.worker {
 			if err := os.Chown(dir.path, uid, gid); err != nil {
 				t.Fatal(err)
@@ -86,6 +93,15 @@ func TestSharedRuntimeRealIsolatedSystemd(t *testing.T) {
 	token := "asa137-only-isolated-test-executor-token"
 	tokenPath := filepath.Join(base, "executor.token")
 	if err := os.WriteFile(tokenPath, []byte(token), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// Production executors fail closed without a provisioned audit key.
+	// Use a fresh test-only key, never credentials from the installed Agent.
+	auditKey := make([]byte, 32)
+	if _, err := rand.Read(auditKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(base, "audit-fingerprint.key"), []byte("v1:"+hex.EncodeToString(auditKey)+"\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
 	cfg := config.Default()
