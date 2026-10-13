@@ -1742,7 +1742,9 @@ acquire_cloudflare_mcp_bearer(){
   local supplied="" token="" fd="${AI_SERVER_AGENT_MCP_AUTH_FD:-}"
   if [ -n "$fd" ]; then
     [ "$fd" = 3 ] || die "Invalid MCP bearer handoff descriptor; only descriptor 3 is supported."
-    if ! IFS= read -r -u 3 supplied; then
+    # Bash read returns nonzero at EOF even when it received a valid final
+    # token without a newline. Validate those bytes normally; reject empty FD.
+    if ! IFS= read -r -u 3 supplied && [ -z "$supplied" ]; then
       exec 3<&-
       die "Could not read the one-use MCP bearer from the installer handoff descriptor."
     fi
@@ -1758,6 +1760,7 @@ acquire_cloudflare_mcp_bearer(){
   supplied=""
   [[ "$token" =~ ^[0-9a-f]{64}$ ]] || die "Invalid MCP bearer format. Use the active 64-character hexadecimal token, without putting it into shell history."
   verify_mcp_token_local "$token" || die "MCP bearer verification failed against the local Agent. No Cloudflare resources have been changed. Use credential-rotate direct-default if the original token is unavailable."
+  log "Named MCP bearer verified against the local Agent; Cloudflare resources not yet modified."
   CF_MCP_AUTH_TOKEN="$token"
   token=""
 }

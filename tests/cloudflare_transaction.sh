@@ -27,6 +27,17 @@ verify_mcp_token_local(){ [ "$1" = "$TEST_MCP_BEARER" ]; }
   [ "$CF_MCP_AUTH_TOKEN" = "$TEST_MCP_BEARER" ]
   [ ! -e "$AUTH_HEADER_FILE" ]
 ) 3<<<"$TEST_MCP_BEARER"
+# A secret store can provide the exact 64 token bytes followed by EOF, without
+# a newline. This is a valid one-use descriptor framing, not missing input.
+(
+  AI_SERVER_AGENT_MCP_AUTH_FD=3
+  acquire_cloudflare_mcp_bearer
+  [ "$CF_MCP_AUTH_TOKEN" = "$TEST_MCP_BEARER" ]
+  [ ! -e /proc/self/fd/3 ]
+) 3< <(printf '%s' "$TEST_MCP_BEARER")
+if ( AI_SERVER_AGENT_MCP_AUTH_FD=3; acquire_cloudflare_mcp_bearer ) 3</dev/null >/dev/null 2>&1; then
+  echo 'empty bearer descriptor was accepted' >&2; exit 1
+fi
 if ( AI_SERVER_AGENT_MCP_AUTH_FD=3; acquire_cloudflare_mcp_bearer ) 3<<<invalid >/dev/null 2>&1; then
   echo 'malformed bearer was accepted' >&2; exit 1
 fi
