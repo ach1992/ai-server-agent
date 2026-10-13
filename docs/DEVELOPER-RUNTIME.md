@@ -419,6 +419,74 @@ install Agent
 
 Uncommitted local work is not durable project truth. The workflow should create coherent commits/pushes often enough that useful work is recoverable without forcing noisy commits after every edit.
 
+### Planned shared-host multi-project runtime recovery (Issue #137; NOT SHIPPED)
+
+**Status / ownership:** The Owner accepted the lean architectural *direction* and requested this
+documentation/Issue reconciliation; **final outcome sign-off is still required before runtime
+implementation, integration, release or installation**. The authoritative active scope,
+behavioral acceptance and decision gate live in [Issue #137](https://github.com/ach1992/ai-server-agent/issues/137).
+Nothing in this subsection describes an already callable MCP feature. Confirm the real
+installed tool catalog and release identity before using any future capability.
+
+The additional product goal is **reliable sequential chat/Master handoff while different
+projects' Masters safely share one dedicated development host**. Exactly one Master
+owns a given project outcome at a time; a new chat succeeds that project's prior Master.
+Workers, jobs, terminals, Browser sessions and other projects may remain active across
+handoffs. GitHub remains authoritative for the outcome, code, PRs, review, CI and release.
+The Agent remains a **runtime observation and execution plane**, never a second project
+manager or multi-Master election service.
+
+Share the host, one Agent/executor, native toolchains and caches, systemd, and the pinned
+Playwright/Chromium installation by default. Isolate only mutable context where worthwhile:
+
+| Planned primitive | Minimum boundary / behavior | Explicit non-goal |
+| --- | --- | --- |
+| Workspace-aware worker execution | Optional canonical existing worktree/directory for `run_command` and `start_job`; old CWD/HOME stays unchanged when omitted; identify repo/branch through existing Git tools | A per-workspace OS ACL, new Git wrapper or automatic per-project HOME/cache |
+| Recoverable runtime inventory | One bounded on-demand `runtime_list` (name provisional): task/service status from existing job state/systemd; same-principal reconnectable terminal metadata from existing protected records; sanitized Browser busy/lease summary | A scheduler, process registry, heartbeat daemon or automatic terminal/Browser takeover |
+| Durable job attribution/idempotency | Trusted canonical workspace, principal, job kind, non-secret task hint and truthful status for new jobs; compare workdir/kind in material retry identity, preserve old claims | Guessing legacy owners, storing command bodies or adding a task database |
+| Intentional long-running services | `task` versus `service` on the **same** existing systemd job/log/status/stop/claim substrate; separate bounded admission, explicit status/stop and total memory/CPU pressure safety | Unlimited background process slots, separate service daemon, assumed reboot autostart or automatic legacy migration |
+| Opt-in Browser state isolation | `shared` default; `isolated` temporary cookies/storage/profile with the same pinned engine and global exclusive browser admission | Parallel browser throughput, duplicated Browser installations, cross-principal session control or isolation of the tested application's database |
+
+**Authorization and compatibility are not implied by path labels.** The bearer-authenticated
+Agent control plane is still one privileged trust domain; several projects can use the same
+`direct-default` principal. A workspace filter is a usability/attribution mechanism, not a
+tenant boundary. Terminal/Browser owner checks remain principal/workspace bound; inventory
+must not disclose their cross-principal handles. Historical running jobs without trusted
+attribution remain visibly unknown and are neither stopped nor reassigned automatically.
+Root-shell and root-file privileges are unchanged. Legacy tool inputs and claims continue
+to work with their documented defaults; new material conflicts must fail closed.
+
+The **cold successor path** is: recover Issue/PR/authority/HEAD from GitHub -> discover
+canonical Git remote and exact current worktree/dirty state -> inspect bounded runtime
+inventory for that worktree -> safely continue or reconcile unknown tasks and same-principal
+terminal sessions -> run in explicit workspace -> commit/push verified changes and record
+only non-obvious remaining decisions in the owning Issue. A server lost before push cannot
+recreate uncommitted changes. Browser sessions should be treated as short-lived runtime
+evidence, not universally portable chat state.
+
+The separate task/service capacity is **not free RAM**. Admission must fail with clear
+status under CPU/memory/disk limits; in particular the four owner-unverified legacy jobs
+on the primary host are preserved and count conservatively until separately authorized
+reconciliation. Dev-server port conflicts are diagnosed, not solved with a new port broker.
+Agent-owned disposable artifacts may be cleaned only with proven identity and safety.
+
+Stage work under #137 as: (A) explicit workspace plus bounded runtime/terminal discovery;
+(B) shared systemd engine with task/service lifecycle and resource guards; (C) isolated
+Browser state. Keep the one-at-a-time Browser admission initially. Test on disposable
+hDE01 with two projects, same/different principals, lost handles, ambiguous launch,
+legacy state, capacity pressure, process restart and Browser storage separation. Count
+representative routine scenarios before implementation and aim for >=90% useful coverage
+as a design evaluation, **not** a reliability SLA; a safety/data-loss failure is blocking
+independently of the count. #59 retains the complete development/commit/push/recovery gate;
+#60/#66 own terminal substrate, #63 Browser base behavior, #118 configured-vs-effective
+resource settings, and #99 actual client-visible typed data/attachment acceptance.
+
+Do not add new databases, queues, resident schedulers, runtime registries, duplicate
+Chrome installations, project-only user accounts or provider-specific assumptions.
+Update README, this document's shipped status and `docs/ARCHITECTURE.md` only as
+capabilities are implemented, validated and actually delivered; in particular existing
+`v0.1.12` descriptions must remain truthful.
+
 ## 17. Implementation sequencing
 
 Phase A documentation is integrated and the owner execution-boundary gate was accepted on 2026-10-07. Runtime work now follows the current dependency contracts and value-first sequencing in Issue #52 rather than waiting on another Phase A gate.
@@ -465,5 +533,6 @@ Do not promote capabilities merely because they are powerful, modern, or availab
 - #65 — optional evidence-triggered Incus;
 - #66 — internal stateful-session substrate;
 - #99 — AI-facing bounded data delivery and typed-artifact acceptance.
+- #137 — planned shared-host multi-project runtime recovery, controlled long-running services, and Browser state isolation (Owner final gate pending).
 
 After this document is integrated, use it for stable architecture and use Issues for active work/dependencies. Do not reconstruct these decisions from chat history.

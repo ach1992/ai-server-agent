@@ -414,3 +414,37 @@ Exercise as applicable:
 Measure representative workflow latency, remote/tool-call count, idle/active process footprint and recovery friction where useful. Do not introduce caches, daemons, alternate backends or infrastructure solely from theoretical performance concerns; escalate only from measured or repeatedly observed need.
 
 Optional code-server, managed Incus, Ctags, alternate terminal backends and generic provider/tool-manager frameworks are not Core-v1 acceptance requirements unless their contracts are explicitly reactivated from new evidence.
+
+## 12. Shared-host / cross-chat recovery target (Issue #137 — NOT YET SHIPPED)
+
+The [Issue #137](https://github.com/ach1992/ai-server-agent/issues/137) extension is
+**design-only pending final Owner sign-off**. Its scenarios are not claimed as passing
+on the currently installed Stable and do not replace any checked/unchecked Issue #59
+evidence. This section describes the future validation boundary, not a new required
+CI dependency before #137 is authorized.
+
+When implementation is approved, use existing isolated test-server/systemd and
+repository-worktree fixtures instead of touching primary shared-host jobs:
+
+- Two independent project remotes/worktrees, wrong/stale CWD, same versus different
+  authenticated principal, and exact Git identity; workspace labels do not grant ACLs.
+- New job/service metadata and bounded discovery across a lost chat ID; old unattributed
+  artifacts remain unknown, non-secret and not automatically controllable/reclassified.
+- Same-key/same-material idempotent replay; changed canonical workspace/kind rejection;
+  pre-existing default-CWD fingerprint/claim compatibility and crash/unknown outcome.
+- Four task slots versus intentional bounded service slots and an overall host-resource
+  admission guard; low-memory/disk/failure diagnostics; no migration of live legacy units.
+- Terminal handle recovery for the same principal/workspace/epoch only and refusal of
+  cross-principal control, including Executor restart / expired backend.
+- Browser shared default versus isolated temporary cookies/localStorage, no leakage or
+  shared-profile corruption after close, forced crash and expiry; one global Browser
+  admission and bounded cleanup; no implied app-backend data separation.
+- GitHub-backed cold Master/clean-server rebuild and actual source/edit/test/push
+  acceptance under Issue #59; unpushed local data loss remains an explicit limit.
+
+Use one small predeclared representative scenario matrix (approximately 10–12 cases)
+with observed pass/fail and resource/tool-call costs. Aim for >=90% routine coverage
+as a design goal, never a promised SLA; any security, data-loss or project-interference
+failure blocks acceptance. Record exact source SHA, installed binary, connector/tool
+availability and test host. Follow exact-candidate CI, required independent review
+and Owner-gated integration/release after implementation is actually authorized.
