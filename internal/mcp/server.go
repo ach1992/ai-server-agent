@@ -88,17 +88,25 @@ type Server struct {
 
 type EmptyInput struct{}
 type RunInput struct {
-	Command string `json:"command" jsonschema:"Bash command to execute"`
+	Command   string `json:"command" jsonschema:"Bash command to execute"`
+	Workspace string `json:"workspace,omitempty" jsonschema:"Optional existing worker directory within configured workspace root; defaults to workspace root; not a filesystem sandbox"`
 }
 type RootRunInput struct {
 	Command  string `json:"command" jsonschema:"Bash command to execute as root"`
 	Approval bool   `json:"approval,omitempty" jsonschema:"Set true only after explicit user approval when a previous call returned approval_required"`
 }
 type StartJobInput struct {
+	Workspace   string `json:"workspace,omitempty" jsonschema:"Optional existing worker CWD under workspace root; forbidden for root jobs"`
+	Kind        string `json:"kind,omitempty" jsonschema:"task (default) or service; service is a long-running foreground process"`
+	Label       string `json:"label,omitempty" jsonschema:"Short non-secret purpose; required for service, optional for task"`
 	Command     string `json:"command" jsonschema:"Command to run as a persistent background job"`
 	Root        bool   `json:"root,omitempty" jsonschema:"Run as root instead of aiworker"`
 	Approval    bool   `json:"approval,omitempty" jsonschema:"Set true only after explicit user approval when a previous call returned approval_required"`
 	OperationID string `json:"operation_id,omitempty" jsonschema:"Optional caller-generated idempotency key; retry the same material request with the same key after a lost response"`
+}
+type RuntimeListInput struct {
+	Workspace string `json:"workspace,omitempty" jsonschema:"Optional exact canonical existing worker directory filter"`
+	Kind      string `json:"kind,omitempty" jsonschema:"Optional task, service or terminal filter"`
 }
 type JobInput struct {
 	JobID string `json:"job_id" jsonschema:"Persistent job id"`
@@ -315,10 +323,10 @@ func (s *Server) registerTools() {
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "run_command",
-		Description: "Run an arbitrary Bash command as the unprivileged aiworker user in the dedicated workspace. Commands can change files or external systems; MCP hints do not replace server-side permissions. Use for normal project work, builds, tests, Git, package managers inside the project, and diagnostics that do not require host privileges. " + s.commandTimeoutDescription(),
+		Description: "Run Bash as the unprivileged aiworker in an optional existing canonical workspace CWD (default: configured workspace root; Git not required). Shared Agent-private HOME/XDG is independent of CWD. Commands can change files or external systems; MCP hints do not replace server-side permissions. Use for normal project work, builds, tests, Git, package managers inside the project, and diagnostics that do not require host privileges. " + s.commandTimeoutDescription(),
 		Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input RunInput) (*mcpsdk.CallToolResult, executor.Response, error) {
-		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "run", Command: input.Command, TimeoutMS: s.commandTimeoutMS()})
+		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "run", Command: input.Command, Workspace: input.Workspace, TimeoutMS: s.commandTimeoutMS()})
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
@@ -339,15 +347,24 @@ func (s *Server) registerTools() {
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "start_job",
-		Description: "Start a persistent background Bash command using a transient systemd unit. Use for installs, large builds/test suites, migrations, crawls, and other work expected to run long or produce substantial output. The job and bounded retained output continue if ChatGPT disconnects or the MCP service restarts. Supply operation_id when a lost response may be retried so the same material request returns the same job handle instead of starting a duplicate.",
+		Description: "Start a persistent task (default) or explicitly labeled foreground service using the existing transient ai-job systemd runner, optional existing worker workspace CWD, and shared private HOME/XDG. Root jobs reject worker workspaces. Acceptance proves launch, not application readiness. The job and bounded retained output continue if ChatGPT disconnects or the MCP service restarts. Use a stable unique per-project/task operation_id to reconcile lost responses; changed command/authority/CWD/kind/label conflicts and must not be retried under a new key without reconciliation.",
 		Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input StartJobInput) (*mcpsdk.CallToolResult, executor.Response, error) {
-		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "start_job", Command: input.Command, Root: input.Root, Approval: input.Approval, OperationID: input.OperationID})
+		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "start_job", Command: input.Command, Workspace: input.Workspace, Kind: input.Kind, Label: input.Label, Root: input.Root, Approval: input.Approval, OperationID: input.OperationID})
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
 		return s.responseResult(resp)
 	})
+
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "runtime_list", Description: "Passive bounded read-only snapshot of this principal's task/service and eligible worker Terminal identities. Filter by exact existing workspace or task/service/terminal kind. Includes explicit truncated and unknown states; does not reconcile or change any runtime state. Use browser_status separately for Browser availability.", Annotations: annotations(true, false, true, false)},
+		func(ctx context.Context, req *mcpsdk.CallToolRequest, input RuntimeListInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+			resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "runtime_list", Workspace: input.Workspace, Kind: input.Kind})
+			if err != nil {
+				return executorTransportErrorResult(err)
+			}
+			return s.responseResult(resp)
+		})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "job_status", Description: "Read and reconcile the current state and exit status of a persistent job. Reconciliation may persist an unknown-completion marker and retire a stale protected command handoff after the transient unit is gone.", Annotations: annotations(false, false, true, false)},
 		func(ctx context.Context, req *mcpsdk.CallToolRequest, input JobInput) (*mcpsdk.CallToolResult, executor.Response, error) {

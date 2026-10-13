@@ -151,6 +151,8 @@ func (s *Server) dispatch(req Request) Response {
 		return s.run(req)
 	case "start_job":
 		return s.startJob(req)
+	case "runtime_list":
+		return s.runtimeList(req)
 	case "job_status":
 		return s.jobStatus(req)
 	case "job_output":
@@ -273,6 +275,15 @@ func (s *Server) openJobFile(path string) (*os.File, error) {
 	return f, nil
 }
 
+// workerCommandWorkspace selects a canonical existing CWD. No Git discovery
+// or filesystem isolation is implied by the selected working directory.
+func (s *Server) workerCommandWorkspace(input string) (string, error) {
+	if input == "" {
+		return s.workspaceRoot()
+	}
+	return s.workspacePath(input, true)
+}
+
 func (s *Server) startJob(req Request) Response {
 	return s.startJobBounded(req)
 }
@@ -356,7 +367,17 @@ func (s *Server) jobStop(req Request) (resp Response) {
 		applyOutputResult(&resp, result)
 		return resp
 	}
-	resp = Response{OK: true, JobID: id, Status: "stop_requested"}
+	active, verifyErr := jobUnitActive(id)
+	if verifyErr != nil || active {
+		reason := "job unit remains active after stop"
+		if verifyErr != nil {
+			reason = "job termination cannot be verified: " + verifyErr.Error()
+		}
+		resp = unknownJobLaunchResponse(id, reason)
+		applyOutputResult(&resp, result)
+		return resp
+	}
+	resp = Response{OK: true, JobID: id, Status: "stopped"}
 	applyOutputResult(&resp, result)
 	return resp
 }
