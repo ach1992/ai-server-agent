@@ -421,60 +421,62 @@ Uncommitted local work is not durable project truth. The workflow should create 
 
 ### Shared-host recovery and opt-in runtime separation (Issue #137; PLANNED)
 
-**Status:** The Owner approved this design direction. The behaviors below are **not
-implemented or shipped**; [Issue #137](https://github.com/ach1992/ai-server-agent/issues/137)
-owns executable scope and acceptance, and the installed MCP tool catalog determines
-what is actually available.
+**Owner decision:** Design accepted for an intentional **fresh-install baseline**;
+reversible source development is authorized. These MCP behaviors are **not
+implemented or shipped**. [Issue #137](https://github.com/ach1992/ai-server-agent/issues/137)
+owns the complete current contract and acceptance. Existing v0.1.12 release
+documentation describes the **previous** shipped installation, not this design.
 
-Multiple different projects may have Masters using one development host concurrently;
-each project has one active Master at a time, succeeded sequentially by a new chat.
-The Agent is the execution and runtime-observation plane; Git/GitHub owns project
-truth, decisions, PRs, CI and releases. Recover the exact Git identity/worktree
-before inspecting runtime state or resuming side-effecting work.
+One Agent/executor serves multiple projects on a shared Linux development host.
+Each project has one active Master, succeeded by new chats; Git/GitHub remains
+authoritative for source, decisions, PR/CI/review/release. Share the system,
+toolchains, systemd and pinned Browser installation; separate mutable context
+only when it prevents recurring project interference.
 
-Share the Agent/executor, systemd, installed toolchains and one pinned Browser
-engine by default; separate only mutable context that risks cross-project errors:
-
-| Planned capability | Smallest useful contract |
+| Planned feature | Lean contract |
 | --- | --- |
-| Explicit workspace | Optional **existing canonical worker CWD** on `run_command` and `start_job`, resolved under the configured workspace root; preserve old CWD and HOME when omitted. Root command semantics and Unix authority remain unchanged. |
-| Bounded runtime discovery | One **on-demand, read-only** inventory of task/service handles, owner-scoped reconnectable terminal records and sanitized global Browser busy state. Exact filters and deterministic bounded output; no new registry or universal process API. |
-| Recoverable job identity | Versioned bounded records of canonical workspace, authenticated principal, task/service kind and non-secret task hint; material `operation_id` includes workspace/kind. Old claims remain replay-compatible and unattributed history stays unknown. |
-| Task vs service lifetime | Reuse **the same existing systemd job runner**, logs, claims, stop/status and lifecycle lock. Finite task slots stay separate from **bounded** long-running service admission, with total host-resource and retention accounting. Do not infer boot persistence from transient units. |
-| Browser state isolation | Keep `shared` as default; opt-in ephemeral `isolated` cookies/storage for managed Browser tools, using the same pinned installation and one exclusive Browser admission. The separately operated Playwright CLI retains its own lifecycle. |
+| Exact execution CWD | Optional validated existing worker `workspace` for `run_command` / `start_job`; default CWD/HOME remain documented and root semantics unchanged. Git remote/branch/HEAD/worktree identity comes from the existing Git tools. |
+| Bounded `runtime_list` | On-demand, read-only Job/Service metadata from the protected job store and systemd, same-principal discoverable Terminal records and sanitized Browser busy status; bounded results and honest unknown state. No scheduler, polling registry or generic process manager. |
+| Job attribution | **Every new job** has a durable small record (even without caller `operation_id`): canonical workspace, authenticated principal, task/service kind, optional non-secret hint, status/retention. New idempotency material includes command, authority, canonical CWD and kind. |
+| Task/service separation | **One existing systemd job runner and unit namespace** for tasks and intentional long-running services. Distinct bounded admission quotas, consistent active-unit/resource accounting, lifecycle stop/uninstall protection; transient services do not promise boot persistence. |
+| Browser isolation | Shared persistent profile is the default; opt-in ephemeral isolated cookies/storage/profile for managed Browser paths using the same installed engine and existing exclusive admission. The separate CLI keeps its documented independent process/session model. |
 
-A workspace filter is **not** a project security boundary: authenticated worker
-commands may share one Unix identity and multiple projects may use the same MCP
-principal. The listing must not reveal other principals' PTY/Browser handles;
-unknown old jobs are never auto-reclassified, stopped or cleaned. Workspace
-validation reduces wrong-directory execution but does not sandbox arbitrary
-shell commands or eliminate all filesystem races. Isolated Browser storage does
-not isolate a target website's database or credentials on external services.
+**No historical runtime migration burden:** The new baseline is validated on a
+**clean disposable Agent install**; we do not add claim-format translators,
+legacy-fingerprint shims, old Profile/Session importers or forced compatibility
+with earlier installed runtime state. Reuse the existing well-designed Go
+executor and protocols instead of rewriting the product. Preserve state
+recovery and safe update/reinstall behavior **from the new baseline onward**;
+avoid introducing a new migration problem in the next release.
 
-The four unidentified legacy `ai-job-*` units on the shared host must remain
-untouched until their owners permit an explicit, tested transition. A service
-being outside the task *counter* does not reduce its CPU/RAM demand or by itself
-free any **legacy** task slot. A later authorized migration must preserve
-service identity, endpoint/data and rollback. Shared resource pressure should
-fail clearly, not create unlimited service execution or an automatic scheduler.
+An eventual reset of an *existing* server is operationally separate from this
+source design: stop/delete only precisely authorized Agent-owned state and
+proved-safe active units. The primary shared host has four currently
+owner-unverified `ai-job-*` services which must remain untouched until
+ownership and effects are confirmed. Existing `purge` safety preserves
+`/srv/ai-workspace` and the `aiworker` account; do not discard other
+Masters' unpushed work or unrelated host services. New task/service capacities
+do not create additional physical CPU or RAM.
 
-The sequential cold-Master path is: GitHub Issue/PR/authority -> verified remote,
-branch, HEAD and worktree -> bounded relevant runtime inventory -> reconnect
-only same-principal recoverable sessions or reconcile unknown jobs -> work in
-explicit CWD -> commit/push useful source. Unpushed work, expired sessions and
-lost-server Browser state have no guaranteed recovery.
+A workspace label is **not** a Unix sandbox or per-project ACL; multiple
+projects may share the same bearer principal and `aiworker` UID. A terminal
+handle is visible/reconnectable only for its authenticated owner/exact
+workspace; Browser inventory must not expose other principals' handles.
+Isolated Browser state does not isolate a target website's database or provide
+concurrent Browser throughput.
 
-#137 sequences (A) workspace plus job/terminal discovery, (B) task/service
-admission and resource guard, and (C) Browser profile isolation. The same
-Issue owns the exceptional-case and compatibility evidence. #59 continues to
-own independent full GitHub end-to-end/host-recovery acceptance; #60/#66 own
-the terminal substrate, #63 the existing Browser, #118 existing operator
-settings and #99 file/attachment delivery.
+Cold recovery: read controlling GitHub Issue/PR -> verify remote, HEAD, branch
+and worktree -> list relevant live runtime -> reconnect eligible same-principal
+Terminal or reconcile unknown Job -> continue in explicit CWD -> commit/push
+recoverable progress. Unpushed work, expired terminals and lost-server Browser
+state cannot be recovered universally.
 
-Do not add a project database, background monitor, distributed Master lock,
-new scheduler/queue, per-project duplicate runtimes or generic port broker.
-Keep `README.md` and `docs/ARCHITECTURE.md` truthful about **shipped** behavior
-until the corresponding source is integrated, released and installed.
+Sequence one coherent Slice A (workdir + inventory), then Slice B (bounded
+service lifecycle), then Slice C (Browser isolation); #137 owns their actual
+acceptance. #59 independently owns the full GitHub commit/push/fresh-host
+loop; #60/#66 PTY/session safety, #63 Browser base behavior, #118 operator
+settings, and #99 model-visible attachments. No new database, monitor,
+distributed lease, service engine, port broker or provider-specific core.
 
 ## 17. Implementation sequencing
 
@@ -522,6 +524,6 @@ Do not promote capabilities merely because they are powerful, modern, or availab
 - #65 — optional evidence-triggered Incus;
 - #66 — internal stateful-session substrate;
 - #99 — AI-facing bounded data delivery and typed-artifact acceptance.
-- #137 — Owner-approved, not-yet-shipped shared-host recovery, controlled services and opt-in Browser-state isolation.
+- #137 — Owner-approved fresh-install baseline for shared-host recovery, service lifecycle and opt-in Browser-state isolation (not shipped).
 
 After this document is integrated, use it for stable architecture and use Issues for active work/dependencies. Do not reconstruct these decisions from chat history.

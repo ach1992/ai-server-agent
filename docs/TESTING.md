@@ -417,23 +417,25 @@ Optional code-server, managed Incus, Ctags, alternate terminal backends and gene
 
 ### Shared-host cold-Master execution (planned Issue #137)
 
-The [Owner-approved **design** in #137](https://github.com/ach1992/ai-server-agent/issues/137)
-is **not yet implemented**; none of these are Stable/installed-pass claims.
-Its controlling acceptance checklist lives in #137, and existing #59 program
-acceptance remains independent.
+The [Owner-approved clean-install target (#137)](https://github.com/ach1992/ai-server-agent/issues/137)
+is **not implemented or delivered**. The detailed checklist lives only in
+#137; existing #59 acceptance remains independent.
 
-On the authorized disposable test host, cover two verified Git worktrees and
-different/same MCP principals; explicit CWD/legacy default compatibility;
-bounded job/terminal discovery after lost handles; truthful unknown outcomes,
-idempotency conflict across CWD/kind and retained-claim migration; four task
-slots plus bounded service slots/overall resource and disk reserve; safe
-uninstall/purge and simulated legacy owner-unknown units; Executor restart,
-TTL and Browser shared-versus-isolated storage/crash cleanup.
+Test on a **clean, disposable Agent installation**: two different project
+worktrees and verified Git identities; same/different MCP principals;
+explicit CWD and wrong-path rejection; bounded runtime discovery including
+jobs without caller-provided `operation_id`; lost-handle same-owner Terminal
+reconnect; material idempotency conflicts; truthful unknown crash state;
+separate task/service quotas backed by the same systemd unit enumeration,
+total resource/disk bounds and safe uninstall/purge; shared versus isolated
+Browser state and failure/TTL cleanup. Record exact source/install/client
+identity, resource/tool-call costs and every actual result.
 
-Prove read-only listings have no secret output, no unrelated PTY/Browser
-handles, no unintended state mutations or false workspace/tenant ACL claim.
-Verify any authorized old-service handoff separately before touching a live
-unit. Record exact candidate/client/installed identities, scenario outcomes,
-host-resource deltas and compatibility/rollback. A critical security or
-data-loss regression blocks acceptance irrespective of the informal ~90%
-routine-scenario coverage goal.
+**Do not spend tests or production code on upgrading old claim/job/profile
+formats or migrating prior Agent installations.** The new baseline must
+recover its **own** state on executor/client restart and permit reliable
+future updates. Destructive resets on an occupied shared host are separately
+authorized; never touch owner-unknown active jobs or unrelated work just to
+create a fresh baseline. Any data-loss, security or cross-project
+interference failure blocks acceptance independently of the informal 90%
+routine-scenario design goal.
