@@ -414,3 +414,26 @@ Exercise as applicable:
 Measure representative workflow latency, remote/tool-call count, idle/active process footprint and recovery friction where useful. Do not introduce caches, daemons, alternate backends or infrastructure solely from theoretical performance concerns; escalate only from measured or repeatedly observed need.
 
 Optional code-server, managed Incus, Ctags, alternate terminal backends and generic provider/tool-manager frameworks are not Core-v1 acceptance requirements unless their contracts are explicitly reactivated from new evidence.
+
+### Shared-host first-install recovery target (Issue #137; NOT SHIPPED)
+
+The authoritative acceptance cases are maintained only in
+[Issue #137](https://github.com/ach1992/ai-server-agent/issues/137).
+After source implementation, validate on an **authorized clean disposable
+Agent host** (hDE01 only after verifying it can be freshly provisioned):
+two Git worktrees plus a valid non-Git workdir; correct worker CWD,
+shared private worker HOME/XDG across Command/Job/Terminal/LSP/DAP and
+root/workspace mismatch rejection;
+lost-chat new-job and same-principal terminal discovery via passive
+read-only `runtime_list` (no cleanup or cross-principal leaks); material start
+idempotency and unknown crash status; independently bounded task/service
+slots (with service labels) on the same systemd engine; protected
+uninstall/purge; Browser shared/isolated storage and its **existing
+`browser_status`**, and bounded error/resource behavior. Keep #59's
+full GitHub code/build/test/push/recovery acceptance separate.
+
+**Do not create historical upgrade/migration test fixtures** for previous
+Agent installations, claims, profiles, tool schemas or old client state.
+Observe exact candidate/installed identity, cross-project safety and
+resource footprint. The ~90% goal guides simple high-value scope, **not**
+permission to skip required acceptance items; security/data-loss defects block.
