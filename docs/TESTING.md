@@ -421,8 +421,9 @@ The authoritative acceptance cases are maintained only in
 [Issue #137](https://github.com/ach1992/ai-server-agent/issues/137).
 After source implementation, validate on an **authorized clean disposable
 Agent host** (hDE01 only after verifying it can be freshly provisioned):
-two Git worktrees plus a valid non-Git workdir; correct worker CWD and
-root/workspace mismatch rejection;
+two Git worktrees plus a valid non-Git workdir; correct worker CWD,
+shared private worker HOME/XDG across Command/Job/PTY and root/workspace
+mismatch rejection;
 lost-chat new-job and same-principal terminal discovery; material start
 idempotency and unknown crash status; independently bounded task/service
 slots (with service labels) on the same systemd engine; protected
