@@ -419,64 +419,53 @@ install Agent
 
 Uncommitted local work is not durable project truth. The workflow should create coherent commits/pushes often enough that useful work is recoverable without forcing noisy commits after every edit.
 
-### Shared-host recovery and opt-in runtime separation (Issue #137; PLANNED)
+### Shared-host development and cold-chat recovery (Issue #137; PLANNED)
 
-**Owner decision:** Design accepted for an intentional **fresh-install baseline**;
-reversible source development is authorized. These MCP behaviors are **not
-implemented or shipped**. [Issue #137](https://github.com/ach1992/ai-server-agent/issues/137)
-owns the complete current contract and acceptance. Existing v0.1.12 release
-documentation describes the **previous** shipped installation, not this design.
+**Owner-approved first-install baseline, NOT SHIPPED:** Develop the new
+Agent as if first installed on a fresh Linux host. Do **not** add migration
+logic/tests for historical Agent versions, claims, profiles or runtime state,
+or promise future cross-version migration. [Issue #137](https://github.com/ach1992/ai-server-agent/issues/137)
+is the **sole detailed implementation and acceptance contract**. The
+existing released Stable descriptions above still describe shipped behavior.
 
-One Agent/executor serves multiple projects on a shared Linux development host.
-Each project has one active Master, succeeded by new chats; Git/GitHub remains
-authoritative for source, decisions, PR/CI/review/release. Share the system,
-toolchains, systemd and pinned Browser installation; separate mutable context
-only when it prevents recurring project interference.
+One Agent/Executor and shared systemd/toolchains/Playwright installation serve
+multiple different projects. Each project has one sequentially succeeded
+Master; GitHub remains source/code/approval/review/CI truth. The Agent is only
+a bounded runtime execution/discovery plane, not a project database or
+Master-election service.
 
-| Planned feature | Lean contract |
+| Planned minimal behavior | Reused boundary |
 | --- | --- |
-| Exact execution CWD | Optional validated existing worker `workspace` for `run_command` / `start_job`; default CWD/HOME remain documented and root semantics unchanged. Git remote/branch/HEAD/worktree identity comes from the existing Git tools. |
-| Bounded `runtime_list` | On-demand, read-only Job/Service metadata from the protected job store and systemd, same-principal discoverable Terminal records and sanitized Browser busy status; bounded results and honest unknown state. No scheduler, polling registry or generic process manager. |
-| Job attribution | **Every new job** has a durable small record (even without caller `operation_id`): canonical workspace, authenticated principal, task/service kind, optional non-secret hint, status/retention. New idempotency material includes command, authority, canonical CWD and kind. |
-| Task/service separation | **One existing systemd job runner and unit namespace** for tasks and intentional long-running services. Distinct bounded admission quotas, consistent active-unit/resource accounting, lifecycle stop/uninstall protection; transient services do not promise boot persistence. |
-| Browser isolation | Shared persistent profile is the default; opt-in ephemeral isolated cookies/storage/profile for managed Browser paths using the same installed engine and existing exclusive admission. The separate CLI keeps its documented independent process/session model. |
+| Workspace-aware commands | Optional canonical existing worker CWD on `run_command` and `start_job`; retain safe default CWD/HOME and existing Git identity tools; reject worker-only `workspace` on root jobs rather than silently ignoring it. |
+| Recoverable Job records | One small protected record **for every new job**, even without caller `operation_id`; retain principal, CWD, kind, bounded status, a short required service label (optional for task) and new-baseline material idempotency. Unknown completion is not automatically replayed. |
+| `runtime_list` | One bounded read-only snapshot for **task/service records and same-principal recoverable Terminal handles**; workspace/kind filters, honest unknown/truncation; no new scheduler, registry or pagination initially. |
+| Task versus Service | Use the **same existing `ai-job-*` systemd runner**, record/claim/log/stop path and lifecycle lock, with independently bounded admission and shared resource/disk safeguards. Transient services need not restart on host reboot. |
+| Isolated Browser state | Shared-profile default and one Browser admission remain. Opt-in temporary private cookies/storage with the **same pinned engine**; preserve the shared profile and verify cleanup. Use **existing `browser_status`** for readiness/busy rather than duplicating it in `runtime_list`. |
 
-**No historical runtime migration burden:** The new baseline is validated on a
-**clean disposable Agent install**; we do not add claim-format translators,
-legacy-fingerprint shims, old Profile/Session importers or forced compatibility
-with earlier installed runtime state. Reuse the existing well-designed Go
-executor and protocols instead of rewriting the product. Preserve state
-recovery and safe update/reinstall behavior **from the new baseline onward**;
-avoid introducing a new migration problem in the next release.
+Workspace selection is operational correctness, **not** a filesystem sandbox
+or tenant ACL. Multiple Masters may use the same trusted principal/worker
+UID. Discover only handles permitted by the existing principal/workspace
+boundary; do not expand root-terminal discovery beyond explicit privileged
+authorization. Isolated browser storage does not isolate the tested app's
+server-side data.
 
-An eventual reset of an *existing* server is operationally separate from this
-source design: stop/delete only precisely authorized Agent-owned state and
-proved-safe active units. The primary shared host has four currently
-owner-unverified `ai-job-*` services which must remain untouched until
-ownership and effects are confirmed. Existing `purge` safety preserves
-`/srv/ai-workspace` and the `aiworker` account; do not discard other
-Masters' unpushed work or unrelated host services. New task/service capacities
-do not create additional physical CPU or RAM.
+A successor chat recovers the owning Issue/PR from GitHub, verifies exact
+remote/HEAD/dirty worktree, reads the bounded runtime snapshot and connects
+only to a valid same-owner session before starting new side effects.
+Unpushed work, expired PTYs and lost-host browser sessions cannot be
+reconstructed automatically. Reuse the existing Go executor, session
+broker and Playwright runner; **no replacement platform, extra daemon, new
+queue/database, generic port broker, duplicate Browser or historical
+compatibility matrix**.
 
-A workspace label is **not** a Unix sandbox or per-project ACL; multiple
-projects may share the same bearer principal and `aiworker` UID. A terminal
-handle is visible/reconnectable only for its authenticated owner/exact
-workspace; Browser inventory must not expose other principals' handles.
-Isolated Browser state does not isolate a target website's database or provide
-concurrent Browser throughput.
-
-Cold recovery: read controlling GitHub Issue/PR -> verify remote, HEAD, branch
-and worktree -> list relevant live runtime -> reconnect eligible same-principal
-Terminal or reconcile unknown Job -> continue in explicit CWD -> commit/push
-recoverable progress. Unpushed work, expired terminals and lost-server Browser
-state cannot be recovered universally.
-
-Sequence one coherent Slice A (workdir + inventory), then Slice B (bounded
-service lifecycle), then Slice C (Browser isolation); #137 owns their actual
-acceptance. #59 independently owns the full GitHub commit/push/fresh-host
-loop; #60/#66 PTY/session safety, #63 Browser base behavior, #118 operator
-settings, and #99 model-visible attachments. No new database, monitor,
-distributed lease, service engine, port broker or provider-specific core.
+Fresh installation is a **product target**, not authorization to erase
+an occupied development host. Preserve unrelated live jobs/workspaces;
+test on an authorized disposable clean host. New-baseline process-restart
+recovery and finite resource lifetime remain necessary, but upgrading an
+earlier installed Agent is **not** a completion gate. Acceptance and staged
+execution remain in #137; existing program end-to-end acceptance remains
+under #59, Terminal substrate under #60/#66, Browser base under #63,
+runtime settings under #118, and typed attachment rendering under #99.
 
 ## 17. Implementation sequencing
 
@@ -524,6 +513,6 @@ Do not promote capabilities merely because they are powerful, modern, or availab
 - #65 — optional evidence-triggered Incus;
 - #66 — internal stateful-session substrate;
 - #99 — AI-facing bounded data delivery and typed-artifact acceptance.
-- #137 — Owner-approved fresh-install baseline for shared-host recovery, service lifecycle and opt-in Browser-state isolation (not shipped).
+- #137 — Owner-approved first-install-only shared-runtime recovery, finite task/service lifecycle and optional Browser-state isolation (not shipped).
 
 After this document is integrated, use it for stable architecture and use Issues for active work/dependencies. Do not reconstruct these decisions from chat history.

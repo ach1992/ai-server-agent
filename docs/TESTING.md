@@ -415,27 +415,22 @@ Measure representative workflow latency, remote/tool-call count, idle/active pro
 
 Optional code-server, managed Incus, Ctags, alternate terminal backends and generic provider/tool-manager frameworks are not Core-v1 acceptance requirements unless their contracts are explicitly reactivated from new evidence.
 
-### Shared-host cold-Master execution (planned Issue #137)
+### Shared-host first-install recovery target (Issue #137; NOT SHIPPED)
 
-The [Owner-approved clean-install target (#137)](https://github.com/ach1992/ai-server-agent/issues/137)
-is **not implemented or delivered**. The detailed checklist lives only in
-#137; existing #59 acceptance remains independent.
+The authoritative acceptance cases are maintained only in
+[Issue #137](https://github.com/ach1992/ai-server-agent/issues/137).
+After source implementation, validate on an **authorized clean disposable
+Agent host** (hDE01 only after verifying it can be freshly provisioned):
+two Git worktrees; correct worker CWD and root/workspace mismatch rejection;
+lost-chat new-job and same-principal terminal discovery; material start
+idempotency and unknown crash status; independently bounded task/service
+slots (with service labels) on the same systemd engine; protected
+uninstall/purge; Browser shared/isolated storage and its **existing
+`browser_status`**, and bounded error/resource behavior. Keep #59's
+full GitHub code/build/test/push/recovery acceptance separate.
 
-Test on a **clean, disposable Agent installation**: two different project
-worktrees and verified Git identities; same/different MCP principals;
-explicit CWD and wrong-path rejection; bounded runtime discovery including
-jobs without caller-provided `operation_id`; lost-handle same-owner Terminal
-reconnect; material idempotency conflicts; truthful unknown crash state;
-separate task/service quotas backed by the same systemd unit enumeration,
-total resource/disk bounds and safe uninstall/purge; shared versus isolated
-Browser state and failure/TTL cleanup. Record exact source/install/client
-identity, resource/tool-call costs and every actual result.
-
-**Do not spend tests or production code on upgrading old claim/job/profile
-formats or migrating prior Agent installations.** The new baseline must
-recover its **own** state on executor/client restart and permit reliable
-future updates. Destructive resets on an occupied shared host are separately
-authorized; never touch owner-unknown active jobs or unrelated work just to
-create a fresh baseline. Any data-loss, security or cross-project
-interference failure blocks acceptance independently of the informal 90%
-routine-scenario design goal.
+**Do not create historical upgrade/migration test fixtures** for previous
+Agent installations, claims, profiles, tool schemas or old client state.
+Observe exact candidate/installed identity, cross-project safety and
+resource footprint. Critical security/data-loss regressions block
+acceptance independently of the informal ~90% routine scenario target.
