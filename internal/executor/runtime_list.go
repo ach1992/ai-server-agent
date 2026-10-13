@@ -96,11 +96,11 @@ func (s *Server) runtimeList(req Request) Response {
 			return jobStateError("runtime_unavailable", err)
 		}
 	} else {
-		files, readErr := os.ReadDir(dir)
+		files, overflow, readErr := readDirBounded(dir, maxPersistentJobClaims+maxFailedJobClaims)
 		if readErr != nil {
 			return jobStateError("runtime_unavailable", readErr)
 		}
-		if len(files) > maxPersistentJobClaims+maxFailedJobClaims {
+		if overflow {
 			response.Truncated = true
 		} else {
 			for _, entry := range files {
@@ -183,10 +183,10 @@ func (s *Server) runtimeList(req Request) Response {
 	if req.Kind == "" || req.Kind == "terminal" {
 		recordsDir := filepath.Join(s.cfg.StateDir, "terminal-sessions")
 		if err := trustedDir(recordsDir); err == nil {
-			entries, readErr := os.ReadDir(recordsDir)
+			entries, overflow, readErr := readDirBounded(recordsDir, maxRuntimeListEntries*4)
 			if readErr != nil {
 				response.Truncated = true
-			} else if len(entries) > maxRuntimeListEntries*4 {
+			} else if overflow {
 				response.Truncated = true
 			} else {
 				for _, entry := range entries {
@@ -296,4 +296,23 @@ func passiveWorkerTerminalSocketPresent(stateDir string, rec terminalRecord) boo
 	}
 	st, ok = info.Sys().(*syscall.Stat_t)
 	return ok && st.Uid == uint32(os.Geteuid())
+}
+
+// Read only one entry beyond the accepted state bound. A root-controlled
+// namespace can still be corrupt; inventory must not allocate an unbounded
+// list of directory names before setting truncated/unknown.
+func readDirBounded(path string, limit int) ([]os.DirEntry, bool, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return nil, false, err
+	}
+	defer f.Close()
+	entries, err := f.ReadDir(limit + 1)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return nil, false, err
+	}
+	if len(entries) > limit {
+		return entries[:limit], true, nil
+	}
+	return entries, false, nil
 }

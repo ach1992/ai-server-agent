@@ -245,3 +245,55 @@ func TestSharedRuntimeServiceQuotaIndependentAndUnknownFailsClosed(t *testing.T)
 		t.Fatalf("unknown active state fabricated reliable capacity: %+v", unknown)
 	}
 }
+
+// A successful systemctl stop is only a request; state must prove that the
+// exact unit is no longer active before advertising terminal completion.
+func TestSharedRuntimeStopRequiresVerifiedUnitTermination(t *testing.T) {
+	s, _, _ := newSharedRuntimeTestServer(t)
+	for _, tc := range []struct {
+		name   string
+		active bool
+	}{
+		{"still_running", true}, {"confirmed_stopped", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			bin := t.TempDir()
+			script := "#!/bin/sh\ncase \"$1\" in\n stop) exit 0 ;;\n list-units) "
+			if tc.active {
+				script += "printf 'ai-job-123.service loaded active running fake\\n' "
+			}
+			script += ";;\n *) exit 67 ;;\nesac\n"
+			if err := os.WriteFile(filepath.Join(bin, "systemctl"), []byte(script), 0755); err != nil {
+				t.Fatal(err)
+			}
+			t.Setenv("PATH", bin+":"+os.Getenv("PATH"))
+			got := s.jobStop(Request{JobID: "123"})
+			if tc.active {
+				if got.OK || got.ErrorCode != "unknown_completion" || got.Status != "unknown" {
+					t.Fatalf("systemctl accepted stop with unit still active: %+v", got)
+				}
+			} else if !got.OK || got.Status != "stopped" {
+				t.Fatalf("stopped unit not positively verified: %+v", got)
+			}
+		})
+	}
+}
+
+func TestSharedRuntimePassiveDirectoryListingIsBounded(t *testing.T) {
+	dir := t.TempDir()
+	for i := 0; i < 6; i++ {
+		if err := os.WriteFile(filepath.Join(dir, fmt.Sprintf("fixture-%d", i)), []byte("x"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	names, overflow, err := readDirBounded(dir, 3)
+	if err != nil || !overflow || len(names) != 3 {
+		t.Fatalf("bounded directory enumeration: len=%d overflow=%t err=%v", len(names), overflow, err)
+	}
+	// Enumeration does not modify any file, even when the directory exceeds
+	// the contract's memory/capacity bound.
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) != 6 {
+		t.Fatalf("inventory mutated entries: %d %v", len(entries), err)
+	}
+}

@@ -357,13 +357,21 @@ func (s *Server) jobStop(req Request) (resp Response) {
 	}()
 
 	out := newBoundedOutputCollector(systemdOutputLimit)
-	cmd := exec.Command("systemctl", "stop", "ai-job-"+id)
+	// systemctl stop may block behind a hung unit. An interrupted stop is
+	// uncertain, never proof that the service has been terminated.
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), 25*time.Second)
+	defer stopCancel()
+	cmd := exec.CommandContext(stopCtx, "systemctl", "stop", "ai-job-"+id)
 	cmd.Stdout = out
 	cmd.Stderr = out
 	er := cmd.Run()
 	result := out.Result()
 	if er != nil {
-		resp = Response{Error: er.Error(), ReasonCode: "job_stop_failed", ErrorCode: "job_stop_failed", ErrorClass: "process", JobID: id}
+		if stopCtx.Err() != nil {
+			resp = unknownJobLaunchResponse(id, "systemd job stop timed out; unit termination has not been verified")
+		} else {
+			resp = Response{Error: er.Error(), ReasonCode: "job_stop_failed", ErrorCode: "job_stop_failed", ErrorClass: "process", JobID: id}
+		}
 		applyOutputResult(&resp, result)
 		return resp
 	}

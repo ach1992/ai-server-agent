@@ -1,19 +1,24 @@
 package executor
 
 import (
+	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 )
 
 // This bounded, read-only PID1 view is shared by admission and discovery.
 // Never return systemctl's unit descriptions: they can include shell text.
 func activeAgentUnitIDs() ([]string, error) {
 	out := newBoundedOutputCollector(systemdOutputLimit)
-	cmd := exec.Command("systemctl", "list-units", "--type=service",
+	// Inventory runs on both admission and passive discovery; never let a
+	// stalled PID1/dbus interaction monopolize either path indefinitely.
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, "systemctl", "list-units", "--type=service",
 		"--state=activating,active,deactivating,reloading",
 		"--no-legend", "--no-pager", "ai-job-*.service")
 	cmd.Stdout, cmd.Stderr = out, out
@@ -65,9 +70,12 @@ func activeAgentJobKindCounts(jobsDir string) (activeKindCounts, error) {
 	if err := trustedDir(dir); err != nil {
 		return counts, err
 	}
-	files, err := os.ReadDir(dir)
+	files, truncated, err := readDirBounded(dir, maxPersistentJobClaims+maxFailedJobClaims)
 	if err != nil {
 		return counts, err
+	}
+	if truncated {
+		return counts, errors.New("persistent job claim namespace exceeds its bound")
 	}
 	claims := make(map[string]jobClaim, len(files))
 	for _, entry := range files {

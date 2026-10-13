@@ -3,6 +3,7 @@ package executor
 import (
 	"context"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"os/user"
@@ -180,6 +181,34 @@ func TestSharedRuntimeRealIsolatedSystemd(t *testing.T) {
 	first := start("service", paths["project-a"], "service-a", "asa137-a-serve")
 	if !first.OK || first.Status != "accepted" || first.JobID == "" {
 		t.Fatalf("service launch: %+v", first)
+	}
+	// A stopped/restarted private executor must rediscover the same transient
+	// systemd service without re-launching the underlying side effect.
+	if err := runner.Process.Signal(os.Interrupt); err != nil {
+		t.Fatal(err)
+	}
+	_ = runner.Wait()
+	runner = exec.Command(binary, "-config", cfgPath, "executor")
+	runner.Stdout, runner.Stderr = os.Stderr, os.Stderr
+	if err := runner.Start(); err != nil {
+		t.Fatal(err)
+	}
+	reconnectDeadline := time.Now().Add(6 * time.Second)
+	for {
+		conn, dialErr := net.DialTimeout("unix", cfg.ExecutorSocket, 100*time.Millisecond)
+		if dialErr == nil {
+			_ = conn.Close()
+			break
+		}
+		if time.Now().After(reconnectDeadline) {
+			t.Fatalf("private executor failed to restart: %v", dialErr)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	afterRestart := call(ownerCtx, Request{Action: "runtime_list", Workspace: paths["project-a"], Kind: "service"})
+	if !afterRestart.OK || len(afterRestart.RuntimeEntries) != 1 ||
+		afterRestart.RuntimeEntries[0].ID != first.JobID || afterRestart.RuntimeEntries[0].Status != "active" {
+		t.Fatalf("service did not survive private executor restart: %+v", afterRestart)
 	}
 	replay := call(ownerCtx, Request{Action: "start_job", Kind: "service", Workspace: paths["project-a"],
 		Label: "service-a", OperationID: "asa137-a-serve", Command: "printf 'READY_service\\n'; printf 'HOME=%s\\n' \"$HOME\"; while true; do sleep 1; done"})
