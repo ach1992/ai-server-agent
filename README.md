@@ -12,7 +12,7 @@ The MCP server provides **concise routing instructions** for the persistent work
 
 ## Platform support
 
-Published immutable Stable [`v0.1.11`](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.11) and the current `main` branch support:
+Published immutable Stable [`v0.1.12`](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.12) and the current `main` branch support:
 
 - **Ubuntu 22.04 or newer**
 - **Debian 11 or newer** (Debian 11 application compatibility is retained, but upstream Debian LTS ended on 2026-08-31; use Debian 12+ for an officially security-maintained base unless you have an ELTS arrangement)
@@ -28,18 +28,18 @@ AI Server Agent does not require nginx, Apache, Caddy, Docker, PHP, a database, 
 
 ## Install the latest stable release
 
-Stable installation starts with a small bootstrap loaded from an **immutable published release tag**, separate from the release `install.sh` asset it authenticates. The current verified trust anchor is the immutable [`v0.1.11` release](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.11), not the mutable `main` branch. GitHub Releases, rather than this page, remain authoritative if a newer version is published.
+Stable installation starts with a small bootstrap loaded from an **immutable published release tag**, separate from the release `install.sh` asset it authenticates. The current verified trust anchor is the immutable [`v0.1.12` release](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.12), not the mutable `main` branch. GitHub Releases, rather than this page, remain authoritative if a newer version is published.
 
 To install the **latest immutable Stable** identified by the GitHub Releases API using that pinned bootstrap:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.11/scripts/install-stable.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.12/scripts/install-stable.sh | bash
 ```
 
-To install **exactly `v0.1.11`** instead of following future latest releases:
+To install **exactly `v0.1.12`** instead of following future latest releases:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.11/scripts/install-stable.sh | bash -s -- v0.1.11
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.12/scripts/install-stable.sh | bash -s -- v0.1.12
 ```
 
 The bootstrap authenticates the release-scoped installer digest **before** privileged execution. The first command resolves GitHub's current latest immutable release; the second requires the named release. On the next release, update the documented bootstrap trust anchor only after its tag is immutable and its bootstrap has been verified.
@@ -505,9 +505,17 @@ Cloudflare, privileged lifecycle and release-provenance changes also have dedica
 
 ### Live acceptance baseline
 
+#### Published `v0.1.12` delivery and validation
+
+[Immutable Stable `v0.1.12`](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.12) is the current published non-draft/non-prerelease release at protected tag/commit `9b06c085c1ff75f3a314215657d3b04f510c9432`. The official [Release workflow #38332527481](https://github.com/ach1992/ai-server-agent/actions/runs/38332527481) completed successfully after exact-main [CI #38332359804](https://github.com/ach1992/ai-server-agent/actions/runs/38332359804) and [Security #38332360238](https://github.com/ach1992/ai-server-agent/actions/runs/38332360238). Publication verified the immutable tag, the authenticated `install.sh`, the `SHA256SUMS` manifest, Linux amd64/arm64 archives and GitHub attestations.
+
+This release fixes the **fresh-install Cloudflare verification regression** in `v0.1.11`: the manager incorrectly read the retired plaintext `/etc/ai-server-agent/mcp.authorization` instead of authenticating with the active verifier-backed named MCP credential. The [independently reviewed fix PR #133](https://github.com/ach1992/ai-server-agent/pull/133) sends the newly issued bearer through one-use FD3 on fresh install, supports newline or EOF-only token framing, checks the active bearer against the local Agent before Cloudflare changes, and preserves public HTTPS health, unauthenticated MCP `401`, authenticated `initialize` and Cloudflare transaction rollback/recovery. High Assurance Security passed a real disposable **installer -> installed manager** credential test, deliberately stopping before live Cloudflare API access.
+
+**Delivery boundary:** the published artifact and source/CI validation are proven; `v0.1.12` is **not yet verified installed on `hDE01` or the older Test Server**. The operator last confirmed `hDE01` healthy on `v0.1.11` in local mode, with no pending local Cloudflare transaction journal. External hostname/DNS/Origin Rules, new connected-client MCP acceptance and native ChatGPT-visible JPEG/ZIP/file handling remain unverified. Preserve installed credentials/state on update, verify the target host identity, reconcile any existing `testserver.ach.li` Cloudflare ownership before cutover, and keep [#59](https://github.com/ach1992/ai-server-agent/issues/59), [#99](https://github.com/ach1992/ai-server-agent/issues/99), [#63](https://github.com/ach1992/ai-server-agent/issues/63) and [#118](https://github.com/ach1992/ai-server-agent/issues/118) open for their distinct acceptance gates.
+
 #### Published `v0.1.11` delivery and validation
 
-[Immutable Stable `v0.1.11`](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.11) is the published non-draft/non-prerelease GitHub latest Stable at exact protected tag/commit `8c85a48d3e8559d0bf16e366f00ddeee6927dc47`. The [official Release workflow #38304046568](https://github.com/ach1992/ai-server-agent/actions/runs/38304046568) completed successfully after exact-main CI and Security validation, including immutable-release and asset attestation verification. The release contains the authenticated `install.sh`, `SHA256SUMS`, and amd64/arm64 archives.
+[Immutable Stable `v0.1.11`](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.11) was published as a non-draft/non-prerelease immutable Stable at exact protected tag/commit `8c85a48d3e8559d0bf16e366f00ddeee6927dc47`. The [official Release workflow #38304046568](https://github.com/ach1992/ai-server-agent/actions/runs/38304046568) completed successfully after exact-main CI and Security validation, including immutable-release and asset attestation verification. The release contains the authenticated `install.sh`, `SHA256SUMS`, and amd64/arm64 archives.
 
 On the authorized disposable Ubuntu 24.04 amd64 Test Server, the *published* `v0.1.11` Stable was installed with the existing verified Stable updater. Both running Agent and Executor process executables match SHA-256 `819aac1ae8888b6ee71275b57f95eec2833c7f6bdbb675610c62e22b5dc46370`, independently matched to the executable extracted from the actual GitHub release archive. Install-state is pinned to `stable/v0.1.11`; service health and identity passed. The protected configuration and MCP credential files were verified byte-identical to their pre-upgrade backups; the retained Browser profile remained present, and the pinned Browser reported `ready=true`.
 
