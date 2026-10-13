@@ -1738,8 +1738,36 @@ save_manual_state(){
   atomic_install_file "$tmp" "$MANAGED_STATE" root "$AGENT_USER" 0640 || { rm -f "$tmp"; return 1; }; rm -f "$tmp"
 }
 
+acquire_cloudflare_mcp_bearer(){
+  local supplied="" token="" fd="${AI_SERVER_AGENT_MCP_AUTH_FD:-}"
+  if [ -n "$fd" ]; then
+    [ "$fd" = 3 ] || die "Invalid MCP bearer handoff descriptor; only descriptor 3 is supported."
+    # Bash read returns nonzero at EOF even when it received a valid final
+    # token without a newline. Validate those bytes normally; reject empty FD.
+    if ! IFS= read -r -u 3 supplied && [ -z "$supplied" ]; then
+      exec 3<&-
+      die "Could not read the one-use MCP bearer from the installer handoff descriptor."
+    fi
+    exec 3<&-
+  else
+    [ -r /dev/tty ] || die "Cloudflare setup requires the current MCP bearer. Run the manager in an interactive terminal or pass the one-use descriptor 3; no bearer plaintext is stored on disk."
+    printf 'Current MCP bearer (input hidden, not stored): ' >/dev/tty
+    IFS= read -r -s supplied </dev/tty || die "Could not read the MCP bearer from the terminal."
+    printf '\n' >/dev/tty
+  fi
+  token="${supplied#Authorization: }"
+  token="${token#Bearer }"
+  supplied=""
+  [[ "$token" =~ ^[0-9a-f]{64}$ ]] || die "Invalid MCP bearer format. Use the active 64-character hexadecimal token, without putting it into shell history."
+  verify_mcp_token_local "$token" || die "MCP bearer verification failed against the local Agent. No Cloudflare resources have been changed. Use credential-rotate direct-default if the original token is unavailable."
+  log "Named MCP bearer verified against the local Agent; Cloudflare resources not yet modified."
+  CF_MCP_AUTH_TOKEN="$token"
+  token=""
+}
+
 verify_public(){
-  local host="$1" auth payload unauth_code auth_code out i ok=1
+  local host="$1" bearer="${2:-}" payload unauth_code auth_code out i ok=1
+  [[ "$bearer" =~ ^[0-9a-f]{64}$ ]] || return 1
   payload='{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"ai-server-agent-manager","version":"1"}}}'
   for i in $(seq 1 20); do
     if curl -fsS --connect-timeout 5 "https://$host/healthz" >/dev/null 2>&1; then ok=0; break; fi
@@ -1748,9 +1776,8 @@ verify_public(){
   [ "$ok" -eq 0 ] || return 1
   unauth_code="$(curl -sS -o /dev/null -w '%{http_code}' -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' --data "$payload" "https://$host/mcp" || true)"
   [ "$unauth_code" = "401" ] || return 1
-  auth="$(<"$AUTH_HEADER_FILE")"; out="$(mktemp)"
-  auth_code="$(printf 'header = "Authorization: %s"\n' "$auth" | curl --config - -sS -o "$out" -w '%{http_code}' -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' --data "$payload" "https://$host/mcp" || true)"
-  unset auth
+  out="$(mktemp)"
+  auth_code="$(printf 'header = "Authorization: Bearer %s"\n' "$bearer" | curl --config - -sS -o "$out" -w '%{http_code}' -X POST -H 'Content-Type: application/json' -H 'Accept: application/json, text/event-stream' --data "$payload" "https://$host/mcp" || true)"
   if [ "$auth_code" = "200" ] && grep -q '"name":"ai-server-agent"' "$out"; then ok=0; else ok=1; fi
   rm -f "$out"
   return "$ok"
@@ -1871,6 +1898,7 @@ configure_cloudflare(){ (
   set -Eeuo pipefail
   acquire_management_lock
   need_cmd jq; need_cmd openssl; need_cmd curl; need_cmd sha256sum
+  CF_MCP_AUTH_TOKEN=""
   old_host=""; old_zone=""; old_dns=""; old_dns_owned=""; old_dns_fingerprint=""; old_origin_ruleset=""; old_origin_rule=""; old_origin_fingerprint=""; old_ssl_ruleset=""; old_ssl_rule=""; old_ssl_fingerprint=""; old_cert=""; old_port=""; previous_zone=""; previous_cert=""
   host=""; port=""; zone_pair=""; zone_id=""; zone_name=""; ip=""; stage=""; cert_id=""; dns_id=""; dns_owned=false; dns_action=""; dns_fingerprint=""
   origin_ruleset_id=""; origin_rule_id=""; origin_action=""; origin_fingerprint=""; ssl_ruleset_id=""; ssl_rule_id=""; ssl_action=""; ssl_fingerprint=""
@@ -1887,6 +1915,9 @@ configure_cloudflare(){ (
   printf '\n'
   ui_wrap '' 'Cloudflare will manage only this MCP hostname: proxied DNS, an origin-port rule, a hostname-scoped strict SSL Configuration Rule, and an Origin CA certificate.'
   ui_wrap '' 'The whole-zone SSL mode will not be changed.'
+  # Validate the active credential before any remote Cloudflare mutation.
+  # Fresh installs hand it over via a one-use inherited fd, never a legacy file.
+  acquire_cloudflare_mcp_bearer
   print_cf_token_guidance "$host"
   load_cf_token
   zone_pair="$(cf_find_zone "$host")"; IFS='|' read -r zone_id zone_name <<<"$zone_pair"; log "Cloudflare zone: $zone_name"
@@ -1906,6 +1937,7 @@ configure_cloudflare(){ (
     fi
     rm -rf "$stage"
     CF_TOKEN=""
+    CF_MCP_AUTH_TOKEN=""
     return "$rc"
   }
   trap cloudflare_transaction_exit EXIT
@@ -1928,7 +1960,8 @@ configure_cloudflare(){ (
   install -o root -g "$AGENT_USER" -m 0644 "$stage/new.crt" "$TLS_DIR/origin.crt"
   write_config public "$port" "$TLS_DIR/origin.crt" "$TLS_DIR/origin.key"
   restart_and_verify_local || die "Agent failed after TLS/public reconfiguration; transaction rollback started."
-  verify_public "$host" || die "Public Cloudflare verification failed; transaction rollback started."
+  verify_public "$host" "$CF_MCP_AUTH_TOKEN" || die "Public Cloudflare verification failed; transaction rollback started."
+  CF_MCP_AUTH_TOKEN=""
 
   cf_set_commit_intent "$host" "$port" "$zone_id" "$zone_name" "$dns_id" "$dns_owned" "$origin_ruleset_id" "$origin_rule_id" "$ssl_ruleset_id" "$ssl_rule_id" "$cert_id" "$dns_fingerprint" "$origin_fingerprint" "$ssl_fingerprint"
   if [ -n "$old_host" ] && [ "$old_host" != "$host" ]; then
@@ -2081,6 +2114,9 @@ first_run(){
   printf '  0) Configure later - keep the healthy local Agent\n\n'
   local choice
   read -r -p 'Choose [1]: ' choice </dev/tty; choice="${choice:-1}"
+  # Do not propagate a fresh install's one-use bearer into non-Cloudflare
+  # setup subprocesses, which never need to inspect the credential.
+  if [ "$choice" != 1 ] && [ "${AI_SERVER_AGENT_MCP_AUTH_FD:-}" = 3 ]; then exec 3<&-; fi
   case "$choice" in
     1) configure_cloudflare ;;
     2) configure_local ;;

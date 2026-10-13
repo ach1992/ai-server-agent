@@ -8,20 +8,76 @@ AGENT_USER=root
 STATE_DIR="$TMP/state"; CONFIG_DIR="$TMP/config"; CONTROL_DIR="$CONFIG_DIR/control"; TLS_DIR="$CONFIG_DIR/tls"; CONFIG_FILE="$CONFIG_DIR/config.json"; MANAGED_STATE="$CONFIG_DIR/managed.json"; CF_TXN_STATE="$CONTROL_DIR/cloudflare-transaction.json"; CF_TXN_BACKUP_DIR="$CONTROL_DIR/cloudflare-transaction-backup"; MANAGEMENT_LOCK="$CONTROL_DIR/management.lock"; MANAGEMENT_LOCK_FD=""; AUTH_HEADER_FILE="$CONFIG_DIR/mcp.authorization"
 mkdir -p "$STATE_DIR" "$CONFIG_DIR" "$CONTROL_DIR" "$TLS_DIR"
 printf '{"listen_address":"127.0.0.1:3210","tls_cert_file":"","tls_key_file":""}\n' > "$CONFIG_FILE"
-printf 'Bearer test\n' > "$AUTH_HEADER_FILE"
+# Current installs retain only verifier digests; the removed legacy header
+# must not be recreated for public Cloudflare validation.
+test ! -e "$AUTH_HEADER_FILE"
+TEST_MCP_BEARER=0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef
 printf '{}\n' > "$MANAGED_STATE"
 need_cmd(){ :; }
 load_cf_token(){ CF_TOKEN=test; }
 cf_find_zone(){ printf 'zone1|example.com\n'; }
 cf_public_ipv4(){ printf '203.0.113.10\n'; }
 restart_and_verify_local(){ return 0; }
+verify_mcp_token_local(){ [ "$1" = "$TEST_MCP_BEARER" ]; }
+# Simulate a fresh install's inherited one-use descriptor. It must be consumed
+# without creating the deleted legacy plaintext Authorization file.
+(
+  AI_SERVER_AGENT_MCP_AUTH_FD=3
+  acquire_cloudflare_mcp_bearer
+  [ "$CF_MCP_AUTH_TOKEN" = "$TEST_MCP_BEARER" ]
+  [ ! -e "$AUTH_HEADER_FILE" ]
+) 3<<<"$TEST_MCP_BEARER"
+# A secret store can provide the exact 64 token bytes followed by EOF, without
+# a newline. This is a valid one-use descriptor framing, not missing input.
+(
+  AI_SERVER_AGENT_MCP_AUTH_FD=3
+  acquire_cloudflare_mcp_bearer
+  [ "$CF_MCP_AUTH_TOKEN" = "$TEST_MCP_BEARER" ]
+  [ ! -e /proc/self/fd/3 ]
+) 3< <(printf '%s' "$TEST_MCP_BEARER")
+if ( AI_SERVER_AGENT_MCP_AUTH_FD=3; acquire_cloudflare_mcp_bearer ) 3</dev/null >/dev/null 2>&1; then
+  echo 'empty bearer descriptor was accepted' >&2; exit 1
+fi
+if ( AI_SERVER_AGENT_MCP_AUTH_FD=3; acquire_cloudflare_mcp_bearer ) 3<<<invalid >/dev/null 2>&1; then
+  echo 'malformed bearer was accepted' >&2; exit 1
+fi
+if ( AI_SERVER_AGENT_MCP_AUTH_FD=3; acquire_cloudflare_mcp_bearer ) 3<<<0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdee >/dev/null 2>&1; then
+  echo 'wrong bearer bypassed local verification' >&2; exit 1
+fi
+# Authenticated PUBLIC initialize is still required; replacing the legacy
+# file must not silently weaken Cloudflare validation to health/401 only.
+(
+  curl(){
+    local previous="" output="" arg hdr
+    case " $* " in
+      *'https://mcp.example.com/healthz'*) return 0 ;;
+      *'https://mcp.example.com/mcp'*) ;;
+      *) return 1 ;;
+    esac
+    if [[ " $* " == *' --config - '* ]]; then
+      IFS= read -r hdr || return 1
+      [ "$hdr" = "header = \"Authorization: Bearer $TEST_MCP_BEARER\"" ] || return 1
+      for arg in "$@"; do
+        if [ "$previous" = '-o' ]; then output="$arg"; break; fi
+        previous="$arg"
+      done
+      [ -n "$output" ] || return 1
+      printf '{\"serverInfo\":{\"name\":\"ai-server-agent\"}}\n' > "$output"
+      printf '200'
+    else
+      printf '401'
+    fi
+  }
+  verify_public mcp.example.com "$TEST_MCP_BEARER"
+  if verify_public mcp.example.com invalid; then echo 'invalid public bearer was accepted' >&2; exit 1; fi
+)
 verify_public(){ return 0; }
 systemctl(){ return 0; }
 confirm(){ return 1; }
 expect_configure_failure(){
   local label="$1" rc
   set +e
-  ( set -Eeuo pipefail; configure_cloudflare >/dev/null 2>&1 )
+  ( set -Eeuo pipefail; AI_SERVER_AGENT_MCP_AUTH_FD=3 configure_cloudflare >/dev/null 2>&1 ) 3<<<"$TEST_MCP_BEARER"
   rc=$?
   set -e
   [ "$rc" -ne 0 ] || { echo "expected $label" >&2; exit 1; }

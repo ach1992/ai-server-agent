@@ -96,6 +96,7 @@ A separate first-run test proves that choosing "Configure later" is a successful
 
 `tests/cloudflare_transaction.sh` exercises production shell functions with a mocked Cloudflare provider. It covers, among other things:
 
+- manager-side fresh-install bearer handoff via one-use fd without the deleted `mcp.authorization` legacy file, acceptance of both newline-terminated and EOF-only bearer framing, empty/wrong credential fail-closed behavior, and authenticated PUBLIC MCP initialize verification;
 - rollback of transaction-created resources;
 - preserved recovery state after incomplete rollback;
 - current-representation fingerprints before destructive cleanup;
@@ -106,6 +107,8 @@ A separate first-run test proves that choosing "Configure later" is a successful
 - marker-based response-lost Rule recovery independent of `ref`, followed by full durable fingerprint verification before deletion;
 - exact-rule cleanup rather than deleting a shared Ruleset container;
 - management-lock exclusion behavior.
+
+`tests/fresh_cloudflare_handoff.sh` runs on the disposable High Assurance Security runner after a clean fixture teardown. It uses the actual production `install.sh` with noninteractive Cloudflare selection and the locally built Agent binary; the newly issued active MCP credential crosses the real installed manager process boundary on FD3, is verified against the live loopback Agent, and never touches the obsolete plaintext Authorization file. The test deliberately withholds the Cloudflare API token file, asserts a successful *pre-provider* credential check and an expected stop at token acquisition, and verifies that no Cloudflare journal/TLS resource was staged and that local Agent and Executor remain healthy. The fixture is purged on exit. This is a production installer/manager behavioral acceptance, **not** a live external Cloudflare API or native ChatGPT client acceptance. The required success marker is emitted only after successful authenticated local MCP verification, so a missing/corrupt FD3 or the original stale-file path fails the test.
 
 `tests/cloudflare_rulesets_pagination.sh` is retained as the historical test filename, but the production contract it now exercises is phase-entrypoint discovery rather than broad Rulesets pagination. It verifies direct zone phase-entrypoint reads for `http_request_origin` and `http_config_settings`, authoritative 404-as-absence handling, provider-error propagation, entrypoint/rule schema validation, malformed successful exact-Ruleset responses, duplicate Rule IDs, and valid exact/empty Ruleset lookups. A malformed or ambiguous provider representation must never become proof of absence.
 

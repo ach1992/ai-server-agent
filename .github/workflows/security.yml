@@ -116,6 +116,10 @@ jobs:
       - name: Cleanup test installation
         if: always()
         run: sudo env AI_SERVER_AGENT_YES=1 bash uninstall.sh --purge || true
+      - name: Real fresh-install Cloudflare named credential FD3 handoff (no provider token)
+        run: |
+          bash -n tests/fresh_cloudflare_handoff.sh
+          bash tests/fresh_cloudflare_handoff.sh
 
   stable-provenance:
     needs: change-scope
