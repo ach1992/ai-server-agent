@@ -90,6 +90,16 @@ func TestSharedRuntimeRealIsolatedSystemd(t *testing.T) {
 		}
 		paths[name] = path
 	}
+	// Two real repositories, plus one intentionally non-Git scratch CWD.
+	for _, name := range []string{"project-a", "project-b"} {
+		cmd := exec.Command("/usr/sbin/runuser", "-u", "aiworker", "--", "/usr/bin/git", "-C", paths[name], "init", "-q")
+		if output, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("initialize private %s repo as worker: %v, %s", name, err, output)
+		}
+	}
+	if _, err := os.Stat(filepath.Join(paths["scratch"], ".git")); !os.IsNotExist(err) {
+		t.Fatal("non-Git scratch fixture unexpectedly contains a repository")
+	}
 	token := "asa137-only-isolated-test-executor-token"
 	tokenPath := filepath.Join(base, "executor.token")
 	if err := os.WriteFile(tokenPath, []byte(token), 0600); err != nil {
@@ -168,6 +178,23 @@ func TestSharedRuntimeRealIsolatedSystemd(t *testing.T) {
 		if !result.OK || !strings.Contains(result.Output, "CWD="+test.expect+" HOME="+home+" XDG_CACHE_HOME="+filepath.Join(home, ".cache")) {
 			t.Fatalf("root-executor worker cwd/home mismatch: %+v", result)
 		}
+	}
+	for _, name := range []string{"project-a", "project-b"} {
+		identity := call(ownerCtx, Request{Action: "run", Command: "git rev-parse --show-toplevel", Workspace: paths[name]})
+		if !identity.OK || strings.TrimSpace(identity.Output) != paths[name] {
+			t.Fatalf("repository CWD identity %s was not exact: %+v", name, identity)
+		}
+	}
+	rootCommand := call(ownerCtx, Request{Action: "run", Command: `printf 'ROOT_CWD=%s ROOT_HOME=%s\n' "$PWD" "$HOME"`, Root: true, Approval: true})
+	if !rootCommand.OK || !strings.Contains(rootCommand.Output, "ROOT_CWD=/root ROOT_HOME=/root") {
+		t.Fatalf("privileged worker path unexpectedly used as root HOME or CWD: %+v", rootCommand)
+	}
+	workspaceWrite := call(ownerCtx, Request{Action: "workspace_write", Workspace: paths["scratch"], Path: "source.txt", Content: "scratch-only\n", MustNotExist: true})
+	if !workspaceWrite.OK {
+		t.Fatalf("real Landlock worker structured scratch write rejected: %+v", workspaceWrite)
+	}
+	if _, err := os.Stat(filepath.Join(paths["project-a"], "source.txt")); !os.IsNotExist(err) {
+		t.Fatal("structured scratch write crossed project workspace")
 	}
 	rootMismatch := call(ownerCtx, Request{Action: "start_job", Command: "printf no", Root: true, Approval: true, Workspace: paths["project-a"]})
 	if rootMismatch.OK || rootMismatch.ErrorCode != "invalid_workspace" {
@@ -294,5 +321,5 @@ func TestSharedRuntimeRealIsolatedSystemd(t *testing.T) {
 	if !stopped.OK || stopped.Status != "stopped" {
 		t.Fatalf("second service stop not verified: %+v", stopped)
 	}
-	t.Logf("verified isolated production runner: 4 tasks, 2 services, source client CWD/HOME, principal inventory and exact ID stops")
+	t.Logf("verified isolated production runner: 2 Git repos + non-Git scratch, worker/root CWD/HOME, Landlock structured write, 4 tasks, 2 services, replay and recovery, principal inventory and exact ID stops")
 }

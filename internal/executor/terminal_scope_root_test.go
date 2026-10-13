@@ -20,10 +20,13 @@ import (
 // This test must never execute as part of ordinary CI. It launches a genuine
 // root-owned transient systemd scope and drops the pane to aiworker. Only a
 // separately authorized disposable host may opt in explicitly.
+// The hDE01 path additionally requires the Issue #137 E2E environment gate;
+// it neither broadens the historical CLY535343 gate nor affects installed services.
 func TestApprovedWorkerTmuxScopeSurvivesBrokerStop(t *testing.T) {
 	approved := os.Getenv("ASA_PTY_SCOPE_APPROVED_HOST")
 	hostname, _ := os.Hostname()
-	if approved == "" || approved != hostname || hostname != "CLY535343" || os.Geteuid() != 0 {
+	if approved == "" || approved != hostname || os.Geteuid() != 0 ||
+		(hostname != "CLY535343" && (hostname != "hDE01" || os.Getenv("ASA137_E2E_HOST") != hostname)) {
 		t.Skip("real systemd scope test requires explicitly authorized disposable host and root")
 	}
 	account, err := user.Lookup("aiworker")
@@ -48,6 +51,9 @@ func TestApprovedWorkerTmuxScopeSurvivesBrokerStop(t *testing.T) {
 	}
 	state := filepath.Join(dir, "state")
 	if err := os.Mkdir(state, 0711); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(state, 0711); err != nil {
 		t.Fatal(err)
 	}
 	home := filepath.Join(state, "worker-home")
@@ -153,7 +159,8 @@ func TestApprovedWorkerTmuxScopeSurvivesBrokerStop(t *testing.T) {
 	}
 	owner.SessionEpoch = recovered.SessionEpoch
 	owner.Action = "terminal_write"
-	owner.Content = "printf 'SCOPE_WORKER_UID:%s\\n' \"$(id -u)\"\n"
+	expectedEnv := fmt.Sprintf("SCOPE_WORKER_UID:%d SCOPE_HOME:%s SCOPE_XDG:%s SCOPE_CWD:%s", uid, home, filepath.Join(home, ".config"), project)
+	owner.Content = "printf 'SCOPE_WORKER_UID:%s SCOPE_HOME:%s SCOPE_XDG:%s SCOPE_CWD:%s\\n' \"$(id -u)\" \"$HOME\" \"$XDG_CONFIG_HOME\" \"$PWD\"\n"
 	if got := s2.terminalAction(owner); !got.OK {
 		t.Fatalf("worker input after recovered backend failed: %+v", got)
 	}
@@ -173,12 +180,12 @@ func TestApprovedWorkerTmuxScopeSurvivesBrokerStop(t *testing.T) {
 			t.Fatal(err)
 		}
 		seen.Write(raw)
-		if strings.Contains(seen.String(), fmt.Sprintf("SCOPE_WORKER_UID:%d", uid)) {
+		if strings.Contains(seen.String(), expectedEnv) {
 			break
 		}
 		time.Sleep(15 * time.Millisecond)
 	}
-	if !strings.Contains(seen.String(), fmt.Sprintf("SCOPE_WORKER_UID:%d", uid)) {
+	if !strings.Contains(seen.String(), expectedEnv) {
 		t.Fatalf("no worker-identity proof after control recovery; got %q", seen.String())
 	}
 	owner.Action = "terminal_close"
