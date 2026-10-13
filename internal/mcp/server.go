@@ -135,12 +135,14 @@ type BrowserSetupInput struct {
 	Approval bool `json:"approval,omitempty" jsonschema:"Set true to allow downloading the private browser runtime and installing required shared libraries"`
 }
 type BrowserRunInput struct {
+	ProfileMode       string `json:"profile_mode,omitempty" jsonschema:"shared (default) or isolated ephemeral cookies/localStorage; same global exclusive Browser admission"`
 	Script            string `json:"script" jsonschema:"JavaScript statements using the pre-created Playwright browser, context, and page variables; maximum 131072 raw bytes"`
 	TimeoutMS         int64  `json:"timeout_ms,omitempty" jsonschema:"Browser execution timeout in milliseconds; default 90000, maximum 300000"`
 	IgnoreHTTPSErrors bool   `json:"ignore_https_errors,omitempty" jsonschema:"Explicit scoped exception for local/self-signed development; default false preserves normal HTTPS certificate validation"`
 }
 
 type BrowserE2EInput struct {
+	ProfileMode       string             `json:"profile_mode,omitempty" jsonschema:"shared (default) or isolated ephemeral Browser state"`
 	Steps             []browser.FlowStep `json:"steps" jsonschema:"1..12 ordered steps: goto, snapshot (returns bounded eN refs), click/fill/assert_text by ref or role/name or CSS, assert_url, console, network. Refs are flow-only, never cross-call."`
 	TimeoutMS         int64              `json:"timeout_ms,omitempty" jsonschema:"Total flow timeout milliseconds; default 90000, maximum 300000"`
 	IgnoreHTTPSErrors bool               `json:"ignore_https_errors,omitempty" jsonschema:"Explicit scoped exception for self-signed development; default false"`
@@ -426,9 +428,9 @@ func (s *Server) registerTools() {
 			return s.responseResult(resp)
 		})
 
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_run", Description: "Run bounded Playwright JavaScript in headless Chromium using the Agent-wide shared persistent browser profile. Variables browser, context, and page are pre-created; use console.log for observations. HTTPS certificate validation is enabled by default; ignore_https_errors is an explicit request-scoped development exception. Browser execution is action-capable and may reuse cookies/local-storage/session state created by other authorized browser callers.", Annotations: annotations(false, true, false, true)},
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_run", Description: "Run bounded Playwright JavaScript in headless Chromium using the shared persistent profile by default; profile_mode=isolated uses a bounded disposable private profile. Variables browser, context, and page are pre-created; use console.log for observations. HTTPS certificate validation is enabled by default; ignore_https_errors is an explicit request-scoped development exception. Browser execution is action-capable; the shared default may reuse cookies/local-storage from other authorized callers, while isolated mode has disposable private state.", Annotations: annotations(false, true, false, true)},
 		func(ctx context.Context, req *mcpsdk.CallToolRequest, input BrowserRunInput) (*mcpsdk.CallToolResult, executor.Response, error) {
-			resp, err := s.browser.Run(ctx, browser.RunOptions{Script: input.Script, TimeoutMS: input.TimeoutMS, IgnoreHTTPSErrors: input.IgnoreHTTPSErrors})
+			resp, err := s.browser.Run(ctx, browser.RunOptions{Script: input.Script, TimeoutMS: input.TimeoutMS, IgnoreHTTPSErrors: input.IgnoreHTTPSErrors, ProfileMode: input.ProfileMode})
 			if err != nil {
 				return executorTransportErrorResult(err)
 			}
@@ -436,10 +438,10 @@ func (s *Server) registerTools() {
 		})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-		Name: "browser_e2e", Description: "Run a compact ordered Browser/E2E workflow: navigate, take an accessible snapshot, click/fill by exact role+name or CSS locator, assert text/URL and inspect bounded console/network events. Uses the SAME managed Chromium/profile/admission/TLS/resource limits as browser_run, in one browser execution; no extra daemon or profile. This is not a cross-call live session. Use browser_run for arbitrary Playwright JavaScript and advanced scenarios; use browser_e2e for common bounded flows. Snapshots are explicitly truncated at 8192 UTF-8 bytes; complete stable snapshots MAY issue bounded eN refs (role + within-role index, no raw DOM name/tag hints) for later steps in THIS call (click/fill/assert_text). Unstable or inaccessible DOM returns refs_unavailable instead of guessed handles; refs expire on navigation, detachment and call completion, and do not authorize cross-call interaction. Binary trace/screenshot retrieval is not provided by this one-call tool; use browser_session_capture for bounded typed JPEG or browser_session_trace for one separately authenticated bounded ZIP trace flow, not a general-purpose artifact store.",
+		Name: "browser_e2e", Description: "Run a compact ordered Browser/E2E workflow: navigate, take an accessible snapshot, click/fill by exact role+name or CSS locator, assert text/URL and inspect bounded console/network events. Uses the same pinned Chromium, exclusive admission, TLS/resource limits and shared-by-default or isolated ephemeral profile as browser_run; no extra daemon or engine. All steps complete within one browser execution. This is not a cross-call live session. Use browser_run for arbitrary Playwright JavaScript and advanced scenarios; use browser_e2e for common bounded flows. Snapshots are explicitly truncated at 8192 UTF-8 bytes; complete stable snapshots MAY issue bounded eN refs (role + within-role index, no raw DOM name/tag hints) for later steps in THIS call (click/fill/assert_text). Unstable or inaccessible DOM returns refs_unavailable instead of guessed handles; refs expire on navigation, detachment and call completion, and do not authorize cross-call interaction. Binary trace/screenshot retrieval is not provided by this one-call tool; use browser_session_capture for bounded typed JPEG or browser_session_trace for one separately authenticated bounded ZIP trace flow, not a general-purpose artifact store.",
 		Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input BrowserE2EInput) (*mcpsdk.CallToolResult, executor.Response, error) {
-		resp, err := s.browser.Flow(ctx, browser.FlowOptions{Steps: input.Steps, TimeoutMS: input.TimeoutMS, IgnoreHTTPSErrors: input.IgnoreHTTPSErrors})
+		resp, err := s.browser.Flow(ctx, browser.FlowOptions{Steps: input.Steps, TimeoutMS: input.TimeoutMS, IgnoreHTTPSErrors: input.IgnoreHTTPSErrors, ProfileMode: input.ProfileMode})
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}

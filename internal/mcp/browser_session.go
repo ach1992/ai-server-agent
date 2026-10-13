@@ -12,6 +12,7 @@ import (
 )
 
 type BrowserSessionOpenInput struct {
+	ProfileMode       string `json:"profile_mode,omitempty" jsonschema:"shared (default) or isolated ephemeral Browser cookies/localStorage, with one global admission"`
 	Workspace         string `json:"workspace" jsonschema:"Exact absolute worker workspace/worktree used to bind session authorization"`
 	IgnoreHTTPSErrors bool   `json:"ignore_https_errors,omitempty" jsonschema:"Explicit TLS validation exception for an isolated development site; default is secure HTTPS validation"`
 }
@@ -44,8 +45,8 @@ type BrowserSessionFlowInput struct {
 }
 
 func (s *Server) registerBrowserSessionTools() {
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_open", Description: "Open an unprivileged authenticated managed Chromium session in an exact workspace. Uses the existing pinned engine, Agent-wide shared profile, and executor-owned worker session broker. The shared Browser profile admits only one run or session at once; session identity is not an authorization token. Bounded TTL; no second daemon, no unsafe automatic retries.", Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionOpenInput) (*mcpsdk.CallToolResult, executor.Response, error) {
-		resp, err := s.browser.SessionOpen(ctx, browser.SessionOptions{Workspace: in.Workspace, IgnoreHTTPSErrors: in.IgnoreHTTPSErrors})
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_open", Description: "Open an unprivileged authenticated managed Chromium session in an exact workspace. Uses the pinned engine, shared or opt-in isolated ephemeral profile, and executor-owned worker session broker. The global Browser admission allows only one run or session at once; session identity is not an authorization token. Bounded TTL; no second daemon, no unsafe automatic retries.", Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionOpenInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+		resp, err := s.browser.SessionOpen(ctx, browser.SessionOptions{Workspace: in.Workspace, IgnoreHTTPSErrors: in.IgnoreHTTPSErrors, ProfileMode: in.ProfileMode})
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}

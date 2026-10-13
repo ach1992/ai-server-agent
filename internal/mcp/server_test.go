@@ -123,6 +123,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 	foundBrowserSessions := map[string]bool{}
 	foundBrowserStatus := false
 	foundStartJob := false
+	foundRuntimeList := false
 	foundJobStatus := false
 	foundReadFile := false
 	foundWriteFile := false
@@ -174,6 +175,34 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			}
 			if !strings.Contains(string(b), `"operation_id"`) {
 				t.Fatalf("start_job input schema missing operation_id: %s", b)
+			}
+		case "runtime_list":
+			foundRuntimeList = true
+			if tool.Annotations == nil || !tool.Annotations.ReadOnlyHint ||
+				!tool.Annotations.IdempotentHint ||
+				(tool.Annotations.DestructiveHint != nil && *tool.Annotations.DestructiveHint) {
+				t.Fatal("runtime_list must be passive read-only discovery")
+			}
+			in, err := json.Marshal(tool.InputSchema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"workspace", "kind"} {
+				if !strings.Contains(string(in), `"`+field+`"`) {
+					t.Fatalf("runtime_list schema missing %s: %s", field, in)
+				}
+			}
+			if tool.OutputSchema == nil {
+				t.Fatal("runtime_list typed output missing")
+			}
+			out, err := json.Marshal(tool.OutputSchema)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, field := range []string{"runtime_entries", "runtime_capacity", "truncated", "generated_at"} {
+				if !strings.Contains(string(out), `"`+field+`"`) {
+					t.Fatalf("runtime_list output missing %s: %s", field, out)
+				}
 			}
 		case "job_status":
 			foundJobStatus = true
@@ -451,6 +480,9 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			if tool.Name != "browser_session_open" && !strings.Contains(string(input), `"session_id"`) {
 				t.Fatalf("%s lacks opaque session identity: %s", tool.Name, input)
 			}
+			if tool.Name == "browser_session_open" && !strings.Contains(string(input), `"profile_mode"`) {
+				t.Fatalf("browser_session_open profile_mode not exposed: %s", input)
+			}
 			if tool.Name == "browser_session_trace" {
 				for _, field := range []string{"operation", "steps", "file_version", "offset", "session_id"} {
 					if !strings.Contains(string(input), `"`+field+`"`) {
@@ -491,7 +523,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 				tool.Annotations.OpenWorldHint == nil || !*tool.Annotations.OpenWorldHint {
 				t.Fatal("browser_e2e must disclose open-world/action-capable behavior")
 			}
-			for _, label := range []string{"SAME managed Chromium/profile/admission/TLS/resource limits", "one browser execution", "not a cross-call live session", "refs expire on navigation"} {
+			for _, label := range []string{"same pinned Chromium, exclusive admission, TLS/resource limits", "shared-by-default or isolated ephemeral profile", "one browser execution", "not a cross-call live session", "refs expire on navigation"} {
 				if !strings.Contains(tool.Description, label) {
 					t.Fatalf("browser_e2e description missing %q", label)
 				}
@@ -500,7 +532,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, field := range []string{"steps", "action", "url", "selector", "ref", "role", "name", "value", "expected", "timeout_ms", "ignore_https_errors"} {
+			for _, field := range []string{"steps", "action", "url", "selector", "ref", "role", "name", "value", "expected", "timeout_ms", "ignore_https_errors", "profile_mode"} {
 				if !strings.Contains(string(in), `"`+field+`"`) {
 					t.Fatalf("browser_e2e schema missing %q: %s", field, in)
 				}
@@ -513,14 +545,14 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			if tool.Annotations == nil || tool.Annotations.DestructiveHint == nil || !*tool.Annotations.DestructiveHint || tool.Annotations.OpenWorldHint == nil || !*tool.Annotations.OpenWorldHint {
 				t.Fatal("browser_run must advertise destructive/open-world hints")
 			}
-			if !strings.Contains(tool.Description, "HTTPS certificate validation is enabled by default") || !strings.Contains(tool.Description, "shared persistent browser profile") {
+			if !strings.Contains(tool.Description, "HTTPS certificate validation is enabled by default") || !strings.Contains(tool.Description, "shared persistent profile by default") || !strings.Contains(tool.Description, "profile_mode=isolated") {
 				t.Fatalf("browser_run must disclose TLS/shared-profile semantics: %q", tool.Description)
 			}
 			in, err := json.Marshal(tool.InputSchema)
 			if err != nil {
 				t.Fatal(err)
 			}
-			for _, field := range []string{"script", "timeout_ms", "ignore_https_errors"} {
+			for _, field := range []string{"script", "timeout_ms", "ignore_https_errors", "profile_mode"} {
 				if !strings.Contains(string(in), `"`+field+`"`) {
 					t.Fatalf("browser_run input schema missing %q: %s", field, in)
 				}
@@ -532,7 +564,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			t.Errorf("missing managed Browser tool %s", name)
 		}
 	}
-	if !foundEnvironment || !foundRunCommand || !foundRoot || !foundStartJob || !foundJobStatus || !foundReadFile || !foundWriteFile || !foundWorkerStat || !foundWorkerRead || !foundWorkerWrite || !foundWorkerApplyEdits || !foundWorkspaceSearch || !foundRepositoryEnvironment || !foundRepositoryDiscover || !foundRepositoryInspect || !foundWorktreeCreate || !foundWorktreeRemove || !foundBrowserStatus || !foundBrowser || !foundBrowserE2E {
+	if !foundEnvironment || !foundRunCommand || !foundRoot || !foundStartJob || !foundRuntimeList || !foundJobStatus || !foundReadFile || !foundWriteFile || !foundWorkerStat || !foundWorkerRead || !foundWorkerWrite || !foundWorkerApplyEdits || !foundWorkspaceSearch || !foundRepositoryEnvironment || !foundRepositoryDiscover || !foundRepositoryInspect || !foundWorktreeCreate || !foundWorktreeRemove || !foundBrowserStatus || !foundBrowser || !foundBrowserE2E {
 		t.Fatalf("required tools missing: environment=%v root=%v start_job=%v job_status=%v read_file=%v write_file=%v workspace_search=%v repository_environment=%v repository_discover=%v repository_inspect=%v worktree_create=%v worktree_remove=%v browser_status=%v browser=%v browser_e2e=%v", foundEnvironment, foundRoot, foundStartJob, foundJobStatus, foundReadFile, foundWriteFile, foundWorkspaceSearch, foundRepositoryEnvironment, foundRepositoryDiscover, foundRepositoryInspect, foundWorktreeCreate, foundWorktreeRemove, foundBrowserStatus, foundBrowser, foundBrowserE2E)
 	}
 }

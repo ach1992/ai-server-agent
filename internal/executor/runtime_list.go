@@ -227,8 +227,10 @@ func (s *Server) runtimeList(req Request) Response {
 						continue
 					}
 					if rec.ID != id || rec.Version != 1 || !rec.Scoped || rec.Lifecycle != "active" ||
-						!validTmuxSessionName(rec.Name) || rec.ExpiresAt.IsZero() ||
-						!rec.ExpiresAt.After(now) {
+						!validTmuxSessionName(rec.Name) || !validTmuxPaneID(rec.Pane) ||
+						!filepath.IsAbs(rec.Workspace) || filepath.Clean(rec.Workspace) != rec.Workspace ||
+						rec.ExpiresAt.IsZero() || !rec.ExpiresAt.After(now) ||
+						!passiveWorkerTerminalSocketPresent(s.cfg.StateDir, rec) {
 						continue
 					}
 					status := "active"
@@ -237,6 +239,7 @@ func (s *Server) runtimeList(req Request) Response {
 					}
 					response.RuntimeEntries = append(response.RuntimeEntries, RuntimeEntry{
 						Kind: "terminal", ID: rec.ID, Workspace: rec.Workspace, Status: status,
+						CreatedAt: rec.ExpiresAt.Add(-maxStdioSessionAge).UTC().Format(time.RFC3339Nano),
 						ExpiresAt: rec.ExpiresAt.UTC().Format(time.RFC3339),
 					})
 				}
@@ -263,4 +266,34 @@ func (s *Server) runtimeList(req Request) Response {
 		response.Truncated = true
 	}
 	return response
+}
+
+// This read-only check parallels the production reconnect socket identity
+// boundary without calling terminalRecordsDir (which creates directories),
+// opening a tmux client, or refreshing a terminal expiry.
+func passiveWorkerTerminalSocketPresent(stateDir string, rec terminalRecord) bool {
+	base := filepath.Join(stateDir, "worker-terminals")
+	if !filepath.IsAbs(rec.SocketDir) || rec.SocketDir == base ||
+		!withinPath(base, rec.SocketDir) ||
+		!strings.HasPrefix(filepath.Base(rec.SocketDir), ".asa-tmux-") {
+		return false
+	}
+	socket := filepath.Join(rec.SocketDir, "socket")
+	if len(socket) > terminalMaxUnixSocketPath {
+		return false
+	}
+	info, err := os.Lstat(rec.SocketDir)
+	if err != nil || !info.IsDir() || info.Mode().Perm() != 0700 {
+		return false
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || st.Uid != uint32(os.Geteuid()) {
+		return false
+	}
+	info, err = os.Lstat(socket)
+	if err != nil || info.Mode()&os.ModeSocket == 0 {
+		return false
+	}
+	st, ok = info.Sys().(*syscall.Stat_t)
+	return ok && st.Uid == uint32(os.Geteuid())
 }
