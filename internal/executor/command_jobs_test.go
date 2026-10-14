@@ -508,7 +508,6 @@ func TestPersistentJobClaimReplayCannotBypassActiveCapacity(t *testing.T) {
 	}
 }
 
-
 func TestPersistentServiceClaimReplayUsesServiceCapacity(t *testing.T) {
 	for _, claimState := range []string{"claimed", "launching"} {
 		for _, tc := range []struct {

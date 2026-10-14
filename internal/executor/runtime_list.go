@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	maxRuntimeListEntries          = 32
+	maxRuntimeListEntries         = 32
 	runtimeListObservationTimeout = 5 * time.Second
 )
 
