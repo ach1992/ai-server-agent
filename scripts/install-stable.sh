@@ -96,12 +96,30 @@ actual_digest="sha256:$(sha256sum "$tmp/install.sh" | awk '{print $1}')"
 chmod 0500 "$tmp/install.sh"
 
 log "Verified immutable stable installer $VERSION before privileged staging."
-run_privileged /bin/bash --noprofile --norc -s -- "$tmp/install.sh" "$installer_digest" <<'ROOT_INSTALL'
+# sudo deliberately drops caller environment variables. Carry only three
+# operator-selected, non-secret installation inputs across the privileged
+# trust boundary as positional data, never via sudo -E or generic env copying.
+run_privileged /bin/bash --noprofile --norc -s -- \
+  "$tmp/install.sh" "$installer_digest" \
+  "${AI_SERVER_AGENT_ENVIRONMENT_PROFILE:-}" \
+  "${AI_SERVER_AGENT_SERVER_LABEL:-}" \
+  "${AI_SERVER_AGENT_NONINTERACTIVE:-}" <<'ROOT_INSTALL'
 set -Eeuo pipefail
 PATH=/usr/sbin:/usr/bin:/sbin:/bin
 export PATH
 source_installer="${1:?missing verified installer path}"
 expected_digest="${2:?missing verified installer digest}"
+install_profile="${3:-}"
+install_label="${4:-}"
+install_noninteractive="${5:-}"
+case "$install_profile" in
+  ''|development|validation) ;;
+  *) printf '[ai-server-agent] ERROR: Invalid environment purpose. Use development or validation.\n' >&2; exit 1 ;;
+esac
+case "$install_noninteractive" in
+  ''|0|1) ;;
+  *) printf '[ai-server-agent] ERROR: AI_SERVER_AGENT_NONINTERACTIVE must be 0 or 1.\n' >&2; exit 1 ;;
+esac
 
 [[ "$expected_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || {
   printf '[ai-server-agent] ERROR: Invalid privileged staging digest.\n' >&2
@@ -125,5 +143,11 @@ actual_digest="sha256:$(sha256sum "$root_stage/install.sh" | awk '{print $1}')"
   exit 1
 }
 printf '[ai-server-agent] Privileged staging re-verified the authenticated installer bytes.\n'
-/bin/bash --noprofile --norc "$root_stage/install.sh"
+# Pass only the explicitly supported purpose inputs to the verified installer.
+# The label is data, never shell-evaluated, and is validated by install.sh.
+installer_env=()
+[ -z "$install_profile" ] || installer_env+=("AI_SERVER_AGENT_ENVIRONMENT_PROFILE=$install_profile")
+[ -z "$install_label" ] || installer_env+=("AI_SERVER_AGENT_SERVER_LABEL=$install_label")
+[ -z "$install_noninteractive" ] || installer_env+=("AI_SERVER_AGENT_NONINTERACTIVE=$install_noninteractive")
+/usr/bin/env "${installer_env[@]}" /bin/bash --noprofile --norc "$root_stage/install.sh"
 ROOT_INSTALL

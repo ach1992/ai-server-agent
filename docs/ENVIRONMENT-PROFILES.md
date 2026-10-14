@@ -18,7 +18,17 @@ For **noninteractive first installation**, the installer accepts:
 - `AI_SERVER_AGENT_ENVIRONMENT_PROFILE=development|validation` (default: `development`)
 - `AI_SERVER_AGENT_SERVER_LABEL` (optional, printable, at most 80 characters and 256 UTF-8 bytes; no surrounding whitespace)
 
-Provide these environment variables to the installer process itself; do **not** prefix only the `curl` process of a piped bootstrap. Follow the [published authenticated installer](../README.md) and any documented environment-passing behavior for your chosen installation path.
+For a release **that includes this feature**, put environment variables on the **`bash` side** of the verified Stable bootstrap pipe (not only on `curl`). The bootstrap passes only these three non-secret inputs through `sudo` to the integrity-verified installer; it does not forward arbitrary environment variables:
+
+```bash
+RELEASE_TAG='REPLACE_WITH_PUBLISHED_PROFILE_RELEASE_TAG'
+curl -fsSL "https://raw.githubusercontent.com/ach1992/ai-server-agent/${RELEASE_TAG}/scripts/install-stable.sh" | \
+  AI_SERVER_AGENT_NONINTERACTIVE=1 \
+  AI_SERVER_AGENT_ENVIRONMENT_PROFILE=validation \
+  AI_SERVER_AGENT_SERVER_LABEL='QA Server' bash
+```
+
+Replace `RELEASE_TAG` with the appropriate **published immutable Stable** tag when the profile feature ships. The existing `v0.1.12` release does **not** include profiles; this example is not an instruction to use its bootstrap for this feature. The verified release installer continues to validate the values. For direct source installation, pass the same settings to the privileged `install.sh` process.
 
 The existing Connection Mode (local/public/Cloudflare) is an independent setup choice. Do not infer the Profile from the hostname or network address.
 

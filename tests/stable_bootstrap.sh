@@ -20,6 +20,7 @@ make_fixture(){
   FIXTURE="$TMP/fixture-$RANDOM-$RANDOM"
   mkdir -p "$FIXTURE/bin" "$FIXTURE/poison-bin"
   EXEC_MARKER="$FIXTURE/executed"
+  ENV_MARKER="$FIXTURE/installer-environment"
   DOWNLOAD_MARKER="$FIXTURE/downloaded"
   SUDO_MARKER="$FIXTURE/sudo-called"
   ATTACK_MARKER="$FIXTURE/attacker-executed"
@@ -29,6 +30,7 @@ make_fixture(){
 #!/usr/bin/env bash
 set -Eeuo pipefail
 printf 'executed\n' > "$EXEC_MARKER"
+printf '%s\n' "${AI_SERVER_AGENT_ENVIRONMENT_PROFILE-<unset>}" "${AI_SERVER_AGENT_SERVER_LABEL-<unset>}" "${AI_SERVER_AGENT_NONINTERACTIVE-<unset>}" > "$ENV_MARKER"
 INSTALLER
   cat > "$MALICIOUS_INSTALLER" <<'MALICIOUS'
 #!/usr/bin/env bash
@@ -91,10 +93,12 @@ if [ "${RACE_SOURCE_REPLACEMENT:-false}" = true ]; then
   chmod 0500 "$source_installer"
 fi
 export PATH="$POISON_BIN:$PATH"
+# Emulate sudo env_reset so the test proves explicit, positional forwarding.
+unset AI_SERVER_AGENT_ENVIRONMENT_PROFILE AI_SERVER_AGENT_SERVER_LABEL AI_SERVER_AGENT_NONINTERACTIVE
 exec "$@"
 SUDO
   chmod +x "$FIXTURE/bin/curl" "$FIXTURE/bin/sudo"
-  export FIXTURE_INSTALLER="$FIXTURE/install.sh" EXEC_MARKER DOWNLOAD_MARKER SUDO_MARKER ATTACK_MARKER PATH_ATTACK_MARKER MALICIOUS_INSTALLER INSTALLER_DIGEST INSTALLER_URL IMMUTABLE
+  export FIXTURE_INSTALLER="$FIXTURE/install.sh" EXEC_MARKER ENV_MARKER DOWNLOAD_MARKER SUDO_MARKER ATTACK_MARKER PATH_ATTACK_MARKER MALICIOUS_INSTALLER INSTALLER_DIGEST INSTALLER_URL IMMUTABLE
   export POISON_BIN="$FIXTURE/poison-bin"
   export RACE_SOURCE_REPLACEMENT=false
   export PATH="$FIXTURE/bin:/usr/bin:/bin"
@@ -107,6 +111,19 @@ grep -qF 'Privileged staging re-verified the authenticated installer bytes.' "$F
 test -s "$DOWNLOAD_MARKER"
 test -s "$SUDO_MARKER"
 test -s "$EXEC_MARKER"
+test ! -e "$PATH_ATTACK_MARKER"
+test "$(sed -n '1p' "$ENV_MARKER")" = '<unset>'
+test "$(sed -n '2p' "$ENV_MARKER")" = '<unset>'
+test "$(sed -n '3p' "$ENV_MARKER")" = '<unset>'
+
+make_fixture true false false
+AI_SERVER_AGENT_ENVIRONMENT_PROFILE=validation AI_SERVER_AGENT_SERVER_LABEL='QA آزمایش' \
+  AI_SERVER_AGENT_NONINTERACTIVE=1 bash "$BOOTSTRAP" > "$FIXTURE/out"
+test -s "$SUDO_MARKER"
+test -s "$EXEC_MARKER"
+test "$(sed -n '1p' "$ENV_MARKER")" = validation
+test "$(sed -n '2p' "$ENV_MARKER")" = 'QA آزمایش'
+test "$(sed -n '3p' "$ENV_MARKER")" = 1
 test ! -e "$PATH_ATTACK_MARKER"
 
 make_fixture true false false
