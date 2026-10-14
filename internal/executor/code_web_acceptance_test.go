@@ -41,8 +41,9 @@ func TestCodeInspectRealHTMLCSSLanguageServers(t *testing.T) {
 	}
 	s.workspaceHelperBinary = helper
 	sources := map[string]string{
-		"index.html":   "<!doctype html><html><body><main><h1>Title</h1><div id=\"hero\">Hi</div></main></body></html>",
-		"styles.css":   "main { color: green; margin: 0; }",
+		"index.html":   "<!doctype html><html lang=\"fa\" dir=\"rtl\"><head><link rel=\"stylesheet\" href=\"styles.css\"><script defer src=\"app.js\"></script></head><body><main><h1 id=\"hero\">Title</h1><div>Hi</div></main></body></html>",
+		"styles.css":   "main { color: green; margin: 0; } #hero { color: rgb(17, 85, 170); font-weight: 700; }",
+		"app.js":       "document.querySelector('#hero').textContent = 'Linked JS';",
 		"package.json": `{"scripts":{"prepare":"touch WEB-MUST-NOT-EXECUTE","postinstall":"touch WEB-MUST-NOT-EXECUTE"}}`,
 	}
 	for file, body := range sources {
