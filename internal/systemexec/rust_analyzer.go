@@ -2,11 +2,8 @@ package systemexec
 
 import (
 	"errors"
-	"os"
 	"path/filepath"
 	"runtime"
-	"strings"
-	"syscall"
 )
 
 const (
@@ -39,7 +36,7 @@ func RustAnalyzerResources() (string, string, string, error) {
 		return "", "", "", errors.New("rust_lsp_unsupported_platform")
 	}
 	if !Trusted(RustAnalyzerBinary) || !Trusted(RustCompilerBinary) ||
-		!trustedRustSource(filepath.Join(RustCompilerSysrootSource, "core", "src", "lib.rs")) {
+		!TrustedStaticFile(filepath.Join(RustCompilerSysrootSource, "core", "src", "lib.rs")) {
 		return "", "", "", errors.New("rust_lsp_untrusted_optional_resources")
 	}
 	if err := verifyShellNativeBinary(RustAnalyzerBinary, rustAnalyzerExecutables[runtime.GOARCH], 35<<20, 48<<20); err != nil {
@@ -49,36 +46,4 @@ func RustAnalyzerResources() (string, string, string, error) {
 		return "", "", "", errors.New("rust_lsp_compiler_binary_integrity_invalid")
 	}
 	return RustAnalyzerBinary, RustCompilerBinary, RustCompilerDir, nil
-}
-
-// Trusted() requires executable mode at the end; .rs standard library source
-// should NOT be executable. Its entire path is still root-owned, non-writable,
-// symlink-free and readable.
-func trustedRustSource(path string) bool {
-	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
-		return false
-	}
-	current := string(filepath.Separator)
-	pieces := strings.Split(strings.TrimPrefix(path, current), current)
-	for i, part := range pieces {
-		if part == "" || part == "." || part == ".." {
-			return false
-		}
-		current = filepath.Join(current, part)
-		info, err := os.Lstat(current)
-		if err != nil || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0022 != 0 {
-			return false
-		}
-		st, ok := info.Sys().(*syscall.Stat_t)
-		if !ok || st.Uid != 0 {
-			return false
-		}
-		if i == len(pieces)-1 {
-			return info.Mode().IsRegular() && info.Mode().Perm()&0004 != 0
-		}
-		if !info.IsDir() {
-			return false
-		}
-	}
-	return false
 }

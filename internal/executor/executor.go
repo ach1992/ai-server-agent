@@ -61,6 +61,8 @@ type Server struct {
 	rustAnalyzerBinary            string                                                    // test-only pinned native rust-analyzer fixture
 	rustCompilerBinary            string                                                    // test-only pinned native rustc fixture
 	rustSysrootDir                string                                                    // test-only Rust toolchain/sysroot fixture
+	phpBinary                     string                                                    // test-only recognized system PHP fixture
+	phpActorPHAR                  string                                                    // test-only pinned Phpactor artifact fixture
 	environmentGoSystemPath       string                                                    // test-only Go discovery path; empty uses fixed safeCommandPath
 	codeTargetSnapshotHook        func()                                                    // test-only interleaving: alter target after LSP overlay snapshot
 	dlvBinary                     string                                                    // test-only Delve DAP fixture; production uses admin-owned binary

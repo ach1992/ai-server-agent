@@ -58,6 +58,7 @@ func Build(c config.Config) Manifest {
 	_, webLSPErr := systemexec.WebLSP()
 	_, sqlLSPErr := systemexec.SQLLens()
 	_, _, _, rustLSPErr := systemexec.RustAnalyzerResources()
+	_, _, phpLSPErr := systemexec.PHPActor()
 	return Manifest{
 		SchemaVersion:       1,
 		InstanceID:          c.InstanceID,
@@ -82,6 +83,7 @@ func Build(c config.Config) Manifest {
 			{Name: "html-css-language-server", Required: false, Installed: webLSPErr == nil, Paths: []string{systemexec.WebLSPDir}, Notes: "Optional HTML/CSS semantic LSP via VS Code Language Servers 4.10.0; trusted Node with a pinned 4948-file root-owned transitive module tree. CSS diagnostics use validated push notifications; HTML structured symbols supported but not all markup problems produce diagnostics. Browser tools remain separately appropriate for render/layout assertions."},
 			{Name: "sql-language-server", Required: false, Installed: sqlLSPErr == nil, Paths: []string{systemexec.SQLLensDir}, Notes: "Optional offline-first SQL semantic LSP via SQLLens 0.5.0 pinned root-owned complete module tree and Node v24.18.1. Requires explicit postgres/mysql/mariadb dialect per call, no project plugin execution (SQLLENS_NO_PLUGINS=1), no user config loading and no DB connections. MariaDB uses MySQL-compatible grammar subset; DB metadata, migrations and vendor-specific semantics need separate acceptance."},
 			{Name: "rust-language-server", Required: false, Installed: rustLSPErr == nil, Paths: []string{systemexec.RustAnalyzerDir, systemexec.RustCompilerDir}, Notes: "Optional Rust analyzer 2026-10-12 with fixed Rust 1.99.0 compiler and sysroot. Passive per-file LSP graph avoids Cargo metadata, build.rs and proc-macro execution; no automatic dependency resolution or Cargo builds."},
+			{Name: "php-language-server", Required: false, Installed: phpLSPErr == nil, Paths: []string{systemexec.PHPActorDir}, Notes: "Optional Phpactor 2026.10.07.0 with SHA-256 pinned PHAR and trusted OS-managed versioned PHP 8.2/8.3/8.4 CLI. Disables php.ini, Composer execution and project configuration. Uses private worker-home index cache; PHP Xdebug DAP remains separate."},
 			{Name: "go-debugger", Required: false, Installed: systemexec.First("/usr/local/bin/dlv", "/usr/bin/dlv") != "", Paths: []string{"/usr/local/bin/dlv", "/usr/bin/dlv"}, Notes: "Optional Go Delve DAP debugger. v1 launches only prebuilt workspace executables with matching worker file_version; requires trusted admin-owned Delve plus executor-owned root cgroup-v2 containment with cgroup.kill (Linux 5.14+); fails closed before DAP launch without those capabilities. Other Agent capabilities remain usable. Never silently installs/attaches/uses root."},
 			{Name: "browser", Required: false, Installed: fileExists(filepath.Join(browserEngine, "node/bin/node")), Paths: []string{browserEngine, browserData}, Notes: "Optional Playwright/Chromium capability. The executable engine is root-owned under /opt; writable browser profile data is isolated under agent state. Removing it disables browser tools but does not stop the MCP core."},
 		},

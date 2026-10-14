@@ -93,6 +93,24 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 		if binary == "" {
 			return fileError("gopls_unavailable", "dependency", errors.New("trusted optional gopls is not installed"))
 		}
+	} else if actualLanguage == "php" {
+		binary = s.phpBinary // test-only; production selects trusted OS PHP.
+		phar := s.phpActorPHAR
+		if binary != "" && phar == "" {
+			return fileError("php_lsp_fixture_incomplete", "dependency", errors.New("PHP test adapter requires the fixed PHAR fixture"))
+		}
+		if binary == "" {
+			var trustErr error
+			binary, phar, trustErr = systemexec.PHPActor()
+			if trustErr != nil {
+				return fileError("php_lsp_unavailable", "dependency", errors.New("trusted optional pinned PHP CLI and Phpactor resource unavailable"))
+			}
+		}
+		cache, cacheErr := s.phpCacheDir(parent, req, workspace)
+		if cacheErr != nil {
+			return fileError("php_lsp_cache_unavailable", "dependency", cacheErr)
+		}
+		profile = phpLSPProfile(phar, cache)
 	} else if actualLanguage == "rust" {
 		if !systemexec.Trusted(systemexec.SQLLensEnv) {
 			return fileError("rust_lsp_unavailable", "dependency", errors.New("trusted fixed executable environment launcher unavailable"))
@@ -215,13 +233,15 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 // It never accepts executable paths, arguments or configuration from a
 // repository or external MCP caller. Entrypoint trust is checked upstream.
 type lspInspectionProfile struct {
-	arguments            []string
-	extensions           map[string]string // recognized suffix -> LSP languageId
-	initOptions          map[string]any    // pinned, never project-controlled
-	staticConfiguration  map[string]any    // fixed responses to server workspace/configuration
-	waitForInitialPush   bool              // fixed adapters needing async document indexing
-	pushOnlyDiagnostics  bool              // adapter advertised pull but fails to implement it
-	waitForRustWorkspace bool              // rust-analyzer semantic graph readiness is independent of diagnostics
+	arguments                     []string
+	extensions                    map[string]string // recognized suffix -> LSP languageId
+	initOptions                   map[string]any    // pinned, never project-controlled
+	staticConfiguration           map[string]any    // fixed responses to server workspace/configuration
+	waitForInitialPush            bool              // fixed adapters needing async document indexing
+	pushOnlyDiagnostics           bool              // adapter advertised pull but fails to implement it
+	syntheticChangeForDiagnostics bool              // in-memory document edit, never writes project source
+	diagnosticSettle              time.Duration     // ignore premature empty reports for an adapter's debounce window
+	waitForRustWorkspace          bool              // rust-analyzer semantic graph readiness is independent of diagnostics
 }
 
 var goLSPProfile = lspInspectionProfile{
@@ -356,6 +376,37 @@ func rustLSPProfile(file, analyzer, rustc, sysroot string) lspInspectionProfile 
 	}
 }
 
+// Phpactor is invoked without php.ini, PHP project settings or Composer
+// autoloaders. Project startup hooks must never run in a read-only code tool.
+func phpLSPProfile(phar, privateIndexPath string) lspInspectionProfile {
+	safeConfig := map[string]any{
+		"core.trusted":                       false,
+		"core.project_config_candidates":     []string{},
+		"composer.enable":                    false,
+		"indexer.enabled_watchers":           []string{},
+		"indexer.parallel_workers":           0,
+		"indexer.follow_symlinks":            false,
+		"indexer.index_path":                 privateIndexPath,
+		"language_server.enable_trust_check": true,
+	}
+	config, _ := json.Marshal(safeConfig) // fixed serializable built-in types
+	return lspInspectionProfile{
+		arguments: []string{"-n",
+			"-d", "extension=phar.so", "-d", "extension=posix.so",
+			"-d", "extension=tokenizer.so", "-d", "extension=iconv.so",
+			"-d", "extension=mbstring.so",
+			phar, "language-server", "--no-interaction", "--no-ansi",
+			"--config-extra=" + string(config),
+		},
+		extensions:                    map[string]string{".php": "php"},
+		pushOnlyDiagnostics:           true,
+		syntheticChangeForDiagnostics: true,
+		diagnosticSettle:              1700 * time.Millisecond,
+	}
+}
+
+var phpLSPSelectionProfile = lspInspectionProfile{extensions: map[string]string{".php": "php"}}
+
 var rustLSPSelectionProfile = lspInspectionProfile{extensions: map[string]string{".rs": "rust"}}
 
 var pythonTyLSPProfile = lspInspectionProfile{
@@ -383,6 +434,9 @@ func (profile lspInspectionProfile) languageForPath(path string) string {
 func inspectProfileForPath(path string) (lspInspectionProfile, string, bool) {
 	if goLSPProfile.languageForPath(path) != "" {
 		return goLSPProfile, "go", true
+	}
+	if phpLSPSelectionProfile.languageForPath(path) != "" {
+		return phpLSPSelectionProfile, "php", true
 	}
 	if rustLSPSelectionProfile.languageForPath(path) != "" {
 		return rustLSPSelectionProfile, "rust", true
@@ -469,7 +523,7 @@ func (s *Server) workerLSPInspection(ctx context.Context, req Request, profile l
 		return nil, err
 	}
 	openedContent := source
-	if profile.waitForRustWorkspace && method == "diagnostics" {
+	if (profile.waitForRustWorkspace || profile.syntheticChangeForDiagnostics) && method == "diagnostics" {
 		// A real didChange is needed for rust-analyzer syntax diagnostics.
 		// It is strictly in-memory and followed by a pinned version check.
 		openedContent = "\n"
@@ -485,25 +539,25 @@ func (s *Server) workerLSPInspection(ctx context.Context, req Request, profile l
 		if err := wire.waitRustWorkspaceReady(ctx); err != nil {
 			return nil, fmt.Errorf("rust_lsp_workspace_not_ready: %w", err)
 		}
-		if method == "diagnostics" {
-			// Ensure the opened synthetic document has passed through the
-			// analyzer's semantic task queue before the versioned full edit.
-			// Without this barrier its early VFS load may race the edit.
-			if _, err := wire.call(ctx, "textDocument/documentSymbol",
-				map[string]any{"textDocument": map[string]string{"uri": uri}}); err != nil {
-				return nil, fmt.Errorf("rust_lsp_synthetic_document_not_ready: %w", err)
-			}
-			// rust-analyzer may finish crate loading before its VFS
-			// diagnostics subscription is installed. Bound one settling
-			// interval after semantic readiness, never fabricate a report.
+	}
+	if openedContent != source {
+		// A bounded semantic query guarantees that the synthetic first-open
+		// has been processed before applying the exact worker source in memory.
+		if _, err := wire.call(ctx, "textDocument/documentSymbol",
+			map[string]any{"textDocument": map[string]string{"uri": uri}}); err != nil {
+			return nil, fmt.Errorf("lsp_synthetic_document_not_ready: %w", err)
+		}
+		if profile.waitForRustWorkspace {
+			// rust-analyzer can finish graph load before VFS diagnostics
+			// subscription. This bounded interval never invents results.
 			select {
 			case <-ctx.Done():
 				return nil, ctx.Err()
 			case <-time.After(250 * time.Millisecond):
 			}
-			if err := wire.replaceRustDiagnosticSource(uri, source); err != nil {
-				return nil, err
-			}
+		}
+		if err := wire.replaceSyntheticDiagnosticSource(uri, source); err != nil {
+			return nil, err
 		}
 	}
 	// Some real push-only servers (notably bash-language-server) parse and
@@ -535,7 +589,11 @@ func (s *Server) workerLSPInspection(ctx context.Context, req Request, profile l
 				// Push-only servers publish asynchronously after didOpen. The
 				// broker owns the process; only this request's opened URI and
 				// worker-version-verified snapshot are accepted.
-				raw, queryErr = wire.waitPublishedDiagnostics(ctx, uri)
+				if profile.diagnosticSettle > 0 {
+					raw, queryErr = wire.waitPublishedDiagnosticsSettled(ctx, uri, profile.diagnosticSettle)
+				} else {
+					raw, queryErr = wire.waitPublishedDiagnostics(ctx, uri)
+				}
 			}
 		default:
 			return nil, errors.New("unsupported method")

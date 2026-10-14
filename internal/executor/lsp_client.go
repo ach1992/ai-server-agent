@@ -301,6 +301,44 @@ func (w *lspWire) waitPublishedDiagnostics(ctx context.Context, uri string) (jso
 	}
 }
 
+// Phpactor emits interim empty diagnostics before its parser finishes.
+// Wait the fixed, adapter-specific debounce period and return only a real
+// version-correlated notification; never fabricate an error-free result.
+func (w *lspWire) waitPublishedDiagnosticsSettled(ctx context.Context, uri string, window time.Duration) (json.RawMessage, error) {
+	if window <= 0 || window > 3*time.Second {
+		return nil, errors.New("lsp_invalid_diagnostic_settle_interval")
+	}
+	until := time.Now().Add(window)
+	for {
+		remaining := time.Until(until)
+		if remaining <= 0 {
+			if report, ok := w.published[uri]; ok {
+				return report, nil
+			}
+			return nil, errors.New("lsp_diagnostics_missing_after_settle")
+		}
+		if remaining > 200*time.Millisecond {
+			remaining = 200 * time.Millisecond
+		}
+		readCtx, cancel := context.WithTimeout(ctx, remaining)
+		packet, err := w.next(readCtx)
+		cancel()
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if packet.Method != "" && len(packet.ID) != 0 {
+			if err := w.replyToServer(packet); err != nil {
+				return nil, err
+			}
+		} else if packet.Method == "" {
+			return nil, errors.New("lsp_unexpected_diagnostics_response")
+		}
+	}
+}
+
 // Use UTF-16 as the sole advertised position encoding until conversions
 // have substantive adapter fixtures; reject a server's incompatible choice.
 type lspServerCapabilities struct {
@@ -383,12 +421,12 @@ func (w *lspWire) notify(method string, params any) error {
 	return nil
 }
 
-// replaceRustDiagnosticSource updates only the private language server's
+// replaceSyntheticDiagnosticSource updates only the private language server's
 // in-memory document. It NEVER writes the user's workspace. The first open
 // uses a known-empty buffer, then exactly the worker-authorized source bytes
-// are applied as version 2. This is required by rust-analyzer 2026-10-12,
-// which sometimes reports no diagnostics for a directly opened invalid file.
-func (w *lspWire) replaceRustDiagnosticSource(uri, source string) error {
+// are applied as version 2. Some pinned adapters (Rust and PHP) require a
+// didChange notification for useful diagnostics even on the first request.
+func (w *lspWire) replaceSyntheticDiagnosticSource(uri, source string) error {
 	current, ok := w.opened[uri]
 	if !ok || current != 1 || len(source) > codeMaxDocumentBytes || !utf8.ValidString(source) {
 		return errors.New("rust_lsp_invalid_synthetic_change")
