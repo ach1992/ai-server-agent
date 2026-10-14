@@ -525,8 +525,12 @@ func TestPersistentServiceClaimReplayUsesServiceCapacity(t *testing.T) {
 				provisionSharedWorkerHome(t, state)
 				jobs := filepath.Join(state, "jobs")
 				claims := filepath.Join(jobs, "claims")
-				if err := os.Mkdir(jobs, 0711); err != nil { t.Fatal(err) }
-				if err := os.Mkdir(claims, 0700); err != nil { t.Fatal(err) }
+				if err := os.Mkdir(jobs, 0711); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(claims, 0700); err != nil {
+					t.Fatal(err)
+				}
 				workspace := t.TempDir()
 				now := time.Now().UTC().Format(time.RFC3339Nano)
 				var activeLines strings.Builder
@@ -538,21 +542,31 @@ func TestPersistentServiceClaimReplayUsesServiceCapacity(t *testing.T) {
 						CreatedAt: now, PrincipalID: "fixture-owner", PrincipalClass: "direct",
 						Workspace: workspace, Kind: tc.activeKind,
 					}
-					if tc.activeKind == "service" { activeClaim.Label = "fixture-service" }
-					if err := createJobClaim(filepath.Join(claims, "active-"+id+".json"), activeClaim); err != nil { t.Fatal(err) }
+					if tc.activeKind == "service" {
+						activeClaim.Label = "fixture-service"
+					}
+					if err := createJobClaim(filepath.Join(claims, "active-"+id+".json"), activeClaim); err != nil {
+						t.Fatal(err)
+					}
 				}
 				fakeBin := t.TempDir()
 				systemctlScript := "#!/bin/sh\ncase \"$1\" in\n  list-units) printf '%s' " + shellQuote(activeLines.String()) + " ;;\n  show) printf 'not-found\\n' ;;\n  *) exit 64 ;;\nesac\n"
-				if err := os.WriteFile(filepath.Join(fakeBin, "systemctl"), []byte(systemctlScript), 0755); err != nil { t.Fatal(err) }
+				if err := os.WriteFile(filepath.Join(fakeBin, "systemctl"), []byte(systemctlScript), 0755); err != nil {
+					t.Fatal(err)
+				}
 				launchMarker := filepath.Join(t.TempDir(), "launched")
-				if err := os.WriteFile(filepath.Join(fakeBin, "systemd-run"), []byte("#!/bin/sh\ntouch "+shellQuote(launchMarker)+"\nexit 0\n"), 0755); err != nil { t.Fatal(err) }
+				if err := os.WriteFile(filepath.Join(fakeBin, "systemd-run"), []byte("#!/bin/sh\ntouch "+shellQuote(launchMarker)+"\nexit 0\n"), 0755); err != nil {
+					t.Fatal(err)
+				}
 				t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 				current, err := user.Current()
-				if err != nil { t.Fatal(err) }
+				if err != nil {
+					t.Fatal(err)
+				}
 				server := &Server{
-					cfg: config.Config{StateDir: state, WorkspaceDir: workspace, WorkerUser: current.Username},
+					cfg:   config.Config{StateDir: state, WorkspaceDir: workspace, WorkerUser: current.Username},
 					token: "test-executor-token", guard: policy.New(nil),
-					audit: audit.New(filepath.Join(t.TempDir(), "audit.jsonl")),
+					audit:     audit.New(filepath.Join(t.TempDir(), "audit.jsonl")),
 					workerUID: uint32(os.Geteuid()), workerGID: uint32(os.Getegid()),
 				}
 				req := Request{Command: "printf recovered-service", OperationID: "service-replay-" + claimState, Kind: "service", Label: "api"}
@@ -561,25 +575,41 @@ func TestPersistentServiceClaimReplayUsesServiceCapacity(t *testing.T) {
 					State: claimState, CreatedAt: now, Workspace: workspace, Kind: "service", Label: "api",
 				}
 				claimPath := filepath.Join(claims, operationClaimName(req.OperationID))
-				if err := createJobClaim(claimPath, claim); err != nil { t.Fatal(err) }
+				if err := createJobClaim(claimPath, claim); err != nil {
+					t.Fatal(err)
+				}
 				if claimState == "launching" {
 					prepared := req
 					prepared.Workspace = workspace
-					if err := server.prepareJobFiles(jobPathsFor(jobs, claim.JobID), prepared); err != nil { t.Fatal(err) }
+					if err := server.prepareJobFiles(jobPathsFor(jobs, claim.JobID), prepared); err != nil {
+						t.Fatal(err)
+					}
 				}
 				resp := server.startJobBounded(req)
 				recovered, found, err := readJobClaim(claimPath)
-				if err != nil || !found { t.Fatalf("read replay claim: found=%v err=%v", found, err) }
+				if err != nil || !found {
+					t.Fatalf("read replay claim: found=%v err=%v", found, err)
+				}
 				if tc.wantOK {
-					if !resp.OK || !resp.IdempotentReplay || resp.JobID != claim.JobID { t.Fatalf("service replay should use independent service capacity: %+v", resp) }
-					if recovered.State != "started" { t.Fatalf("allowed service replay state = %q, want started", recovered.State) }
-					if _, err := os.Stat(launchMarker); err != nil { t.Fatalf("allowed service replay did not launch: %v", err) }
+					if !resp.OK || !resp.IdempotentReplay || resp.JobID != claim.JobID {
+						t.Fatalf("service replay should use independent service capacity: %+v", resp)
+					}
+					if recovered.State != "started" {
+						t.Fatalf("allowed service replay state = %q, want started", recovered.State)
+					}
+					if _, err := os.Stat(launchMarker); err != nil {
+						t.Fatalf("allowed service replay did not launch: %v", err)
+					}
 				} else {
 					if resp.OK || resp.ErrorCode != "resource_limit" || resp.Status != "busy" || !resp.Retryable || !resp.IdempotentReplay || resp.JobID != claim.JobID {
 						t.Fatalf("service replay bypassed service quota: %+v", resp)
 					}
-					if recovered.State != claimState { t.Fatalf("blocked service replay state = %q, want %q", recovered.State, claimState) }
-					if _, err := os.Stat(launchMarker); !os.IsNotExist(err) { t.Fatalf("capacity-blocked service replay invoked systemd-run: %v", err) }
+					if recovered.State != claimState {
+						t.Fatalf("blocked service replay state = %q, want %q", recovered.State, claimState)
+					}
+					if _, err := os.Stat(launchMarker); !os.IsNotExist(err) {
+						t.Fatalf("capacity-blocked service replay invoked systemd-run: %v", err)
+					}
 				}
 			})
 		}

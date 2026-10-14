@@ -46,7 +46,7 @@ type Server struct {
 	terminalBinary                string                                                    // test-only isolated tmux fixture; production uses /usr/bin/tmux
 	terminalScopeStartTestHook    func(Request, string, *tmuxTerminalState, []string) error // test-only fault
 	terminalScopeStopTestHook     func(string) error                                        // test-only exact-scope stop fault
-	terminalActivePublishTestHook     func(*tmuxTerminalState) error                            // test-only post-scope/pre-ACTIVE fault
+	terminalActivePublishTestHook      func(*tmuxTerminalState) error                            // test-only post-scope/pre-ACTIVE fault
 	runtimeListObservationTimeoutTest time.Duration                                             // test-only passive inventory deadline override
 	runtimeTerminalVerifyTestHook     func(context.Context, string) error                       // test-only passive terminal verifier
 	goplsBinary                   string                                                    // test-only Go language server fixture

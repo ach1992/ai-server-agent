@@ -112,7 +112,6 @@ func TestPassiveRuntimeWorkerTerminalScopeAndPrincipal(t *testing.T) {
 	}
 }
 
-
 func TestRuntimeListUsesOneObservationDeadlineAndDoesNotMutate(t *testing.T) {
 	s, _, workspace := newSharedRuntimeTestServer(t)
 	state, err := os.MkdirTemp("/tmp", "asa-rt-deadline-")
