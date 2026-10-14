@@ -26,7 +26,13 @@ The currently documented authenticated bootstrap for the latest **published immu
 curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.12/scripts/install-stable.sh | bash
 ```
 
-To install **exactly `v0.1.12`** instead of resolving the latest published Stable:\n\n```bash\ncurl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.12/scripts/install-stable.sh | bash -s -- v0.1.12\n```\n\nThis bootstrap authenticates the selected release installer before privileged execution and installs verified release assets. **GitHub Releases is authoritative for the latest release**; the pinned bootstrap tag above is the currently documented trust anchor, not a claim that `main` is stable.
+To install **exactly `v0.1.12`** instead of resolving the latest published Stable:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.12/scripts/install-stable.sh | bash -s -- v0.1.12
+```
+
+This bootstrap authenticates the selected release installer before privileged execution and installs verified release assets. **GitHub Releases is authoritative for the latest release**; the pinned bootstrap tag above is the currently documented trust anchor, not a claim that `main` is stable.
 
 For an exact-version install, troubleshooting, advanced or source installations and supply-chain verification, use the [installation guide](docs/OPERATIONS.md#install-the-latest-stable-release).
 
