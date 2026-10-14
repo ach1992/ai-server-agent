@@ -57,4 +57,4 @@ Some clients may not show or obey server-provided instructions; inspect the auth
 
 ## Feature delivery
 
-The owning acceptance work is [Issue #143](https://github.com/ach1992/ai-server-agent/issues/143). This guide describes source functionality under development; inspect the **installed release** and [GitHub Releases](https://github.com/ach1992/ai-server-agent/releases) before assuming the commands are shipped. The product-level decision is recorded in the Owner-approved Project Specification (documentation integration through [PR #144](https://github.com/ach1992/ai-server-agent/pull/144)).
+The feature is implemented in the current `main` source, but published Stable `v0.1.12` does **not** include it. The owning [Issue #143](https://github.com/ach1992/ai-server-agent/issues/143) remains open for installed and direct-client acceptance. Inspect the **actual installed release** and [GitHub Releases](https://github.com/ach1992/ai-server-agent/releases) before assuming these commands are available. The durable product-level decision is in the Owner-approved [Project Specification](PROJECT-SPEC.md#10-environment-purpose-profiles).

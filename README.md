@@ -75,14 +75,14 @@ Read the [Tool Reference](docs/TOOL-REFERENCE.md) for tools, limits, examples, a
 
 ## Development and Validation server roles
 
-Two **Environment Purpose Profiles** are accepted for a forthcoming implementation:
+The current `main` source implements two **Environment Purpose Profiles** (not included in published Stable `v0.1.12`):
 
 - **Development:** preferred for source/Git changes, builds, debugging and routine project development.
 - **Validation:** preferred for candidate installation, real E2E/integration tests, reproduction and acceptance evidence.
 
-The profiles will label and guide clients; **they are not access-control tiers or separate Agent binaries**. Both can expose the same MCP/root/worker tools. GitHub authentication and optional tool installation remain separate operator decisions.
+The profiles label and guide compatible clients; **they are not access-control tiers or separate Agent binaries**. Both preserve the same MCP/root/worker tools. GitHub authentication and optional tool installation remain separate operator decisions.
 
-**Current release status:** profile selection and dedicated instructions are *not yet shipped*. Do not confuse these planned roles with the existing `local/public` connection options. See the [Project Specification](docs/PROJECT-SPEC.md#10-environment-purpose-profiles) and [Issue #143](https://github.com/ach1992/ai-server-agent/issues/143).
+**Delivery status:** implemented on `main`, but **not shipped in Stable `v0.1.12`**. Use profile management commands only after installing a version that includes this feature; an existing installation does not gain them by merging source. Do not confuse these purposes with `local/public` connection modes. See [Profile setup, management, and client discovery](docs/ENVIRONMENT-PROFILES.md), the [Project Specification](docs/PROJECT-SPEC.md#10-environment-purpose-profiles), and [Issue #143](https://github.com/ach1992/ai-server-agent/issues/143) for installed/client acceptance.
 
 ## Security and resource use
 
@@ -95,6 +95,7 @@ Resource budgets, timeouts and concurrency are bounded to protect host reliabili
 - **[PROJECT-SPEC.md](docs/PROJECT-SPEC.md):** canonical purpose, scope, success criteria and durable principles
 - **[ARCHITECTURE.md](docs/ARCHITECTURE.md):** trust boundaries, host resources, runtime architecture, install/update contracts
 - **[DEVELOPER-RUNTIME.md](docs/DEVELOPER-RUNTIME.md):** detailed accepted capability design and future architecture
+- **[ENVIRONMENT-PROFILES.md](docs/ENVIRONMENT-PROFILES.md):** Development/Validation purpose, install options, management and client metadata (source-only until released)
 - **[TESTING.md](docs/TESTING.md):** validation strategy and evidence expectations
 - **[OPERATIONS.md](docs/OPERATIONS.md):** full install, connectivity, management, updates and repair instructions
 - **[TOOL-REFERENCE.md](docs/TOOL-REFERENCE.md):** MCP tool and feature details
