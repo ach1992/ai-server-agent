@@ -104,7 +104,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 	if got := session.InitializeResult().ServerInfo.Version; got != mcpImplementationVersion() || (strings.HasSuffix(version, "-dev") && got == version) {
 		t.Fatalf("MCP initialize serverInfo.Version = %q, want truthful build identity, not stale development marker %q", got, version)
 	}
-	if got := session.InitializeResult().Instructions; got != instructions(cfg.WorkspaceDir) {
+	if got := session.InitializeResult().Instructions; got != instructions(cfg) {
 		t.Fatalf("MCP initialize instructions did not expose server tool-routing guidance: got %q", got)
 	}
 
@@ -538,7 +538,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 }
 
 func TestInstructionsRouteToolsConciselyAndPreserveSafety(t *testing.T) {
-	got := instructions("/srv/ai-workspace")
+	got := instructions(config.Default())
 	if words := len(strings.Fields(got)); words > 180 {
 		t.Fatalf("MCP instructions use %d words, want at most 180; move details to tool descriptions", words)
 	}

@@ -40,6 +40,8 @@ sudo env \
   -u AI_SERVER_AGENT_MCP_AUTH_FD \
   AI_SERVER_AGENT_BINARY="$BINARY" \
   AI_SERVER_AGENT_NONINTERACTIVE=1 \
+  AI_SERVER_AGENT_ENVIRONMENT_PROFILE=validation \
+  AI_SERVER_AGENT_SERVER_LABEL='QA Agent Host' \
   AI_SERVER_AGENT_SETUP_MODE=cloudflare \
   AI_SERVER_AGENT_HOSTNAME=mcp-ci-handoff.invalid \
   AI_SERVER_AGENT_CLOUDFLARE_API_TOKEN_FILE="$missing_cf_token" \
@@ -77,9 +79,37 @@ sudo jq -e '
   ([.credentials[] | select(.principal.id=="direct-default" and .enabled==true and
       .verifier_algorithm=="sha256-v1" and (.verifier | test("^[0-9a-f]{64}$")))] | length)==1
 ' /etc/ai-server-agent/mcp-credentials.json >/dev/null
-sudo jq -e '.listen_address=="127.0.0.1:3210" and (.tls_cert_file//"")==""' /etc/ai-server-agent/config.json >/dev/null
+sudo jq -e '.listen_address=="127.0.0.1:3210" and (.tls_cert_file//"")=="" and .environment_profile=="validation" and .server_label=="QA Agent Host"' /etc/ai-server-agent/config.json >/dev/null
+sudo jq -e '.environment_profile=="validation" and .server_label=="QA Agent Host"' /var/lib/ai-server-agent/AI_ENVIRONMENT.json >/dev/null
 sudo systemctl is-active --quiet ai-server-agent.service
 sudo systemctl is-active --quiet ai-server-agent-executor.service
 curl -fsS --max-time 5 http://127.0.0.1:3210/healthz >/dev/null
 
-echo "Fresh-installed Cloudflare installer -> manager FD3 boundary: PASS (no provider token, no provider mutation, local services healthy)"
+# New-baseline live management: only the Agent restarts for a purpose change.
+# The authorization store, immutable instance identity and Executor service
+# are independent of profile choice.
+executor_pid="$(sudo systemctl show -p MainPID --value ai-server-agent-executor.service)"
+instance_id="$(sudo jq -r .instance_id /etc/ai-server-agent/config.json)"
+credential_digest="$(sudo sha256sum /etc/ai-server-agent/mcp-credentials.json | cut -d' ' -f1)"
+sudo ai-server-agent-manage profile-set development >/dev/null
+sudo jq -e '.environment_profile=="development" and .server_label=="QA Agent Host"' /var/lib/ai-server-agent/AI_ENVIRONMENT.json >/dev/null
+sudo ai-server-agent-manage profile-set validation >/dev/null
+sudo ai-server-agent-manage profile-label 'QA Agent Host 2' >/dev/null
+sudo jq -e '.environment_profile=="validation" and .server_label=="QA Agent Host 2"' /var/lib/ai-server-agent/AI_ENVIRONMENT.json >/dev/null
+sudo ai-server-agent-manage profile-label 'QA Agent Host' >/dev/null
+test "$(sudo systemctl show -p MainPID --value ai-server-agent-executor.service)" = "$executor_pid"
+test "$(sudo sha256sum /etc/ai-server-agent/mcp-credentials.json | cut -d' ' -f1)" = "$credential_digest"
+
+# Install the SAME new-baseline candidate again in the disposable fixture.
+# The purpose and label survive the installer regeneration, without relying
+# on compatibility machinery for earlier Agent generations.
+sudo env AI_SERVER_AGENT_BINARY="$BINARY" AI_SERVER_AGENT_NONINTERACTIVE=1 \
+  AI_SERVER_AGENT_SETUP_MODE=local bash "$ROOT/install.sh" >"$output" 2>&1
+sudo jq -e '.environment_profile=="validation" and .server_label=="QA Agent Host"' /etc/ai-server-agent/config.json >/dev/null
+sudo jq -e '.environment_profile=="validation" and .server_label=="QA Agent Host"' /var/lib/ai-server-agent/AI_ENVIRONMENT.json >/dev/null
+test "$(sudo jq -r .instance_id /etc/ai-server-agent/config.json)" = "$instance_id"
+test "$(sudo sha256sum /etc/ai-server-agent/mcp-credentials.json | cut -d' ' -f1)" = "$credential_digest"
+sudo systemctl is-active --quiet ai-server-agent.service
+sudo systemctl is-active --quiet ai-server-agent-executor.service
+
+echo "Fresh-installed Cloudflare handoff + purpose profile management + new-baseline reinstall: PASS (no provider token, no provider mutation)"

@@ -329,6 +329,7 @@ runtime_apply(){
   runtime_binary_safe
   [ ! -e "$CF_TXN_STATE" ] && [ ! -L "$CF_TXN_STATE" ] || die "Recover the existing Cloudflare transaction before editing runtime settings."
   [ -z "$(runtime_pending_backup)" ] || die "A previous runtime update has an unresolved rollback snapshot. Inspect the protected .runtime-old.* file and reconcile service state before another edit."
+  [ -z "$(profile_pending_backup)" ] || die "A previous environment update has an unresolved rollback snapshot; reconcile it before any runtime edit."
   staged="$(mktemp "$CONFIG_DIR/.runtime-new.XXXXXXXX")" || die "Cannot stage runtime config."
   backup="$(mktemp "$CONFIG_DIR/.runtime-old.XXXXXXXX")" || { rm -f -- "$staged"; die "Cannot stage rollback."; }
   if [ "$operation" = set ]; then
@@ -377,6 +378,117 @@ runtime_apply(){
   die "Runtime update failed and recovery is NOT verified. Protected rollback snapshot preserved at $backup; inspect the services/config manually. Further runtime changes are blocked until reconciled."
 }
 
+# Purpose profiles guide AI host selection; they never change MCP tool access,
+# root approval, credentials, optional adapters or connection topology.
+profile_pending_backup(){
+  find "$CONFIG_DIR" -maxdepth 1 -name '.profile-old.*' -print -quit
+}
+profile_show(){
+  runtime_config_safe
+  runtime_binary_safe
+  "$RUNTIME_BINARY" -config "$CONFIG_FILE" validate-config >/dev/null || die "Installed Agent rejected current config."
+  printf '%sEnvironment purpose%s\n' "$BOLD" "$RESET"
+  printf '  Profile: %s\n' "$(config_get environment_profile)"
+  local label
+  label="$(config_get server_label)"
+  printf '  Label:   %s\n' "${label:-(not set)}"
+  ui_wrap '  ' 'Development prefers routine Git/source/build/debug work. Validation prefers installing/testing candidates, E2E and acceptance evidence. Both retain all authorized tools.'
+  ui_wrap '  ' 'The selected purpose is descriptive guidance only. GitHub credentials and permission/Root approval are independent. Changes require an Agent restart; an active MCP client may reconnect.'
+  if [ -n "$(profile_pending_backup)" ]; then
+    warn "An earlier profile update left a protected rollback snapshot. Reconcile Agent health and config before another change."
+  fi
+}
+restart_agent_and_verify_profile(){
+  # Role metadata/instructions are owned only by the Agent process. Avoid
+  # restarting the Executor (and disturbing its recoverable sessions).
+  systemctl restart ai-server-agent.service || return 1
+  sleep 1
+  systemctl is-active --quiet ai-server-agent.service || return 1
+  systemctl is-active --quiet ai-server-agent-executor.service || return 1
+  local port
+  port="$(current_port)"
+  if [ -n "$(config_get tls_cert_file)" ]; then
+    curl -kfsS "https://127.0.0.1:$port/healthz" >/dev/null || return 1
+  else
+    curl -fsS "http://127.0.0.1:$port/healthz" >/dev/null || return 1
+  fi
+  # A healthy OLD process or stale manifest is not evidence of the new role.
+  jq -e --arg role "$(config_get environment_profile)" --arg label "$(config_get server_label)" \
+    '.environment_profile==$role and (.server_label // "")==$label' \
+    "$STATE_DIR/AI_ENVIRONMENT.json" >/dev/null 2>&1
+}
+profile_apply(){
+  local key="$1" value="$2" staged backup restore_stage restored=false
+  case "$key" in
+    environment_profile)
+      case "$value" in development|validation) ;; *) die "Profile must be development or validation." ;; esac ;;
+    server_label) ;;
+    *) die "Unsupported purpose setting: $key" ;;
+  esac
+  acquire_management_lock
+  runtime_config_safe
+  runtime_binary_safe
+  [ ! -e "$CF_TXN_STATE" ] && [ ! -L "$CF_TXN_STATE" ] || die "Resolve the Cloudflare transaction before changing environment purpose."
+  [ -z "$(runtime_pending_backup)" ] || die "An unresolved runtime rollback exists; reconcile it first."
+  [ -z "$(profile_pending_backup)" ] || die "An unresolved profile rollback exists; reconcile the protected .profile-old.* snapshot and service state first."
+  staged="$(mktemp "$CONFIG_DIR/.profile-new.XXXXXXXX")" || die "Could not stage profile config."
+  backup="$(mktemp "$CONFIG_DIR/.profile-old.XXXXXXXX")" || { rm -f -- "$staged"; die "Could not stage profile rollback."; }
+  if ! jq --arg key "$key" --arg value "$value" \
+    'if $key=="server_label" and $value=="" then del(.server_label) else .[$key]=$value end' \
+    "$CONFIG_FILE" > "$staged"; then
+    rm -f -- "$staged" "$backup"; die "Could not create purpose configuration."
+  fi
+  if ! "$RUNTIME_BINARY" -config "$staged" validate-config >/dev/null; then
+    rm -f -- "$staged" "$backup"; die "Invalid purpose/label. Choose a valid role or printable label (max 80 characters); existing configuration unchanged."
+  fi
+  if ! cp -p -- "$CONFIG_FILE" "$backup"; then
+    rm -f -- "$staged" "$backup"; die "Could not preserve old profile config."
+  fi
+  if ! chown root:"$AGENT_USER" "$staged" || ! chmod 0640 "$staged"; then
+    rm -f -- "$staged" "$backup"; die "Could not secure staged profile config."
+  fi
+  if ! mv -f -- "$staged" "$CONFIG_FILE"; then
+    rm -f -- "$staged" "$backup"; die "Could not commit profile configuration."
+  fi
+  if restart_agent_and_verify_profile; then
+    rm -f -- "$backup"
+    log "Environment $key updated; Agent restarted and effective manifest and health verified. Executor was not restarted."
+    return 0
+  fi
+  warn "Purpose update failed to activate. Restoring the old config and Agent service."
+  if restore_stage="$(mktemp "$CONFIG_DIR/.profile-restore.XXXXXXXX")"; then
+    if cp -p -- "$backup" "$restore_stage" &&
+       mv -f -- "$restore_stage" "$CONFIG_FILE" &&
+       restart_agent_and_verify_profile; then
+      restored=true
+    fi
+    rm -f -- "$restore_stage"
+  fi
+  if [ "$restored" = true ]; then
+    rm -f -- "$backup"
+    die "Environment update failed; previous configuration and Agent health were restored."
+  fi
+  die "Environment update failed and recovery is NOT verified. Rollback snapshot preserved at $backup; reconcile installed config and services manually before another change."
+}
+profile_menu(){
+  [ -r /dev/tty ] || die "Interactive environment profile selection requires a terminal."
+  while true; do
+    header
+    profile_show
+    printf '\n  1) Development\n  2) Validation\n  3) Set server label\n  4) Clear server label\n  0) Back\n\n'
+    local choice label
+    read -r -p 'Choose: ' choice </dev/tty
+    case "$choice" in
+      1) profile_apply environment_profile development; pause ;;
+      2) profile_apply environment_profile validation; pause ;;
+      3) label="$(prompt_value 'Server label (max 80 printable characters)')"; profile_apply server_label "$label"; pause ;;
+      4) profile_apply server_label ""; pause ;;
+      0) return ;;
+      *) warn "Choose 1, 2, 3, 4, or 0." ;;
+    esac
+  done
+}
+
 status(){
   need_cmd jq
   local identity channel version ref mode port cert host provider health service executor endpoint
@@ -397,6 +509,8 @@ status(){
   printf '  Executor:      %s\n' "$executor"
   printf '  Local health:  %s\n' "$health"
   printf '  Mode:          %s\n' "$mode"
+  printf '  Purpose:       %s\n' "$(config_get environment_profile)"
+  [ -n "$(config_get server_label)" ] && printf '  Server label:  %s\n' "$(config_get server_label)"
   printf '  Port:          %s\n' "$port"
   [ -n "$provider" ] && printf '  Setup:         %s\n' "$provider"
   [ -n "$host" ] && printf '  Domain:        %s\n' "$host"
@@ -2145,6 +2259,7 @@ menu(){
     printf '  %s9)%s Remove recorded Cloudflare resources\n' "$YELLOW" "$RESET"
     printf '  %s10)%s MCP credential management\n' "$CYAN" "$RESET"
     printf '  %s11)%s Runtime limits and timeouts\n' "$CYAN" "$RESET"
+    printf '  %s12)%s Environment purpose / server label\n' "$CYAN" "$RESET"
     printf '  0) Exit\n\n'
     read -r -p 'Choose: ' choice </dev/tty
     case "$choice" in
@@ -2159,6 +2274,7 @@ menu(){
       9) cloudflare_cleanup; pause ;;
       10) credential_menu ;;
       11) runtime_menu ;;
+      12) profile_menu ;;
       0) return ;;
       *) warn "Invalid choice."; pause ;;
     esac
@@ -2177,6 +2293,10 @@ case "${1:-menu}" in
   runtime-show) [ "$#" -eq 1 ] || die "Usage: ai-server-agent-manage runtime-show"; runtime_show ;;
   runtime-set) [ "$#" -eq 3 ] || die "Usage: ai-server-agent-manage runtime-set <key> <integer>"; runtime_apply set "$2" "$3" ;;
   runtime-reset) [ "$#" -eq 2 ] || die "Usage: ai-server-agent-manage runtime-reset <key>"; runtime_apply reset "$2" ;;
+  profile-show) [ "$#" -eq 1 ] || die "Usage: ai-server-agent-manage profile-show"; profile_show ;;
+  profile-set) [ "$#" -eq 2 ] || die "Usage: ai-server-agent-manage profile-set development|validation"; profile_apply environment_profile "$2" ;;
+  profile-label) [ "$#" -eq 2 ] || die "Usage: ai-server-agent-manage profile-label '<label>'"; profile_apply server_label "$2" ;;
+  profile-label-clear) [ "$#" -eq 1 ] || die "Usage: ai-server-agent-manage profile-label-clear"; profile_apply server_label "" ;;
   chatgpt|chatgpt-setup) chatgpt_setup ;;
   reveal-auth) reveal_auth ;;
   credentials|credential-status) credential_status ;;
@@ -2191,5 +2311,5 @@ case "${1:-menu}" in
   repair) repair ;;
   uninstall) run_uninstall 0 ;;
   purge) run_uninstall 1 ;;
-  *) die "Unknown command: ${1:-}. Use menu, status, runtime-show, runtime-set, runtime-reset, chatgpt-setup, credential-status, credential-rotate, credential-revoke, configure-cloudflare, configure-local, configure-manual-tls, cloudflare-cleanup, update, repair, uninstall, or purge." ;;
+  *) die "Unknown command: ${1:-}. Use menu, status, profile-show, profile-set, profile-label, profile-label-clear, runtime-show, runtime-set, runtime-reset, chatgpt-setup, credential-status, credential-rotate, credential-revoke, configure-cloudflare, configure-local, configure-manual-tls, cloudflare-cleanup, update, repair, uninstall, or purge." ;;
 esac
