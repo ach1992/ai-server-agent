@@ -158,7 +158,7 @@ Ctags is not a Core-v1 managed dependency. Reconsider only from a concrete non-L
 
 LSP owns diagnostics, symbols, definitions, references, hover, rename and related language-aware semantics.
 
-v1 reference path: Go with gopls. Additional language servers are added only from real consumer need.
+Current shipped reference path: Go with gopls. Issue #140 accepts a defined first expansion to PHP, JavaScript/TypeScript, Python, Bash/POSIX Shell, Rust, HTML, CSS, and PostgreSQL/MySQL/MariaDB-aware SQL. This sentence describes current shipped behavior, not a limit on accepted future scope.
 
 The initial Go read-only MCP operations (`code_definition`, `code_references`, `code_symbols`, `code_diagnostics`) require an explicit, resolved workspace, a workspace-relative `.go` source path and the exact `file_version` returned by `workspace_stat`/`workspace_read`. The executor obtains complete, bounded UTF-8 source through the existing sandboxed `aiworker` file helper and rechecks the file version after gopls responds; stale, binary or oversized source is rejected rather than silently analyzed as a truncated document. The reference adapter intentionally handles sources below 64 KiB (within its 128 KiB LSP frame budget), bounded result JSON and root-owned trusted, non-symlink system gopls installations at conventional paths, with parent directories checked for unsafe ownership and writability. The same trust validator governs the optional Delve and root-terminal tmux production executables and the capability manifest. Broader documents/providers, reuse and paginated semantic results remain explicit expansion points, not implied support. The integrated v1 cross-file location path uses a bounded first-query target discovery, exact worker-authority read snapshots and explicit gopls `didOpen` overlays for target files, followed by a confirming query and file-version rechecks. Every in-workspace location carries its own `file_version`; target edits or conflicting semantic results fail closed rather than lending the request source's version to a different file. External locations stay redacted, and this is not a multi-file atomic transaction or a claim that the output is a durable edit plan.
 
@@ -239,7 +239,7 @@ Production terminal recovery across an actual Executor service restart also requ
 
 DAP is Core v1 because debugging is expected to be a recurring workflow where structured runtime state materially outperforms parsing a human debugger console.
 
-v1 reference path: Go + Delve/DAP.
+Current shipped reference path: Go + Delve/DAP. Issue #140 accepts additional runtime-specific DAP adapters; HTML/CSS/SQL do not acquire fictional DAP obligations.
 
 The **integrated PR #98 reference implementation** adds a first-class `debug_*` MCP loop with Delve `dap` in **worker-only `exec` mode**. `debug_launch` accepts an existing regular executable inside an exact resolved workspace/worktree and a matching `workspace_stat` `file_version`; the operator builds debug binaries explicitly through the normal worker command/job path. `debug_adapter_status` reports optional administrative Delve availability (`/usr/bin/dlv` or `/usr/local/bin/dlv`) without automatically installing it. Once launched, the client can set version-pinned source breakpoints, complete `debug_configure`, inspect threads/stacks/scopes/variables, continue/pause/step, inspect exception information when supported, evaluate explicitly authorized expressions and terminate/inspect status. Attach, elevated debugging and DAP reverse `runInTerminal` requests are **not supported by the initial reference path**; unusual workflows stay available through separately authorized terminal/CLI tools.
 
@@ -419,12 +419,12 @@ install Agent
 
 Uncommitted local work is not durable project truth. The workflow should create coherent commits/pushes often enough that useful work is recoverable without forcing noisy commits after every edit.
 
-### Shared-host development and cold-chat recovery (Issue #137; PLANNED)
+### Shared-host development and cold-chat recovery (Issue #137; separate delivery and acceptance)
 
-**Owner-approved first-install baseline, NOT SHIPPED:** Develop the new
+**Owner-approved first-install target; consult #137 and its PRs for the live shipped/candidate state:** Develop the new
 Agent as if first installed on a fresh Linux host. Do **not** add migration
 logic/tests for historical Agent versions, claims, profiles or runtime state,
-or promise future cross-version migration. [Issue #137](https://github.com/ach1992/ai-server-agent/issues/137)
+or pre-build speculative future cross-version migration. [Issue #137](https://github.com/ach1992/ai-server-agent/issues/137)
 is the **sole detailed implementation and acceptance contract**. The
 existing released Stable descriptions above still describe shipped behavior.
 
@@ -485,6 +485,8 @@ Activate bounded dependency-aware slices rather than everything at once:
 
 Optional/deferred work is not a blocker.
 
+**Issue #140 has a separate Owner-gated documentation-first prerequisite:** finish and review its revised architecture/acceptance contract before writing any multi-language implementation. The accepted first-expansion language scope is not optional/deferred. Keep #137 Shared Runtime independent: do not bundle #140 changes into another workstream's frozen or independently reviewed candidate. Reconcile the **current** Issue/PR/target identity before implementation or integration.
+
 ## 18. Promotion rule for future capabilities
 
 A mature CLI/tool should move into Layer 1 only when evidence shows that a dedicated Agent abstraction materially improves a recurring workflow through one or more of:
@@ -497,7 +499,55 @@ A mature CLI/tool should move into Layer 1 only when evidence shows that a dedic
 
 Do not promote capabilities merely because they are powerful, modern, or available.
 
-## 19. Authoritative work items
+## 19. Language-neutral extensions and fresh-install delivery (Issue #140; target, not shipped)
+
+**Design status:** The Owner selected a protocol-first, capability-driven direction and explicitly ordered a **documentation/Issue review before implementation**. No source coding, source PR integration, installed-server change or release for #140 is authorized until a subsequent explicit Owner approval. The latest Issue #140 body owns its accepted per-language coverage and its implementation/acceptance gates; this document owns durable architecture only.
+
+**Extension test:** For an adapter that already implements LSP/DAP, adding a language should normally be a bounded integration of a trusted tool, its narrow profile, and conformance fixtures. It must not require a new MCP family, file writer, process/session registry or security model. Genuine language-specific runtime differences may require a small typed launch/transport handler. Do not promise that every third-party adapter behaves identically.
+
+| Boundary | Existing owner / extension rule |
+| --- | --- |
+| Public interaction | Reuse the four existing `code_*` names and the 17 existing `debug_*` names. Add only useful optional inputs (e.g. resolved language, SQL dialect, supported launch mode), preserving practical Go/default behavior; require a separately justified contract decision for a genuinely new tool. |
+| Semantic protocol | One executor-private LSP client owns initialize/capability negotiation, JSON-RPC framing, request/notification demultiplexing, cancel/time bounds, position encoding, diagnostics and normalized result semantics. |
+| Debug protocol | One executor-private DAP engine owns protocol sequencing, async events, typed responses and state transitions. Adapter-specific configuration, launch arguments, transport and debuggee identification stay outside the generic wire layer. |
+| Runtime ownership | Reuse the existing #66 executor-owned session broker, worker identity, principal/class/workspace checks, resource admission, audit, process lifetime and verified cleanup. No second broker or public raw adapter proxy. |
+| Files / mutations | Version-pin source reads and cross-file locations through #55; route structured WorkspaceEdit/rename/refactor plans through the existing safe version-precondition edit path. Neither a language adapter nor ast-grep becomes an Agent-owned second file writer. |
+| Project vs Agent readiness | #64 `repository_environment` remains descriptive of **project-declared** toolchains and requirements; it is **not** the authority for Agent-managed LSP/DAP adapters. Report actual trusted Agent adapter readiness through existing `agent_environment`/selected `debug_adapter_status`-style status surfaces and reconcile with the selected workspace/language. Distinguish declared, installed, protocol-compatible, permitted, ready, degraded and unavailable; discovery never grants authority, installs tools or executes untrusted workspace code. |
+| Binary/large evidence | Reuse #99 bounded metadata, versioned ranges, integrity and supported typed delivery. No independent language-specific artifact store or claim that base64 transport implies model visibility. |
+| Web/UI/SQL behavior | Reuse Browser/Playwright for real DOM/CSS behavior and the existing command/job paths for explicit build/test. SQL analysis is offline by default; optional DB metadata access is separately approved, least-privilege and not generic query execution. |
+
+**Minimal profile, not a plugin marketplace.** An internal static adapter profile may declare language IDs/file matches, dialect where relevant, trusted executable/version/source, supported protocol operations, safe initialization options, supported DAP launch modes, connection type, required runtime/toolchain, and capabilities that are actually verified. Ambiguous file/language selection fails explicitly; a repository must not supply arbitrary privileged launch commands or silently override the adapter executable. Profiles compose with common mechanisms; do not copy broker, audit, resource, filesystem, output or auth logic into every language implementation.
+
+**Pin the full adapter execution chain.** Root-owned `node`, `python` or `php` alone does not validate loaded language-server packages, wheels, plugins, shared libraries, startup scripts or child binaries. Only operator-controlled, provenance/version/checksum-verified and platform-compatible launch chains may execute as Agent-owned adapters; workspace-local, worker-writable dependencies/config must not silently gain authority. Include licenses and Ubuntu/Debian amd64/arm64 artifacts in readiness checks. Optional adapters must not become mandatory Core dependencies.
+
+**LSP correctness before adapter count.** The Go reference code is currently hard-wired to `.go`, `gopls`, its current message/frame limits and pull diagnostics. Generalization must support negotiated real server capabilities, UTF-16 positions unless negotiated otherwise, properly correlated asynchronous push `publishDiagnostics` as well as pull diagnostics, complete/bounded results, multi-file source-version binding, explicit unsupported operations, lost-event disclosure and fail-closed source drift. Client and server requests/notifications must not be silently dropped when relevant. Keep per-call launch initially; only add bounded session reuse/caching after representative measurements show a net benefit and no principal/workspace/cache cross-talk.
+
+**Passive LSP must not mutate.** Versionless pushed diagnostics cannot acquire fabricated `file_version`; accept them only when correlated to a verifiably stable source snapshot, otherwise return uncertainty. Reject unsolicited `workspace/applyEdit`, automatic command/download or other execution/write requests during read-only `code_*` calls. Future user-authorized rename/refactor may translate an explicitly accepted, bounded, versioned WorkspaceEdit through #55; current multi-file preflight plus per-file atomic writes are **not** all-or-nothing transactions. Hover and rename are examples of LSP capabilities, not additional required public tools in #140.
+
+**DAP correctness before adapter count.** The Delve reference path assumes a prebuilt Go executable, a private socket and Delve-specific debuggee provenance. A conforming DAP adapter may emit `initialized`, request breakpoint configuration, and defer its `launch` response until `configurationDone`; a sequential wait-for-launch-response implementation can deadlock. The shared engine must handle supported legal orderings, concurrent pending messages, adapter capabilities and explicit timeouts without turning on adapter-originated `runInTerminal` or unreviewed reverse requests. Script/module/test (Python), Node/TypeScript source maps, PHP CLI/request Xdebug and prebuilt Rust/LLDB need distinct, bounded launch/transport contracts. Preserve authenticated worker authority, private endpoints, pinned process identities, cgroup/descendant containment, unknown-after-send reporting and **verified cleanup even if the adapter exits before reporting a debuggee**. Delve's direct-child PID/executable assumptions are not a universal DAP contract.
+
+**Different target owners require different verified stop semantics.** For a session-owned CLI target, the Executor must prove containment and cleanup of adapter, debuggee and descendants. For an existing *separately service-owned* test target (e.g. worker-controlled PHP HTTP service started by the existing Job/Service path), the DAP session does **not** inherit ownership of that service: bind the exact permitted request, service and private DBGp connection, detach/close/verify only its debugger resources on `debug_stop`, preserve the running service, and reserve service termination for separately authorized `job_stop`. Never `cgroup.kill` a cgroup owned by the HTTP service from DAP stop or claim an external process was reaped. Arbitrary remote, production or unverified PHP-FPM/Apache targets are not supported. Treat safe PHP HTTP request-mode feasibility as an explicit gate: unresolved provenance/detachment blocks acceptance rather than silently dropping the mode.
+
+**Adapter-originated launch is not a back door.** DAP `runInTerminal` is unsupported by default. If an accepted adapter requires it, prefer verified self-launch; otherwise a future reviewed handler may admit only a typed user-approved worker target/argv/CWD/environment bound to the same session, audit, contained process ownership and cleanup. No arbitrary reverse-request shell, root execution, uncontained child process or automatic nested debug session. Declare unsupported capability until the safe path is implemented and proven.
+
+**Trust is separate from protocol and from workspace identity.** A "read-only" LSP call must not execute untrusted project build scripts, Rust procedural macros, repository toolchain overrides, startup hooks, package-manager scripts or project-controlled language-server configuration. If safe semantic analysis is not possible, report an accurately degraded/unsupported capability until the action is explicitly trusted and confined. SQL must never open a database automatically or run statements including `EXPLAIN ANALYZE` under a read-only label. PHP HTTP/Xdebug and browser-extension debugging require separately accepted local/test authorization and transport boundaries; root/remote attach do not arrive through adapter capability discovery. A shared worker UID/workspace filter is **not** cross-tenant filesystem isolation.
+
+**Shared HOME does not confer trust.** #137 deliberately shares one worker HOME/XDG among projects; never treat its worker-writable config or caches as operator adapter policy. Where a real tool requires cache scoping, use a bounded canonical workspace + adapter/version key without another HOME manager, and prove no cross-repository semantic-result or session-handle contamination. Workspace checks are logical authorization, not tenant filesystem confidentiality.
+
+**Single-host resource economics.** One Agent/Executor and the existing job/session/browser infrastructure remain authoritative. Protocol messages need bounded per-consumer framing and backpressure; terminal output retention and lossless protocol response handling are different contracts. The existing finite broker admission budget is shared by LSP/DAP/Terminal/Browser; test heterogeneous multi-project capacity, early rejection and truthful busy/unknown outcomes rather than hiding starvation behind indefinite waits. Record CPU/RSS, process counts, time-to-first-result, dropped events and cleanup against concrete multi-project fixtures before adding worker pools, hot-session caches, parallel language servers or new knobs. Do not perform a blanket refactor of already-working Git, Browser, Jobs, Workspace or PTY tools to make them fit a speculative universal interface. Converge duplicate action dispatch or specialized transport code only when a testable real integration slice requires it.
+
+**Clean-install baseline for the next release candidate.** The *new candidate* is designed and accepted as a **first-ever installation on an authorized empty supported Linux host**. Once released, that candidate becomes a **new forward-compatibility baseline**: future versions must decide schema evolution and upgrade guarantees for actual new-baseline users when warranted. No speculative migration framework or support for earlier installed releases is needed today, but fresh-install permission is not a permanent exemption from disciplined future upgrades. Preserve bounded state identity, reconnect and lifecycle contracts within the new build. There is no obligation to migrate or preserve prior Agent install scripts, old config layouts, legacy job/operation claims, historical browser profiles, previous terminal handles, or mixed-version in-place upgrade compatibility; do not manufacture compatibility wrappers or migration tests for those absent users. This does **not** authorize wiping an occupied host, changing the running Stable, weakening signed-release/install verification, or dropping recovery *within the newly installed build* after chat disconnect, Agent/Executor restart or proven persistent runtime ownership. Public MCP tool names, output meanings and independent external clients remain valuable product contracts; any intentional breaking client-facing change must be explicitly reviewed rather than smuggled in as "no legacy install migration." Current shipped Stable install/update behavior remains documented separately and unchanged by this design decision.
+
+**Proof-oriented delivery sequence (no code until Owner accepts the documents):**
+
+1. Reconcile the **current controlling revision of Issue #140** with this target architecture and #52/#137/#59/#99, propose docs only, and obtain explicit Owner sign-off to begin implementation. Do not change another workstream's frozen or independently reviewed candidate to implement #140.
+2. On an independently isolated implementation branch **after that approval**, prove a *small* language-neutral LSP/DAP mechanism against real Go and at least one behaviorally different adapter each: push/pull diagnostics, delayed DAP launch response, source versions, cancellation, private transport and verified process cleanup. Verify DAP reverse-launch requirements and a separately service-owned PHP HTTP attach/detach topology before freezing common launch/cleanup assumptions. Compare existing small wire code against focused maintained Go protocol libraries; adopt only if measurably simpler to maintain.
+3. Expand LSP, then DAP using the same small registry/typed launch seams for all accepted #140 languages. Every first-wave language needs at least one substantive **positive** real semantic/diagnostic proof (plus its required runtime proof); typed unsupported results are correct for optional operations, **not** substitutes for required first-class capability. CLI PHP must prove owned-target termination; HTTP PHP must prove authorized request attach/detach while preserving the service. PHP/Node/Python/Rust DAP, Shell DAP feasibility gate, HTML/CSS Browser verification, SQL offline PG+MySQL/MariaDB are each validated on representative real files. An adapter's unsupported operation returns an actionable typed error rather than a fabricated feature.
+4. Run concurrent, independent worktrees with different languages; check missing-tool degradation, retained process/evidence bounds, negative permissions, crash/soak/recovery and actual connected-client behavior. Required exact-HEAD CI/Security, author-separated HIGH_ASSURANCE for material process/security changes, Owner-gated integration/release/deployment, and #59/#99 program acceptance remain independent obligations.
+
+**What is deliberately excluded:** a public plugin API/marketplace, universal language runner, unconditional managed provisioning, second state broker, per-project Agent/database/UID, broad rewrite of working tools, and a guarantee that any future adapter can integrate without a small compatibility handler. Each new abstraction must demonstrate a real repeated failure or measurable integration/maintenance improvement.
+
+## 20. Authoritative work items
 
 - #52 — Developer Runtime program and sequencing;
 - #53 — Phase A canonical architecture/docs;
@@ -513,7 +563,8 @@ Do not promote capabilities merely because they are powerful, modern, or availab
 - #64 — environment/toolchain discovery;
 - #65 — optional evidence-triggered Incus;
 - #66 — internal stateful-session substrate;
-- #99 — AI-facing bounded data delivery and typed-artifact acceptance.
-- #137 — Owner-approved first-install-only shared-runtime recovery, finite task/service lifecycle and optional Browser-state isolation (not shipped).
+- #99 — AI-facing bounded data delivery and typed-artifact acceptance;
+- #137 — separate first-install Shared Runtime; its current PR and acceptance state live in GitHub;
+- #140 — language-neutral multi-language LSP/DAP, docs-first Owner gate and adapter acceptance.
 
 After this document is integrated, use it for stable architecture and use Issues for active work/dependencies. Do not reconstruct these decisions from chat history.
