@@ -38,6 +38,18 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 		return fileError("invalid_code_path", "validation", errors.New("source path must be an ordinary workspace-relative file"))
 	}
 	profile, actualLanguage, supported := inspectProfileForPath(path)
+	if isSQLSourcePath(path) {
+		actualLanguage = "sql"
+		if req.SQLDialect == "" {
+			return fileError("sql_dialect_required", "validation", errors.New("SQL semantics require explicit sql_dialect postgres, mysql or mariadb; no implied default/database access"))
+		}
+		profile, supported = sqlLSPProfile(req.SQLDialect, "", "")
+		if !supported {
+			return fileError("unsupported_sql_dialect", "validation", errors.New("SQL dialect must be postgres, mysql or mariadb"))
+		}
+	} else if req.SQLDialect != "" {
+		return fileError("invalid_sql_dialect_scope", "validation", errors.New("SQL dialect cannot be supplied for a non-SQL source"))
+	}
 	if !supported {
 		return fileError("unsupported_code_language", "validation", errors.New("source extension is not supported by the installed first-class LSP profiles"))
 	}
@@ -81,6 +93,25 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 		if binary == "" {
 			return fileError("gopls_unavailable", "dependency", errors.New("trusted optional gopls is not installed"))
 		}
+	} else if actualLanguage == "sql" {
+		if !systemexec.Trusted(systemexec.SQLLensEnv) {
+			return fileError("sql_lsp_unavailable", "dependency", errors.New("trusted environment executable for fixed SQL interpreter settings is unavailable"))
+		}
+		binary = systemexec.SQLLensEnv
+		node, cli := s.sqlNodeBinary, s.sqlCLIBinary // test-only, never MCP inputs
+		if node != "" {
+			if cli == "" {
+				return fileError("sql_lsp_fixture_incomplete", "dependency", errors.New("SQL fixture must provide trusted interpreter and fixed CLI"))
+			}
+		} else {
+			var trustErr error
+			node, trustErr = systemexec.SQLLens()
+			if trustErr != nil {
+				return fileError("sql_lsp_unavailable", "dependency", errors.New("trusted optional pinned SQL language server and resources are unavailable"))
+			}
+			cli = systemexec.SQLLensCLI
+		}
+		profile, _ = sqlLSPProfile(req.SQLDialect, node, cli)
 	} else if actualLanguage == "html" || actualLanguage == "css" {
 		binary = s.webNodeBinary // test-only fixture, never callable from MCP input
 		if binary != "" {
@@ -228,6 +259,47 @@ func webLSPProfile(language string) lspInspectionProfile {
 
 var htmlLSPProfile = webLSPProfile("html")
 var cssLSPProfile = webLSPProfile("css")
+
+func isSQLSourcePath(path string) bool {
+	switch strings.ToLower(filepath.Ext(path)) {
+	case ".sql", ".pgsql", ".psql", ".mysql", ".mariadb":
+		return true
+	}
+	return false
+}
+
+// SQL dialects are explicit and independent of untrusted project configuration.
+// The trusted env program execs a fixed, checksum-verified Node package.
+// In particular, SQLLENS_NO_PLUGINS=1 disables project/user-supplied dynamic
+// imports and SQLLENS_USER_CONFIG=/dev/null prevents implicit user credentials.
+func sqlLSPProfile(dialect, node, cli string) (lspInspectionProfile, bool) {
+	var languageID string
+	switch dialect {
+	case "postgres", "postgresql":
+		languageID = "sql-postgres"
+	case "mysql", "mariadb":
+		languageID = "sql-mysql" // MariaDB compatibility subset; no full-vendor promise
+	default:
+		return lspInspectionProfile{}, false
+	}
+	return lspInspectionProfile{
+		arguments: []string{
+			"SQLLENS_NO_PLUGINS=1",
+			"SQLLENS_USER_CONFIG=/dev/null",
+			"NODE_ENV=production",
+			node, cli, "--stdio",
+		},
+		extensions: map[string]string{
+			".sql":     languageID,
+			".pgsql":   languageID,
+			".psql":    languageID,
+			".mysql":   languageID,
+			".mariadb": languageID,
+		},
+		waitForInitialPush:  true,
+		pushOnlyDiagnostics: true,
+	}, true
+}
 
 var pythonTyLSPProfile = lspInspectionProfile{
 	arguments:  []string{"server"},

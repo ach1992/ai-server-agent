@@ -40,6 +40,7 @@ type Request struct {
 	VerifyRemote     bool                `json:"verify_remote,omitempty"`
 	Disposable       bool                `json:"disposable,omitempty"`
 	CodeMethod       string              `json:"code_method,omitempty"`
+	SQLDialect       string              `json:"sql_dialect,omitempty"`
 	DebugMethod      string              `json:"debug_method,omitempty"`
 	DebugProgram     string              `json:"debug_program,omitempty"`
 	DebugLines       []int               `json:"debug_lines,omitempty"`

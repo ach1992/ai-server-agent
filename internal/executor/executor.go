@@ -56,6 +56,8 @@ type Server struct {
 	webNodeBinary                 string                                                    // test-only HTML/CSS LSP Node executable fixture
 	webHTMLCLIBinary              string                                                    // test-only HTML LSP entrypoint fixture
 	webCSSCLIBinary               string                                                    // test-only CSS LSP entrypoint fixture
+	sqlNodeBinary                 string                                                    // test-only SQL LSP Node executable fixture
+	sqlCLIBinary                  string                                                    // test-only SQL LSP entrypoint fixture
 	environmentGoSystemPath       string                                                    // test-only Go discovery path; empty uses fixed safeCommandPath
 	codeTargetSnapshotHook        func()                                                    // test-only interleaving: alter target after LSP overlay snapshot
 	dlvBinary                     string                                                    // test-only Delve DAP fixture; production uses admin-owned binary
