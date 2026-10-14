@@ -54,6 +54,8 @@ type dapState struct {
 	eventsDropped       uint64
 	stage               string
 	configured          bool
+	initialized         bool // DAP initialized event: adapter ready for config
+	pendingLaunchSeq    int  // one deferred launch response, bound to its request
 	socketDir           string
 }
 
@@ -124,6 +126,9 @@ type dapPacket struct {
 }
 
 func (d *dapState) acceptEvent(packet dapPacket) {
+	if packet.Event == "initialized" {
+		d.initialized = true
+	}
 	if packet.Event == "process" && d.pinError == "" {
 		if err := d.pinDebuggeeProcess(packet.Body); err != nil {
 			d.pinError = err.Error()
@@ -181,8 +186,45 @@ func (d *dapState) markUncertain(err error) error {
 // A single request/response sequence is serialized per authenticated session.
 // Asynchronous notifications are queued within a strict total byte budget.
 func (d *dapState) call(ctx context.Context, command string, args any) (json.RawMessage, error) {
+	return d.callWithMode(ctx, command, args, false)
+}
+
+// This private protocol seam is for adapters whose launch reply arrives only
+// after configurationDone. It deliberately does NOT change Delve launch or
+// grant any new executable/attach/transport capability.
+func (d *dapState) callDeferredLaunch(ctx context.Context, args any) (json.RawMessage, error) {
+	return d.callWithMode(ctx, "launch", args, true)
+}
+
+func (d *dapState) acceptDeferredLaunchReply(packet dapPacket) (bool, error) {
+	if d.pendingLaunchSeq == 0 || packet.RequestSeq != d.pendingLaunchSeq {
+		return false, nil
+	}
+	if packet.Command != "launch" || !packet.Success {
+		return true, d.markUncertain(errors.New("dap_deferred_launch_failed_or_mismatched"))
+	}
+	if len(packet.Body) > dapMaxReply {
+		return true, d.markUncertain(errors.New("dap_deferred_launch_result_too_large"))
+	}
+	d.pendingLaunchSeq = 0
+	return true, nil
+}
+
+func (d *dapState) callWithMode(ctx context.Context, command string, args any, deferLaunch bool) (json.RawMessage, error) {
 	d.mu.Lock()
 	defer d.mu.Unlock()
+	if deferLaunch && command != "launch" {
+		return nil, errors.New("dap_invalid_deferred_command")
+	}
+	if d.pendingLaunchSeq != 0 {
+		// No evaluation/control before the previously sent launch has been
+		// reconciled. Only bounded configuration and disconnect are allowed.
+		switch command {
+		case "setBreakpoints", "setFunctionBreakpoints", "setExceptionBreakpoints", "configurationDone", "disconnect":
+		default:
+			return nil, errors.New("dap_launch_pending_configuration")
+		}
+	}
 	if d.conn == nil {
 		return nil, errors.New("dap_disconnected")
 	}
@@ -212,6 +254,14 @@ func (d *dapState) call(ctx context.Context, command string, args any) (json.Raw
 	if err := dapFrame(d.conn, map[string]any{"seq": seq, "type": "request", "command": command, "arguments": args}); err != nil {
 		return nil, d.markUncertain(err)
 	}
+	// A legal adapter may have emitted initialized immediately after its
+	// initialize response, before receiving launch. The new launch request
+	// is now pending; let configuration proceed without blocking.
+	if deferLaunch && d.initialized {
+		d.pendingLaunchSeq = seq
+		return json.RawMessage(`{}`), nil
+	}
+	var ownReply json.RawMessage
 	for {
 		if err := ctx.Err(); err != nil {
 			return nil, d.markUncertain(err)
@@ -230,6 +280,13 @@ func (d *dapState) call(ctx context.Context, command string, args any) (json.Raw
 			if d.pinError != "" {
 				return nil, d.markUncertain(errors.New("dap_target_identity_unproven"))
 			}
+			if deferLaunch && packet.Event == "initialized" {
+				if ownReply != nil {
+					return ownReply, nil
+				}
+				d.pendingLaunchSeq = seq
+				return json.RawMessage(`{}`), nil
+			}
 		case "request":
 			// Explicitly reject adapter-initiated runInTerminal/other reverse
 			// commands; never add a hidden PTY or privileged process path.
@@ -238,7 +295,16 @@ func (d *dapState) call(ctx context.Context, command string, args any) (json.Raw
 				return nil, d.markUncertain(err)
 			}
 		case "response":
-			if packet.RequestSeq != seq || packet.Command != command {
+			if matched, err := d.acceptDeferredLaunchReply(packet); matched {
+				if err != nil {
+					return nil, err
+				}
+				if ownReply != nil {
+					return ownReply, nil
+				}
+				continue
+			}
+			if packet.RequestSeq != seq || packet.Command != command || ownReply != nil {
 				return nil, d.markUncertain(errors.New("dap_response_identity_mismatch"))
 			}
 			if !packet.Success {
@@ -252,9 +318,21 @@ func (d *dapState) call(ctx context.Context, command string, args any) (json.Raw
 				return nil, d.markUncertain(errors.New("dap_result_too_large"))
 			}
 			if len(packet.Body) == 0 {
-				return json.RawMessage(`{}`), nil
+				ownReply = json.RawMessage(`{}`)
+			} else {
+				ownReply = packet.Body
 			}
-			return packet.Body, nil
+			if deferLaunch && !d.initialized {
+				// Some adapters acknowledge launch before initialized. Do not
+				// issue breakpoint requests until initialized has arrived.
+				continue
+			}
+			if command == "configurationDone" && d.pendingLaunchSeq != 0 {
+				// A delayed adapter may reply to configurationDone first.
+				// Do not report configuration success while launch is unknown.
+				continue
+			}
+			return ownReply, nil
 		default:
 			return nil, d.markUncertain(errors.New("dap_invalid_packet_type"))
 		}
@@ -325,6 +403,11 @@ func (d *dapState) drainFrames(ctx context.Context, afterExit bool) bool {
 			_ = d.conn.SetWriteDeadline(time.Now().Add(time.Second))
 			if err := dapFrame(d.conn, map[string]any{"seq": d.seq, "type": "response", "request_seq": packet.Seq, "command": packet.Command, "success": false, "message": "unsupported_adapter_reverse_request"}); err != nil {
 				d.markUncertain(fmt.Errorf("dap_drain_reverse_request_failed: %w", err))
+				return true
+			}
+		} else if packet.Type == "response" && d.pendingLaunchSeq != 0 {
+			if matched, err := d.acceptDeferredLaunchReply(packet); !matched || err != nil {
+				d.markUncertain(errors.New("dap_drain_unexpected_deferred_response"))
 				return true
 			}
 		} else {

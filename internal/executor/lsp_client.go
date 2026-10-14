@@ -30,10 +30,16 @@ type lspWire struct {
 	cursor    uint64
 	input     []byte
 	nextID    int
+	// An LSP notification is asynchronous: retain only the latest bounded
+	// diagnostics for documents explicitly opened by this request. Never
+	// reuse diagnostics between principals, worktrees or adapter sessions.
+	opened    map[string]int
+	published map[string]json.RawMessage
 }
 
 func newLSPWire(server *Server, owner Request, sessionID string) *lspWire {
-	return &lspWire{server: server, owner: owner, sessionID: sessionID}
+	return &lspWire{server: server, owner: owner, sessionID: sessionID,
+		opened: make(map[string]int), published: make(map[string]json.RawMessage)}
 }
 
 func (w *lspWire) send(v any) error {
@@ -122,6 +128,11 @@ func (w *lspWire) next(ctx context.Context) (lspPacket, error) {
 				return lspPacket{}, errors.New("lsp_invalid_jsonrpc_frame")
 			}
 			w.input = w.input[consumed:]
+			if packet.Method == "textDocument/publishDiagnostics" {
+				if err := w.recordDiagnostics(packet); err != nil {
+					return lspPacket{}, err
+				}
+			}
 			return packet, nil
 		}
 		state, err := w.server.sessions.read(w.owner, w.sessionID, w.cursor, maxStdioOutputBytes)
@@ -164,6 +175,11 @@ func (w *lspWire) call(ctx context.Context, method string, params any) (json.Raw
 	for {
 		packet, err := w.next(ctx)
 		if err != nil {
+			// A request may already have changed language-server state. Best
+			// effort LSP cancellation precedes broker teardown on deadline.
+			if ctx.Err() != nil {
+				_ = w.notify("$/cancelRequest", map[string]any{"id": id})
+			}
 			return nil, err
 		}
 		if packet.Method != "" && len(packet.ID) != 0 {
@@ -207,8 +223,108 @@ func (w *lspWire) replyToServer(packet lspPacket) error {
 	return w.send(map[string]any{"jsonrpc": "2.0", "id": packet.ID, "result": result})
 }
 
+// recordDiagnostics does not accept server-invented source versions or
+// unopened/out-of-scope document URIs. The caller still proves the worker
+// file_version after receiving the result, including for versionless push.
+func (w *lspWire) recordDiagnostics(packet lspPacket) error {
+	if len(packet.ID) != 0 || len(packet.Params) > 16<<10 {
+		return errors.New("lsp_invalid_diagnostics_notification")
+	}
+	var payload struct {
+		URI         string          `json:"uri"`
+		Version     *int            `json:"version"`
+		Diagnostics json.RawMessage `json:"diagnostics"`
+	}
+	if json.Unmarshal(packet.Params, &payload) != nil {
+		return errors.New("lsp_invalid_diagnostics_notification")
+	}
+	openedVersion, ok := w.opened[payload.URI]
+	if !ok {
+		return nil // Other files are not read authority or caller results.
+	}
+	if payload.Version != nil && *payload.Version != openedVersion {
+		return errors.New("lsp_diagnostics_document_version_mismatch")
+	}
+	if len(payload.Diagnostics) == 0 || len(payload.Diagnostics) > 16<<10 ||
+		payload.Diagnostics[0] != '[' || !json.Valid(payload.Diagnostics) {
+		return errors.New("lsp_invalid_diagnostics_items")
+	}
+	report, err := json.Marshal(map[string]any{"kind": "full", "items": payload.Diagnostics})
+	if err != nil || len(report) > 16<<10 {
+		return errors.New("lsp_diagnostics_result_too_large")
+	}
+	w.published[payload.URI] = report
+	return nil
+}
+
+// waitPublishedDiagnostics handles server-initiated requests while waiting.
+// A missing notification is a failure, never an invented clean result.
+func (w *lspWire) waitPublishedDiagnostics(ctx context.Context, uri string) (json.RawMessage, error) {
+	for {
+		if report, ok := w.published[uri]; ok {
+			return report, nil
+		}
+		packet, err := w.next(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if packet.Method != "" && len(packet.ID) != 0 {
+			if err := w.replyToServer(packet); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if packet.Method == "" {
+			return nil, errors.New("lsp_unexpected_diagnostics_response")
+		}
+	}
+}
+
+// Use UTF-16 as the sole advertised position encoding until conversions
+// have substantive adapter fixtures; reject a server's incompatible choice.
+type lspServerCapabilities struct {
+	PositionEncoding   string          `json:"positionEncoding"`
+	DiagnosticProvider json.RawMessage `json:"diagnosticProvider"`
+}
+
+func parseLSPServerCapabilities(raw json.RawMessage) (lspServerCapabilities, error) {
+	var reply struct {
+		Capabilities lspServerCapabilities `json:"capabilities"`
+	}
+	if err := json.Unmarshal(raw, &reply); err != nil {
+		return lspServerCapabilities{}, err
+	}
+	if reply.Capabilities.PositionEncoding != "" && reply.Capabilities.PositionEncoding != "utf-16" {
+		return lspServerCapabilities{}, errors.New("lsp_unsupported_position_encoding")
+	}
+	return reply.Capabilities, nil
+}
+
+func (c lspServerCapabilities) pullDiagnostics() bool {
+	value := strings.TrimSpace(string(c.DiagnosticProvider))
+	return value != "" && value != "false" && value != "null"
+}
+
 func (w *lspWire) notify(method string, params any) error {
-	return w.send(map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
+	if err := w.send(map[string]any{"jsonrpc": "2.0", "method": method, "params": params}); err != nil {
+		return err
+	}
+	if method == "textDocument/didOpen" {
+		var opened struct {
+			TextDocument struct {
+				URI     string `json:"uri"`
+				Version int    `json:"version"`
+			} `json:"textDocument"`
+		}
+		value, err := json.Marshal(params)
+		if err != nil || json.Unmarshal(value, &opened) != nil ||
+			opened.TextDocument.URI == "" || opened.TextDocument.Version <= 0 ||
+			len(w.opened) >= codeMaxTargetFiles+1 {
+			return errors.New("lsp_invalid_document_open")
+		}
+		w.opened[opened.TextDocument.URI] = opened.TextDocument.Version
+	}
+	return nil
 }
 
 // workerGoDefinition is the first bounded, read-only consumer of the shared

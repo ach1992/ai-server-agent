@@ -118,11 +118,23 @@ func (s *Server) workerGoInspection(ctx context.Context, req Request, goplsPath,
 	wire := newLSPWire(s, req, id)
 	uri := fileURI(file)
 	root := fileURI(workspace)
-	if _, err = wire.call(ctx, "initialize", map[string]any{
+	initialized, err := wire.call(ctx, "initialize", map[string]any{
 		"processId": nil, "rootUri": root,
 		"workspaceFolders": []map[string]string{{"uri": root, "name": filepath.Base(workspace)}},
-		"capabilities":     map[string]any{"workspace": map[string]any{"configuration": true}},
-	}); err != nil {
+		"capabilities": map[string]any{
+			"workspace": map[string]any{"configuration": true},
+			"general":   map[string]any{"positionEncodings": []string{"utf-16"}},
+			"textDocument": map[string]any{
+				"publishDiagnostics": map[string]any{"versionSupport": true},
+				"diagnostic":         map[string]any{"dynamicRegistration": false},
+			},
+		},
+	})
+	if err != nil {
+		return nil, err
+	}
+	serverCapabilities, err := parseLSPServerCapabilities(initialized)
+	if err != nil {
 		return nil, err
 	}
 	if err = wire.notify("initialized", map[string]any{}); err != nil {
@@ -146,7 +158,14 @@ func (s *Server) workerGoInspection(ctx context.Context, req Request, goplsPath,
 		case "symbols":
 			raw, queryErr = wire.call(ctx, "textDocument/documentSymbol", map[string]any{"textDocument": doc})
 		case "diagnostics":
-			raw, queryErr = wire.call(ctx, "textDocument/diagnostic", map[string]any{"textDocument": doc})
+			if serverCapabilities.pullDiagnostics() {
+				raw, queryErr = wire.call(ctx, "textDocument/diagnostic", map[string]any{"textDocument": doc})
+			} else {
+				// Push-only servers publish asynchronously after didOpen. The
+				// broker owns the process; only this request's opened URI and
+				// worker-version-verified snapshot are accepted.
+				raw, queryErr = wire.waitPublishedDiagnostics(ctx, uri)
+			}
 		default:
 			return nil, errors.New("unsupported method")
 		}
