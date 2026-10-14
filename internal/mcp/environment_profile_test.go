@@ -35,7 +35,8 @@ func TestMCPEnvironmentPurposeKeepsToolInventory(t *testing.T) {
 			defer session.Close()
 			instructions := session.InitializeResult().Instructions
 			if !strings.Contains(instructions, "Environment purpose: "+role) ||
-				!strings.Contains(instructions, "guidance; it is not an authorization") {
+				!strings.Contains(instructions, "guidance; it is not an authorization") ||
+				!strings.Contains(instructions, "Server label: "+cfg.ServerLabel) {
 				t.Fatalf("MCP role instructions missing: %q", instructions)
 			}
 			env, err := session.CallTool(context.Background(), &mcpsdk.CallToolParams{Name: "agent_environment", Arguments: map[string]any{}})
