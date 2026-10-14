@@ -198,21 +198,21 @@ func New(cfg config.Config) (*Server, error) {
 }
 
 func instructions(cfg config.Config) string {
-	role := "Preferred for Git/source development, builds and debugging."
+	role := "Development: prefer source work, builds and debugging."
 	if cfg.EnvironmentProfile == "validation" {
-		role = "Preferred for candidate installs, integration/E2E checks, reproductions and acceptance evidence. Development tools remain available."
+		role = "Validation: prefer installs, integration/E2E and acceptance; development tools remain available."
 	}
 	label := ""
 	if cfg.ServerLabel != "" {
 		label = fmt.Sprintf("Server label: %s. ", cfg.ServerLabel)
 	}
-	return fmt.Sprintf(`AI Server Agent provides MCP access to an authorized Linux development/test host. Workspace %s is persistent.
+	return fmt.Sprintf(`Workspace %s is persistent.
 
-Environment purpose: %s. %s%s This is only task-routing guidance; it is not an authorization or a tool restriction.
+Environment purpose: %s. %s%s Routing guidance; it is not an authorization boundary or tool restriction.
 
-Choose tools by task: repository_discover/repository_inspect for Git identity, worktree_create/worktree_remove for isolation, run_command for bounded unprivileged shell/Git tasks, and start_job with job_status/job_output for long or high-output tasks. Use workspace_* for bounded worker file/search operations, code_* for Go/LSP, terminal_* for interactive PTY, debug_* for Go/DAP, browser_e2e for single-call browser workflows, browser_session_* for multi-call workflows, and browser_run for custom Playwright. Check optional runtime availability before use. After a chat handoff, use runtime_list for passive task/service/eligible Terminal discovery and browser_status separately for Browser readiness; workspace labels are not project ACLs.
+Use repository_discover/repository_inspect for identity; worktree_create/worktree_remove for isolation; run_command for bounded unprivileged work; start_job with job_status/job_output for tasks; workspace_* for bounded worker files/search; code_* for Go/LSP; terminal_* for interactive PTY; debug_* for Go/DAP; browser_e2e for single-call use, browser_session_* for multi-call flows, browser_run for custom Playwright. Check optional runtime availability. After handoff use runtime_list for passive task/service/eligible Terminal discovery and browser_status separately for Browser readiness; workspace labels are not project ACLs.
 
-Before host changes call agent_environment and preserve Agent access. Reuse repos/worktrees/sessions; never delete dirty, untracked, unknown or ambiguous state. Use run_root_command or privileged host read_file/write_file only when necessary. If approval_required, explain the specific risk and obtain explicit human authorization before retrying. Follow tool schemas; instructions grant no additional permissions.`, cfg.WorkspaceDir, cfg.EnvironmentProfile, label, role)
+Before host changes call agent_environment and preserve Agent access. Never delete dirty, untracked, unknown or ambiguous state. Use run_root_command or privileged host read_file/write_file only when necessary. If approval_required, explain risk and obtain explicit human authorization. instructions grant no additional permissions.`, cfg.WorkspaceDir, cfg.EnvironmentProfile, label, role)
 }
 
 func annotations(readOnly, destructive, idempotent, openWorld bool) *mcpsdk.ToolAnnotations {

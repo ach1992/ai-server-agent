@@ -570,10 +570,27 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 }
 
 func TestInstructionsRouteToolsConciselyAndPreserveSafety(t *testing.T) {
-	got := instructions(config.Default())
-	if words := len(strings.Fields(got)); words > 180 {
-		t.Fatalf("MCP instructions use %d words, want at most 180; move details to tool descriptions", words)
+	maxLabel := strings.TrimSpace(strings.Repeat("a ", 40)) // 79 characters, 40 words.
+	for _, tc := range []struct {
+		profile string
+		label   string
+	}{
+		{profile: "development"},
+		{profile: "development", label: maxLabel},
+		{profile: "validation", label: "QA Server"},
+		{profile: "validation", label: maxLabel},
+	} {
+		cfg := config.Default()
+		cfg.EnvironmentProfile = tc.profile
+		cfg.ServerLabel = tc.label
+		if err := cfg.Validate(); err != nil {
+			t.Fatalf("valid instruction profile rejected: %+v: %v", tc, err)
+		}
+		if got := instructions(cfg); len(strings.Fields(got)) > 180 {
+			t.Fatalf("MCP instructions use %d words for profile=%q label=%q, want at most 180", len(strings.Fields(got)), tc.profile, tc.label)
+		}
 	}
+	got := instructions(config.Default())
 	for _, want := range []string{
 		"/srv/ai-workspace is persistent",
 		"repository_discover/repository_inspect",
