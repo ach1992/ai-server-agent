@@ -419,9 +419,9 @@ install Agent
 
 Uncommitted local work is not durable project truth. The workflow should create coherent commits/pushes often enough that useful work is recoverable without forcing noisy commits after every edit.
 
-### Shared-host development and cold-chat recovery (Issue #137; PR #139 source candidate unmerged)
+### Shared-host development and cold-chat recovery (Issue #137; separate delivery and acceptance)
 
-**Owner-approved first-install baseline, NOT SHIPPED:** Develop the new
+**Owner-approved first-install target; consult #137 and its PRs for the live shipped/candidate state:** Develop the new
 Agent as if first installed on a fresh Linux host. Do **not** add migration
 logic/tests for historical Agent versions, claims, profiles or runtime state,
 or pre-build speculative future cross-version migration. [Issue #137](https://github.com/ach1992/ai-server-agent/issues/137)
@@ -485,7 +485,7 @@ Activate bounded dependency-aware slices rather than everything at once:
 
 Optional/deferred work is not a blocker.
 
-**Issue #140 has a separate Owner-gated documentation-first prerequisite:** finish and review its revised architecture/acceptance contract before writing any multi-language implementation. The accepted first-expansion language scope is not optional/deferred. The independent #137 / PR #139 shared-runtime source candidate must not be expanded, rebased, or invalidated by #140 work; plan its integration against the then-current target branch.
+**Issue #140 has a separate Owner-gated documentation-first prerequisite:** finish and review its revised architecture/acceptance contract before writing any multi-language implementation. The accepted first-expansion language scope is not optional/deferred. Keep #137 Shared Runtime independent: do not bundle #140 changes into another workstream's frozen or independently reviewed candidate. Reconcile the **current** Issue/PR/target identity before implementation or integration.
 
 ## 18. Promotion rule for future capabilities
 
@@ -540,7 +540,7 @@ Do not promote capabilities merely because they are powerful, modern, or availab
 
 **Proof-oriented delivery sequence (no code until Owner accepts the documents):**
 
-1. Reconcile the **current controlling revision of Issue #140** with this target architecture and #52/#137/#59/#99, propose docs only, and obtain explicit Owner sign-off to begin implementation. Do not modify frozen PR #139.
+1. Reconcile the **current controlling revision of Issue #140** with this target architecture and #52/#137/#59/#99, propose docs only, and obtain explicit Owner sign-off to begin implementation. Do not change another workstream's frozen or independently reviewed candidate to implement #140.
 2. On an independently isolated implementation branch **after that approval**, prove a *small* language-neutral LSP/DAP mechanism against real Go and at least one behaviorally different adapter each: push/pull diagnostics, delayed DAP launch response, source versions, cancellation, private transport and verified process cleanup. Verify DAP reverse-launch requirements and a separately service-owned PHP HTTP attach/detach topology before freezing common launch/cleanup assumptions. Compare existing small wire code against focused maintained Go protocol libraries; adopt only if measurably simpler to maintain.
 3. Expand LSP, then DAP using the same small registry/typed launch seams for all accepted #140 languages. Every first-wave language needs at least one substantive **positive** real semantic/diagnostic proof (plus its required runtime proof); typed unsupported results are correct for optional operations, **not** substitutes for required first-class capability. CLI PHP must prove owned-target termination; HTTP PHP must prove authorized request attach/detach while preserving the service. PHP/Node/Python/Rust DAP, Shell DAP feasibility gate, HTML/CSS Browser verification, SQL offline PG+MySQL/MariaDB are each validated on representative real files. An adapter's unsupported operation returns an actionable typed error rather than a fabricated feature.
 4. Run concurrent, independent worktrees with different languages; check missing-tool degradation, retained process/evidence bounds, negative permissions, crash/soak/recovery and actual connected-client behavior. Required exact-HEAD CI/Security, author-separated HIGH_ASSURANCE for material process/security changes, Owner-gated integration/release/deployment, and #59/#99 program acceptance remain independent obligations.
@@ -564,7 +564,7 @@ Do not promote capabilities merely because they are powerful, modern, or availab
 - #65 — optional evidence-triggered Incus;
 - #66 — internal stateful-session substrate;
 - #99 — AI-facing bounded data delivery and typed-artifact acceptance;
-- #137 — approved first-install Shared Runtime with protected, still-unmerged PR #139;
+- #137 — separate first-install Shared Runtime; its current PR and acceptance state live in GitHub;
 - #140 — language-neutral multi-language LSP/DAP, docs-first Owner gate and adapter acceptance.
 
 After this document is integrated, use it for stable architecture and use Issues for active work/dependencies. Do not reconstruct these decisions from chat history.
