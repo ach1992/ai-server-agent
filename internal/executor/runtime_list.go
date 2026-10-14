@@ -98,6 +98,9 @@ func (s *Server) runtimeListContext(parent context.Context, req Request) Respons
 	active := make(map[string]bool, len(ids))
 	if err != nil {
 		response.Truncated = true // the active state and capacity are not established
+		if ctx.Err() != nil {
+			return response
+		}
 	} else {
 		for _, id := range ids {
 			active[id] = true
@@ -118,6 +121,10 @@ func (s *Server) runtimeListContext(parent context.Context, req Request) Respons
 			response.Truncated = true
 		} else {
 			for _, entry := range files {
+				if ctx.Err() != nil {
+					response.Truncated = true
+					break
+				}
 				if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 					response.Truncated = true
 					continue
@@ -155,6 +162,10 @@ func (s *Server) runtimeListContext(parent context.Context, req Request) Respons
 	}
 	if req.Kind == "" || req.Kind == "task" || req.Kind == "service" {
 		for id, claim := range claims {
+			if ctx.Err() != nil {
+				response.Truncated = true
+				break
+			}
 			if claim.PrincipalID != req.PrincipalID || claim.PrincipalClass != req.PrincipalClass {
 				continue
 			}
@@ -204,6 +215,10 @@ func (s *Server) runtimeListContext(parent context.Context, req Request) Respons
 				response.Truncated = true
 			} else {
 				for _, entry := range entries {
+					if ctx.Err() != nil {
+						response.Truncated = true
+						break
+					}
 					if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
 						continue
 					}

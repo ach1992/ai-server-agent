@@ -176,14 +176,14 @@ func TestRuntimeListUsesOneObservationDeadlineAndDoesNotMutate(t *testing.T) {
 	started := time.Now()
 	got := s.dispatchContext(context.Background(), req)
 	elapsed := time.Since(started)
-	if !got.OK || !got.Truncated || len(got.RuntimeEntries) != 3 {
+	if !got.OK || !got.Truncated || len(got.RuntimeEntries) != 1 {
 		t.Fatalf("deadline inventory result = %+v", got)
 	}
 	if elapsed > 250*time.Millisecond {
 		t.Fatalf("runtime_list exceeded one request-wide observation deadline: %s", elapsed)
 	}
-	if verifyCalls != 3 {
-		t.Fatalf("terminal verification calls = %d, want 3 bounded by one shared context", verifyCalls)
+	if verifyCalls != 1 {
+		t.Fatalf("terminal verification calls = %d, want work to stop after shared deadline", verifyCalls)
 	}
 	for _, entry := range got.RuntimeEntries {
 		if entry.Status != "unknown" {
