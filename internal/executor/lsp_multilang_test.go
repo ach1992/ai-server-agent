@@ -46,6 +46,11 @@ func TestLanguageNeutralProfileValidation(t *testing.T) {
 			t.Fatalf("Shell LSP profile missing: %q", path)
 		}
 	}
+	for _, tc := range []struct{ path, lang string }{{"layout.html", "html"}, {"layout.htm", "html"}, {"theme.css", "css"}} {
+		if profile, language, ok := inspectProfileForPath(tc.path); !ok || language != tc.lang || profile.languageForPath(tc.path) != tc.lang {
+			t.Fatalf("Web LSP profile selection failed for %q", tc.path)
+		}
+	}
 	if _, _, ok := inspectProfileForPath("unsafe.pyc"); ok {
 		t.Fatal("binary compiled Python bytecode should not be an LSP source")
 	}

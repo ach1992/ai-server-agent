@@ -81,6 +81,25 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 		if binary == "" {
 			return fileError("gopls_unavailable", "dependency", errors.New("trusted optional gopls is not installed"))
 		}
+	} else if actualLanguage == "html" || actualLanguage == "css" {
+		binary = s.webNodeBinary // test-only fixture, never callable from MCP input
+		if binary != "" {
+			if s.webHTMLCLIBinary == "" || s.webCSSCLIBinary == "" {
+				return fileError("web_lsp_fixture_incomplete", "dependency", errors.New("the test Web LSP fixture must provide both adapters"))
+			}
+			profile = webLSPProfile(actualLanguage)
+			if actualLanguage == "html" {
+				profile.arguments[0] = s.webHTMLCLIBinary
+			} else {
+				profile.arguments[0] = s.webCSSCLIBinary
+			}
+		} else {
+			var trustErr error
+			binary, trustErr = systemexec.WebLSP()
+			if trustErr != nil {
+				return fileError("web_lsp_unavailable", "dependency", errors.New("trusted optional HTML/CSS language-server resources unavailable"))
+			}
+		}
 	} else if actualLanguage == "shell" {
 		binary = s.bashNodeBinary // test-only three-component fixture override
 		if binary != "" {
@@ -149,10 +168,12 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 // It never accepts executable paths, arguments or configuration from a
 // repository or external MCP caller. Entrypoint trust is checked upstream.
 type lspInspectionProfile struct {
-	arguments          []string
-	extensions         map[string]string // recognized suffix -> LSP languageId
-	initOptions        map[string]any    // pinned, never project-controlled
-	waitForInitialPush bool              // fixed adapters needing async document indexing
+	arguments           []string
+	extensions          map[string]string // recognized suffix -> LSP languageId
+	initOptions         map[string]any    // pinned, never project-controlled
+	staticConfiguration map[string]any    // fixed responses to server workspace/configuration
+	waitForInitialPush  bool              // fixed adapters needing async document indexing
+	pushOnlyDiagnostics bool              // adapter advertised pull but fails to implement it
 }
 
 var goLSPProfile = lspInspectionProfile{
@@ -180,6 +201,33 @@ func shellLSPProfile(cli, shellcheck string) lspInspectionProfile {
 }
 
 var bashLSPProfile = shellLSPProfile(systemexec.BashLSPCLI, systemexec.BashShellCheck)
+
+// Both VS Code web language services request document configuration. Use
+// bounded immutable settings rather than forwarding repository settings or
+// pretending their advertised document pull-diagnostics method works.
+func webLSPProfile(language string) lspInspectionProfile {
+	p := lspInspectionProfile{
+		waitForInitialPush:  true,
+		pushOnlyDiagnostics: true,
+		staticConfiguration: map[string]any{
+			"html": map[string]any{"validate": true},
+			"css": map[string]any{"validate": true,
+				"lint": map[string]any{"unknownProperties": "warning"}},
+		},
+	}
+	switch language {
+	case "html":
+		p.extensions = map[string]string{".html": "html", ".htm": "html"}
+		p.arguments = []string{systemexec.WebLSPHTMLCLI, "--stdio"}
+	case "css":
+		p.extensions = map[string]string{".css": "css"}
+		p.arguments = []string{systemexec.WebLSPCSSCLI, "--stdio"}
+	}
+	return p
+}
+
+var htmlLSPProfile = webLSPProfile("html")
+var cssLSPProfile = webLSPProfile("css")
 
 var pythonTyLSPProfile = lspInspectionProfile{
 	arguments:  []string{"server"},
@@ -212,6 +260,12 @@ func inspectProfileForPath(path string) (lspInspectionProfile, string, bool) {
 	}
 	if bashLSPProfile.languageForPath(path) != "" {
 		return bashLSPProfile, "shell", true
+	}
+	if htmlLSPProfile.languageForPath(path) != "" {
+		return htmlLSPProfile, "html", true
+	}
+	if cssLSPProfile.languageForPath(path) != "" {
+		return cssLSPProfile, "css", true
 	}
 	language := typeScript7LSPProfile.languageForPath(path)
 	if language == "" {
@@ -247,19 +301,26 @@ func (s *Server) workerLSPInspection(ctx context.Context, req Request, profile l
 	}
 	defer func() { _ = s.workerStdioClose(req, id) }()
 	wire := newLSPWire(s, req, id)
+	wire.staticConfiguration = profile.staticConfiguration
 	uri := fileURI(file)
 	root := fileURI(workspace)
+	textDocumentCapabilities := map[string]any{
+		"publishDiagnostics": map[string]any{"versionSupport": true},
+	}
+	if !profile.pushOnlyDiagnostics {
+		// VS Code HTML/CSS language services switch to pull-only when this
+		// client capability exists, but their current pull endpoint rejects
+		// requests. An explicitly push-only adapter must not advertise it.
+		textDocumentCapabilities["diagnostic"] = map[string]any{"dynamicRegistration": false}
+	}
 	initialized, err := wire.call(ctx, "initialize", map[string]any{
 		"processId": nil, "rootUri": root,
 		"initializationOptions": profile.initOptions,
 		"workspaceFolders":      []map[string]string{{"uri": root, "name": filepath.Base(workspace)}},
 		"capabilities": map[string]any{
-			"workspace": map[string]any{"configuration": true},
-			"general":   map[string]any{"positionEncodings": []string{"utf-16"}},
-			"textDocument": map[string]any{
-				"publishDiagnostics": map[string]any{"versionSupport": true},
-				"diagnostic":         map[string]any{"dynamicRegistration": false},
-			},
+			"workspace":    map[string]any{"configuration": true},
+			"general":      map[string]any{"positionEncodings": []string{"utf-16"}},
+			"textDocument": textDocumentCapabilities,
 		},
 	})
 	if err != nil {
@@ -303,7 +364,7 @@ func (s *Server) workerLSPInspection(ctx context.Context, req Request, profile l
 		case "symbols":
 			raw, queryErr = wire.call(ctx, "textDocument/documentSymbol", map[string]any{"textDocument": doc})
 		case "diagnostics":
-			if serverCapabilities.pullDiagnostics() {
+			if serverCapabilities.pullDiagnostics() && !profile.pushOnlyDiagnostics {
 				raw, queryErr = wire.call(ctx, "textDocument/diagnostic", map[string]any{"textDocument": doc})
 			} else {
 				// Push-only servers publish asynchronously after didOpen. The

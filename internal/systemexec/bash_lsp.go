@@ -6,13 +6,8 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"io/fs"
 	"os"
-	"path/filepath"
 	"runtime"
-	"strconv"
-	"strings"
-	"syscall"
 )
 
 const (
@@ -98,72 +93,13 @@ func verifyShellNativeBinary(path, want string, smallest, largest int64) error {
 	return nil
 }
 
-// verifyBashLSPModules hashes all package file bytes plus relative names,
-// types and lengths in deterministic lexical WalkDir order. No symlinks,
-// executable wrappers, worker-owned or group/world-writable dependencies are
-// accepted. Bounded file/count/byte limits guard pathological trees.
+// An untrusted package tree cannot supply any executable JS modules. This
+// wrapper enforces the exact Bash transitive package snapshot while sharing
+// the filesystem/type/owner/byte verifier with optional HTML/CSS LSP.
 func verifyBashLSPModules(root string, requireRoot bool) error {
-	if _, err := os.Lstat(filepath.Join(root, ".bin")); !os.IsNotExist(err) {
-		return errors.New("bash_lsp_unwanted_package_bin_wrappers")
-	}
-	h := sha256.New()
-	files, dirs := 0, 0
-	var sizeTotal int64
-	err := filepath.WalkDir(root, func(path string, entry fs.DirEntry, walkErr error) error {
-		if walkErr != nil {
-			return errors.New("bash_lsp_dependency_tree_inaccessible")
-		}
-		if path == root {
-			return nil
-		}
-		rel, err := filepath.Rel(root, path)
-		if err != nil || rel == "." || len(rel) > 512 || strings.ContainsRune(rel, 0) {
-			return errors.New("bash_lsp_invalid_dependency_path")
-		}
-		rel = filepath.ToSlash(rel)
-		fi, err := os.Lstat(path)
-		if err != nil || fi.Mode()&os.ModeSymlink != 0 || fi.Mode()&os.ModeType&^os.ModeDir != 0 {
-			return errors.New("bash_lsp_unsafe_dependency_type")
-		}
-		if requireRoot {
-			st, ok := fi.Sys().(*syscall.Stat_t)
-			if !ok || st.Uid != 0 || fi.Mode().Perm()&0022 != 0 {
-				return errors.New("bash_lsp_untrusted_dependency_ownership")
-			}
-		}
-		if fi.IsDir() {
-			dirs++
-			if dirs > bashModuleDirCount || (requireRoot && fi.Mode().Perm()&0005 != 0005) {
-				return errors.New("bash_lsp_dependency_directory_invalid")
-			}
-			_, _ = io.WriteString(h, "d\x00"+rel+"\x00")
-			return nil
-		}
-		if !fi.Mode().IsRegular() || fi.Size() < 0 || files >= bashModuleFileCount ||
-			sizeTotal > bashModuleMaxBytes-fi.Size() ||
-			(requireRoot && fi.Mode().Perm()&0004 != 0004) {
-			return errors.New("bash_lsp_dependency_file_invalid")
-		}
-		files++
-		sizeTotal += fi.Size()
-		_, _ = io.WriteString(h, "f\x00"+rel+"\x00"+strconv.FormatInt(fi.Size(), 10)+"\x00")
-		f, err := os.Open(path)
-		if err != nil {
-			return errors.New("bash_lsp_dependency_unreadable")
-		}
-		n, readErr := io.Copy(h, io.LimitReader(f, fi.Size()+1))
-		closeErr := f.Close()
-		if readErr != nil || closeErr != nil || n != fi.Size() {
-			return errors.New("bash_lsp_dependency_changed_during_read")
-		}
-		return nil
+	return verifyPinnedNodeModules(root, requireRoot, nodeModulePolicy{
+		label: "bash_lsp", fileCount: bashModuleFileCount,
+		dirCount: bashModuleDirCount, maxBytes: bashModuleMaxBytes,
+		digest: bashModuleTreeDigest,
 	})
-	if err != nil {
-		return err
-	}
-	if dirs != bashModuleDirCount || files != bashModuleFileCount || sizeTotal > bashModuleMaxBytes ||
-		hex.EncodeToString(h.Sum(nil)) != bashModuleTreeDigest {
-		return errors.New("bash_lsp_dependency_tree_digest_mismatch")
-	}
-	return nil
 }

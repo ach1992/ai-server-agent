@@ -55,6 +55,7 @@ func Build(c config.Config) Manifest {
 	_, typeScript7Err := systemexec.TypeScript7()
 	_, pythonTyErr := systemexec.TyPython()
 	_, bashLSPErr := systemexec.BashLSP()
+	_, webLSPErr := systemexec.WebLSP()
 	return Manifest{
 		SchemaVersion:       1,
 		InstanceID:          c.InstanceID,
@@ -76,6 +77,7 @@ func Build(c config.Config) Manifest {
 			{Name: "typescript-language-server", Required: false, Installed: typeScript7Err == nil, Paths: []string{systemexec.TypeScript7Library}, Notes: "Optional pinned native TypeScript 7.0.2 LSP for JavaScript/TypeScript. Administrator-controlled complete 110-file resource directory is validated for root ownership, no symlinks and per-architecture SHA-256. Missing or invalid adapters degrade only code_* for JS/TS; no node, global npm, automatic installer, project script or additional broker dependency."},
 			{Name: "python-language-server", Required: false, Installed: pythonTyErr == nil, Paths: []string{systemexec.PythonTyBinary}, Notes: "Optional native Python ty 0.0.87 LSP. Only administrator-owned, per-architecture SHA-256 pinned binary is launched; does not execute Python source, install packages, use arbitrary project run commands or require a Python interpreter as a control-plane dependency. Not a replacement for Python DAP."},
 			{Name: "shell-language-server", Required: false, Installed: bashLSPErr == nil, Paths: []string{systemexec.BashLSPDir}, Notes: "Optional Bash/POSIX sh LSP powered by bash-language-server 5.8.1, root-owned checksum-verified complete Node modules, Node v24.18.1 and ShellCheck v0.11.0. Dialect inferred from source shebang, shellcheck external-source execution disabled; no project command or auto-install, Shell DAP is a separate feasibility gate."},
+			{Name: "html-css-language-server", Required: false, Installed: webLSPErr == nil, Paths: []string{systemexec.WebLSPDir}, Notes: "Optional HTML/CSS semantic LSP via VS Code Language Servers 4.10.0; trusted Node with a pinned 4948-file root-owned transitive module tree. CSS diagnostics use validated push notifications; HTML structured symbols supported but not all markup problems produce diagnostics. Browser tools remain separately appropriate for render/layout assertions."},
 			{Name: "go-debugger", Required: false, Installed: systemexec.First("/usr/local/bin/dlv", "/usr/bin/dlv") != "", Paths: []string{"/usr/local/bin/dlv", "/usr/bin/dlv"}, Notes: "Optional Go Delve DAP debugger. v1 launches only prebuilt workspace executables with matching worker file_version; requires trusted admin-owned Delve plus executor-owned root cgroup-v2 containment with cgroup.kill (Linux 5.14+); fails closed before DAP launch without those capabilities. Other Agent capabilities remain usable. Never silently installs/attaches/uses root."},
 			{Name: "browser", Required: false, Installed: fileExists(filepath.Join(browserEngine, "node/bin/node")), Paths: []string{browserEngine, browserData}, Notes: "Optional Playwright/Chromium capability. The executable engine is root-owned under /opt; writable browser profile data is isolated under agent state. Removing it disables browser tools but does not stop the MCP core."},
 		},

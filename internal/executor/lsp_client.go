@@ -33,8 +33,9 @@ type lspWire struct {
 	// An LSP notification is asynchronous: retain only the latest bounded
 	// diagnostics for documents explicitly opened by this request. Never
 	// reuse diagnostics between principals, worktrees or adapter sessions.
-	opened    map[string]int
-	published map[string]json.RawMessage
+	opened              map[string]int
+	published           map[string]json.RawMessage
+	staticConfiguration map[string]any // fixed adapter-owned values, never project data
 }
 
 func newLSPWire(server *Server, owner Request, sessionID string) *lspWire {
@@ -208,12 +209,21 @@ func (w *lspWire) replyToServer(packet lspPacket) error {
 	var result any
 	if packet.Method == "workspace/configuration" {
 		var params struct {
-			Items []json.RawMessage `json:"items"`
+			Items []struct {
+				Section string `json:"section"`
+			} `json:"items"`
 		}
-		if err := json.Unmarshal(packet.Params, &params); err != nil {
+		if err := json.Unmarshal(packet.Params, &params); err != nil ||
+			len(params.Items) > 32 {
 			return errors.New("lsp_invalid_configuration_request")
 		}
-		result = make([]any, len(params.Items))
+		values := make([]any, len(params.Items))
+		for i, item := range params.Items {
+			// Only a predeclared read-only adapter profile may supply a setting.
+			// Unknown/unrecognized requests never receive caller/project config.
+			values[i] = w.staticConfiguration[item.Section]
+		}
+		result = values
 	} else if packet.Method != "window/workDoneProgress/create" {
 		return w.send(map[string]any{
 			"jsonrpc": "2.0", "id": packet.ID,
