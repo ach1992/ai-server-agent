@@ -158,4 +158,5 @@ fi
 rm -f -- "$r4_snapshot"
 test -z "$(runtime_pending_backup)" || fail 'isolated R4 fixture retained stale backup'
 
+ASA_PROFILE_TEST_BINARY="$RUNTIME_BINARY" bash "$ROOT/tests/environment_profiles.sh"
 echo 'Runtime settings management PASS'

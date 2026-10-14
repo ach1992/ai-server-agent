@@ -40,6 +40,8 @@ type Manifest struct {
 	InstanceID          string         `json:"instance_id,omitempty"`
 	GeneratedAt         string         `json:"generated_at"`
 	Purpose             string         `json:"purpose"`
+	EnvironmentProfile  string         `json:"environment_profile"`
+	ServerLabel         string         `json:"server_label,omitempty"`
 	WorkerUser          string         `json:"worker_user"`
 	AgentUser           string         `json:"agent_user"`
 	WorkspaceDir        string         `json:"workspace_dir"`
@@ -50,13 +52,19 @@ type Manifest struct {
 }
 
 func Build(c config.Config) Manifest {
+	purpose := "This server is designated for AI-operated software development, Git/source work, builds and debugging. It can also run real tests. Preserve the AI Server Agent control plane and respect task authorization."
+	if c.EnvironmentProfile == "validation" {
+		purpose = "This server is designated for AI-operated candidate installation, real testing, reproduction and acceptance evidence. Keep ordinary Git/development/root tools available when the authorized task requires them. Preserve the AI Server Agent control plane."
+	}
 	browserEngine := "/opt/ai-server-agent/browser"
 	browserData := filepath.Join(c.StateDir, "runtime/browser")
 	return Manifest{
 		SchemaVersion:       1,
 		InstanceID:          c.InstanceID,
 		GeneratedAt:         time.Now().UTC().Format(time.RFC3339),
-		Purpose:             "This server is dedicated to AI-operated development, deployment validation, diagnostics, and testing. Preserve the AI Server Agent control plane while changing the rest of the host as required.",
+		Purpose:             purpose,
+		EnvironmentProfile:  c.EnvironmentProfile,
+		ServerLabel:         c.ServerLabel,
 		WorkerUser:          c.WorkerUser,
 		AgentUser:           c.AgentUser,
 		WorkspaceDir:        c.WorkspaceDir,

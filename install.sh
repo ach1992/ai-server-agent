@@ -36,6 +36,8 @@ HOSTNAME_VALUE="${AI_SERVER_AGENT_HOSTNAME:-}"
 TRACK_REF="${AI_SERVER_AGENT_TRACK_REF:-$REF}"
 NONINTERACTIVE="${AI_SERVER_AGENT_NONINTERACTIVE:-0}"
 SETUP_MODE="${AI_SERVER_AGENT_SETUP_MODE:-}"
+ENVIRONMENT_PROFILE=""
+SERVER_LABEL=""
 CHECK_ONLY=0
 RESOLVE_REF_ONLY=0
 FRESH_INSTALL=1
@@ -194,6 +196,34 @@ export DEBIAN_FRONTEND=noninteractive
 log "Installing minimal setup utilities (ca-certificates, curl, git, jq, openssl, tar, xz-utils)..."
 apt-get update -qq
 apt-get install -y -qq ca-certificates curl git jq openssl tar xz-utils >/dev/null
+
+# Environment purpose is descriptive task-routing guidance, not a tool set,
+# permission tier, GitHub-auth installation or connection mode.
+if [ "$FRESH_INSTALL" -eq 1 ]; then
+  ENVIRONMENT_PROFILE="${AI_SERVER_AGENT_ENVIRONMENT_PROFILE:-development}"
+  SERVER_LABEL="${AI_SERVER_AGENT_SERVER_LABEL:-}"
+  if [ "$NONINTERACTIVE" != "1" ] && [ -r /dev/tty ] && [ -z "${AI_SERVER_AGENT_ENVIRONMENT_PROFILE+x}" ]; then
+    printf '\nSelect this server\x27s primary purpose (all Agent tools remain available):\n' >/dev/tty
+    printf '  1) Development — Git/source, builds, debugging and project work\n' >/dev/tty
+    printf '  2) Validation  — candidate installs, integration/E2E, diagnostics and acceptance tests\n' >/dev/tty
+    read -r -p 'Choose [1]: ' profile_choice </dev/tty
+    case "${profile_choice:-1}" in
+      1) ENVIRONMENT_PROFILE=development ;;
+      2) ENVIRONMENT_PROFILE=validation ;;
+      *) die "Invalid environment purpose. Choose Development (1) or Validation (2)." ;;
+    esac
+  fi
+else
+  if [ -n "${AI_SERVER_AGENT_ENVIRONMENT_PROFILE+x}" ] || [ -n "${AI_SERVER_AGENT_SERVER_LABEL+x}" ]; then
+    warn "Environment purpose options are first-install inputs only. Existing values are preserved; use ai-server-agent-manage profile-set/profile-label to change them."
+  fi
+  ENVIRONMENT_PROFILE="$(jq -er '.environment_profile // "development" | strings' "$CONFIG_FILE")" || die "Existing environment_profile is not a string."
+  SERVER_LABEL="$(jq -er '.server_label // "" | strings' "$CONFIG_FILE")" || die "Existing server_label is not a string."
+fi
+case "$ENVIRONMENT_PROFILE" in
+  development|validation) ;;
+  *) die "AI_SERVER_AGENT_ENVIRONMENT_PROFILE must be development or validation." ;;
+esac
 
 # An instance has one non-secret identity for its entire state-preserving lifecycle.
 # A legacy installation migrates once; an already issued ID must never change
@@ -607,6 +637,17 @@ cat > "$config_tmp" <<JSON
   "instance_id": "$INSTANCE_ID"
 }
 JSON
+# JSON-encode non-secret operator purpose/label, never interpolate label into
+# a here-doc: untrusted quote/newline bytes must not change config structure.
+purpose_tmp="$(mktemp "$CONFIG_DIR/.config-purpose.XXXXXX")" || die "Could not stage environment purpose."
+if ! jq --arg profile "$ENVIRONMENT_PROFILE" --arg server_name "$SERVER_LABEL" \
+  '.environment_profile=$profile | if $server_name=="" then del(.server_label) else .server_label=$server_name end' \
+  "$config_tmp" > "$purpose_tmp"; then
+  rm -f -- "$purpose_tmp" "$config_tmp"
+  die "Could not prepare environment purpose configuration."
+fi
+mv -f -- "$purpose_tmp" "$config_tmp"
+
 # The generated base config intentionally reuses the current installer
 # migration decisions for credentials/TLS/instance. Carry forward ONLY the
 # existing operator "runtime" member, and let the TARGET Go binary validate

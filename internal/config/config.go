@@ -7,6 +7,9 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
+	"unicode"
+	"unicode/utf8"
 )
 
 type Config struct {
@@ -27,25 +30,28 @@ type Config struct {
 	AgentUser           string           `json:"agent_user"`
 	PublicBaseURL       string           `json:"public_base_url,omitempty"`
 	InstanceID          string           `json:"instance_id,omitempty"`
+	EnvironmentProfile  string           `json:"environment_profile,omitempty"`
+	ServerLabel         string           `json:"server_label,omitempty"`
 	Runtime             *RuntimeSettings `json:"runtime,omitempty"`
 }
 
 func Default() Config {
 	defaults := DefaultRuntimeSettings()
 	return Config{
-		Runtime:         &defaults,
-		ListenAddress:   "127.0.0.1:3210",
-		MCPPath:         "/mcp",
-		HealthPath:      "/healthz",
-		AuthMode:        "bearer",
-		BearerTokenFile: "/etc/ai-server-agent/mcp.token",
-		ExecutorSocket:  "/run/ai-server-agent/executor.sock",
-		ExecutorToken:   "/etc/ai-server-agent/executor.token",
-		StateDir:        "/var/lib/ai-server-agent",
-		LogDir:          "/var/log/ai-server-agent",
-		WorkspaceDir:    "/srv/ai-workspace",
-		WorkerUser:      "aiworker",
-		AgentUser:       "aiagent",
+		Runtime:            &defaults,
+		ListenAddress:      "127.0.0.1:3210",
+		MCPPath:            "/mcp",
+		HealthPath:         "/healthz",
+		AuthMode:           "bearer",
+		BearerTokenFile:    "/etc/ai-server-agent/mcp.token",
+		ExecutorSocket:     "/run/ai-server-agent/executor.sock",
+		ExecutorToken:      "/etc/ai-server-agent/executor.token",
+		StateDir:           "/var/lib/ai-server-agent",
+		LogDir:             "/var/log/ai-server-agent",
+		WorkspaceDir:       "/srv/ai-workspace",
+		EnvironmentProfile: "development",
+		WorkerUser:         "aiworker",
+		AgentUser:          "aiagent",
 	}
 }
 
@@ -82,6 +88,17 @@ func (c Config) Validate() error {
 			if (ch < '0' || ch > '9') && (ch < 'a' || ch > 'f') {
 				return errors.New("instance_id must be asa_ followed by 32 lowercase hexadecimal characters")
 			}
+		}
+	}
+	if c.EnvironmentProfile != "development" && c.EnvironmentProfile != "validation" {
+		return fmt.Errorf("environment_profile must be development or validation (got %q)", c.EnvironmentProfile)
+	}
+	if strings.TrimSpace(c.ServerLabel) != c.ServerLabel || len(c.ServerLabel) > 256 || utf8.RuneCountInString(c.ServerLabel) > 80 || !utf8.ValidString(c.ServerLabel) {
+		return errors.New("server_label must be valid UTF-8, at most 80 characters/256 bytes, with no surrounding whitespace")
+	}
+	for _, r := range c.ServerLabel {
+		if !unicode.IsPrint(r) {
+			return errors.New("server_label contains an invalid or non-printable character")
 		}
 	}
 	if c.AuthMode != "bearer" {
