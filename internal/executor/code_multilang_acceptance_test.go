@@ -22,6 +22,10 @@ func TestCodeInspectMissingAndWrongLanguageDoNotLaunch(t *testing.T) {
 	}
 	owner.Language = ""
 	owner.Path = "schema.sql"
+	if got := s.codeInspect(context.Background(), owner); got.OK || got.ErrorCode != "sql_dialect_required" {
+		t.Fatalf("SQL silently inferred an unsafe dialect: %+v", got)
+	}
+	owner.Path = "unsupported.graphql"
 	if got := s.codeInspect(context.Background(), owner); got.OK || got.ErrorCode != "unsupported_code_language" {
 		t.Fatalf("unimplemented adapter accepted: %+v", got)
 	}
