@@ -6,6 +6,36 @@ import (
 	"testing"
 )
 
+func TestPHPIndexStoreRejectsSymlinksAndWorldWritablePaths(t *testing.T) {
+	cache := t.TempDir()
+	uid := uint32(os.Geteuid())
+	if !phpIndexStoreSafe(cache, uid) {
+		t.Fatal("absent index payload should be creatable")
+	}
+	store := filepath.Join(cache, "store")
+	if err := os.Symlink(t.TempDir(), store); err != nil {
+		t.Fatal(err)
+	}
+	if phpIndexStoreSafe(cache, uid) {
+		t.Fatal("symlinked index store accepted")
+	}
+	if err := os.Remove(store); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(store, 0755); err != nil {
+		t.Fatal(err)
+	}
+	if !phpIndexStoreSafe(cache, uid) || phpIndexStoreSafe(cache, uid+1) {
+		t.Fatal("worker-owned private-parent index rejected, or foreign owner accepted")
+	}
+	if err := os.Chmod(store, 0777); err != nil {
+		t.Fatal(err)
+	}
+	if phpIndexStoreSafe(cache, uid) {
+		t.Fatal("world-writable index store accepted")
+	}
+}
+
 func TestPHPIndexCacheRejectsSymlinksAndGroupWritablePaths(t *testing.T) {
 	home := t.TempDir()
 	dir := filepath.Join(home, ".cache", "phpactor", "index", "agent-012345")

@@ -64,16 +64,20 @@ const (
 
 func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp Response) {
 	write := req.Action == "workspace_write" || req.Action == "workspace_apply_edits" || req.Action == "workspace_transfer" || req.Action == "workspace_transfer_gc"
-	if req.Action != "workspace_stat" && req.Action != "workspace_read" && req.Action != "workspace_write" && req.Action != "workspace_apply_edits" && req.Action != "workspace_transfer" && req.Action != "workspace_transfer_gc" && req.Action != "workspace_text_search" {
+	if req.Action != "workspace_stat" && req.Action != "workspace_read" && req.Action != "workspace_write" && req.Action != "workspace_apply_edits" && req.Action != "workspace_transfer" && req.Action != "workspace_transfer_gc" && req.Action != "workspace_text_search" && req.Action != "workspace_php_index_manifest" {
 		return fileError("invalid_action", "validation", errors.New("unsupported worker workspace action"))
 	}
-	if strings.TrimSpace(req.Workspace) == "" || (req.Action != "workspace_text_search" && req.Action != "workspace_apply_edits" && req.Action != "workspace_transfer_gc" && strings.TrimSpace(req.Path) == "") {
+	if strings.TrimSpace(req.Workspace) == "" || (req.Action != "workspace_text_search" && req.Action != "workspace_php_index_manifest" && req.Action != "workspace_apply_edits" && req.Action != "workspace_transfer_gc" && strings.TrimSpace(req.Path) == "") {
 		return fileError("invalid_workspace", "validation", errors.New("workspace and relative file path are required"))
 	}
 	if req.Root || req.Approval || req.Mode != 0 {
 		return fileError("invalid_request", "validation", errors.New("workspace files always use worker authority without privilege/mode override"))
 	}
-	if req.Action == "workspace_text_search" {
+	if req.Action == "workspace_php_index_manifest" {
+		if req.Path != "" || req.Content != "" || req.FileVersion != "" || req.Limit != 0 || req.Offset != 0 {
+			return fileError("php_index_invalid_request", "validation", errors.New("PHP index manifest accepts only the workspace"))
+		}
+	} else if req.Action == "workspace_text_search" {
 		probe := workspaceFileOperation{Action: req.Action, Pattern: req.Pattern, SearchLimit: req.SearchLimit, SearchPaths: req.SearchPaths, Globs: req.Globs, Literal: req.Literal, TimeoutMS: req.TimeoutMS}
 		if err := validateWorkerTextSearch(probe); err != nil {
 			return fileError("invalid_text_search", "validation", err)
@@ -108,7 +112,7 @@ func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp 
 	} else if req.Offset < 0 || req.Limit < 0 || req.Limit > maxFileReadBytes {
 		return fileError("invalid_range", "validation", errors.New("invalid bounded read offset or limit"))
 	}
-	if req.Action != "workspace_apply_edits" && req.Action != "workspace_transfer_gc" && req.Action != "workspace_text_search" {
+	if req.Action != "workspace_apply_edits" && req.Action != "workspace_transfer_gc" && req.Action != "workspace_text_search" && req.Action != "workspace_php_index_manifest" {
 		if _, err := safeWorkspaceRelativeFile(req.Path); err != nil {
 			return fileError("invalid_path", "validation", err)
 		}
@@ -271,7 +275,9 @@ func RunWorkspaceFileHelper() int {
 	}
 	defer unlock()
 	var resp Response
-	if op.Action == "workspace_read" || op.Action == "workspace_stat" {
+	if op.Action == "workspace_php_index_manifest" {
+		resp = workerPHPIndexManifest(op)
+	} else if op.Action == "workspace_read" || op.Action == "workspace_stat" {
 		resp = readWorkerWorkspaceFile(op)
 	} else if op.Action == "workspace_write" {
 		resp = writeWorkerWorkspaceFile(op)

@@ -84,6 +84,7 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 		return fileError("code_source_unstable", "conflict", errors.New("version mismatch, binary source, or incomplete read"))
 	}
 	binary := ""
+	var phpArchive, phpCache string
 	if actualLanguage == "go" {
 		binary = s.goplsBinary
 		if binary == "" {
@@ -95,22 +96,26 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 		}
 	} else if actualLanguage == "php" {
 		binary = s.phpBinary // test-only; production selects trusted OS PHP.
-		phar := s.phpActorPHAR
-		if binary != "" && phar == "" {
+		phpArchive = s.phpActorPHAR
+		if binary != "" && phpArchive == "" {
 			return fileError("php_lsp_fixture_incomplete", "dependency", errors.New("PHP test adapter requires the fixed PHAR fixture"))
 		}
 		if binary == "" {
 			var trustErr error
-			binary, phar, trustErr = systemexec.PHPActor()
+			binary, phpArchive, trustErr = systemexec.PHPActor()
 			if trustErr != nil {
 				return fileError("php_lsp_unavailable", "dependency", errors.New("trusted optional pinned PHP CLI and Phpactor resource unavailable"))
 			}
 		}
-		cache, cacheErr := s.phpCacheDir(parent, req, workspace)
+		var cacheErr error
+		phpCache, cacheErr = s.phpCacheDir(parent, req, workspace)
 		if cacheErr != nil {
 			return fileError("php_lsp_cache_unavailable", "dependency", cacheErr)
 		}
-		profile = phpLSPProfile(phar, cache)
+		if !phpIndexStoreSafe(phpCache, s.workerUID) {
+			return fileError("php_lsp_index_store_untrusted", "security", errors.New("PHP index store is not a worker-owned nonsymlink directory"))
+		}
+		profile = phpLSPProfile(phpArchive, filepath.Join(phpCache, "store"))
 	} else if actualLanguage == "rust" {
 		if !systemexec.Trusted(systemexec.SQLLensEnv) {
 			return fileError("rust_lsp_unavailable", "dependency", errors.New("trusted fixed executable environment launcher unavailable"))
@@ -200,6 +205,19 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 	}
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
+	indexFingerprint := ""
+	if actualLanguage == "php" {
+		if !s.phpIndexMu.TryLock() {
+			return fileError("php_lsp_index_busy", "resource", errors.New("another PHP index/navigation operation is active"))
+		}
+		defer s.phpIndexMu.Unlock()
+		if req.CodeMethod == "definition" || req.CodeMethod == "references" {
+			indexFingerprint, err = s.buildPHPIndex(ctx, req, workspace, binary, phpArchive, phpCache)
+			if err != nil {
+				return fileError("php_lsp_index_unavailable", "runtime", err)
+			}
+		}
+	}
 	canonicalReq := req
 	canonicalReq.Path = path
 	data, err := s.workerLSPInspection(ctx, canonicalReq, profile, binary, filepath.Join(workspace, path), source.Output, req.CodeMethod, req.Line, req.Character)
@@ -223,6 +241,14 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 	}
 	if stable.FileVersion != req.FileVersion {
 		return fileError("file_changed", "conflict", errors.New("source changed during semantic inspection"))
+	}
+	if indexFingerprint != "" {
+		manifestReq := req
+		manifestReq.Action, manifestReq.Path, manifestReq.FileVersion = "workspace_php_index_manifest", "", ""
+		manifest := s.workerWorkspaceFile(parent, manifestReq)
+		if !manifest.OK || manifest.FileVersion != indexFingerprint {
+			return fileError("php_lsp_index_source_changed", "conflict", errors.New("PHP workspace changed during navigation"))
+		}
 	}
 	response := Response{OK: true, Status: "code_" + req.CodeMethod, OutputEncoding: "json", Output: string(data), FileVersion: req.FileVersion, BytesReturned: int64(len(data)), BytesSeen: int64(len(data))}
 	return response
@@ -384,7 +410,9 @@ func phpLSPProfile(phar, privateIndexPath string) lspInspectionProfile {
 		"core.project_config_candidates":     []string{},
 		"composer.enable":                    false,
 		"indexer.enabled_watchers":           []string{},
-		"indexer.parallel_workers":           0,
+		"indexer.parallel_workers":           1,
+		"indexer.max_filesize_to_index":      phpIndexMaxFileBytes,
+		"indexer.include_patterns":           []string{"/**/*.php"},
 		"indexer.follow_symlinks":            false,
 		"indexer.index_path":                 privateIndexPath,
 		"language_server.enable_trust_check": true,

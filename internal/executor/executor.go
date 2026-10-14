@@ -34,6 +34,7 @@ type Server struct {
 	workerGID                     uint32
 	runs                          *runLimiter
 	sessions                      *stdioSessionBroker
+	phpIndexMu                    sync.Mutex              // single fresh index/build/lookup at a time; bounded, no second broker
 	terminalAdmissionMu           sync.Mutex              // serializes disk-backed terminal capacity and scope creation
 	browserAdmission              browserSessionAdmission // exclusive shared profile lease
 	browserNodeBinary             string                  // test-only private fixture override; production always uses root-owned pinned Node

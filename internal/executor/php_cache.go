@@ -77,6 +77,21 @@ func (s *Server) phpCacheDir(ctx context.Context, req Request, workspace string)
 	}
 }
 
+// Phpactor's --reset may recreate the index payload directory. Keep that
+// payload under the permanently private 0700 principal/workspace parent.
+func phpIndexStoreSafe(cache string, uid uint32) bool {
+	path := filepath.Join(cache, "store")
+	info, err := os.Lstat(path)
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0022 != 0 {
+		return false
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	return ok && st.Uid == uid
+}
+
 func phpPrivateCacheReady(home, dir string, uid uint32) bool {
 	if !filepath.IsAbs(home) || !strings.HasPrefix(dir, home+string(filepath.Separator)) {
 		return false

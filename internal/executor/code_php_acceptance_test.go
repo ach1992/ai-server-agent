@@ -78,8 +78,10 @@ func TestCodeInspectRealPHPActorSafe(t *testing.T) {
 		"vendor/autoload.php": "<?php file_put_contents('PHP-AUTOLOAD-MUST-NOT-EXECUTE','unsafe');",
 		".phpactor.yml":       "composer.enable: true\nindexer.follow_symlinks: true\n",
 		"wp-config.php":       "<?php if (isset($GLOBALS['do_not_execute'])) {file_put_contents('PHP-WORDPRESS-MUST-NOT-EXECUTE','bad');}\n",
-		"app/Http/Controllers/HomeController.php":   "<?php\nnamespace App\\Http\\Controllers;\nclass HomeController { public function index(): string { return 'Laravel style'; } }\n",
-		"wp-content/plugins/agent-proof/plugin.php": "<?php\nnamespace AgentProofPlugin;\nclass RegisterHooks { public static function initialize(): void {} }\n",
+		"app/Http/Controllers/HomeController.php":      "<?php\nnamespace App\\Http\\Controllers;\nclass HomeController { public function index(): string { return 'Laravel style'; } }\n",
+		"wp-content/plugins/agent-proof/plugin.php":    "<?php\nnamespace AgentProofPlugin;\nclass RegisterHooks { public static function initialize(): void {} }\n",
+		"app/Http/Controllers/Consumer.php":            "<?php\nnamespace App\\Http\\Controllers;\n$home = new HomeController();\necho $home->index();\n",
+		"wp-content/plugins/agent-proof/bootstrap.php": "<?php\nnamespace AgentProofPlugin;\n$hooks = new RegisterHooks();\nRegisterHooks::initialize();\n",
 	}
 	for path, data := range files {
 		if err := os.WriteFile(filepath.Join(workspace, path), []byte(data), 0600); err != nil {
@@ -118,6 +120,18 @@ func TestCodeInspectRealPHPActorSafe(t *testing.T) {
 	if r := run("references", 3, 20); !strings.Contains(r.Output, "file_version") {
 		t.Fatalf("Phpactor symbol references not proven: %s", r.Output)
 	}
+	// Real Composer PSR-4 cross-file navigation must come from the fresh
+	// offline worker-built index, never from executing the autoloader.
+	owner.Path, owner.FileVersion = "consumer.php", stat("consumer.php").FileVersion
+	if r := run("definition", 3, 18); !strings.Contains(r.Output, `"uri":"src/Greeter.php"`) ||
+		!strings.Contains(r.Output, version.FileVersion) {
+		t.Fatalf("cross-file Composer class Definition missing/stale: %s", r.Output)
+	}
+	owner.Path, owner.FileVersion = "src/Greeter.php", version.FileVersion
+	if r := run("references", 2, 7); !strings.Contains(r.Output, `"uri":"consumer.php"`) ||
+		!strings.Contains(r.Output, stat("consumer.php").FileVersion) {
+		t.Fatalf("cross-file Composer References missing/stale: %s", r.Output)
+	}
 	// Representative WordPress-plugin and Laravel-controller PHP syntax is
 	// independently parsed without evaluating files or enabling Composer.
 	for _, tc := range []struct{ path, symbol string }{
@@ -127,6 +141,19 @@ func TestCodeInspectRealPHPActorSafe(t *testing.T) {
 		owner.Path, owner.FileVersion = tc.path, stat(tc.path).FileVersion
 		if r := run("symbols", 0, 0); !strings.Contains(r.Output, tc.symbol) {
 			t.Fatalf("%s project-shaped PHP symbols missing: %s", tc.path, r.Output)
+		}
+	}
+	for _, tc := range []struct {
+		consumer, target string
+		line, column     int
+	}{
+		{"app/Http/Controllers/Consumer.php", "app/Http/Controllers/HomeController.php", 2, 18},
+		{"wp-content/plugins/agent-proof/bootstrap.php", "wp-content/plugins/agent-proof/plugin.php", 2, 19},
+	} {
+		owner.Path, owner.FileVersion = tc.consumer, stat(tc.consumer).FileVersion
+		if r := run("definition", tc.line, tc.column); !strings.Contains(r.Output, `"uri":"`+tc.target+`"`) ||
+			!strings.Contains(r.Output, stat(tc.target).FileVersion) {
+			t.Fatalf("real Laravel/WordPress class navigation missing: consumer=%s result=%s", tc.consumer, r.Output)
 		}
 	}
 	owner.Path, owner.FileVersion = "src/Greeter.php", version.FileVersion
