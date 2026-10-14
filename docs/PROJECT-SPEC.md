@@ -33,7 +33,7 @@ Provide authorized normal and privileged command execution, file and process ope
 
 ### 4.2 Software development
 
-Enable repository discovery and recovery, isolated worktree workflows, search, source editing, semantic code intelligence, debugging, builds, tests, terminal use, and ordinary Git/GitHub development flows. Prefer standards and mature native tools. Add first-class structured Agent functionality where it materially improves correctness, semantic fidelity, state ownership, recoverability, or AI usability.
+Enable repository discovery and recovery, isolated worktree workflows, search, source editing, semantic code intelligence, debugging, builds, tests, terminal use, and ordinary Git/GitHub development flows. Where independently authorized tools and credentials are available, AI work should be able to progress from repository inspection and changes through version control, push, review/CI evidence, and a release-ready handoff without requiring the Agent to become a project manager or GitHub credential broker. Prefer standards and mature native tools. Add first-class structured Agent functionality where it materially improves correctness, semantic fidelity, state ownership, recoverability, or AI usability.
 
 ### 4.3 Real validation and diagnosis
 
@@ -107,6 +107,8 @@ It does not require every programming language, database, browser, container run
 The product meets its intended outcome when a supported AI client can reliably authenticate, identify the host and available capabilities, perform substantial authorized development or validation workflows, inspect actionable evidence, and recover relevant work without reliance on chat history.
 
 Installation, updates, and failure recovery must be reproducible and diagnosable; host capability must not be unnecessarily obstructed by the Agent itself. Operational concurrency and retained state must be understandable and manageable for the supported host environment.
+
+Representative success must be demonstrated through an authorized direct-client development workflow, a realistic Validation-host test and diagnosis workflow, and recovery of relevant in-progress work after a client/chat interruption, using exact repository/host identity. Specific workflow fixtures, negative cases and release gates belong to [Testing](TESTING.md) and their owning Issues, not to this product-level document.
 
 A source implementation or green unit CI is not automatically an installed/client-verified release. Each shipped capability must satisfy the corresponding actual protocol, operating-system, security, integration, error, resource, recovery, and delivery acceptance required by its work item.
 

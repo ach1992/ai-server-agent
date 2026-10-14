@@ -85,7 +85,7 @@ See `docs/ARCHITECTURE.md` for trust boundaries and `docs/TESTING.md` for the cu
 
 ## Developer Runtime value-first rules
 
-When working on Issues #52-#66, #137, #140 or #143, read `docs/DEVELOPER-RUNTIME.md` and the current controlling Issue before designing or implementing a new capability.
+When working on Issues #52-#66, #99, #118, #137, #140 or #143, read `docs/DEVELOPER-RUNTIME.md` and the current controlling Issue before designing or implementing a new capability.
 
 The governing optimization is **maximum practical AI-development leverage per unit of total complexity**.
 
@@ -99,7 +99,7 @@ The governing optimization is **maximum practical AI-development leverage per un
 - DAP and Playwright-backed Browser are Core-v1 capabilities, but their public surfaces stay focused on common high-value workflows rather than protocol/API completeness.
 - Keep #66 consumer-driven and internal; do not grow it into a public generic process/provider framework.
 - Extend LSP/DAP through one shared protocol/session/authorization path plus narrow capability-verified adapter profiles; do not create a new MCP tool family, broker, worker file writer or general plugin framework for each language. Verify the entire adapter launch chain, reject unsolicited read-only LSP writes and distinguish DAP-session-owned processes from separately owned test services (detach must not kill services).
-- Under Issue #140, honor the explicit Owner gate: documentation/Issue design review precedes source implementation. The next-version acceptance is a clean first install, not legacy script/config/state migration; preserve protections and recovery within that new baseline, and decide future-baseline upgrade support from real future requirements rather than adding it speculatively now. Keep #137 and #140 workstreams independent; never alter an in-review/frozen candidate of another workstream to accelerate #140, and recheck live GitHub state before integration.
+- Under Issue #140, the Owner's documentation/Issue design-first gate has already been satisfied and separate source-development authority was granted. Its integration, release and test-host approval gates remain distinct. The next-version acceptance is a clean first install, not legacy script/config/state migration; preserve protections and recovery within that new baseline, and decide future-baseline upgrade support from real future requirements rather than adding it speculatively now. Keep #137 and #140 workstreams independent; never alter an in-review/frozen candidate of another workstream to accelerate #140, and recheck live GitHub state before integration.
 - Keep project worktrees separate from worker HOME/config/cache, runtime/session state, generated artifacts and audit/log state.
 - Do not implement Ctags, managed Incus, multiple terminal backends, generic tool managers/environment-provider frameworks, custom indexes or similar deferred capabilities without new evidence satisfying their promotion rule.
 - Keep README truthful about shipped behavior; accepted product requirements belong in `docs/PROJECT-SPEC.md` and target architecture in `docs/DEVELOPER-RUNTIME.md` until implementation is real.
