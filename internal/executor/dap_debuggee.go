@@ -79,12 +79,13 @@ func (d *dapState) pinDebuggeeProcess(body json.RawMessage) error {
 		return errors.New("dap_debuggee_parent_or_uid_mismatch")
 	}
 	workspaceExecutable := filepath.Join(d.workspace, d.program)
-	if d.adapter == "python/debugpy" {
-		// debugpy can spawn its target through an intermediate launcher.
-		// Only kernel-proven containment and a trusted interpreter inode
-		// permit accepting this different process-parent topology.
+	if d.adapter == "python/debugpy" || d.adapter == "javascript/js-debug" {
+		// Python and Node may use an intermediate launcher, so an OS parent
+		// relation to the adapter is not a safe or correct DAP contract.
+		// The stronger kernel proof is membership in this exact private
+		// root-owned cgroup plus a pinned trusted interpreter executable.
 		if d.containment == nil || !d.containment.containsPID(pid) || d.targetInterpreter == "" {
-			return errors.New("python_dap_debuggee_not_root_contained")
+			return errors.New("script_dap_debuggee_not_root_contained")
 		}
 		workspaceExecutable = d.targetInterpreter
 	} else {

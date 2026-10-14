@@ -184,6 +184,16 @@ func (s *Server) workerContainedDAPSession(req Request, workspace, binary string
 	return s.startProcessSessionWithOptions(req, "dap", workspace, binary, nil, "", group, true, args...)
 }
 
+// JS adapters listen on a private Unix socket instead of stdio. The same
+// original process/session broker owns the verified private cgroup; this
+// launches no root debuggee and creates no additional process broker.
+func (s *Server) workerContainedSocketDAPSession(req Request, workspace, binary string, group *dapCgroup, args ...string) (string, error) {
+	if req.Root || req.Approval || group == nil || os.Geteuid() != 0 {
+		return "", errors.New("socket DAP requires root executor-owned worker containment")
+	}
+	return s.startProcessSessionWithOptions(req, "dap", workspace, binary, nil, "", group, false, args...)
+}
+
 func (s *Server) workerProcessSession(req Request, kind, workspace, binary string, terminal *tmuxTerminalState, args ...string) (string, error) {
 	if req.Root || req.Approval {
 		return "", errors.New("worker process cannot be privileged")
@@ -653,6 +663,9 @@ func (b *stdioSessionBroker) removeAndStop(entry *stdioSession) error {
 		entry.dap.mu.Lock()
 		if entry.dap.conn != nil {
 			_ = entry.dap.conn.Close()
+		}
+		if entry.dap.parentConn != nil {
+			_ = entry.dap.parentConn.Close()
 		}
 		entry.dap.mu.Unlock()
 	}

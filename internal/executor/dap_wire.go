@@ -30,7 +30,8 @@ type dapState struct {
 	mu                  sync.Mutex // serializes DAP frames and events
 	actionMu            sync.Mutex // serializes complete user operations and close
 	conn                net.Conn
-	pending             []byte // incomplete frame retained across status timeouts
+	parentConn          net.Conn // Node target-only: second protocol connection to SAME pinned adapter
+	pending             []byte   // incomplete frame retained across status timeouts
 	workspace           string
 	adapter             string
 	program             string

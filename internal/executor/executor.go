@@ -69,6 +69,8 @@ type Server struct {
 	dlvBinary                     string                                                    // test-only Delve DAP fixture; production uses admin-owned binary
 	pythonDebugpyBinary           string                                                    // test-only recognized Python interpreter fixture
 	pythonDebugpyModules          string                                                    // test-only unprivileged verified wheel fixture
+	javascriptDAPNode             string                                                    // test-only JS adapter Node fixture
+	javascriptDAPCLI              string                                                    // test-only JS adapter entrypoint fixture
 }
 
 func NewServer(cfg config.Config, token string) (*Server, error) {

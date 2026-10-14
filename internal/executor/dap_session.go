@@ -27,6 +27,24 @@ func (s *Server) debugAction(ctx context.Context, req Request) Response {
 	}
 	switch req.Action {
 	case "debug_adapter_status":
+		if req.Language == "javascript" {
+			_, _, trustErr := systemexec.JavaScriptDAP()
+			available := trustErr == nil
+			if s.javascriptDAPNode != "" && s.javascriptDAPCLI != "" {
+				available = true
+			}
+			body, _ := json.Marshal(map[string]any{
+				"adapter": "javascript/js-debug", "installed": available,
+				"modes": []string{"node"}, "attach_supported": false,
+				"privileged": false, "provisioning": "optional_root_owned_pinned_complete_js_debug",
+				"containment": "executor_owned_private_cgroup_v2_required",
+			})
+			state := "unavailable"
+			if available {
+				state = "installed_containment_unverified"
+			}
+			return Response{OK: true, Status: state, Output: string(body), OutputEncoding: "json", BytesSeen: int64(len(body)), BytesReturned: int64(len(body))}
+		}
 		if req.Language == "python" {
 			_, _, err := systemexec.PythonDebugpy()
 			available := err == nil
@@ -45,7 +63,7 @@ func (s *Server) debugAction(ctx context.Context, req Request) Response {
 			return Response{OK: true, Status: status, Output: string(b), OutputEncoding: "json", BytesReturned: int64(len(b)), BytesSeen: int64(len(b))}
 		}
 		if req.Language != "" && req.Language != "go" {
-			return fileError("unsupported_debug_language", "validation", errors.New("debugger readiness supports go and python only"))
+			return fileError("unsupported_debug_language", "validation", errors.New("debugger readiness supports go, python and javascript only"))
 		}
 		_, err := s.debugBinary()
 		available := err == nil
@@ -180,6 +198,9 @@ func peerIsWorkerDelve(conn *net.UnixConn, uid uint32, pid int) bool {
 }
 
 func (s *Server) debugLaunch(ctx context.Context, req Request) (response Response) {
+	if req.Language == "javascript" {
+		return s.debugLaunchNode(ctx, req)
+	}
 	if req.Language == "python" {
 		return s.debugLaunchPython(ctx, req)
 	}
@@ -498,7 +519,10 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 		if d.adapter == "python/debugpy" {
 			extension = ".py"
 		}
-		if err != nil || filepath.Ext(relative) != extension || len(req.DebugLines) > 32 || req.FileVersion == "" {
+		sourceExt := filepath.Ext(relative)
+		validJS := d.adapter == "javascript/js-debug" && (sourceExt == ".js" || sourceExt == ".mjs" || sourceExt == ".cjs")
+		if err != nil || (d.adapter == "javascript/js-debug" && !validJS) ||
+			(d.adapter != "javascript/js-debug" && sourceExt != extension) || len(req.DebugLines) > 32 || req.FileVersion == "" {
 			return fileError("debug_invalid_breakpoints", "validation", errors.New("language-matching source file_version and <=32 breakpoint lines required"))
 		}
 		if d.sourceVersions[relative] == "" && len(d.sourceVersions) >= 16 {
@@ -530,12 +554,22 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 		if d.configured {
 			return fileError("debug_already_configured", "validation", errors.New("debug configuration already completed"))
 		}
+		// js-debug's Node child does not reliably emit a DAP "process"
+		// notification. Its safety proof is the original adapter pidfd,
+		// authenticated two AF_UNIX connections and the kernel-verified
+		// private cgroup. Require that proof before configurationDone
+		// resumes any user code; never mistake missing process-event
+		// metadata for permission to launch without containment.
+		if d.adapter == "javascript/js-debug" && !d.nodeContainmentReady() {
+			return fileError("javascript_dap_containment_unverified", "security",
+				errors.New("Node debugger has no live pinned adapter and private cgroup; configuration denied"))
+		}
 	case "continue", "pause", "next", "stepIn", "stepOut", "stackTrace", "exceptionInfo":
 		if !d.configured {
 			return fileError("debug_not_configured", "state", errors.New("complete breakpoints/configure first"))
 		}
-		if req.DebugThreadID < 1 {
-			return fileError("debug_thread_required", "validation", errors.New("valid thread_id is required"))
+		if req.DebugThreadID < 0 || (d.adapter != "javascript/js-debug" && req.DebugThreadID == 0) {
+			return fileError("debug_thread_required", "validation", errors.New("valid adapter-specific DAP thread_id is required"))
 		}
 		args = map[string]any{"threadId": req.DebugThreadID}
 		if method == "stackTrace" {

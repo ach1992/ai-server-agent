@@ -29,10 +29,10 @@ func TestPublicDebugMCPPrincipalAndBoundedTypedArguments(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	received := make(chan executor.Request, 8)
+	received := make(chan executor.Request, 10)
 	errs := make(chan error, 1)
 	go func() {
-		for i := 0; i < 7; i++ {
+		for i := 0; i < 9; i++ {
 			conn, err := ln.Accept()
 			if err != nil {
 				errs <- err
@@ -91,8 +91,10 @@ func TestPublicDebugMCPPrincipalAndBoundedTypedArguments(t *testing.T) {
 	}{
 		{"debug_adapter_status", "debug_adapter_status", "", map[string]any{}},
 		{"debug_adapter_status", "debug_adapter_status", "", map[string]any{"language": "python"}},
+		{"debug_adapter_status", "debug_adapter_status", "", map[string]any{"language": "javascript"}},
 		{"debug_launch", "debug_launch", "", map[string]any{"workspace": "/srv/ai-workspace/worktree", "program": "bin/demo", "file_version": "exact-binary-version", "stop_on_entry": true}},
 		{"debug_launch", "debug_launch", "", map[string]any{"workspace": "/srv/ai-workspace/worktree", "program": "src/example.py", "file_version": "exact-python-version", "language": "python", "mode": "script", "stop_on_entry": true}},
+		{"debug_launch", "debug_launch", "", map[string]any{"workspace": "/srv/ai-workspace/worktree", "program": "src/example.js", "file_version": "exact-javascript-version", "language": "javascript", "mode": "node", "stop_on_entry": true}},
 		{"debug_breakpoints", "debug_action", "breakpoints", map[string]any{"workspace": "/srv/ai-workspace/worktree", "session_id": "stdio_abc", "path": "main.go", "file_version": "exact-source-version", "lines": []int{4, 8}}},
 		{"debug_evaluate", "debug_action", "evaluate", map[string]any{"workspace": "/srv/ai-workspace/worktree", "session_id": "stdio_abc", "frame_id": 1000, "expression": "1+2"}},
 		{"debug_stop", "debug_stop", "", map[string]any{"workspace": "/srv/ai-workspace/worktree", "session_id": "stdio_abc"}},
@@ -111,6 +113,10 @@ func TestPublicDebugMCPPrincipalAndBoundedTypedArguments(t *testing.T) {
 				if task.args["language"] == "python" {
 					if req.DebugProgram != "src/example.py" || req.FileVersion != "exact-python-version" || req.Language != "python" || req.DebugMode != "script" || !req.DebugStopOnEntry {
 						t.Fatalf("Python launch did not preserve exact source/mode/principal: %+v", req)
+					}
+				} else if task.args["language"] == "javascript" {
+					if req.DebugProgram != "src/example.js" || req.FileVersion != "exact-javascript-version" || req.Language != "javascript" || req.DebugMode != "node" || !req.DebugStopOnEntry {
+						t.Fatalf("Node launch did not preserve exact source/mode/principal: %+v", req)
 					}
 				} else if req.DebugProgram != "bin/demo" || req.FileVersion != "exact-binary-version" || req.Language != "" || req.DebugMode != "" || !req.DebugStopOnEntry {
 					t.Fatalf("legacy Go launch contract changed: %+v", req)
