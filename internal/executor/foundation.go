@@ -90,7 +90,7 @@ func connectionContext(c net.Conn) (context.Context, context.CancelFunc) {
 
 func (s *Server) dispatchContext(ctx context.Context, req Request) Response {
 	switch req.Action {
-	case "browser_admission_status", "browser_session_open", "browser_session_flow", "browser_session_capture", "browser_session_trace", "browser_session_status", "browser_session_close", "run", "code_inspect", "debug_adapter_status", "debug_launch", "debug_action", "debug_status", "debug_stop", "workspace_stat", "workspace_read", "workspace_write", "workspace_apply_edits", "workspace_transfer", "workspace_text_search", "workspace_search", "repository_environment", "repository_discover", "repository_inspect", "worktree_create", "worktree_remove":
+	case "browser_admission_status", "browser_session_open", "browser_session_flow", "browser_session_capture", "browser_session_trace", "browser_session_status", "browser_session_close", "run", "runtime_list", "code_inspect", "debug_adapter_status", "debug_launch", "debug_action", "debug_status", "debug_stop", "workspace_stat", "workspace_read", "workspace_write", "workspace_apply_edits", "workspace_transfer", "workspace_text_search", "workspace_search", "repository_environment", "repository_discover", "repository_inspect", "worktree_create", "worktree_remove":
 		if !s.auth(req.Token) {
 			return Response{Error: "unauthorized"}
 		}
@@ -104,6 +104,8 @@ func (s *Server) dispatchContext(ctx context.Context, req Request) Response {
 			return s.browserSessionAction(ctx, req)
 		case "run":
 			return s.runContext(ctx, req)
+		case "runtime_list":
+			return s.runtimeListContext(ctx, req)
 		case "code_inspect":
 			return s.codeInspect(ctx, req)
 		case "debug_adapter_status", "debug_launch", "debug_action", "debug_status", "debug_stop":

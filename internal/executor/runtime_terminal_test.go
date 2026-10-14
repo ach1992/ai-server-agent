@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"context"
 	"encoding/json"
 	"net"
 	"os"
@@ -108,5 +109,92 @@ func TestPassiveRuntimeWorkerTerminalScopeAndPrincipal(t *testing.T) {
 	}
 	if got := s.runtimeList(req); len(got.RuntimeEntries) != 0 {
 		t.Fatalf("vanished socket advertised as recoverable: %+v", got)
+	}
+}
+
+
+func TestRuntimeListUsesOneObservationDeadlineAndDoesNotMutate(t *testing.T) {
+	s, _, workspace := newSharedRuntimeTestServer(t)
+	state, err := os.MkdirTemp("/tmp", "asa-rt-deadline-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(state) })
+	s.cfg.StateDir = state
+	jobs := filepath.Join(state, "jobs")
+	if err := os.Mkdir(jobs, 0711); err != nil {
+		t.Fatal(err)
+	}
+	mockActiveUnits(t)
+	for _, dir := range []string{"terminal-sessions", "worker-terminals"} {
+		if err := os.Mkdir(filepath.Join(state, dir), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	req := Request{Token: s.token, Action: "runtime_list", PrincipalID: "principal-a", PrincipalClass: "direct", Kind: "terminal", Workspace: workspace}
+	before := map[string][]byte{}
+	for i, ch := range []string{"a", "b", "c"} {
+		id := "stdio_" + strings.Repeat(ch, 32)
+		socketDir := filepath.Join(state, "worker-terminals", ".asa-tmux-"+strings.Repeat(ch, 6))
+		if err := os.Mkdir(socketDir, 0700); err != nil {
+			t.Fatal(err)
+		}
+		listener, err := net.Listen("unix", filepath.Join(socketDir, "socket"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Cleanup(func() { _ = listener.Close() })
+		rec := terminalRecord{
+			Version: 1, ID: id, OwnerID: req.PrincipalID, OwnerClass: req.PrincipalClass,
+			Workspace: workspace, Root: false, Scoped: true, Lifecycle: "active",
+			SocketDir: socketDir, Name: "asa_" + strings.Repeat(ch, 24), Pane: "%0",
+			Columns: 80, Rows: 24, ExpiresAt: time.Now().UTC().Add(time.Duration(30+i) * time.Minute),
+		}
+		data, err := json.Marshal(rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		path := filepath.Join(state, "terminal-sessions", id+".json")
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		before[path] = append([]byte(nil), data...)
+	}
+
+	s.runtimeListObservationTimeoutTest = 50 * time.Millisecond
+	verifyCalls := 0
+	s.runtimeTerminalVerifyTestHook = func(ctx context.Context, _ string) error {
+		verifyCalls++
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(500 * time.Millisecond):
+			return nil
+		}
+	}
+
+	started := time.Now()
+	got := s.dispatchContext(context.Background(), req)
+	elapsed := time.Since(started)
+	if !got.OK || !got.Truncated || len(got.RuntimeEntries) != 3 {
+		t.Fatalf("deadline inventory result = %+v", got)
+	}
+	if elapsed > 250*time.Millisecond {
+		t.Fatalf("runtime_list exceeded one request-wide observation deadline: %s", elapsed)
+	}
+	if verifyCalls != 3 {
+		t.Fatalf("terminal verification calls = %d, want 3 bounded by one shared context", verifyCalls)
+	}
+	for _, entry := range got.RuntimeEntries {
+		if entry.Status != "unknown" {
+			t.Fatalf("deadline-constrained terminal fabricated status: %+v", entry)
+		}
+	}
+	for path, want := range before {
+		after, err := os.ReadFile(path)
+		if err != nil || string(after) != string(want) {
+			t.Fatalf("passive deadline inventory mutated %s: err=%v", path, err)
+		}
 	}
 }

@@ -117,6 +117,10 @@ func (s *Server) startScopedTerminalBackend(req Request, binary string, t *tmuxT
 }
 
 func verifyScopedTerminalBackend(name string) error {
+	return verifyScopedTerminalBackendContext(context.Background(), name)
+}
+
+func verifyScopedTerminalBackendContext(parent context.Context, name string) error {
 	unit, err := terminalScopeUnit(name)
 	if err != nil {
 		return err
@@ -125,7 +129,7 @@ func verifyScopedTerminalBackend(name string) error {
 	if systemctl == "" {
 		return errors.New("trusted systemctl is unavailable")
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), terminalScopeCommandTimeout)
+	ctx, cancel := context.WithTimeout(parent, terminalScopeCommandTimeout)
 	defer cancel()
 	output, err := exec.CommandContext(ctx, systemctl, "show", "--no-pager",
 		"-p", "LoadState", "-p", "ActiveState", "-p", "ControlGroup",

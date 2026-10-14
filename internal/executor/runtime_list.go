@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"io"
@@ -13,7 +14,10 @@ import (
 	"time"
 )
 
-const maxRuntimeListEntries = 32
+const (
+	maxRuntimeListEntries          = 32
+	runtimeListObservationTimeout = 5 * time.Second
+)
 
 type RuntimeEntry struct {
 	Kind      string `json:"kind"`
@@ -47,6 +51,16 @@ func runtimeRank(s string) int {
 }
 
 func (s *Server) runtimeList(req Request) Response {
+	return s.runtimeListContext(context.Background(), req)
+}
+
+func (s *Server) runtimeListContext(parent context.Context, req Request) Response {
+	timeout := runtimeListObservationTimeout
+	if s.runtimeListObservationTimeoutTest > 0 {
+		timeout = s.runtimeListObservationTimeoutTest
+	}
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
 	if req.PrincipalID == "" || req.PrincipalClass == "" {
 		return fileError("invalid_principal", "authorization", errors.New("authenticated principal required for runtime discovery"))
 	}
@@ -80,7 +94,7 @@ func (s *Server) runtimeList(req Request) Response {
 	if err := trustedDir(jobsDir); err != nil {
 		return jobStateError("runtime_unavailable", err)
 	}
-	ids, err := activeAgentUnitIDs()
+	ids, err := activeAgentUnitIDsContext(ctx)
 	active := make(map[string]bool, len(ids))
 	if err != nil {
 		response.Truncated = true // the active state and capacity are not established
@@ -234,8 +248,11 @@ func (s *Server) runtimeList(req Request) Response {
 						continue
 					}
 					status := "active"
-					if err := verifyScopedTerminalBackend(rec.Name); err != nil {
+					if err := s.verifyRuntimeTerminalBackend(ctx, rec.Name); err != nil {
 						status = "unknown"
+						if ctx.Err() != nil {
+							response.Truncated = true
+						}
 					}
 					response.RuntimeEntries = append(response.RuntimeEntries, RuntimeEntry{
 						Kind: "terminal", ID: rec.ID, Workspace: rec.Workspace, Status: status,
@@ -266,6 +283,13 @@ func (s *Server) runtimeList(req Request) Response {
 		response.Truncated = true
 	}
 	return response
+}
+
+func (s *Server) verifyRuntimeTerminalBackend(ctx context.Context, name string) error {
+	if s.runtimeTerminalVerifyTestHook != nil {
+		return s.runtimeTerminalVerifyTestHook(ctx, name)
+	}
+	return verifyScopedTerminalBackendContext(ctx, name)
 }
 
 // This read-only check parallels the production reconnect socket identity

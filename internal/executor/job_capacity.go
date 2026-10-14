@@ -13,10 +13,14 @@ import (
 // This bounded, read-only PID1 view is shared by admission and discovery.
 // Never return systemctl's unit descriptions: they can include shell text.
 func activeAgentUnitIDs() ([]string, error) {
+	return activeAgentUnitIDsContext(context.Background())
+}
+
+func activeAgentUnitIDsContext(parent context.Context) ([]string, error) {
 	out := newBoundedOutputCollector(systemdOutputLimit)
 	// Inventory runs on both admission and passive discovery; never let a
 	// stalled PID1/dbus interaction monopolize either path indefinitely.
-	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	ctx, cancel := context.WithTimeout(parent, 4*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "systemctl", "list-units", "--type=service",
 		"--state=activating,active,deactivating,reloading",
