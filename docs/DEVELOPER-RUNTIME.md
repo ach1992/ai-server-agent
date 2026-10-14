@@ -2,11 +2,7 @@
 
 **Authority:** [PROJECT-SPEC.md](PROJECT-SPEC.md) is the Owner-approved product-level north star. This document owns capability-specific technical design and defer/acceptance boundaries; [ARCHITECTURE.md](ARCHITECTURE.md) owns host, security and lifecycle architecture. Current integrated and released behavior must not be inferred from target architecture alone.
 
-> Status: **the principal source capabilities shipped in published immutable Stable and passed real installed direct-MCP tests on one dedicated host; full cross-client, optional-platform and extended acceptance remains tracked by Issues #59/#99**. GitHub Releases and the current Issue #59 receipt identify the exact latest Stable.
->
-> The latest published immutable release is [`v0.1.12`](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.12), source/tag `9b06c085c1ff75f3a314215657d3b04f510c9432`; it includes the reviewed fresh Cloudflare named-credential repair. This release is NOW **verified byte-identical in the running Agent/Executor processes** of the new `hDE01` Test Server, publicly reachable at `aitestserver.ach.li` with TLS health 200 and unauthenticated MCP 401. Live connected Browser/LSP/DAP/PTY/Jobs, small bounded binary SHA-256 and read-only GitHub recovery/short Go suite passed. Native ChatGPT inline/downloadable JPEG/ZIP/file presentation, long-soak/recovery, full GitHub write/PR loop and runtime settings matrices are **still OPEN** under #59/#99/#63/#118; see [verified live receipt](https://github.com/ach1992/ai-server-agent/issues/59#issuecomment-6137123091).
->
-> Current runtime behavior is documented by `README.md` and the current implementation. This document defines the accepted Developer Runtime target delivered by the relevant workstreams tracked under Issues #54-#66 and the cross-cutting data-delivery Issue #99. Phase A architecture/documentation is integrated and its execution boundary was owner-accepted on 2026-10-07; optional/deferred workstreams in that range are explicitly non-blocking below.
+> **Status and evidence:** This document records accepted capability architecture, not a live release or installed-server status ledger. Verify implemented/integrated work against current source and the owning [GitHub Issues](https://github.com/ach1992/ai-server-agent/issues) and PRs; [Releases](https://github.com/ach1992/ai-server-agent/releases) own shipped versions. [Issue #59](https://github.com/ach1992/ai-server-agent/issues/59) owns real workflow/installed-client acceptance, [#99](https://github.com/ach1992/ai-server-agent/issues/99) data delivery, [#137](https://github.com/ach1992/ai-server-agent/issues/137) shared runtime, and [#140](https://github.com/ach1992/ai-server-agent/issues/140) multi-language LSP/DAP. Phase A architecture was accepted; runtime integration and installed evidence remain independent.
 
 ## 1. Outcome
 
@@ -505,7 +501,7 @@ Do not promote capabilities merely because they are powerful, modern, or availab
 
 ## 19. Language-neutral extensions and fresh-install delivery (Issue #140; target, not shipped)
 
-**Design status:** The Owner selected a protocol-first, capability-driven direction; the historical documentation-first review gate was satisfied, and subsequent source-development authority was granted on 2026-10-14. PR #142 is an independent source candidate, not automatically merged, installed or released. The latest Issue #140 body and current PR own acceptance/review/integration and release gates; this document owns durable architecture only.
+**Design status:** The Owner selected a protocol-first, capability-driven direction; the historical documentation-first review gate was satisfied, and subsequent source-development authority was granted on 2026-10-14. Any source candidate remains separate from acceptance, review, integration, installed-client evidence and release. The latest Issue #140 body and its live PRs own those gates; this document owns durable architecture only.
 
 **Extension test:** For an adapter that already implements LSP/DAP, adding a language should normally be a bounded integration of a trusted tool, its narrow profile, and conformance fixtures. It must not require a new MCP family, file writer, process/session registry or security model. Genuine language-specific runtime differences may require a small typed launch/transport handler. Do not promise that every third-party adapter behaves identically.
 
@@ -569,6 +565,6 @@ Do not promote capabilities merely because they are powerful, modern, or availab
 - #66 — internal stateful-session substrate;
 - #99 — AI-facing bounded data delivery and typed-artifact acceptance;
 - #137 — separate first-install Shared Runtime; its current PR and acceptance state live in GitHub;
-- #140 — language-neutral multi-language LSP/DAP, docs-first Owner gate and adapter acceptance.
+- #140 — language-neutral multi-language LSP/DAP, accepted first-expansion languages and per-adapter real acceptance (the historical docs-first Owner gate was satisfied).
 
 After this document is integrated, use it for stable architecture and use Issues for active work/dependencies. Do not reconstruct these decisions from chat history.

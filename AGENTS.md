@@ -85,7 +85,7 @@ See `docs/ARCHITECTURE.md` for trust boundaries and `docs/TESTING.md` for the cu
 
 ## Developer Runtime value-first rules
 
-When working on Issues #52-#66, #137 or #140, read `docs/DEVELOPER-RUNTIME.md` and the current controlling Issue before designing or implementing a new capability.
+When working on Issues #52-#66, #137, #140 or #143, read `docs/DEVELOPER-RUNTIME.md` and the current controlling Issue before designing or implementing a new capability.
 
 The governing optimization is **maximum practical AI-development leverage per unit of total complexity**.
 
