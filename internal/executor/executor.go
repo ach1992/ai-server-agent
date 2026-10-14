@@ -58,6 +58,9 @@ type Server struct {
 	webCSSCLIBinary               string                                                    // test-only CSS LSP entrypoint fixture
 	sqlNodeBinary                 string                                                    // test-only SQL LSP Node executable fixture
 	sqlCLIBinary                  string                                                    // test-only SQL LSP entrypoint fixture
+	rustAnalyzerBinary            string                                                    // test-only pinned native rust-analyzer fixture
+	rustCompilerBinary            string                                                    // test-only pinned native rustc fixture
+	rustSysrootDir                string                                                    // test-only Rust toolchain/sysroot fixture
 	environmentGoSystemPath       string                                                    // test-only Go discovery path; empty uses fixed safeCommandPath
 	codeTargetSnapshotHook        func()                                                    // test-only interleaving: alter target after LSP overlay snapshot
 	dlvBinary                     string                                                    // test-only Delve DAP fixture; production uses admin-owned binary

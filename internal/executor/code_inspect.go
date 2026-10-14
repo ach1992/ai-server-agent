@@ -93,6 +93,22 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 		if binary == "" {
 			return fileError("gopls_unavailable", "dependency", errors.New("trusted optional gopls is not installed"))
 		}
+	} else if actualLanguage == "rust" {
+		if !systemexec.Trusted(systemexec.SQLLensEnv) {
+			return fileError("rust_lsp_unavailable", "dependency", errors.New("trusted fixed executable environment launcher unavailable"))
+		}
+		analyzer, rustc, sysroot := s.rustAnalyzerBinary, s.rustCompilerBinary, s.rustSysrootDir
+		if analyzer == "" {
+			var trustErr error
+			analyzer, rustc, sysroot, trustErr = systemexec.RustAnalyzerResources()
+			if trustErr != nil {
+				return fileError("rust_lsp_unavailable", "dependency", errors.New("trusted optional Rust analyzer, rustc and sysroot are unavailable"))
+			}
+		} else if rustc == "" || sysroot == "" {
+			return fileError("rust_lsp_fixture_incomplete", "dependency", errors.New("Rust test fixture requires native analyzer, pinned rustc and sysroot"))
+		}
+		binary = systemexec.SQLLensEnv
+		profile = rustLSPProfile(filepath.Join(workspace, path), analyzer, rustc, sysroot)
 	} else if actualLanguage == "sql" {
 		if !systemexec.Trusted(systemexec.SQLLensEnv) {
 			return fileError("sql_lsp_unavailable", "dependency", errors.New("trusted environment executable for fixed SQL interpreter settings is unavailable"))
@@ -199,12 +215,13 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 // It never accepts executable paths, arguments or configuration from a
 // repository or external MCP caller. Entrypoint trust is checked upstream.
 type lspInspectionProfile struct {
-	arguments           []string
-	extensions          map[string]string // recognized suffix -> LSP languageId
-	initOptions         map[string]any    // pinned, never project-controlled
-	staticConfiguration map[string]any    // fixed responses to server workspace/configuration
-	waitForInitialPush  bool              // fixed adapters needing async document indexing
-	pushOnlyDiagnostics bool              // adapter advertised pull but fails to implement it
+	arguments            []string
+	extensions           map[string]string // recognized suffix -> LSP languageId
+	initOptions          map[string]any    // pinned, never project-controlled
+	staticConfiguration  map[string]any    // fixed responses to server workspace/configuration
+	waitForInitialPush   bool              // fixed adapters needing async document indexing
+	pushOnlyDiagnostics  bool              // adapter advertised pull but fails to implement it
+	waitForRustWorkspace bool              // rust-analyzer semantic graph readiness is independent of diagnostics
 }
 
 var goLSPProfile = lspInspectionProfile{
@@ -301,6 +318,46 @@ func sqlLSPProfile(dialect, node, cli string) (lspInspectionProfile, bool) {
 	}, true
 }
 
+// The read-only Rust project graph is constructed from the already validated
+// source path rather than untrusted Cargo.toml, build.rs, rustup or project
+// config. PATH disables name-based program lookup; only a root-pinned rustc
+// is available for toolchain metadata. The worker process is never privileged.
+func rustLSPProfile(file, analyzer, rustc, sysroot string) lspInspectionProfile {
+	settings := map[string]any{
+		"linkedProjects": []any{map[string]any{
+			"sysroot_src": filepath.Join(sysroot, "lib", "rustlib", "src", "rust", "library"),
+			"crates": []any{map[string]any{
+				"root_module":         file,
+				"edition":             "2021",
+				"deps":                []any{},
+				"is_workspace_member": true,
+			}},
+		}},
+		"cargo": map[string]any{
+			"sysroot":      sysroot,
+			"sysrootSrc":   filepath.Join(sysroot, "lib", "rustlib", "src", "rust", "library"),
+			"buildScripts": map[string]any{"enable": false},
+			"autoreload":   false, "noDeps": true,
+		},
+		"check":        map[string]any{"enable": false},
+		"checkOnSave":  false,
+		"procMacro":    map[string]any{"enable": false},
+		"diagnostics":  map[string]any{"enable": true},
+		"cachePriming": map[string]any{"enable": false},
+		"workspace":    map[string]any{"discoverConfig": nil},
+	}
+	return lspInspectionProfile{
+		arguments:            []string{"PATH=/dev/null", "RUSTC=" + rustc, "RUSTUP_AUTO_INSTALL=0", "RUSTUP_TOOLCHAIN=1.99.0", analyzer},
+		extensions:           map[string]string{".rs": "rust"},
+		initOptions:          settings,
+		staticConfiguration:  map[string]any{"rust-analyzer": settings, "": settings},
+		waitForRustWorkspace: true,
+		pushOnlyDiagnostics:  true,
+	}
+}
+
+var rustLSPSelectionProfile = lspInspectionProfile{extensions: map[string]string{".rs": "rust"}}
+
 var pythonTyLSPProfile = lspInspectionProfile{
 	arguments:  []string{"server"},
 	extensions: map[string]string{".py": "python", ".pyi": "python"},
@@ -326,6 +383,9 @@ func (profile lspInspectionProfile) languageForPath(path string) string {
 func inspectProfileForPath(path string) (lspInspectionProfile, string, bool) {
 	if goLSPProfile.languageForPath(path) != "" {
 		return goLSPProfile, "go", true
+	}
+	if rustLSPSelectionProfile.languageForPath(path) != "" {
+		return rustLSPSelectionProfile, "rust", true
 	}
 	if pythonTyLSPProfile.languageForPath(path) != "" {
 		return pythonTyLSPProfile, "python", true
@@ -408,10 +468,43 @@ func (s *Server) workerLSPInspection(ctx context.Context, req Request, profile l
 	if err = wire.notify("initialized", map[string]any{}); err != nil {
 		return nil, err
 	}
+	openedContent := source
+	if profile.waitForRustWorkspace && method == "diagnostics" {
+		// A real didChange is needed for rust-analyzer syntax diagnostics.
+		// It is strictly in-memory and followed by a pinned version check.
+		openedContent = "\n"
+	}
 	if err = wire.notify("textDocument/didOpen", map[string]any{
-		"textDocument": map[string]any{"uri": uri, "languageId": profile.languageForPath(file), "version": 1, "text": source},
+		"textDocument": map[string]any{"uri": uri, "languageId": profile.languageForPath(file), "version": 1, "text": openedContent},
 	}); err != nil {
 		return nil, err
+	}
+	if profile.waitForRustWorkspace {
+		// A valid Rust source may have no diagnostics at all. The pinned
+		// analyzer's own read-only status reports when its graph is loaded.
+		if err := wire.waitRustWorkspaceReady(ctx); err != nil {
+			return nil, fmt.Errorf("rust_lsp_workspace_not_ready: %w", err)
+		}
+		if method == "diagnostics" {
+			// Ensure the opened synthetic document has passed through the
+			// analyzer's semantic task queue before the versioned full edit.
+			// Without this barrier its early VFS load may race the edit.
+			if _, err := wire.call(ctx, "textDocument/documentSymbol",
+				map[string]any{"textDocument": map[string]string{"uri": uri}}); err != nil {
+				return nil, fmt.Errorf("rust_lsp_synthetic_document_not_ready: %w", err)
+			}
+			// rust-analyzer may finish crate loading before its VFS
+			// diagnostics subscription is installed. Bound one settling
+			// interval after semantic readiness, never fabricate a report.
+			select {
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			case <-time.After(250 * time.Millisecond):
+			}
+			if err := wire.replaceRustDiagnosticSource(uri, source); err != nil {
+				return nil, err
+			}
+		}
 	}
 	// Some real push-only servers (notably bash-language-server) parse and
 	// index didOpen asynchronously. A semantic request before the first

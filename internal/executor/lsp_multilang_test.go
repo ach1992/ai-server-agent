@@ -51,6 +51,10 @@ func TestLanguageNeutralProfileValidation(t *testing.T) {
 			t.Fatalf("Web LSP profile selection failed for %q", tc.path)
 		}
 	}
+	if profile, lang, ok := inspectProfileForPath("src/lib.rs"); !ok || lang != "rust" ||
+		profile.languageForPath("src/lib.rs") != "rust" {
+		t.Fatal("Rust language profile selection failed")
+	}
 	if _, _, ok := inspectProfileForPath("unsafe.pyc"); ok {
 		t.Fatal("binary compiled Python bytecode should not be an LSP source")
 	}

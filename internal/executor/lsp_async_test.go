@@ -214,3 +214,60 @@ func TestLSPInitialPushReadinessFailsClosed(t *testing.T) {
 		})
 	}
 }
+
+// Stale diagnostics from Rust's synthetic version 1 never stand in for
+// worker-authorized version 2; unversioned reports cannot masquerade as
+// current evidence either. Standard adapters retain strict mismatch errors.
+func TestRustLSPDocumentVersionAndWorkspaceStatus(t *testing.T) {
+	for _, sample := range []struct {
+		status string
+		ready  bool
+	}{
+		{"No workspaces\n\nAnalysis:", false},
+		{"", false},
+		{"Workspaces:\nLoaded 11 packages across 1 workspace.", true},
+		{"Workspaces: Loaded 1 package across 1 workspace.", true},
+		{"Workspaces:\nLoading 11 packages.", false},
+		{"No workspaces\nWorkspaces: Loaded 1 package", false},
+	} {
+		if got := rustWorkspaceStatusReady(sample.status); got != sample.ready {
+			t.Fatalf("Rust workspace readiness %q: got %t want %t", sample.status, got, sample.ready)
+		}
+	}
+	uri := "file:///workspace/src/lib.rs"
+	makeNotice := func(v any) lspPacket {
+		raw, err := json.Marshal(map[string]any{
+			"uri": uri, "version": v, "diagnostics": []any{
+				map[string]any{"message": "real analyzer issue", "severity": 1},
+			},
+		})
+		if err != nil {
+			t.Fatal(err)
+		}
+		return lspPacket{JSONRPC: "2.0", Method: "textDocument/publishDiagnostics", Params: raw}
+	}
+	w := &lspWire{
+		opened:                  map[string]int{uri: 2},
+		published:               map[string]json.RawMessage{},
+		initialSyntheticVersion: map[string]int{uri: 1},
+	}
+	if err := w.recordDiagnostics(makeNotice(1)); err != nil {
+		t.Fatalf("stale pre-replacement Rust notification must be discarded: %v", err)
+	}
+	if len(w.published) != 0 {
+		t.Fatal("stale Rust diagnostics entered user result")
+	}
+	if err := w.recordDiagnostics(makeNotice(nil)); err == nil {
+		t.Fatal("versionless Rust report accepted after synthetic source replacement")
+	}
+	if err := w.recordDiagnostics(makeNotice(3)); err == nil {
+		t.Fatal("future Rust diagnostic version accepted")
+	}
+	if err := w.recordDiagnostics(makeNotice(2)); err != nil || len(w.published[uri]) == 0 {
+		t.Fatalf("current Rust diagnostic version rejected: %v", err)
+	}
+	w.initialSyntheticVersion = map[string]int{}
+	if err := w.recordDiagnostics(makeNotice(1)); err == nil {
+		t.Fatal("default adapter stale version rejection regressed")
+	}
+}

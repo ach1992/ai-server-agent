@@ -9,8 +9,8 @@ import (
 
 type CodeInspectInput struct {
 	Workspace   string `json:"workspace" jsonschema:"Exact absolute resolved aiworker workspace/worktree directory"`
-	Path        string `json:"path" jsonschema:"Workspace-relative regular .go .ts .tsx .mts .cts .js .jsx .mjs or .cjs .py .pyi .sh .bash .htm .html .css .sql .pgsql .psql .mysql or .mariadb source path; no symlinks or .git files"`
-	Language    string `json:"language,omitempty" jsonschema:"Optional language go, javascript, typescript, python, shell, html, css or sql; checked against path extension (never selects project commands)"`
+	Path        string `json:"path" jsonschema:"Workspace-relative regular .go .ts .tsx .mts .cts .js .jsx .mjs or .cjs .py .pyi .sh .bash .htm .html .css .sql .pgsql .psql .mysql or .mariadb or .rs source path; no symlinks or .git files"`
+	Language    string `json:"language,omitempty" jsonschema:"Optional language go, javascript, typescript, python, shell, html, css, sql or rust; checked against path extension (never selects project commands)"`
 	FileVersion string `json:"file_version" jsonschema:"Required exact file_version returned by worker workspace_stat/read. Semantic results fail when source changes."`
 	SQLDialect  string `json:"sql_dialect,omitempty" jsonschema:"Required for SQL files: explicit postgres, mysql or mariadb (MariaDB uses MySQL syntax subset); no implicit connections or project dialect fallback"`
 	Line        int    `json:"line,omitempty" jsonschema:"Zero-based source line for definition/references"`
@@ -19,10 +19,10 @@ type CodeInspectInput struct {
 
 func (s *Server) registerCodeTools() {
 	tools := []struct{ suffix, description string }{
-		{"definition", "Resolve a source symbol definition using the trusted Go, JS/TS, Python, Shell, HTML/CSS or SQL LSP profile and exact aiworker file_version"},
-		{"references", "Retrieve bounded source references through trusted Go, JS/TS, Python, Shell, HTML/CSS or SQL LSP; output never mutates files"},
-		{"symbols", "Retrieve bounded Go, JavaScript/TypeScript, Python, Shell, HTML/CSS or SQL document symbols via real language semantics"},
-		{"diagnostics", "Retrieve bounded Go, JavaScript/TypeScript, Python, Shell, HTML/CSS or SQL LSP diagnostics, negotiated as push or pull"},
+		{"definition", "Resolve a source symbol definition using the trusted Go, JS/TS, Python, Shell, HTML/CSS, SQL or Rust LSP profile and exact aiworker file_version"},
+		{"references", "Retrieve bounded source references through trusted Go, JS/TS, Python, Shell, HTML/CSS, SQL or Rust LSP; output never mutates files"},
+		{"symbols", "Retrieve bounded Go, JavaScript/TypeScript, Python, Shell, HTML/CSS, SQL or Rust document symbols via real language semantics"},
+		{"diagnostics", "Retrieve bounded Go, JavaScript/TypeScript, Python, Shell, HTML/CSS, SQL or Rust LSP diagnostics, negotiated as push or pull"},
 	}
 	for _, tool := range tools {
 		method := tool.suffix

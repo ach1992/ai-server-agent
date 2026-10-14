@@ -33,14 +33,16 @@ type lspWire struct {
 	// An LSP notification is asynchronous: retain only the latest bounded
 	// diagnostics for documents explicitly opened by this request. Never
 	// reuse diagnostics between principals, worktrees or adapter sessions.
-	opened              map[string]int
-	published           map[string]json.RawMessage
-	staticConfiguration map[string]any // fixed adapter-owned values, never project data
+	opened                  map[string]int
+	published               map[string]json.RawMessage
+	staticConfiguration     map[string]any // fixed adapter-owned values, never project data
+	initialSyntheticVersion map[string]int // only Rust in-memory diagnostic replay; reject old reports
 }
 
 func newLSPWire(server *Server, owner Request, sessionID string) *lspWire {
 	return &lspWire{server: server, owner: owner, sessionID: sessionID,
-		opened: make(map[string]int), published: make(map[string]json.RawMessage)}
+		opened: make(map[string]int), published: make(map[string]json.RawMessage),
+		initialSyntheticVersion: make(map[string]int)}
 }
 
 func (w *lspWire) send(v any) error {
@@ -253,7 +255,16 @@ func (w *lspWire) recordDiagnostics(packet lspPacket) error {
 		return nil // Other files are not read authority or caller results.
 	}
 	if payload.Version != nil && *payload.Version != openedVersion {
+		if original, ok := w.initialSyntheticVersion[payload.URI]; ok && *payload.Version == original {
+			// Rust diagnostic-only sessions open an empty in-memory document
+			// and immediately replace it with the exact worker-read source.
+			// A queued pre-replacement report is never current evidence.
+			return nil
+		}
 		return errors.New("lsp_diagnostics_document_version_mismatch")
+	}
+	if _, synthetic := w.initialSyntheticVersion[payload.URI]; synthetic && payload.Version == nil {
+		return errors.New("lsp_rust_diagnostics_version_required")
 	}
 	if len(payload.Diagnostics) == 0 || len(payload.Diagnostics) > 16<<10 ||
 		payload.Diagnostics[0] != '[' || !json.Valid(payload.Diagnostics) {
@@ -372,6 +383,29 @@ func (w *lspWire) notify(method string, params any) error {
 	return nil
 }
 
+// replaceRustDiagnosticSource updates only the private language server's
+// in-memory document. It NEVER writes the user's workspace. The first open
+// uses a known-empty buffer, then exactly the worker-authorized source bytes
+// are applied as version 2. This is required by rust-analyzer 2026-10-12,
+// which sometimes reports no diagnostics for a directly opened invalid file.
+func (w *lspWire) replaceRustDiagnosticSource(uri, source string) error {
+	current, ok := w.opened[uri]
+	if !ok || current != 1 || len(source) > codeMaxDocumentBytes || !utf8.ValidString(source) {
+		return errors.New("rust_lsp_invalid_synthetic_change")
+	}
+	params := map[string]any{
+		"textDocument":   map[string]any{"uri": uri, "version": 2},
+		"contentChanges": []map[string]string{{"text": source}},
+	}
+	if err := w.send(map[string]any{"jsonrpc": "2.0", "method": "textDocument/didChange", "params": params}); err != nil {
+		return err
+	}
+	w.initialSyntheticVersion[uri] = current
+	w.opened[uri] = 2
+	delete(w.published, uri)
+	return nil
+}
+
 // workerGoDefinition is the first bounded, read-only consumer of the shared
 // broker. Its caller must supply version-consistent source via #55's worker
 // file read; this private helper never reads workspace files as root. No
@@ -427,4 +461,54 @@ func (s *Server) workerGoDefinition(ctx context.Context, req Request, goplsPath,
 		"textDocument": map[string]string{"uri": uri},
 		"position":     map[string]int{"line": line, "character": character},
 	})
+}
+
+// rust-analyzer 2026-10-12 may return false empty definition/references
+// until its explicit Rust crate graph has loaded. A valid Rust file can
+// receive no initial publishDiagnostics; instead use the immutable
+// adapter's own non-mutating status request as the bounded readiness gate.
+func (w *lspWire) waitRustWorkspaceReady(ctx context.Context) error {
+	lastState := "awaiting_status"
+	for {
+		raw, err := w.call(ctx, "rust-analyzer/analyzerStatus", map[string]any{})
+		if err != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("rust_lsp_status_%s: %w", lastState, err)
+			}
+			return err
+		}
+		if err != nil {
+			return err
+		}
+		var status string
+		if err := json.Unmarshal(raw, &status); err != nil {
+			return errors.New("rust_lsp_invalid_workspace_status")
+		}
+		// The 2026-10-12 protocol response has a newline between this
+		// heading and its loaded-workspace line, not a space.
+		if rustWorkspaceStatusReady(status) {
+			return nil
+		}
+		if strings.Contains(status, "No workspaces") {
+			lastState = "no_workspaces"
+		} else if status == "" {
+			lastState = "empty"
+		} else {
+			lastState = "loading"
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("rust_lsp_status_%s: %w", lastState, ctx.Err())
+		case <-time.After(60 * time.Millisecond):
+		}
+	}
+}
+
+// Match only positively loaded workspaces, not an empty/transition reply.
+// The pinned 2026-10-12 analyzer uses a two-line "Workspaces: \nLoaded"
+// status; treating it as one line caused a hard semantic timeout.
+func rustWorkspaceStatusReady(status string) bool {
+	return (strings.Contains(status, "Workspaces:\nLoaded ") ||
+		strings.Contains(status, "Workspaces: Loaded ")) &&
+		!strings.Contains(status, "No workspaces")
 }
