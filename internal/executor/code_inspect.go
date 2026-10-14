@@ -81,6 +81,15 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 		if binary == "" {
 			return fileError("gopls_unavailable", "dependency", errors.New("trusted optional gopls is not installed"))
 		}
+	} else if actualLanguage == "python" {
+		binary = s.tyBinary // test fixture only; production is always root owned.
+		if binary == "" {
+			var trustErr error
+			binary, trustErr = systemexec.TyPython()
+			if trustErr != nil {
+				return fileError("python_ty_unavailable", "dependency", errors.New("trusted pinned optional native Python ty 0.0.87 adapter is unavailable"))
+			}
+		}
 	} else {
 		binary = s.ts7Binary // test fixture only; production cannot override this path.
 		if binary == "" {
@@ -139,6 +148,11 @@ var goLSPProfile = lspInspectionProfile{
 // TypeScript 7 has a native LSP entrypoint. This is an internal conformance
 // profile only until an administrator-owned, integrity-pinned binary/resource
 // chain and supported readiness/status surface are implemented.
+var pythonTyLSPProfile = lspInspectionProfile{
+	arguments:  []string{"server"},
+	extensions: map[string]string{".py": "python", ".pyi": "python"},
+}
+
 var typeScript7LSPProfile = lspInspectionProfile{
 	arguments: []string{"--lsp", "--stdio"},
 	extensions: map[string]string{
@@ -157,6 +171,9 @@ func (profile lspInspectionProfile) languageForPath(path string) string {
 func inspectProfileForPath(path string) (lspInspectionProfile, string, bool) {
 	if goLSPProfile.languageForPath(path) != "" {
 		return goLSPProfile, "go", true
+	}
+	if pythonTyLSPProfile.languageForPath(path) != "" {
+		return pythonTyLSPProfile, "python", true
 	}
 	language := typeScript7LSPProfile.languageForPath(path)
 	if language == "" {

@@ -34,6 +34,15 @@ func TestLanguageNeutralProfileValidation(t *testing.T) {
 	if _, err := codeTargetPathsForProfile(json.RawMessage(`[{"uri":"../outside.ts"}]`), typeScript7LSPProfile); err == nil {
 		t.Fatal("out-of-workspace location accepted")
 	}
+	for _, path := range []string{"main.py", "module.pyi"} {
+		if profile, language, ok := inspectProfileForPath(path); !ok ||
+			language != "python" || profile.languageForPath(path) != "python" {
+			t.Fatalf("Python LSP profile selection failed for %q", path)
+		}
+	}
+	if _, _, ok := inspectProfileForPath("unsafe.pyc"); ok {
+		t.Fatal("binary compiled Python bytecode should not be an LSP source")
+	}
 }
 
 // Execute only when supplied a real, separately provisioned test-only TS 7
