@@ -3,6 +3,7 @@ package systemexec
 import (
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -17,10 +18,10 @@ func TestTypeScript7OptionalAndFailClosed(t *testing.T) {
 	fixture := os.Getenv("AGENT_TS7_PROOF_BIN")
 	if fixture != "" {
 		library := filepath.Dir(fixture)
-		if err := verifyTypeScript7Tree(library, false, typeScript7PinnedTree["amd64"]); err != nil {
+		if err := verifyTypeScript7Tree(library, false, typeScript7PinnedTree[runtime.GOARCH]); err != nil {
 			t.Fatalf("actual pinned npm package proof failed: %v", err)
 		}
-		if err := verifyTypeScript7Tree(library, true, typeScript7PinnedTree["amd64"]); err == nil {
+		if err := verifyTypeScript7Tree(library, true, typeScript7PinnedTree[runtime.GOARCH]); err == nil {
 			t.Fatal("worker-owned adapter resources received root trust")
 		}
 	}
@@ -28,7 +29,7 @@ func TestTypeScript7OptionalAndFailClosed(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "tsc"), []byte("not actual TS7"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyTypeScript7Tree(dir, false, typeScript7PinnedTree["amd64"]); err == nil ||
+	if err := verifyTypeScript7Tree(dir, false, typeScript7PinnedTree[runtime.GOARCH]); err == nil ||
 		!strings.Contains(err.Error(), "count") {
 		t.Fatalf("incomplete adapter accepted: %v", err)
 	}

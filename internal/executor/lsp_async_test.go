@@ -20,7 +20,8 @@ func TestLSPAsyncFixtureProcess(t *testing.T) {
 		return
 	}
 	mode := os.Args[len(os.Args)-1]
-	if mode != "agent-lsp-push" && mode != "agent-lsp-stale" && mode != "agent-lsp-silent" {
+	if mode != "agent-lsp-push" && mode != "agent-lsp-stale" &&
+		mode != "agent-lsp-silent" && mode != "agent-lsp-other" {
 		return
 	}
 	reader := bufio.NewReader(os.Stdin)
@@ -70,10 +71,16 @@ func TestLSPAsyncFixtureProcess(t *testing.T) {
 			if mode == "agent-lsp-stale" {
 				version = 2
 			}
+			uri := opened.TextDocument.URI
+			if mode == "agent-lsp-other" {
+				// An unsolicited report from another file cannot satisfy the
+				// caller's exact-document readiness or expose its diagnostics.
+				uri += ".unopened"
+			}
 			if err := fixtureLSPSend(os.Stdout, map[string]any{
 				"jsonrpc": "2.0", "method": "textDocument/publishDiagnostics",
 				"params": map[string]any{
-					"uri": opened.TextDocument.URI, "version": version,
+					"uri": uri, "version": version,
 					"diagnostics": []any{map[string]any{
 						"message": "actual pushed syntax error", "severity": 1,
 						"range": map[string]any{
@@ -167,5 +174,43 @@ func TestLSPCapabilitiesFailClosedOnIncompatibleEncoding(t *testing.T) {
 	if err != nil || !capabilities.supports("definition") || capabilities.supports("references") ||
 		!capabilities.supports("symbols") || capabilities.supports("runWorkspaceCommand") {
 		t.Fatalf("unsafe server capability interpretation: %+v / %v", capabilities, err)
+	}
+}
+
+// A push-only adapter can advertise semantic capability before it has
+// finished indexing didOpen. Do not treat an empty premature result or a
+// notification for an unopened document as proof of readiness.
+func TestLSPInitialPushReadinessFailsClosed(t *testing.T) {
+	for _, mode := range []string{"agent-lsp-silent", "agent-lsp-other"} {
+		t.Run(mode, func(t *testing.T) {
+			s, owner, workspace := testStdioBroker(t)
+			fixture := filepath.Join(workspace, "ready-fixture")
+			script := fmt.Sprintf("#!/bin/sh\nexec %q -test.run=^TestLSPAsyncFixtureProcess$ -- %s\n", os.Args[0], mode)
+			if err := os.WriteFile(fixture, []byte(script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			file := filepath.Join(workspace, "main.sh")
+			source := "#!/bin/sh\necho ready\n"
+			if err := os.WriteFile(file, []byte(source), 0600); err != nil {
+				t.Fatal(err)
+			}
+			profile := lspInspectionProfile{
+				extensions:         map[string]string{".sh": "shellscript"},
+				waitForInitialPush: true,
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), 450*time.Millisecond)
+			defer cancel()
+			value, err := s.workerLSPInspection(ctx, owner, profile, fixture, file, source, "symbols", 0, 0)
+			if err == nil || !strings.Contains(err.Error(), "lsp_initial_document_not_ready") ||
+				!strings.Contains(err.Error(), "context deadline exceeded") {
+				t.Fatalf("unproven push readiness accepted: value=%s err=%v", value, err)
+			}
+			s.sessions.mu.Lock()
+			active := len(s.sessions.sessions)
+			s.sessions.mu.Unlock()
+			if active != 0 {
+				t.Fatalf("pending adapter session leaked: %d", active)
+			}
+		})
 	}
 }

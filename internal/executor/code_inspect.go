@@ -81,6 +81,20 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 		if binary == "" {
 			return fileError("gopls_unavailable", "dependency", errors.New("trusted optional gopls is not installed"))
 		}
+	} else if actualLanguage == "shell" {
+		binary = s.bashNodeBinary // test-only three-component fixture override
+		if binary != "" {
+			if s.bashCLIBinary == "" || s.bashShellcheckBinary == "" {
+				return fileError("bash_lsp_fixture_incomplete", "dependency", errors.New("a test Bash LSP fixture must provide all components"))
+			}
+			profile = shellLSPProfile(s.bashCLIBinary, s.bashShellcheckBinary)
+		} else {
+			var trustErr error
+			binary, trustErr = systemexec.BashLSP()
+			if trustErr != nil {
+				return fileError("bash_lsp_unavailable", "dependency", errors.New("trusted optional Bash LSP, pinned Node and ShellCheck resources are unavailable"))
+			}
+		}
 	} else if actualLanguage == "python" {
 		binary = s.tyBinary // test fixture only; production is always root owned.
 		if binary == "" {
@@ -135,9 +149,10 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 // It never accepts executable paths, arguments or configuration from a
 // repository or external MCP caller. Entrypoint trust is checked upstream.
 type lspInspectionProfile struct {
-	arguments   []string
-	extensions  map[string]string // recognized suffix -> LSP languageId
-	initOptions map[string]any    // pinned, never project-controlled
+	arguments          []string
+	extensions         map[string]string // recognized suffix -> LSP languageId
+	initOptions        map[string]any    // pinned, never project-controlled
+	waitForInitialPush bool              // fixed adapters needing async document indexing
 }
 
 var goLSPProfile = lspInspectionProfile{
@@ -145,14 +160,34 @@ var goLSPProfile = lspInspectionProfile{
 	extensions: map[string]string{".go": "go"},
 }
 
-// TypeScript 7 has a native LSP entrypoint. This is an internal conformance
-// profile only until an administrator-owned, integrity-pinned binary/resource
-// chain and supported readiness/status surface are implemented.
+// ShellCheck recognizes #!/bin/sh versus #!/usr/bin/env bash and returns
+// dialect-appropriate diagnostics. All initialization options are fixed by
+// the Agent; shell startup never interprets repository config as commands.
+func shellLSPProfile(cli, shellcheck string) lspInspectionProfile {
+	return lspInspectionProfile{
+		arguments:          []string{cli, "start"},
+		extensions:         map[string]string{".sh": "shellscript", ".bash": "shellscript"},
+		waitForInitialPush: true,
+		initOptions: map[string]any{
+			"backgroundAnalysisMaxFiles":   0,
+			"enableSourceErrorDiagnostics": true,
+			"shellcheckExternalSources":    false,
+			"shellcheckPath":               shellcheck,
+			"explainshellEndpoint":         "",
+			"shfmt":                        map[string]any{"path": ""},
+		},
+	}
+}
+
+var bashLSPProfile = shellLSPProfile(systemexec.BashLSPCLI, systemexec.BashShellCheck)
+
 var pythonTyLSPProfile = lspInspectionProfile{
 	arguments:  []string{"server"},
 	extensions: map[string]string{".py": "python", ".pyi": "python"},
 }
 
+// The native TypeScript 7 profile is selected only with its pinned,
+// operator-owned executable and full standard-library resource set.
 var typeScript7LSPProfile = lspInspectionProfile{
 	arguments: []string{"--lsp", "--stdio"},
 	extensions: map[string]string{
@@ -174,6 +209,9 @@ func inspectProfileForPath(path string) (lspInspectionProfile, string, bool) {
 	}
 	if pythonTyLSPProfile.languageForPath(path) != "" {
 		return pythonTyLSPProfile, "python", true
+	}
+	if bashLSPProfile.languageForPath(path) != "" {
+		return bashLSPProfile, "shell", true
 	}
 	language := typeScript7LSPProfile.languageForPath(path)
 	if language == "" {
@@ -241,6 +279,16 @@ func (s *Server) workerLSPInspection(ctx context.Context, req Request, profile l
 		"textDocument": map[string]any{"uri": uri, "languageId": profile.languageForPath(file), "version": 1, "text": source},
 	}); err != nil {
 		return nil, err
+	}
+	// Some real push-only servers (notably bash-language-server) parse and
+	// index didOpen asynchronously. A semantic request before the first
+	// version-correlated publishDiagnostics falsely reports an empty symbol
+	// table. Await the document's first push as a mandatory readiness proof;
+	// no unsolicited result from another URI can satisfy this gate.
+	if profile.waitForInitialPush {
+		if _, err := wire.waitPublishedDiagnostics(ctx, uri); err != nil {
+			return nil, fmt.Errorf("lsp_initial_document_not_ready: %w", err)
+		}
 	}
 	doc := map[string]string{"uri": uri}
 	position := map[string]int{"line": line, "character": character}

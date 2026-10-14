@@ -50,6 +50,9 @@ type Server struct {
 	goplsBinary                   string                                                    // test-only Go language server fixture
 	ts7Binary                     string                                                    // test-only native TS 7 language server fixture
 	tyBinary                      string                                                    // test-only native Python ty language server fixture
+	bashNodeBinary                string                                                    // test-only Bash LSP Node executable fixture
+	bashCLIBinary                 string                                                    // test-only Bash LSP trusted JS entrypoint fixture
+	bashShellcheckBinary          string                                                    // test-only Bash LSP ShellCheck executable fixture
 	environmentGoSystemPath       string                                                    // test-only Go discovery path; empty uses fixed safeCommandPath
 	codeTargetSnapshotHook        func()                                                    // test-only interleaving: alter target after LSP overlay snapshot
 	dlvBinary                     string                                                    // test-only Delve DAP fixture; production uses admin-owned binary
