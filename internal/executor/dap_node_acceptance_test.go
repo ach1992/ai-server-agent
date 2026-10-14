@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -15,6 +16,15 @@ import (
 // disconnects its synthetic Node debuggee; it does NOT simulate or replace
 // the mandatory root-cgroup installed-Agent launch/cleanup acceptance.
 func TestRealMicrosoftNodeDAPTwoConnectionsOneBroker(t *testing.T) {
+	proveRealMicrosoftNodeDAP(t, false)
+}
+
+func TestRealMicrosoftTypeScriptSourceMapDAP(t *testing.T) {
+	proveRealMicrosoftNodeDAP(t, true)
+}
+
+func proveRealMicrosoftNodeDAP(t *testing.T, typescript bool) {
+	t.Helper()
 	node := os.Getenv("AGENT_JS_DAP_PROOF_NODE")
 	cli := os.Getenv("AGENT_JS_DAP_PROOF_CLI")
 	if node == "" && cli == "" {
@@ -27,7 +37,42 @@ func TestRealMicrosoftNodeDAPTwoConnectionsOneBroker(t *testing.T) {
 	s.runs = newRunLimiterWith(2, 1)
 	source := "function doubled(n) {\n const result=n*2;\n return result;\n}\nconst answer=doubled(21);\nconsole.log(answer);\nsetTimeout(()=>{},12000);\n"
 	program := filepath.Join(workspace, "main.js")
-	if err := os.WriteFile(program, []byte(source), 0600); err != nil {
+	breakpointSource := program
+	if typescript {
+		tsc := os.Getenv("AGENT_TS_DAP_PROOF_TSC")
+		if tsc == "" {
+			t.Skip("requires immutable TypeScript compiler fixture for real source-map acceptance")
+		}
+		breakpointSource = filepath.Join(workspace, "main.ts")
+		source = "function doubled(n: number): number {\n const result: number = n*2;\n return result;\n}\nconst answer: number=doubled(21);\nconsole.log(answer);\nsetTimeout(()=>{},12000);\n"
+		if err := os.WriteFile(breakpointSource, []byte(source), 0600); err != nil {
+			t.Fatal(err)
+		}
+		// Compiler is a pinned out-of-workspace fixture. No npm scripts,
+		// ts-node, project configuration or install hooks execute here.
+		compiler := exec.Command(node, tsc, "--target", "ES2022", "--module", "commonjs", "--sourceMap", "--outDir", workspace, breakpointSource)
+		compiler.Dir = workspace
+		if output, err := compiler.CombinedOutput(); err != nil {
+			t.Fatalf("real pinned tsc fixture failed: %v %s", err, output)
+		}
+		if info, err := os.Lstat(program + ".map"); err != nil || !info.Mode().IsRegular() {
+			t.Fatalf("compiled TypeScript must emit regular Node .js.map: %v", err)
+		}
+		// Check the ACTUAL TypeScript compiler output using precisely the
+		// worker-only source-map graph validation used by production launch.
+		s.workspaceHelperBinary = buildNodeProofWorkspaceHelper(t)
+		version := s.workerWorkspaceFile(context.Background(), Request{
+			Action: "workspace_stat", Workspace: workspace, Path: "main.js",
+		})
+		if !version.OK || version.FileVersion == "" {
+			t.Fatalf("compiled executable version not available under worker identity: %+v", version)
+		}
+		graph, err := s.inspectPrecompiledTypeScriptMap(context.Background(), owner, "main.js", version.FileVersion)
+		if err != nil || graph["main.ts"] == "" || graph["main.js.map"] == "" ||
+			graph["main.js"] != version.FileVersion {
+			t.Fatalf("real TypeScript source-map graph not trustworthy: %+v %v", graph, err)
+		}
+	} else if err := os.WriteFile(program, []byte(source), 0600); err != nil {
 		t.Fatal(err)
 	}
 	sock := filepath.Join(t.TempDir(), "dap.sock")
@@ -96,7 +141,7 @@ func TestRealMicrosoftNodeDAPTwoConnectionsOneBroker(t *testing.T) {
 		t.Fatalf("child launch/initialized: %v", err)
 	}
 	set, err := d.call(ctx, "setBreakpoints", map[string]any{
-		"source":         map[string]string{"path": program},
+		"source":         map[string]string{"path": breakpointSource},
 		"breakpoints":    []map[string]int{{"line": 3}},
 		"sourceModified": false,
 	})
@@ -139,8 +184,8 @@ func TestRealMicrosoftNodeDAPTwoConnectionsOneBroker(t *testing.T) {
 	stack, err := d.call(ctx, "stackTrace", map[string]any{
 		"threadId": threadID, "startFrame": 0, "levels": 10,
 	})
-	if err != nil || !strings.Contains(string(stack), "main.js") {
-		t.Fatalf("Node target stack/source identity not proven: %v %s", err, stack)
+	if err != nil || !strings.Contains(string(stack), filepath.Base(breakpointSource)) {
+		t.Fatalf("Node target stack/source identity not proven for selected %s: %v %s", breakpointSource, err, stack)
 	}
 	var frames struct {
 		Frames []struct {
@@ -154,6 +199,44 @@ func TestRealMicrosoftNodeDAPTwoConnectionsOneBroker(t *testing.T) {
 	if err != nil || !strings.Contains(string(scopes), "variablesReference") {
 		t.Fatalf("Node stack scopes unavailable: %v %s", err, scopes)
 	}
+	// A provisional setBreakpoints response is NOT breakpoint proof: the
+	// adapter may accept a source line without ever binding it. Continue
+	// from stopOnEntry and require a separate genuine "breakpoint" stop
+	// with a stack mapped back to the original JS/TS source.
+	if _, err := d.call(ctx, "continue", map[string]any{"threadId": threadID}); err != nil {
+		t.Fatalf("Node continue to source breakpoint failed: %v", err)
+	}
+	hit := false
+	for until := time.Now().Add(6 * time.Second); time.Now().Before(until); {
+		d.drain(ctx)
+		d.mu.Lock()
+		for _, event := range d.events {
+			var packet dapPacket
+			if json.Unmarshal(event, &packet) == nil && packet.Event == "stopped" &&
+				strings.Contains(string(packet.Body), `"reason":"breakpoint"`) {
+				hit = true
+				break
+			}
+		}
+		stage := d.stage
+		d.mu.Unlock()
+		if hit {
+			break
+		}
+		if stage == "failed" || stage == "uncertain" || stage == "terminated" {
+			t.Fatalf("Node did not stop at real source breakpoint; stage=%s", stage)
+		}
+		time.Sleep(25 * time.Millisecond)
+	}
+	if !hit {
+		t.Fatalf("Node never hit requested real %s source breakpoint", breakpointSource)
+	}
+	mappedStack, err := d.call(ctx, "stackTrace", map[string]any{
+		"threadId": threadID, "startFrame": 0, "levels": 10,
+	})
+	if err != nil || !strings.Contains(string(mappedStack), filepath.Base(breakpointSource)) {
+		t.Fatalf("Node breakpoint stack not mapped back to original %s: %v %s", breakpointSource, err, mappedStack)
+	}
 	step, err := d.call(ctx, "next", map[string]any{"threadId": threadID})
 	if err != nil {
 		t.Fatalf("Node real source stepping failed: %v %s", err, step)
@@ -162,5 +245,5 @@ func TestRealMicrosoftNodeDAPTwoConnectionsOneBroker(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Node disconnect failed: %v %s", err, stop)
 	}
-	t.Log("real pinned js-debug Node parent+child Unix sockets: peer PID/UID, typed reverse, breakpoint, stack/source, scopes, step, disconnect PASS")
+	t.Logf("real js-debug Node with typescript_source_maps=%t: original broker two peer-pinned sockets, stopped, source breakpoint, actual mapped stack/scopes, step, stop PASS", typescript)
 }

@@ -10,14 +10,14 @@ import (
 // Debug tools reuse the same focused Go/Delve, Python/debugpy and Node/js-debug DAP control loop;
 // there is no generic raw DAP command/socket API or privileged attach.
 type DebugAdapterStatusInput struct {
-	Language string `json:"language,omitempty" jsonschema:"Optional language: go (default), python or javascript; passive trusted adapter readiness only"`
+	Language string `json:"language,omitempty" jsonschema:"Optional language: go (default), python, javascript or typescript; passive trusted adapter readiness only"`
 }
 type DebugLaunchInput struct {
 	Workspace   string `json:"workspace" jsonschema:"Exact absolute worker workspace/worktree directory"`
-	Program     string `json:"program" jsonschema:"Workspace-relative prebuilt Go executable, Python .py or JavaScript .js/.mjs/.cjs source (depending on language/mode)"`
+	Program     string `json:"program" jsonschema:"Workspace-relative prebuilt Go executable, Python .py or Node .js/.mjs/.cjs; TypeScript requires precompiled .js plus adjacent .js.map"`
 	FileVersion string `json:"file_version" jsonschema:"Exact program/source version from workspace_stat; stale versions are rejected"`
-	Language    string `json:"language,omitempty" jsonschema:"Optional debugger language: omit or go for Go/Delve, python for debugpy, javascript for Node/js-debug"`
-	Mode        string `json:"mode,omitempty" jsonschema:"Go exec (default); Python script/module/test; JavaScript node; unsupported modes rejected"`
+	Language    string `json:"language,omitempty" jsonschema:"Optional debugger language: go (default), python, javascript or precompiled typescript source map for Node/js-debug"`
+	Mode        string `json:"mode,omitempty" jsonschema:"Go exec (default); Python script/module/test; JavaScript/TypeScript precompiled node; unsupported modes rejected"`
 	StopOnEntry bool   `json:"stop_on_entry,omitempty" jsonschema:"Pause the selected Go/Python/Node program at its entrypoint"`
 }
 type DebugOwnerInput struct {
@@ -27,7 +27,7 @@ type DebugOwnerInput struct {
 type DebugBreakpointsInput struct {
 	Workspace   string `json:"workspace"`
 	SessionID   string `json:"session_id"`
-	Path        string `json:"path" jsonschema:"Workspace-relative .go, .py or .js/.mjs/.cjs source matching active debug adapter"`
+	Path        string `json:"path" jsonschema:"Workspace-relative .go, .py, .js/.mjs/.cjs or TypeScript .ts with pinned .js.map; exact file version required"`
 	FileVersion string `json:"file_version" jsonschema:"Exact current source version from workspace_stat"`
 	Lines       []int  `json:"lines" jsonschema:"1-based source lines, max 32; an empty array removes breakpoints"`
 }
@@ -55,11 +55,11 @@ type DebugEvaluateInput struct {
 
 func (s *Server) registerDebugTools() {
 
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "debug_adapter_status", Description: "Discover optional trusted Go/Delve, Python/debugpy or Node/js-debug readiness and verified modes without launching or installing tools; no remote/root attach.", Annotations: annotations(true, false, true, false)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugAdapterStatusInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "debug_adapter_status", Description: "Discover optional trusted Go/Delve, Python/debugpy or Node/js-debug JS/TypeScript source-map readiness without launching or installing tools; no remote/root attach.", Annotations: annotations(true, false, true, false)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugAdapterStatusInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		return s.callDebug(ctx, executor.Request{Action: "debug_adapter_status", Language: in.Language})
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-		Name: "debug_launch", Description: "Launch worker-only Go/Delve exec, Python/debugpy script/module/unittest, or Node/js-debug javascript/node DAP with exact source file_version and trusted optional adapter. Python and Node require atomic executor-owned private cgroup-v2 descendant containment and pinned full adapter resources. No remote attach, root, custom adapter or runInTerminal. Debugging explicitly executes selected project code.", Annotations: annotations(false, true, false, true),
+		Name: "debug_launch", Description: "Launch worker-only Go/Delve exec, Python/debugpy script/module/unittest, or Node/js-debug JavaScript and precompiled TypeScript source-map node DAP with exact source file_version and trusted optional adapter. Python and Node require atomic executor-owned private cgroup-v2 descendant containment and pinned full adapter resources. No remote attach, root, custom adapter or runInTerminal. Debugging explicitly executes selected project code.", Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugLaunchInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		return s.callDebug(ctx, executor.Request{Action: "debug_launch", Workspace: in.Workspace, DebugProgram: in.Program, FileVersion: in.FileVersion, DebugStopOnEntry: in.StopOnEntry, Language: in.Language, DebugMode: in.Mode})
 	})

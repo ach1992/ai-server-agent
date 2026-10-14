@@ -27,7 +27,7 @@ func (s *Server) debugAction(ctx context.Context, req Request) Response {
 	}
 	switch req.Action {
 	case "debug_adapter_status":
-		if req.Language == "javascript" {
+		if req.Language == "javascript" || req.Language == "typescript" {
 			_, _, trustErr := systemexec.JavaScriptDAP()
 			available := trustErr == nil
 			if s.javascriptDAPNode != "" && s.javascriptDAPCLI != "" {
@@ -36,7 +36,8 @@ func (s *Server) debugAction(ctx context.Context, req Request) Response {
 			body, _ := json.Marshal(map[string]any{
 				"adapter": "javascript/js-debug", "installed": available,
 				"modes": []string{"node"}, "attach_supported": false,
-				"privileged": false, "provisioning": "optional_root_owned_pinned_complete_js_debug",
+				"precompiled_typescript_source_maps": req.Language == "typescript",
+				"privileged":                         false, "provisioning": "optional_root_owned_pinned_complete_js_debug",
 				"containment": "executor_owned_private_cgroup_v2_required",
 			})
 			state := "unavailable"
@@ -63,7 +64,7 @@ func (s *Server) debugAction(ctx context.Context, req Request) Response {
 			return Response{OK: true, Status: status, Output: string(b), OutputEncoding: "json", BytesReturned: int64(len(b)), BytesSeen: int64(len(b))}
 		}
 		if req.Language != "" && req.Language != "go" {
-			return fileError("unsupported_debug_language", "validation", errors.New("debugger readiness supports go, python and javascript only"))
+			return fileError("unsupported_debug_language", "validation", errors.New("debugger readiness supports go, python, javascript and typescript only"))
 		}
 		_, err := s.debugBinary()
 		available := err == nil
@@ -198,7 +199,7 @@ func peerIsWorkerDelve(conn *net.UnixConn, uid uint32, pid int) bool {
 }
 
 func (s *Server) debugLaunch(ctx context.Context, req Request) (response Response) {
-	if req.Language == "javascript" {
+	if req.Language == "javascript" || req.Language == "typescript" {
 		return s.debugLaunchNode(ctx, req)
 	}
 	if req.Language == "python" {
@@ -520,10 +521,14 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 			extension = ".py"
 		}
 		sourceExt := filepath.Ext(relative)
-		validJS := d.adapter == "javascript/js-debug" && (sourceExt == ".js" || sourceExt == ".mjs" || sourceExt == ".cjs")
+		validJS := d.adapter == "javascript/js-debug" && (sourceExt == ".js" || sourceExt == ".mjs" || sourceExt == ".cjs" || (d.sourceLanguage == "typescript" && (sourceExt == ".ts" || sourceExt == ".tsx")))
 		if err != nil || (d.adapter == "javascript/js-debug" && !validJS) ||
 			(d.adapter != "javascript/js-debug" && sourceExt != extension) || len(req.DebugLines) > 32 || req.FileVersion == "" {
 			return fileError("debug_invalid_breakpoints", "validation", errors.New("language-matching source file_version and <=32 breakpoint lines required"))
+		}
+		if d.adapter == "javascript/js-debug" && d.sourceLanguage == "typescript" &&
+			(sourceExt == ".ts" || sourceExt == ".tsx") && d.sourceVersions[relative] == "" {
+			return fileError("typescript_dap_unmapped_source", "validation", errors.New("TypeScript breakpoint source must be an original file in the pinned source map"))
 		}
 		if d.sourceVersions[relative] == "" && len(d.sourceVersions) >= 16 {
 			return fileError("debug_source_limit", "resource", errors.New("at most 16 source files may have breakpoints in one debug session"))

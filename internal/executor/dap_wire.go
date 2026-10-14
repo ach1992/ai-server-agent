@@ -34,6 +34,7 @@ type dapState struct {
 	pending             []byte   // incomplete frame retained across status timeouts
 	workspace           string
 	adapter             string
+	sourceLanguage      string // Node JS or TypeScript precompiled source-map profile
 	program             string
 	targetInterpreter   string // only the already verified optional Python runtime
 	adapterPID          int

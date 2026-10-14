@@ -20,7 +20,9 @@ import (
 // UID, principal, exact workspace and one cgroup; there is no second broker,
 // user-chosen attach endpoint or adapter-supplied process execution command.
 //
-// Browser/extension/TypeScript source-map flows are separate acceptance gates.
+// Browser/extension modes remain separate acceptance gates. Precompiled
+// TypeScript uses the same Node process with a pinned adjacent source map;
+// this profile never compiles or executes a project build script.
 func (s *Server) debugLaunchNode(ctx context.Context, req Request) (response Response) {
 	if req.DebugMode != "" && req.DebugMode != "node" {
 		return fileError("javascript_dap_unsupported_mode", "validation", errors.New("only the explicit Node launch mode is currently supported"))
@@ -51,6 +53,15 @@ func (s *Server) debugLaunchNode(ctx context.Context, req Request) (response Res
 	if stat.FileVersion != req.FileVersion {
 		return fileError("debug_program_changed", "conflict", errors.New("Node source was changed before launch"))
 	}
+	versions := map[string]string{relative: req.FileVersion}
+	// Pin the actual source-map graph, never a merely adjacent file that
+	// could refer to foreign source paths, stale JS or remote sources.
+	if req.Language == "typescript" {
+		versions, err = s.inspectPrecompiledTypeScriptMap(ctx, req, relative, req.FileVersion)
+		if err != nil {
+			return fileError("typescript_dap_source_map_untrusted", "validation", err)
+		}
+	}
 	if os.Geteuid() != 0 {
 		return fileError("dap_containment_unavailable", "dependency", errors.New("Node debugger requires executor-owned private cgroup v2; uncontained launch forbidden"))
 	}
@@ -64,7 +75,7 @@ func (s *Server) debugLaunchNode(ctx context.Context, req Request) (response Res
 			return fileError("javascript_dap_unavailable", "dependency", errors.New("trusted pinned Microsoft js-debug 1.140.0 and Node 24.18.1 are unavailable"))
 		}
 	}
-	auditObject := workspace + "\x00" + relative + "\x00javascript/node"
+	auditObject := workspace + "\x00" + relative + "\x00" + req.Language + "/node"
 	if blocked := s.beginActionAudit(req, "debug_launch", "worker", auditObject, "developer_debugger"); blocked != nil {
 		return *blocked
 	}
@@ -168,10 +179,10 @@ func (s *Server) debugLaunchNode(ctx context.Context, req Request) (response Res
 		return fileError("javascript_dap_pidfd_unavailable", "state", dupErr)
 	}
 	d := &dapState{
-		conn: rootConn, workspace: workspace, adapter: "javascript/js-debug",
+		conn: rootConn, workspace: workspace, adapter: "javascript/js-debug", sourceLanguage: req.Language,
 		adapterPID: e.pid, adapterPin: os.NewFile(uintptr(dup), "js-dap-original-adapter-pidfd"),
 		workerUID: s.workerUID, program: relative, targetInterpreter: node,
-		sourceVersion: req.FileVersion, sourceVersions: map[string]string{relative: req.FileVersion}, stage: "starting", containment: group, socketDir: dir,
+		sourceVersion: req.FileVersion, sourceVersions: versions, stage: "starting", containment: group, socketDir: dir,
 	}
 	e.dap = d
 	e.mu.Unlock()
@@ -240,8 +251,22 @@ func (s *Server) debugLaunchNode(ctx context.Context, req Request) (response Res
 	if !stable.OK || stable.FileVersion != req.FileVersion {
 		return fileError("debug_program_changed", "conflict", errors.New("Node source changed during debug launch"))
 	}
+	for path, version := range versions {
+		if path == relative {
+			continue
+		}
+		verify := snapshot
+		verify.Path = path
+		latest := s.workerWorkspaceFile(ctx, verify)
+		if !latest.OK || latest.FileVersion != version {
+			return fileError("typescript_dap_source_map_changed", "conflict", errors.New("mapped source or compiled source map changed during Node launch"))
+		}
+	}
 	cleanup = false
-	body := `{"adapter":"javascript/js-debug","mode":"node","configuration_required":true,"additional_targets":false}`
+	body := `{"adapter":"javascript/js-debug","mode":"node","configuration_required":true,"additional_targets":false,"language":"javascript"}`
+	if req.Language == "typescript" {
+		body = `{"adapter":"javascript/js-debug","mode":"node","configuration_required":true,"additional_targets":false,"language":"typescript","precompiled_source_map":true}`
+	}
 	return Response{OK: true, Status: "starting", SessionID: id, FileVersion: req.FileVersion,
 		OutputEncoding: "json", Output: body, BytesSeen: int64(len(body)), BytesReturned: int64(len(body))}
 }
