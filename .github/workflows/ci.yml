@@ -945,7 +945,9 @@ jobs:
         if: ${{ needs.change-scope.outputs.root_trust_security_changed != 'false' }}
         run: |
           command -v script >/dev/null
-          printf '0\n' | script -qefc "sudo env AI_SERVER_AGENT_BINARY=/tmp/ai-server-agent bash install.sh" /tmp/first-run.out
+          # First choose Validation, then defer public connection setup.
+          printf '2\n0\n' | script -qefc "sudo env AI_SERVER_AGENT_BINARY=/tmp/ai-server-agent bash install.sh" /tmp/first-run.out
+          sudo jq -e '.environment_profile=="validation"' /etc/ai-server-agent/config.json >/dev/null
           grep -qF 'Setup deferred. The Agent remains installed and healthy in local mode.' /tmp/first-run.out
           grep -qF 'AI Server Agent core installed successfully; connection setup is incomplete.' /tmp/first-run.out
           grep -qF 'sudo ai-server-agent-manage' /tmp/first-run.out
