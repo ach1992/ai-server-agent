@@ -276,6 +276,18 @@ func (s *Server) resumeClaimedJob(req Request, jobsDir, claimPath string, claim 
 			JobID:      claim.JobID,
 		}
 	}
+	kind := claim.Kind
+	if kind == "" {
+		// Claims created before task/service classification were tasks only.
+		kind = "task"
+	}
+	reqKind := req.Kind
+	if reqKind == "" {
+		reqKind = "task"
+	}
+	if (kind != "task" && kind != "service") || kind != reqKind {
+		return jobStateError("job_state_unavailable", errors.New("persistent job claim kind is invalid or does not match replay request"))
+	}
 	if _, err := safeID(claim.JobID); err != nil {
 		return jobStateError("job_state_unavailable", fmt.Errorf("invalid claimed job id: %w", err))
 	}
@@ -367,7 +379,7 @@ func (s *Server) resumeClaimedJob(req Request, jobsDir, claimPath string, claim 
 		}
 	}
 
-	if blocked := persistentJobAdmissionResponse(jobsDir); blocked != nil {
+	if blocked := persistentJobAdmissionResponse(jobsDir, kind); blocked != nil {
 		blocked.JobID = claim.JobID
 		blocked.IdempotentReplay = true
 		return *blocked
