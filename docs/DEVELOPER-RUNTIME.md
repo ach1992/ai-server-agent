@@ -1,5 +1,7 @@
 # Developer Runtime Target Architecture
 
+**Authority:** [PROJECT-SPEC.md](PROJECT-SPEC.md) is the Owner-approved product-level north star. This document owns capability-specific technical design and defer/acceptance boundaries; [ARCHITECTURE.md](ARCHITECTURE.md) owns host, security and lifecycle architecture. Current integrated and released behavior must not be inferred from target architecture alone.
+
 > Status: **the principal source capabilities shipped in published immutable Stable and passed real installed direct-MCP tests on one dedicated host; full cross-client, optional-platform and extended acceptance remains tracked by Issues #59/#99**. GitHub Releases and the current Issue #59 receipt identify the exact latest Stable.
 >
 > The latest published immutable release is [`v0.1.12`](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.12), source/tag `9b06c085c1ff75f3a314215657d3b04f510c9432`; it includes the reviewed fresh Cloudflare named-credential repair. This release is NOW **verified byte-identical in the running Agent/Executor processes** of the new `hDE01` Test Server, publicly reachable at `aitestserver.ach.li` with TLS health 200 and unauthenticated MCP 401. Live connected Browser/LSP/DAP/PTY/Jobs, small bounded binary SHA-256 and read-only GitHub recovery/short Go suite passed. Native ChatGPT inline/downloadable JPEG/ZIP/file presentation, long-soak/recovery, full GitHub write/PR loop and runtime settings matrices are **still OPEN** under #59/#99/#63/#118; see [verified live receipt](https://github.com/ach1992/ai-server-agent/issues/59#issuecomment-6137123091).
@@ -384,6 +386,8 @@ These may be revisited from real usage without changing the fundamental architec
 
 ## 14. Capability-complete, policy-gated
 
+**Environment purpose is not a capability or security profile:** The proposed `development` and `validation` roles help an AI choose the right authorized host, but both have the same core tool and worker/root capability surface. Their hints are independent of GitHub credential provisioning, installed language adapters, chosen workspace, connection method, and actual permission/approval checks. The `agent_environment` manifest and MCP instructions should expose this purpose once implemented ([Issue #143](https://github.com/ach1992/ai-server-agent/issues/143)); do not create duplicate tool catalogs or per-role process/security engines. The operational role can be changed after installation, and an explicit authorized task may override the preference.
+
 Technical capability and project/action authorization remain separate.
 
 - ordinary development defaults to worker authority;
@@ -485,7 +489,7 @@ Activate bounded dependency-aware slices rather than everything at once:
 
 Optional/deferred work is not a blocker.
 
-**Issue #140 has a separate Owner-gated documentation-first prerequisite:** finish and review its revised architecture/acceptance contract before writing any multi-language implementation. The accepted first-expansion language scope is not optional/deferred. Keep #137 Shared Runtime independent: do not bundle #140 changes into another workstream's frozen or independently reviewed candidate. Reconcile the **current** Issue/PR/target identity before implementation or integration.
+**Issue #140's historical Owner-gated documentation-first prerequisite was completed:** source work has separate authorization; integration, release and host changes remain separately gated. The accepted first-expansion language scope is not optional/deferred. Keep #137 Shared Runtime independent: do not bundle #140 changes into another workstream's frozen or independently reviewed candidate. Reconcile the **current** Issue/PR/target identity before implementation or integration.
 
 ## 18. Promotion rule for future capabilities
 
@@ -501,7 +505,7 @@ Do not promote capabilities merely because they are powerful, modern, or availab
 
 ## 19. Language-neutral extensions and fresh-install delivery (Issue #140; target, not shipped)
 
-**Design status:** The Owner selected a protocol-first, capability-driven direction and explicitly ordered a **documentation/Issue review before implementation**. No source coding, source PR integration, installed-server change or release for #140 is authorized until a subsequent explicit Owner approval. The latest Issue #140 body owns its accepted per-language coverage and its implementation/acceptance gates; this document owns durable architecture only.
+**Design status:** The Owner selected a protocol-first, capability-driven direction; the historical documentation-first review gate was satisfied, and subsequent source-development authority was granted on 2026-10-14. PR #142 is an independent source candidate, not automatically merged, installed or released. The latest Issue #140 body and current PR own acceptance/review/integration and release gates; this document owns durable architecture only.
 
 **Extension test:** For an adapter that already implements LSP/DAP, adding a language should normally be a bounded integration of a trusted tool, its narrow profile, and conformance fixtures. It must not require a new MCP family, file writer, process/session registry or security model. Genuine language-specific runtime differences may require a small typed launch/transport handler. Do not promise that every third-party adapter behaves identically.
 

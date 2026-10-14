@@ -1,5 +1,7 @@
 # Architecture
 
+**Authority:** [PROJECT-SPEC.md](PROJECT-SPEC.md) defines Owner-approved product intent and non-goals. This document owns concrete host/process/trust/lifecycle design. [DEVELOPER-RUNTIME.md](DEVELOPER-RUNTIME.md) owns developer capability composition; the [README](../README.md) is user-facing usage/navigation, not a parallel product specification.
+
 ## 1. Supported release target
 
 The supported stable release target is **Ubuntu 22.04+ and Debian 11+ on amd64/x86_64 and arm64/aarch64**, on dedicated development/test servers with systemd; current `main` follows the same platform policy. The identity of the latest immutable release is intentionally not hard-coded in this architecture document; GitHub Releases is authoritative, with README carrying the supported stable install command.
@@ -64,6 +66,14 @@ Provider-specific setup/authentication/connectivity remains at explicit integrat
 Do not add a speculative provider/plugin framework. A new client/provider is admitted only after current protocol/auth/tool/approval/network behavior is verified and bounded. Passing ChatGPT acceptance proves the ChatGPT integration, not universal compatibility.
 
 The Agent must not require OpenAI credentials for core operation. Provider-specific credentials/state, if introduced later, remain isolated from core state and from other providers.
+
+### Environment purpose versus connection and authority
+
+**Accepted future requirement, not implemented in the published Stable:** An Agent instance can declare `development` or `validation` as its operational **Environment Purpose Profile**, plus an optional non-secret server label. Both profiles reuse the same binary, processes, MCP tool inventory, root/worker execution boundaries, bearer principals, and optional adapter installation mechanisms.
+
+A profile is guidance for choosing the correct host: Development for routine source/Git/build/debug work; Validation for candidate installation, reproduction, E2E and acceptance evidence. It must not grant, revoke, or conceal capabilities, change Root approval behavior, install/remove GitHub credentials, or silently enforce server-side policies. It is independent from local/public/Cloudflare connectivity mode and the authenticated principal identity. Selected purpose should be discoverable through authenticated `agent_environment` data and concise MCP server instructions, subject to actual AI-client support for instruction presentation.
+
+Persist the non-secret selection in the existing Agent configuration and expose a low-friction management/change path; do not create another daemon, profile-specific installer, permission engine, or project/tenant registry. Validate installed-client visibility when the profile feature is implemented. [Issue #143](https://github.com/ach1992/ai-server-agent/issues/143) owns candidate and installed/client acceptance.
 
 ### Root command environment
 
@@ -342,9 +352,9 @@ The target is deliberately value-first:
 
 Core target capabilities include repository/worktree identity, safe worker editing, text + ast-grep structural search, LSP, persistent worker/root PTY, DAP and Playwright-backed browser/E2E validation.
 
-**Multi-language extension direction (Issue #140, not yet implemented):** Keep the existing public `code_*`/`debug_*` families and executor-owned #66 session substrate. LSP/DAP must expose shared protocol/lifecycle/authorization/worker-file contracts; thin bounded language/adapter profiles own actual supported capabilities, trusted transitive launch/toolchain readiness, target-process ownership, and unavoidable language-specific launch/attach differences. DAP must not terminate a separately service-owned target when a debug session detaches; read-only LSP must reject unsolicited writes. Do not make optional language runtimes core dependencies or introduce another broker, universal plugin framework, language-specific file writer or Agent-side database.
+**Multi-language extension direction (Issue #140; unmerged in current main):** Keep the existing public `code_*`/`debug_*` families and executor-owned #66 session substrate. LSP/DAP must expose shared protocol/lifecycle/authorization/worker-file contracts; thin bounded language/adapter profiles own actual supported capabilities, trusted transitive launch/toolchain readiness, target-process ownership, and unavoidable language-specific launch/attach differences. DAP must not terminate a separately service-owned target when a debug session detaches; read-only LSP must reject unsolicited writes. Do not make optional language runtimes core dependencies or introduce another broker, universal plugin framework, language-specific file writer or Agent-side database.
 
-**Next-candidate installation boundary:** Its acceptance is on a new, empty, authorized Linux host. Legacy install-script, config, runtime-state, job-claim, terminal-handle, profile or mixed-version upgrade migration is not a requirement, and must not add compatibility complexity. This does not alter published Stable update/provenance guarantees, authorize deletion of an existing installation, weaken first-install security, or waive reconnect/restart recovery within the new baseline. **That new baseline must be evolved responsibly for its future users; skipping legacy installed-state migration does not forbid future, evidence-driven upgrade support.** #137 Shared Runtime retains its own acceptance and integration ownership; current PR/head state belongs to its live GitHub Issue/PR, not this durable architecture document. As specifically directed by the Owner, #140 source work requires approval **after documentation and Issue review**.
+**Next-candidate installation boundary:** Its acceptance is on a new, empty, authorized Linux host. Legacy install-script, config, runtime-state, job-claim, terminal-handle, profile or mixed-version upgrade migration is not a requirement, and must not add compatibility complexity. This does not alter published Stable update/provenance guarantees, authorize deletion of an existing installation, weaken first-install security, or waive reconnect/restart recovery within the new baseline. **That new baseline must be evolved responsibly for its future users; skipping legacy installed-state migration does not forbid future, evidence-driven upgrade support.** #137 Shared Runtime retains its own acceptance and integration ownership; current PR/head state belongs to its live GitHub Issue/PR, not this durable architecture document. The historical #140 documentation-first Owner gate was satisfied and its separate source-development authorization was granted; consult the live #140 Issue/PR for subsequent integration and release gates.
 
 This architecture document remains authoritative for overall host/process/trust/lifecycle boundaries. `docs/DEVELOPER-RUNTIME.md` owns the detailed development-capability composition and Layer-1/Layer-2/deferred boundary.
 
