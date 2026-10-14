@@ -52,6 +52,7 @@ type Manifest struct {
 func Build(c config.Config) Manifest {
 	browserEngine := "/opt/ai-server-agent/browser"
 	browserData := filepath.Join(c.StateDir, "runtime/browser")
+	_, typeScript7Err := systemexec.TypeScript7()
 	return Manifest{
 		SchemaVersion:       1,
 		InstanceID:          c.InstanceID,
@@ -70,6 +71,7 @@ func Build(c config.Config) Manifest {
 			{Name: "download-utilities", Required: false, Installed: fileExists("/usr/bin/curl") && fileExists("/usr/bin/tar"), Paths: []string{"/usr/bin/curl", "/usr/bin/tar", "/usr/bin/xz"}, Notes: "Used for updates and optional browser setup. Safe to remove without stopping the running MCP core, but update/browser installation will need them restored."},
 			{Name: "terminal", Required: false, Installed: systemexec.First("/usr/bin/tmux") != "", Paths: []string{"/usr/bin/tmux"}, Notes: "Optional trusted root-owned, non-symlink tmux provides Control Mode. Worker panes additionally require trusted /usr/bin/setpriv, /usr/bin/env, a trusted bash (/usr/bin/bash or /bin/bash) and Agent-managed private worker HOME; both worker/root tmux sockets are executor-root-owned. This is not a core dependency."},
 			{Name: "go-language-server", Required: false, Installed: systemexec.First("/usr/local/bin/gopls", "/usr/bin/gopls") != "", Paths: []string{"/usr/local/bin/gopls", "/usr/bin/gopls"}, Notes: "Optional Go semantic-code intelligence. code_* requires exact aiworker file_version and does not install gopls or a Go toolchain."},
+			{Name: "typescript-language-server", Required: false, Installed: typeScript7Err == nil, Paths: []string{systemexec.TypeScript7Library}, Notes: "Optional pinned native TypeScript 7.0.2 LSP for JavaScript/TypeScript. Administrator-controlled complete 110-file resource directory is validated for root ownership, no symlinks and per-architecture SHA-256. Missing or invalid adapters degrade only code_* for JS/TS; no node, global npm, automatic installer, project script or additional broker dependency."},
 			{Name: "go-debugger", Required: false, Installed: systemexec.First("/usr/local/bin/dlv", "/usr/bin/dlv") != "", Paths: []string{"/usr/local/bin/dlv", "/usr/bin/dlv"}, Notes: "Optional Go Delve DAP debugger. v1 launches only prebuilt workspace executables with matching worker file_version; requires trusted admin-owned Delve plus executor-owned root cgroup-v2 containment with cgroup.kill (Linux 5.14+); fails closed before DAP launch without those capabilities. Other Agent capabilities remain usable. Never silently installs/attaches/uses root."},
 			{Name: "browser", Required: false, Installed: fileExists(filepath.Join(browserEngine, "node/bin/node")), Paths: []string{browserEngine, browserData}, Notes: "Optional Playwright/Chromium capability. The executable engine is root-owned under /opt; writable browser profile data is isolated under agent state. Removing it disables browser tools but does not stop the MCP core."},
 		},

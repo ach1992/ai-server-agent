@@ -48,6 +48,7 @@ type Server struct {
 	terminalScopeStopTestHook     func(string) error                                        // test-only exact-scope stop fault
 	terminalActivePublishTestHook func(*tmuxTerminalState) error                            // test-only post-scope/pre-ACTIVE fault
 	goplsBinary                   string                                                    // test-only Go language server fixture
+	ts7Binary                     string                                                    // test-only native TS 7 language server fixture
 	environmentGoSystemPath       string                                                    // test-only Go discovery path; empty uses fixed safeCommandPath
 	codeTargetSnapshotHook        func()                                                    // test-only interleaving: alter target after LSP overlay snapshot
 	dlvBinary                     string                                                    // test-only Delve DAP fixture; production uses admin-owned binary

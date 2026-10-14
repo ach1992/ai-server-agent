@@ -14,7 +14,7 @@ import (
 	"time"
 )
 
-// The public Go-only semantic consumer is deliberately narrow: it uses the
+// Semantic inspection remains bounded and worker-only: it uses the
 // existing #55 worker-authority bounded source read and the #66 stdio broker.
 // Neither the privileged executor nor the network process reads project source
 // directly, and no LSP suggestion is auto-applied to disk.
@@ -28,14 +28,21 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 		return fileError("code_requires_worker_version", "validation", errors.New("worker authority, workspace, and exact file_version are required"))
 	}
 	if req.CodeMethod != "definition" && req.CodeMethod != "references" && req.CodeMethod != "symbols" && req.CodeMethod != "diagnostics" {
-		return fileError("unsupported_code_method", "validation", errors.New("supported Go methods are definition, references, symbols, diagnostics"))
+		return fileError("unsupported_code_method", "validation", errors.New("supported code methods are definition, references, symbols, diagnostics"))
 	}
 	if req.Line < 0 || req.Character < 0 || req.Line > 1<<20 || req.Character > 1<<20 {
 		return fileError("invalid_code_position", "validation", errors.New("position must be zero-based, bounded and nonnegative"))
 	}
 	path, err := safeWorkspaceRelativeFile(req.Path)
-	if err != nil || filepath.Ext(path) != ".go" {
-		return fileError("invalid_code_path", "validation", errors.New("Go source path must be workspace-relative, ordinary .go source"))
+	if err != nil {
+		return fileError("invalid_code_path", "validation", errors.New("source path must be an ordinary workspace-relative file"))
+	}
+	profile, actualLanguage, supported := inspectProfileForPath(path)
+	if !supported {
+		return fileError("unsupported_code_language", "validation", errors.New("source extension is not supported by the installed first-class LSP profiles"))
+	}
+	if req.Language != "" && req.Language != actualLanguage {
+		return fileError("code_language_mismatch", "validation", errors.New("requested language disagrees with the source path"))
 	}
 	workspace, err := s.workspacePath(req.Workspace, true)
 	if err != nil || filepath.Clean(req.Workspace) != workspace {
@@ -53,7 +60,7 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 		return stat
 	}
 	if stat.FileSize == nil || *stat.FileSize > codeMaxDocumentBytes {
-		return fileError("code_document_too_large", "resource", fmt.Errorf("Go source exceeds %d-byte reference-adapter limit; use workspace_read/CLI for large files", codeMaxDocumentBytes))
+		return fileError("code_document_too_large", "resource", fmt.Errorf("source exceeds %d-byte reference-adapter limit; use workspace_read/CLI for large files", codeMaxDocumentBytes))
 	}
 	check.Action = "workspace_read"
 	check.Limit = codeMaxDocumentBytes
@@ -64,23 +71,37 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 	if source.FileVersion != req.FileVersion || source.EOF == nil || !*source.EOF || source.OutputEncoding != "utf-8" {
 		return fileError("code_source_unstable", "conflict", errors.New("version mismatch, binary source, or incomplete read"))
 	}
-	binary := s.goplsBinary
-	if binary == "" {
-		// Optional Go reference server must be provisioned by the operator.
-		// The default is executable code in an administrator-owned location.
-		binary = systemexec.First("/usr/local/bin/gopls", "/usr/bin/gopls")
-	}
-	if binary == "" {
-		return fileError("gopls_unavailable", "dependency", errors.New("gopls is not installed at /usr/local/bin/gopls or /usr/bin/gopls"))
+	binary := ""
+	if actualLanguage == "go" {
+		binary = s.goplsBinary
+		if binary == "" {
+			// Go retains the previously shipped trusted-path policy.
+			binary = systemexec.First("/usr/local/bin/gopls", "/usr/bin/gopls")
+		}
+		if binary == "" {
+			return fileError("gopls_unavailable", "dependency", errors.New("trusted optional gopls is not installed"))
+		}
+	} else {
+		binary = s.ts7Binary // test fixture only; production cannot override this path.
+		if binary == "" {
+			var trustErr error
+			binary, trustErr = systemexec.TypeScript7()
+			if trustErr != nil {
+				return fileError("typescript7_unavailable", "dependency", errors.New("trusted pinned optional TypeScript 7.0.2 native adapter and resources are unavailable"))
+			}
+		}
 	}
 	ctx, cancel := context.WithTimeout(parent, 30*time.Second)
 	defer cancel()
 	canonicalReq := req
 	canonicalReq.Path = path
-	data, err := s.workerGoInspection(ctx, canonicalReq, binary, filepath.Join(workspace, path), source.Output, req.CodeMethod, req.Line, req.Character)
+	data, err := s.workerLSPInspection(ctx, canonicalReq, profile, binary, filepath.Join(workspace, path), source.Output, req.CodeMethod, req.Line, req.Character)
 	if err != nil {
 		if errors.Is(err, errCodeTargetUnstable) {
 			return fileError("code_target_changed", "conflict", err)
+		}
+		if strings.HasPrefix(err.Error(), "lsp_capability_not_supported: ") {
+			return fileError("code_capability_unsupported", "dependency", errors.New("the selected language server does not implement the requested semantic operation"))
 		}
 		return fileError("code_inspection_failed", "runtime", err)
 	}
@@ -94,7 +115,7 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 		return stable
 	}
 	if stable.FileVersion != req.FileVersion {
-		return fileError("file_changed", "conflict", errors.New("Go source changed during semantic inspection"))
+		return fileError("file_changed", "conflict", errors.New("source changed during semantic inspection"))
 	}
 	response := Response{OK: true, Status: "code_" + req.CodeMethod, OutputEncoding: "json", Output: string(data), FileVersion: req.FileVersion, BytesReturned: int64(len(data)), BytesSeen: int64(len(data))}
 	return response
@@ -131,6 +152,20 @@ var typeScript7LSPProfile = lspInspectionProfile{
 
 func (profile lspInspectionProfile) languageForPath(path string) string {
 	return profile.extensions[strings.ToLower(filepath.Ext(path))]
+}
+
+func inspectProfileForPath(path string) (lspInspectionProfile, string, bool) {
+	if goLSPProfile.languageForPath(path) != "" {
+		return goLSPProfile, "go", true
+	}
+	language := typeScript7LSPProfile.languageForPath(path)
+	if language == "" {
+		return lspInspectionProfile{}, "", false
+	}
+	if strings.HasPrefix(language, "typescript") {
+		return typeScript7LSPProfile, "typescript", true
+	}
+	return typeScript7LSPProfile, "javascript", true
 }
 
 func (s *Server) workerGoInspection(ctx context.Context, req Request, goplsPath, file, source, method string, line, character int) (json.RawMessage, error) {
