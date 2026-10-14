@@ -34,6 +34,7 @@ type dapState struct {
 	workspace           string
 	adapter             string
 	program             string
+	targetInterpreter   string // only the already verified optional Python runtime
 	adapterPID          int
 	adapterPin          *os.File // duplicated original adapter pidfd, not a numeric PID claim
 	workerUID           uint32

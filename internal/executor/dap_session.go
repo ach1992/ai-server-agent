@@ -27,6 +27,26 @@ func (s *Server) debugAction(ctx context.Context, req Request) Response {
 	}
 	switch req.Action {
 	case "debug_adapter_status":
+		if req.Language == "python" {
+			_, _, err := systemexec.PythonDebugpy()
+			available := err == nil
+			if s.pythonDebugpyBinary != "" && s.pythonDebugpyModules != "" {
+				available = true
+			}
+			payload := map[string]any{"adapter": "python/debugpy", "installed": available,
+				"modes": []string{"script", "module", "test"}, "attach_supported": false,
+				"privileged": false, "provisioning": "optional_root_owned_pinned_wheel_and_interpreter",
+				"containment": "root_owned_cgroup_v2_required_before_launch"}
+			b, _ := json.Marshal(payload)
+			status := "unavailable"
+			if available {
+				status = "installed_containment_unverified"
+			}
+			return Response{OK: true, Status: status, Output: string(b), OutputEncoding: "json", BytesReturned: int64(len(b)), BytesSeen: int64(len(b))}
+		}
+		if req.Language != "" && req.Language != "go" {
+			return fileError("unsupported_debug_language", "validation", errors.New("debugger readiness supports go and python only"))
+		}
 		_, err := s.debugBinary()
 		available := err == nil
 		detail := map[string]any{"adapter": "go/delve", "installed": available, "modes": []string{"exec"}, "attach_supported": false, "privileged": false, "provisioning": "optional_admin_owned_binary", "containment": "root_owned_cgroup_v2_required_before_launch"}
@@ -160,6 +180,12 @@ func peerIsWorkerDelve(conn *net.UnixConn, uid uint32, pid int) bool {
 }
 
 func (s *Server) debugLaunch(ctx context.Context, req Request) (response Response) {
+	if req.Language == "python" {
+		return s.debugLaunchPython(ctx, req)
+	}
+	if (req.Language != "" && req.Language != "go") || (req.DebugMode != "" && req.DebugMode != "exec") {
+		return fileError("unsupported_debug_language_or_mode", "validation", errors.New("supported Go debug mode is exec; Python requires explicit trusted script/module/test mode"))
+	}
 	if req.Workspace == "" || req.DebugProgram == "" || req.FileVersion == "" {
 		return fileError("debug_identity_required", "validation", errors.New("workspace, executable and exact executable file_version are required"))
 	}
@@ -468,11 +494,15 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 			return fileError("debug_already_configured", "validation", errors.New("setBreakpoints belongs before configurationDone in this v1 adapter"))
 		}
 		relative, err := safeWorkspaceRelativeFile(req.Path)
-		if err != nil || filepath.Ext(relative) != ".go" || len(req.DebugLines) > 32 || req.FileVersion == "" {
-			return fileError("debug_invalid_breakpoints", "validation", errors.New("source .go file_version and <=32 breakpoint lines required"))
+		extension := ".go"
+		if d.adapter == "python/debugpy" {
+			extension = ".py"
+		}
+		if err != nil || filepath.Ext(relative) != extension || len(req.DebugLines) > 32 || req.FileVersion == "" {
+			return fileError("debug_invalid_breakpoints", "validation", errors.New("language-matching source file_version and <=32 breakpoint lines required"))
 		}
 		if d.sourceVersions[relative] == "" && len(d.sourceVersions) >= 16 {
-			return fileError("debug_source_limit", "resource", errors.New("at most 16 Go source files may have breakpoints in one debug session"))
+			return fileError("debug_source_limit", "resource", errors.New("at most 16 source files may have breakpoints in one debug session"))
 		}
 		for _, line := range req.DebugLines {
 			if line < 1 || line > 1000000 {
@@ -564,6 +594,27 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 		d.sourceVersions[breakpointStat.Path] = req.FileVersion
 	}
 	if method == "configure" {
+		// debugpy sends its real process event after configurationDone's
+		// response. Never expose control over a Python target until its
+		// pidfd, worker UID, trusted interpreter and dedicated cgroup
+		// membership have been verified by the common DAP event consumer.
+		if d.adapter == "python/debugpy" {
+			deadline := time.Now().Add(3 * time.Second)
+			for {
+				pinErr := d.pinnedDebuggeeError()
+				if pinErr == nil {
+					break
+				}
+				if ctx.Err() != nil || time.Now().After(deadline) || pinErr.Error() != "dap_debuggee_identity_not_observed" {
+					d.mu.Lock()
+					d.uncertain = true
+					d.stage = "uncertain"
+					d.mu.Unlock()
+					return fileError("python_dap_debuggee_identity_unverified", "state", pinErr)
+				}
+				d.drain(ctx)
+			}
+		}
 		d.mu.Lock()
 		d.configured = true
 		if d.stage == "starting" {

@@ -43,6 +43,7 @@ type Request struct {
 	SQLDialect       string              `json:"sql_dialect,omitempty"`
 	DebugMethod      string              `json:"debug_method,omitempty"`
 	DebugProgram     string              `json:"debug_program,omitempty"`
+	DebugMode        string              `json:"debug_mode,omitempty"`
 	DebugLines       []int               `json:"debug_lines,omitempty"`
 	DebugThreadID    int                 `json:"debug_thread_id,omitempty"`
 	DebugFrameID     int                 `json:"debug_frame_id,omitempty"`

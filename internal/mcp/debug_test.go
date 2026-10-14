@@ -32,7 +32,7 @@ func TestPublicDebugMCPPrincipalAndBoundedTypedArguments(t *testing.T) {
 	received := make(chan executor.Request, 8)
 	errs := make(chan error, 1)
 	go func() {
-		for i := 0; i < 5; i++ {
+		for i := 0; i < 7; i++ {
 			conn, err := ln.Accept()
 			if err != nil {
 				errs <- err
@@ -90,7 +90,9 @@ func TestPublicDebugMCPPrincipalAndBoundedTypedArguments(t *testing.T) {
 		args                 map[string]any
 	}{
 		{"debug_adapter_status", "debug_adapter_status", "", map[string]any{}},
+		{"debug_adapter_status", "debug_adapter_status", "", map[string]any{"language": "python"}},
 		{"debug_launch", "debug_launch", "", map[string]any{"workspace": "/srv/ai-workspace/worktree", "program": "bin/demo", "file_version": "exact-binary-version", "stop_on_entry": true}},
+		{"debug_launch", "debug_launch", "", map[string]any{"workspace": "/srv/ai-workspace/worktree", "program": "src/example.py", "file_version": "exact-python-version", "language": "python", "mode": "script", "stop_on_entry": true}},
 		{"debug_breakpoints", "debug_action", "breakpoints", map[string]any{"workspace": "/srv/ai-workspace/worktree", "session_id": "stdio_abc", "path": "main.go", "file_version": "exact-source-version", "lines": []int{4, 8}}},
 		{"debug_evaluate", "debug_action", "evaluate", map[string]any{"workspace": "/srv/ai-workspace/worktree", "session_id": "stdio_abc", "frame_id": 1000, "expression": "1+2"}},
 		{"debug_stop", "debug_stop", "", map[string]any{"workspace": "/srv/ai-workspace/worktree", "session_id": "stdio_abc"}},
@@ -105,8 +107,20 @@ func TestPublicDebugMCPPrincipalAndBoundedTypedArguments(t *testing.T) {
 			if req.Action != task.action || req.DebugMethod != task.method || req.Root || req.Approval || req.PrincipalID != "direct-default" || req.PrincipalClass != "direct" {
 				t.Fatalf("%s lost enforced worker/principal/method identity: action=%s method=%s root=%t approval=%t principal=%s/%s", task.name, req.Action, req.DebugMethod, req.Root, req.Approval, req.PrincipalID, req.PrincipalClass)
 			}
-			if task.name == "debug_launch" && (req.DebugProgram != "bin/demo" || req.FileVersion != "exact-binary-version" || !req.DebugStopOnEntry) {
-				t.Fatalf("launch contract changed: %+v", req)
+			if task.name == "debug_launch" {
+				if task.args["language"] == "python" {
+					if req.DebugProgram != "src/example.py" || req.FileVersion != "exact-python-version" || req.Language != "python" || req.DebugMode != "script" || !req.DebugStopOnEntry {
+						t.Fatalf("Python launch did not preserve exact source/mode/principal: %+v", req)
+					}
+				} else if req.DebugProgram != "bin/demo" || req.FileVersion != "exact-binary-version" || req.Language != "" || req.DebugMode != "" || !req.DebugStopOnEntry {
+					t.Fatalf("legacy Go launch contract changed: %+v", req)
+				}
+			}
+			if task.name == "debug_adapter_status" {
+				wantLanguage, _ := task.args["language"].(string)
+				if req.Language != wantLanguage {
+					t.Fatalf("adapter readiness language selection lost: %+v", req)
+				}
 			}
 			if task.name == "debug_breakpoints" && (req.Path != "main.go" || req.FileVersion != "exact-source-version" || len(req.DebugLines) != 2) {
 				t.Fatalf("source identity/breakpoints lost: %+v", req)

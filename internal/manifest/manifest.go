@@ -59,6 +59,7 @@ func Build(c config.Config) Manifest {
 	_, sqlLSPErr := systemexec.SQLLens()
 	_, _, _, rustLSPErr := systemexec.RustAnalyzerResources()
 	_, _, phpLSPErr := systemexec.PHPActor()
+	_, _, pythonDAPErr := systemexec.PythonDebugpy()
 	return Manifest{
 		SchemaVersion:       1,
 		InstanceID:          c.InstanceID,
@@ -84,6 +85,7 @@ func Build(c config.Config) Manifest {
 			{Name: "sql-language-server", Required: false, Installed: sqlLSPErr == nil, Paths: []string{systemexec.SQLLensDir}, Notes: "Optional offline-first SQL semantic LSP via SQLLens 0.5.0 pinned root-owned complete module tree and Node v24.18.1. Requires explicit postgres/mysql/mariadb dialect per call, no project plugin execution (SQLLENS_NO_PLUGINS=1), no user config loading and no DB connections. MariaDB uses MySQL-compatible grammar subset; DB metadata, migrations and vendor-specific semantics need separate acceptance."},
 			{Name: "rust-language-server", Required: false, Installed: rustLSPErr == nil, Paths: []string{systemexec.RustAnalyzerDir, systemexec.RustCompilerDir}, Notes: "Optional Rust analyzer 2026-10-12 with fixed Rust 1.99.0 compiler and sysroot. Passive per-file LSP graph avoids Cargo metadata, build.rs and proc-macro execution; no automatic dependency resolution or Cargo builds."},
 			{Name: "php-language-server", Required: false, Installed: phpLSPErr == nil, Paths: []string{systemexec.PHPActorDir}, Notes: "Optional Phpactor 2026.10.07.0 with SHA-256 pinned PHAR and trusted OS-managed versioned PHP 8.2/8.3/8.4 CLI. Disables php.ini, Composer execution and project configuration. Uses private worker-home index cache; PHP Xdebug DAP remains separate."},
+			{Name: "python-debugger", Required: false, Installed: pythonDAPErr == nil, Paths: []string{systemexec.PythonDebugpyDir}, Notes: "Optional debugpy 1.8.22 Python script/module/unittest DAP (Python >=3.10). Exact pinned wheel and all 428 transitive files are verified root-owned; -I adapter launch ignores project/user Python site config. Requires executor-owned cgroup-v2 containment and exact worker source file_version. No implicit install or root/remote attach; installed modules alone do not prove a working debug session."},
 			{Name: "go-debugger", Required: false, Installed: systemexec.First("/usr/local/bin/dlv", "/usr/bin/dlv") != "", Paths: []string{"/usr/local/bin/dlv", "/usr/bin/dlv"}, Notes: "Optional Go Delve DAP debugger. v1 launches only prebuilt workspace executables with matching worker file_version; requires trusted admin-owned Delve plus executor-owned root cgroup-v2 containment with cgroup.kill (Linux 5.14+); fails closed before DAP launch without those capabilities. Other Agent capabilities remain usable. Never silently installs/attaches/uses root."},
 			{Name: "browser", Required: false, Installed: fileExists(filepath.Join(browserEngine, "node/bin/node")), Paths: []string{browserEngine, browserData}, Notes: "Optional Playwright/Chromium capability. The executable engine is root-owned under /opt; writable browser profile data is isolated under agent state. Removing it disables browser tools but does not stop the MCP core."},
 		},

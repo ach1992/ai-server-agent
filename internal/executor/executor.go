@@ -67,6 +67,8 @@ type Server struct {
 	environmentGoSystemPath       string                                                    // test-only Go discovery path; empty uses fixed safeCommandPath
 	codeTargetSnapshotHook        func()                                                    // test-only interleaving: alter target after LSP overlay snapshot
 	dlvBinary                     string                                                    // test-only Delve DAP fixture; production uses admin-owned binary
+	pythonDebugpyBinary           string                                                    // test-only recognized Python interpreter fixture
+	pythonDebugpyModules          string                                                    // test-only unprivileged verified wheel fixture
 }
 
 func NewServer(cfg config.Config, token string) (*Server, error) {

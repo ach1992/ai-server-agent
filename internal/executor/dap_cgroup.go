@@ -59,6 +59,24 @@ func createDAPCgroup() (*dapCgroup, error) {
 	return &dapCgroup{path: dir}, nil
 }
 
+// verifySpawnMembership proves CLONE_INTO_CGROUP placed the original
+// child inside this exact private containment before returning the worker
+// session identity. No post-exec PID migration (or startup race) is used.
+func (g *dapCgroup) verifySpawnMembership(pid int) error {
+	if g == nil || g.path == "" || g.verified || pid <= 0 {
+		return errors.New("DAP cgroup spawn proof invalid")
+	}
+	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
+	if err != nil {
+		return fmt.Errorf("DAP spawned process membership unreadable: %w", err)
+	}
+	if strings.TrimSpace(string(data)) != "0::"+strings.TrimPrefix(g.path, "/sys/fs/cgroup") {
+		return errors.New("DAP atomic spawned process outside private cgroup")
+	}
+	g.verified = true
+	return nil
+}
+
 func (g *dapCgroup) joinOriginalAdapter(e *stdioSession) error {
 	if g == nil || g.path == "" {
 		return errors.New("DAP containment is not provisioned")

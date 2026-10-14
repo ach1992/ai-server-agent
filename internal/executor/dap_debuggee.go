@@ -75,14 +75,27 @@ func (d *dapState) pinDebuggeeProcess(body json.RawMessage) error {
 			}
 		}
 	}
-	if !foundParent || !foundUID || parent != d.adapterPID || uint32(uid) != d.workerUID {
+	if !foundParent || !foundUID || uint32(uid) != d.workerUID {
 		return errors.New("dap_debuggee_parent_or_uid_mismatch")
 	}
-	group, err := syscall.Getpgid(pid)
-	if err != nil || group != pid {
-		return errors.New("dap_debuggee_group_identity_mismatch")
-	}
 	workspaceExecutable := filepath.Join(d.workspace, d.program)
+	if d.adapter == "python/debugpy" {
+		// debugpy can spawn its target through an intermediate launcher.
+		// Only kernel-proven containment and a trusted interpreter inode
+		// permit accepting this different process-parent topology.
+		if d.containment == nil || !d.containment.containsPID(pid) || d.targetInterpreter == "" {
+			return errors.New("python_dap_debuggee_not_root_contained")
+		}
+		workspaceExecutable = d.targetInterpreter
+	} else {
+		if parent != d.adapterPID {
+			return errors.New("dap_debuggee_parent_or_uid_mismatch")
+		}
+		group, err := syscall.Getpgid(pid)
+		if err != nil || group != pid {
+			return errors.New("dap_debuggee_group_identity_mismatch")
+		}
+	}
 	targetInfo, err := os.Stat(fmt.Sprintf("/proc/%d/exe", pid))
 	if err != nil {
 		return fmt.Errorf("dap_debuggee_executable_unavailable: %w", err)
