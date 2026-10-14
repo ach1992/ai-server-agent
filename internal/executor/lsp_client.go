@@ -214,7 +214,7 @@ func (w *lspWire) replyToServer(packet lspPacket) error {
 			return errors.New("lsp_invalid_configuration_request")
 		}
 		result = make([]any, len(params.Items))
-	} else if packet.Method != "window/workDoneProgress/create" && packet.Method != "client/registerCapability" {
+	} else if packet.Method != "window/workDoneProgress/create" {
 		return w.send(map[string]any{
 			"jsonrpc": "2.0", "id": packet.ID,
 			"error": map[string]any{"code": -32601, "message": "Method not found"},
@@ -283,8 +283,36 @@ func (w *lspWire) waitPublishedDiagnostics(ctx context.Context, uri string) (jso
 // Use UTF-16 as the sole advertised position encoding until conversions
 // have substantive adapter fixtures; reject a server's incompatible choice.
 type lspServerCapabilities struct {
-	PositionEncoding   string          `json:"positionEncoding"`
-	DiagnosticProvider json.RawMessage `json:"diagnosticProvider"`
+	PositionEncoding       string          `json:"positionEncoding"`
+	DiagnosticProvider     json.RawMessage `json:"diagnosticProvider"`
+	DefinitionProvider     json.RawMessage `json:"definitionProvider"`
+	ReferencesProvider     json.RawMessage `json:"referencesProvider"`
+	DocumentSymbolProvider json.RawMessage `json:"documentSymbolProvider"`
+}
+
+func lspProviderEnabled(provider json.RawMessage) bool {
+	value := strings.TrimSpace(string(provider))
+	return value == "true" || strings.HasPrefix(value, "{")
+}
+
+func lspProviderValid(provider json.RawMessage) bool {
+	value := strings.TrimSpace(string(provider))
+	return value == "" || value == "null" || value == "false" || lspProviderEnabled(provider)
+}
+
+func (c lspServerCapabilities) supports(method string) bool {
+	switch method {
+	case "definition":
+		return lspProviderEnabled(c.DefinitionProvider)
+	case "references":
+		return lspProviderEnabled(c.ReferencesProvider)
+	case "symbols":
+		return lspProviderEnabled(c.DocumentSymbolProvider)
+	case "diagnostics":
+		return true // push-only servers do not declare diagnosticProvider.
+	default:
+		return false
+	}
 }
 
 func parseLSPServerCapabilities(raw json.RawMessage) (lspServerCapabilities, error) {
@@ -297,12 +325,19 @@ func parseLSPServerCapabilities(raw json.RawMessage) (lspServerCapabilities, err
 	if reply.Capabilities.PositionEncoding != "" && reply.Capabilities.PositionEncoding != "utf-16" {
 		return lspServerCapabilities{}, errors.New("lsp_unsupported_position_encoding")
 	}
+	for _, provider := range []json.RawMessage{
+		reply.Capabilities.DiagnosticProvider, reply.Capabilities.DefinitionProvider,
+		reply.Capabilities.ReferencesProvider, reply.Capabilities.DocumentSymbolProvider,
+	} {
+		if !lspProviderValid(provider) {
+			return lspServerCapabilities{}, errors.New("lsp_invalid_capability_provider")
+		}
+	}
 	return reply.Capabilities, nil
 }
 
 func (c lspServerCapabilities) pullDiagnostics() bool {
-	value := strings.TrimSpace(string(c.DiagnosticProvider))
-	return value != "" && value != "false" && value != "null"
+	return lspProviderEnabled(c.DiagnosticProvider)
 }
 
 func (w *lspWire) notify(method string, params any) error {

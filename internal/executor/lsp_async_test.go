@@ -153,6 +153,7 @@ func TestLSPCapabilitiesFailClosedOnIncompatibleEncoding(t *testing.T) {
 		{`{"capabilities":{"positionEncoding":"utf-16"}}`, false, false},
 		{`{"capabilities":{"diagnosticProvider":false}}`, false, false},
 		{`{"capabilities":{"positionEncoding":"utf-8"}}`, false, true},
+		{`{"capabilities":{"documentSymbolProvider":"unsupported"}}`, false, true},
 	} {
 		caps, err := parseLSPServerCapabilities(json.RawMessage(tc.reply))
 		if (err != nil) != tc.err || (err == nil && caps.pullDiagnostics() != tc.pull) {
@@ -161,5 +162,10 @@ func TestLSPCapabilitiesFailClosedOnIncompatibleEncoding(t *testing.T) {
 	}
 	if _, err := parseLSPServerCapabilities(json.RawMessage(`not-json`)); err == nil {
 		t.Fatal("invalid capability response accepted")
+	}
+	capabilities, err := parseLSPServerCapabilities(json.RawMessage(`{"capabilities":{"definitionProvider":true,"referencesProvider":false,"documentSymbolProvider":{"label":"symbols"}}}`))
+	if err != nil || !capabilities.supports("definition") || capabilities.supports("references") ||
+		!capabilities.supports("symbols") || capabilities.supports("runWorkspaceCommand") {
+		t.Fatalf("unsafe server capability interpretation: %+v / %v", capabilities, err)
 	}
 }

@@ -100,7 +100,44 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 	return response
 }
 
+// A private, fixed adapter profile lets one bounded LSP consumer support
+// distinct language IDs and launch conventions without a second broker.
+// It never accepts executable paths, arguments or configuration from a
+// repository or external MCP caller. Entrypoint trust is checked upstream.
+type lspInspectionProfile struct {
+	arguments   []string
+	extensions  map[string]string // recognized suffix -> LSP languageId
+	initOptions map[string]any    // pinned, never project-controlled
+}
+
+var goLSPProfile = lspInspectionProfile{
+	arguments:  []string{"serve"},
+	extensions: map[string]string{".go": "go"},
+}
+
+// TypeScript 7 has a native LSP entrypoint. This is an internal conformance
+// profile only until an administrator-owned, integrity-pinned binary/resource
+// chain and supported readiness/status surface are implemented.
+var typeScript7LSPProfile = lspInspectionProfile{
+	arguments: []string{"--lsp", "--stdio"},
+	extensions: map[string]string{
+		".ts": "typescript", ".mts": "typescript", ".cts": "typescript",
+		".tsx": "typescriptreact",
+		".js":  "javascript", ".mjs": "javascript", ".cjs": "javascript",
+		".jsx": "javascriptreact",
+	},
+	initOptions: map[string]any{"disableAutomaticTypingAcquisition": true},
+}
+
+func (profile lspInspectionProfile) languageForPath(path string) string {
+	return profile.extensions[strings.ToLower(filepath.Ext(path))]
+}
+
 func (s *Server) workerGoInspection(ctx context.Context, req Request, goplsPath, file, source, method string, line, character int) (json.RawMessage, error) {
+	return s.workerLSPInspection(ctx, req, goLSPProfile, goplsPath, file, source, method, line, character)
+}
+
+func (s *Server) workerLSPInspection(ctx context.Context, req Request, profile lspInspectionProfile, binary, file, source, method string, line, character int) (json.RawMessage, error) {
 	// LSP framing and authorization remain in the same internal broker used
 	// by the existing real-gopls definition proof.
 	workspace, err := s.workspacePath(req.Workspace, true)
@@ -110,7 +147,11 @@ func (s *Server) workerGoInspection(ctx context.Context, req Request, goplsPath,
 	if len(source) > codeMaxDocumentBytes {
 		return nil, errors.New("lsp_document_too_large")
 	}
-	id, err := s.workerStdioSession(req, "lsp", workspace, goplsPath, "serve")
+	if !filepath.IsAbs(file) || profile.languageForPath(file) == "" ||
+		!strings.HasPrefix(filepath.Clean(file), workspace+string(filepath.Separator)) {
+		return nil, errors.New("lsp_invalid_or_outside_source")
+	}
+	id, err := s.workerStdioSession(req, "lsp", workspace, binary, profile.arguments...)
 	if err != nil {
 		return nil, err
 	}
@@ -120,7 +161,8 @@ func (s *Server) workerGoInspection(ctx context.Context, req Request, goplsPath,
 	root := fileURI(workspace)
 	initialized, err := wire.call(ctx, "initialize", map[string]any{
 		"processId": nil, "rootUri": root,
-		"workspaceFolders": []map[string]string{{"uri": root, "name": filepath.Base(workspace)}},
+		"initializationOptions": profile.initOptions,
+		"workspaceFolders":      []map[string]string{{"uri": root, "name": filepath.Base(workspace)}},
 		"capabilities": map[string]any{
 			"workspace": map[string]any{"configuration": true},
 			"general":   map[string]any{"positionEncodings": []string{"utf-16"}},
@@ -137,11 +179,14 @@ func (s *Server) workerGoInspection(ctx context.Context, req Request, goplsPath,
 	if err != nil {
 		return nil, err
 	}
+	if !serverCapabilities.supports(method) {
+		return nil, fmt.Errorf("lsp_capability_not_supported: %s", method)
+	}
 	if err = wire.notify("initialized", map[string]any{}); err != nil {
 		return nil, err
 	}
 	if err = wire.notify("textDocument/didOpen", map[string]any{
-		"textDocument": map[string]any{"uri": uri, "languageId": "go", "version": 1, "text": source},
+		"textDocument": map[string]any{"uri": uri, "languageId": profile.languageForPath(file), "version": 1, "text": source},
 	}); err != nil {
 		return nil, err
 	}
@@ -181,7 +226,7 @@ func (s *Server) workerGoInspection(ctx context.Context, req Request, goplsPath,
 	if err != nil {
 		return nil, err
 	}
-	paths, err := codeTargetPaths(first)
+	paths, err := codeTargetPathsForProfile(first, profile)
 	if err != nil {
 		return nil, err
 	}
@@ -214,7 +259,7 @@ func (s *Server) workerGoInspection(ctx context.Context, req Request, goplsPath,
 		}
 		versions[target] = stat.FileVersion
 		if err := wire.notify("textDocument/didOpen", map[string]any{
-			"textDocument": map[string]any{"uri": fileURI(filepath.Join(workspace, target)), "languageId": "go", "version": 1, "text": read.Output},
+			"textDocument": map[string]any{"uri": fileURI(filepath.Join(workspace, target)), "languageId": profile.languageForPath(target), "version": 1, "text": read.Output},
 		}); err != nil {
 			return nil, err
 		}
@@ -251,9 +296,13 @@ func (s *Server) workerGoInspection(ctx context.Context, req Request, goplsPath,
 	return bindCodeLocationVersions(first, versions)
 }
 
-// Only normalized, in-workspace Go targets may be inspected. No raw LSP
-// URI is used as a filesystem read authority, and references are bounded.
+// Only normalized, in-workspace supported source targets may be inspected.
+// Raw LSP URI is never filesystem read authority, and references are bounded.
 func codeTargetPaths(normalized json.RawMessage) ([]string, error) {
+	return codeTargetPathsForProfile(normalized, goLSPProfile)
+}
+
+func codeTargetPathsForProfile(normalized json.RawMessage, profile lspInspectionProfile) ([]string, error) {
 	var data any
 	if err := json.Unmarshal(normalized, &data); err != nil {
 		return nil, err
@@ -282,7 +331,7 @@ func codeTargetPaths(normalized json.RawMessage) ([]string, error) {
 						continue
 					}
 					relative, err := safeWorkspaceRelativeFile(path)
-					if err != nil || relative != path || filepath.Ext(path) != ".go" {
+					if err != nil || relative != path || profile.languageForPath(path) == "" {
 						return fmt.Errorf("%w: unsupported semantic target", errCodeTargetUnstable)
 					}
 					seen[path] = true
