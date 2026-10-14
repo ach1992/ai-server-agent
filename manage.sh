@@ -413,8 +413,8 @@ restart_agent_and_verify_profile(){
     curl -fsS "http://127.0.0.1:$port/healthz" >/dev/null || return 1
   fi
   # A healthy OLD process or stale manifest is not evidence of the new role.
-  jq -e --arg role "$(config_get environment_profile)" --arg label "$(config_get server_label)" \
-    '.environment_profile==$role and (.server_label // "")==$label' \
+  jq -e --arg role "$(config_get environment_profile)" --arg server_name "$(config_get server_label)" \
+    '.environment_profile==$role and (.server_label // "")==$server_name' \
     "$STATE_DIR/AI_ENVIRONMENT.json" >/dev/null 2>&1
 }
 profile_apply(){

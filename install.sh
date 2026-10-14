@@ -640,8 +640,8 @@ JSON
 # JSON-encode non-secret operator purpose/label, never interpolate label into
 # a here-doc: untrusted quote/newline bytes must not change config structure.
 purpose_tmp="$(mktemp "$CONFIG_DIR/.config-purpose.XXXXXX")" || die "Could not stage environment purpose."
-if ! jq --arg profile "$ENVIRONMENT_PROFILE" --arg label "$SERVER_LABEL" \
-  '.environment_profile=$profile | if $label=="" then del(.server_label) else .server_label=$label end' \
+if ! jq --arg profile "$ENVIRONMENT_PROFILE" --arg server_name "$SERVER_LABEL" \
+  '.environment_profile=$profile | if $server_name=="" then del(.server_label) else .server_label=$server_name end' \
   "$config_tmp" > "$purpose_tmp"; then
   rm -f -- "$purpose_tmp" "$config_tmp"
   die "Could not prepare environment purpose configuration."
