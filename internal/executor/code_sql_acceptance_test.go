@@ -100,11 +100,15 @@ func TestCodeInspectRealOfflineSQLPostgresMySQL(t *testing.T) {
 	// executable authority. In particular, no connection or project import
 	// is permitted by this capability's fixed process environment.
 	fixtures := map[string]string{
-		".sqllens.json":        `{"plugins":["./malicious-plugin.mjs"],"default":"databricks","dialects":[{"files":"*.sql","dialect":"snowflake"}]}`,
-		"malicious-plugin.mjs": `import {writeFileSync} from "node:fs";writeFileSync("SQL-MUST-NOT-EXECUTE","unexpected execution");export default ()=>({});`,
-		"postgres.sql":         "WITH weekly AS (SELECT 1 AS amount) SELECT amount FROM weekly;\n",
-		"mysql.sql":            "WITH weekly AS (SELECT 1 AS amount) SELECT amount FROM weekly;\n",
-		"schema-version.sql":   "CREATE TABLE inventory (item_id bigint PRIMARY KEY);\n",
+		".sqllens.json":              `{"plugins":["./malicious-plugin.mjs"],"default":"databricks","dialects":[{"files":"*.sql","dialect":"snowflake"}]}`,
+		"malicious-plugin.mjs":       `import {writeFileSync} from "node:fs";writeFileSync("SQL-MUST-NOT-EXECUTE","unexpected execution");export default ()=>({});`,
+		"postgres.sql":               "WITH weekly AS (SELECT 1 AS amount) SELECT amount FROM weekly;\n",
+		"mysql.sql":                  "WITH weekly AS (SELECT 1 AS amount) SELECT amount FROM weekly;\n",
+		"schema-version.sql":         "CREATE TABLE inventory (item_id bigint PRIMARY KEY);\n",
+		"mysql-migration-001.sql":    mysqlMigration001,
+		"mysql-migration-002.sql":    mysqlMigration002,
+		"postgres-migration-001.sql": postgresMigration001,
+		"postgres-migration-002.sql": postgresMigration002,
 	}
 	for path, value := range fixtures {
 		if err := os.WriteFile(filepath.Join(workspace, path), []byte(value), 0600); err != nil {
@@ -154,6 +158,26 @@ func TestCodeInspectRealOfflineSQLPostgresMySQL(t *testing.T) {
 				t.Fatalf("%s accepted stale file version: %+v", tc.dialect, stale)
 			}
 		})
+	}
+	// Real migrations, not only trivial CTEs: prove grammar/symbol responses
+	// are produced in both engine families without opening a database.
+	for _, migration := range []struct{ path, dialect, table string }{
+		{"mysql-migration-001.sql", "mysql", "acceptance_accounts"},
+		{"postgres-migration-001.sql", "postgres", "acceptance_accounts"},
+	} {
+		req := owner
+		req.Action, req.Language, req.SQLDialect = "code_inspect", "sql", migration.dialect
+		req.Path, req.FileVersion, req.CodeMethod = migration.path, stat(migration.path).FileVersion, "symbols"
+		out := s.codeInspect(ctx, req)
+		if !out.OK || out.FileVersion != req.FileVersion {
+			t.Fatalf("%s real migration LSP processing failed: %+v", migration.dialect, out)
+		}
+		if !strings.Contains(out.Output, migration.table) {
+			// Known unmet acceptance: SQLLens v0.5.0 emits [] for
+			// CREATE TABLE even though it provides real CTE semantics.
+			// Do not invent schema insight or call this a positive proof.
+			t.Logf("UNMET_SQL_SCHEMA_INSIGHT: %s DDL documentSymbol=%s", migration.dialect, out.Output)
+		}
 	}
 	if _, err := os.Stat(filepath.Join(workspace, "SQL-MUST-NOT-EXECUTE")); !os.IsNotExist(err) {
 		t.Fatalf("untrusted SQL project plugin executed: %v", err)
