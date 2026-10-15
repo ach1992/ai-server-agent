@@ -662,11 +662,6 @@ func (b *stdioSessionBroker) removeAndStop(entry *stdioSession) error {
 	entry.stopMu.Lock()
 	entry.mu.Lock()
 	entry.closed = true
-	if entry.dap != nil && entry.dap.browserProfileDir != "" {
-		if err := removeBrowserDAPProfile(entry.dap.browserProfileDir); err != nil {
-			return fmt.Errorf("javascript_browser_profile_cleanup_uncertain: %w", err)
-		}
-	}
 	if entry.dap != nil {
 		if entry.dap.phpProxy != nil {
 			entry.dap.phpProxy.shutdown()
@@ -772,6 +767,22 @@ func (b *stdioSessionBroker) removeAndStop(entry *stdioSession) error {
 					return fmt.Errorf("dap_runtime_cleanup_uncertain: %w", err)
 				}
 			}
+		}
+	}
+	// Chromium can recreate its user-data directory while still running.
+	// Never remove a Browser DAP profile before the original adapter AND all
+	// descendants have been proven dead by this session's cgroup.kill.
+	// The root-owned generated profile is only cleanup state, not a second
+	// process authority; retain the broker ID on any unverified removal.
+	if entry.dap != nil && entry.dap.browserProfileDir != "" {
+		entry.dap.mu.Lock()
+		proven := entry.dap.containmentProven
+		entry.dap.mu.Unlock()
+		if !proven {
+			return errors.New("javascript_browser_profile_cleanup_before_verified_cgroup")
+		}
+		if err := removeBrowserDAPProfile(entry.dap.browserProfileDir); err != nil {
+			return fmt.Errorf("javascript_browser_profile_cleanup_uncertain: %w", err)
 		}
 	}
 	// Browser has one shared-profile lease. Do not remove the last broker
