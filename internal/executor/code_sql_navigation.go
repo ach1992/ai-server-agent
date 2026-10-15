@@ -443,15 +443,22 @@ func (s *Server) sqlOfflineNavigation(parent context.Context, req Request, sourc
 	var locations []sqlNavLocation
 	if req.CodeMethod == "definition" {
 		drops := 0
+		hasMigrationDeclaration := false
 		for _, item := range foundItems {
 			if item.drop {
 				drops++
 			}
 			if item.declaration {
 				locations = append(locations, item.sqlNavLocation)
+				if sqlNavInsideMigrationTree(item.URI) {
+					hasMigrationDeclaration = true
+				}
 			}
 		}
-		if drops > 0 || tableLifecycleChanged || len(locations) > 1 {
+		// A lone declaration from a rollback or unsupported migration is
+		// not proof of the forward schema: validate its naming even if unique.
+		if drops > 0 || tableLifecycleChanged || len(locations) > 1 ||
+			(!sqlNavInsideMigrationTree(sourcePath) && hasMigrationDeclaration) {
 			location, resolveErr := sqlNavResolveOrderedDefinition(foundItems, tableLifecycle, sourcePath)
 			if resolveErr != nil {
 				return fileError("sql_schema_history_ambiguous", "validation", resolveErr), true

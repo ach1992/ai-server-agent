@@ -17,6 +17,15 @@ func TestSQLMigrationVersionOrderingAndSourceBoundaries(t *testing.T) {
 		{"migrations/0001_create.sql", "migrations", "1", true},
 		{"db/migrations/202610150401_init.SQL", "db/migrations", "202610150401", true},
 		{"db/migrations/.hidden/003_create.sql", "", "", false},
+		{"db/migration/V1__init.sql", "db/migration", "1", true},
+		{"db/migration/V001.002__alter.sql", "db/migration", "1.2", true},
+		{"migrations/V001_002__alter.sql", "migrations", "1.2", true},
+		{"db/migration/V01.00__same.sql", "db/migration", "1", true},
+		{"db/migration/U1__undo.sql", "", "", false},
+		{"db/migration/R__repeatable.sql", "", "", false},
+		{"db/migration/V1__undo.down.sql", "", "", false},
+		{"migrations/001_create.up.sql", "", "", false},
+		{"migrations/001_create.down.sql", "", "", false},
 		{"db/schema.sql", "", "", false},
 		{"migrations/01_create.sql", "", "", false},
 		{"migrations/003_create.psql", "", "", false},
@@ -68,6 +77,41 @@ func TestSQLOrderedMigrationDefinitionsFailClosed(t *testing.T) {
 	column, err := sqlNavResolveOrderedDefinition([]sqlNavFound{create1, create3}, []sqlNavFound{drop}, "db/queries/read.sql")
 	if err != nil || column.URI != create3.URI {
 		t.Fatalf("column state was not rebuilt after table drop: %+v %v", column, err)
+	}
+}
+
+func TestSQLFlywayMigrationHistoryRemainsSourceOnly(t *testing.T) {
+	first := sqlNavHistoryFixture("db/migration/V1__create.sql", true, false, 0)
+	drop := sqlNavHistoryFixture("db/migration/V1.2__drop.sql", false, true, 0)
+	latest := sqlNavHistoryFixture("db/migration/V1.10__recreate.sql", true, false, 0)
+	location, err := sqlNavResolveOrderedDefinition([]sqlNavFound{latest, first, drop}, nil, "queries/read.sql")
+	if err != nil || location.URI != latest.URI {
+		t.Fatalf("Flyway dotted numeric ordering lost: %+v %v", location, err)
+	}
+	if sqlNavCompareVersion("1.2", "1.10") >= 0 || sqlNavCompareVersion("1.9", "2") >= 0 {
+		t.Fatal("Flyway components must be compared numerically")
+	}
+	single, err := sqlNavResolveOrderedDefinition([]sqlNavFound{first}, nil, "queries/read.sql")
+	if err != nil || single.URI != first.URI {
+		t.Fatalf("unambiguous single source migration rejected: %+v %v", single, err)
+	}
+	for _, tc := range []struct {
+		name   string
+		items  []sqlNavFound
+		source string
+	}{
+		{"duplicate normalized version", []sqlNavFound{first, sqlNavHistoryFixture("db/migration/V01.0__second.sql", true, false, 0)}, "queries/read.sql"},
+		{"mixed migration families", []sqlNavFound{sqlNavHistoryFixture("migrations/V1__create.sql", true, false, 0), sqlNavHistoryFixture("migrations/002_drop.sql", false, true, 0)}, "queries/read.sql"},
+		{"undo source", []sqlNavFound{sqlNavHistoryFixture("db/migration/U1__restore.sql", true, false, 0)}, "queries/read.sql"},
+		{"repeatable source", []sqlNavFound{sqlNavHistoryFixture("db/migration/R__view.sql", true, false, 0)}, "queries/read.sql"},
+		{"rollback source", []sqlNavFound{sqlNavHistoryFixture("migrations/001_create.down.sql", true, false, 0)}, "queries/read.sql"},
+		{"query inside migration", []sqlNavFound{first, drop, latest}, "db/migration/V1__create.sql"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if loc, err := sqlNavResolveOrderedDefinition(tc.items, nil, tc.source); err == nil {
+				t.Fatalf("ambiguous migration source was accepted: %+v", loc)
+			}
+		})
 	}
 }
 

@@ -313,6 +313,49 @@ func TestSQLSourceNavigationWorkerCrossFileVersionsAndHistory(t *testing.T) {
 	if !foundAlterIndex {
 		t.Fatalf("MySQL indexed column reference missing or unversioned: %+v", indexed)
 	}
+
+	// A Flyway-style checked-in history must honor numeric dotted versions
+	// and use the latest source, not a live-database inference.
+	for name, body := range map[string]string{
+		"db/migration/V1__create.sql":  "CREATE TABLE receipts (id INT PRIMARY KEY);\n",
+		"db/migration/V1.2__drop.sql":  "DROP TABLE receipts;\n",
+		"db/migration/V1.10__new.sql":  "CREATE TABLE receipts (id BIGINT PRIMARY KEY);\n",
+		"queries/receipts.sql":         "SELECT * FROM receipts;\n",
+		"db/migration/U1__revert.sql":  "CREATE TABLE rollback_only (id INT);\n",
+		"queries/rollback.sql":         "SELECT * FROM rollback_only;\n",
+		"migrations/001_down.down.sql": "CREATE TABLE only_down (id INT);\n",
+		"queries/down.sql":             "SELECT * FROM only_down;\n",
+	} {
+		target := filepath.Join(workspace, name)
+		if err := os.MkdirAll(filepath.Dir(target), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(target, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	owner.SQLDialect, owner.CodeMethod = "postgres", "definition"
+	owner.Path, owner.FileVersion, owner.Line, owner.Character = "queries/receipts.sql", version("queries/receipts.sql"), 0, 16
+	flyway := s.codeInspect(ctx, owner)
+	if !flyway.OK {
+		t.Fatalf("Flyway source-only cross-file navigation failed: %+v", flyway)
+	}
+	if err := json.Unmarshal([]byte(flyway.Output), &targets); err != nil || len(targets) != 1 ||
+		targets[0].URI != "db/migration/V1.10__new.sql" || targets[0].FileVersion != version(targets[0].URI) {
+		t.Fatalf("Flyway numeric dotted latest definition wrong: %+v (%v)", flyway, err)
+	}
+	for _, tc := range []struct {
+		path string
+		char int
+	}{
+		{"queries/rollback.sql", 16}, {"queries/down.sql", 17},
+	} {
+		owner.Path, owner.FileVersion, owner.Character = tc.path, version(tc.path), tc.char
+		unsafe := s.codeInspect(ctx, owner)
+		if unsafe.OK || unsafe.ErrorCode != "sql_schema_history_ambiguous" {
+			t.Fatalf("unsupported migration was accepted as forward schema: %s %+v", tc.path, unsafe)
+		}
+	}
 }
 
 func TestSQLSourceNavigationLimitsAndDuplicateDeclarations(t *testing.T) {
