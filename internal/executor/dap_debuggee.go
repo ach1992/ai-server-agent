@@ -79,7 +79,14 @@ func (d *dapState) pinDebuggeeProcess(body json.RawMessage) error {
 		return errors.New("dap_debuggee_parent_or_uid_mismatch")
 	}
 	workspaceExecutable := filepath.Join(d.workspace, d.program)
-	if d.adapter == "python/debugpy" || d.adapter == "javascript/js-debug" {
+	if d.adapter == "rust/lldb-dap" {
+		// Unlike Go's direct Delve child, LLDB may spawn via an auxiliary
+		// launcher. Only the exact root-owned containment plus binary inode
+		// and pinned original adapter can authorize the reported process.
+		if d.containment == nil || !d.containment.containsPID(pid) {
+			return errors.New("rust_dap_debuggee_not_root_contained")
+		}
+	} else if d.adapter == "python/debugpy" || d.adapter == "javascript/js-debug" {
 		// Python and Node may use an intermediate launcher, so an OS parent
 		// relation to the adapter is not a safe or correct DAP contract.
 		// The stronger kernel proof is membership in this exact private

@@ -73,6 +73,7 @@ type Server struct {
 	pythonDebugpyModules              string                                                    // test-only unprivileged verified wheel fixture
 	javascriptDAPNode                 string                                                    // test-only JS adapter Node fixture
 	javascriptDAPCLI                  string                                                    // test-only JS adapter entrypoint fixture
+	rustLLDBDAPBinary                 string                                                    // test-only known LLDB-DAP executable fixture
 }
 
 func NewServer(cfg config.Config, token string) (*Server, error) {

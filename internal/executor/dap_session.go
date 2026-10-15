@@ -63,8 +63,23 @@ func (s *Server) debugAction(ctx context.Context, req Request) Response {
 			}
 			return Response{OK: true, Status: status, Output: string(b), OutputEncoding: "json", BytesReturned: int64(len(b)), BytesSeen: int64(len(b))}
 		}
+		if req.Language == "rust" {
+			_, trustErr := systemexec.RustLLDBDAP()
+			available := trustErr == nil || s.rustLLDBDAPBinary != ""
+			body, _ := json.Marshal(map[string]any{
+				"adapter": "rust/lldb-dap", "installed": available,
+				"modes": []string{"exec"}, "attach_supported": false,
+				"privileged": false, "provisioning": "optional_verified_LLDB19_native_distribution",
+				"containment": "executor_owned_private_cgroup_v2_required",
+			})
+			status := "unavailable"
+			if available {
+				status = "installed_containment_unverified"
+			}
+			return Response{OK: true, Status: status, Output: string(body), OutputEncoding: "json", BytesSeen: int64(len(body)), BytesReturned: int64(len(body))}
+		}
 		if req.Language != "" && req.Language != "go" {
-			return fileError("unsupported_debug_language", "validation", errors.New("debugger readiness supports go, python, javascript and typescript only"))
+			return fileError("unsupported_debug_language", "validation", errors.New("debugger readiness supports go, rust, python, javascript and typescript only"))
 		}
 		_, err := s.debugBinary()
 		available := err == nil
@@ -204,6 +219,9 @@ func (s *Server) debugLaunch(ctx context.Context, req Request) (response Respons
 	}
 	if req.Language == "python" {
 		return s.debugLaunchPython(ctx, req)
+	}
+	if req.Language == "rust" {
+		return s.debugLaunchRust(ctx, req)
 	}
 	if (req.Language != "" && req.Language != "go") || (req.DebugMode != "" && req.DebugMode != "exec") {
 		return fileError("unsupported_debug_language_or_mode", "validation", errors.New("supported Go debug mode is exec; Python requires explicit trusted script/module/test mode"))
@@ -519,6 +537,9 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 		extension := ".go"
 		if d.adapter == "python/debugpy" {
 			extension = ".py"
+		}
+		if d.adapter == "rust/lldb-dap" {
+			extension = ".rs"
 		}
 		sourceExt := filepath.Ext(relative)
 		validJS := d.adapter == "javascript/js-debug" && (sourceExt == ".js" || sourceExt == ".mjs" || sourceExt == ".cjs" || (d.sourceLanguage == "typescript" && (sourceExt == ".ts" || sourceExt == ".tsx")))

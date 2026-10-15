@@ -14,11 +14,11 @@ type DebugAdapterStatusInput struct {
 }
 type DebugLaunchInput struct {
 	Workspace   string `json:"workspace" jsonschema:"Exact absolute worker workspace/worktree directory"`
-	Program     string `json:"program" jsonschema:"Workspace-relative prebuilt Go executable, Python .py or Node .js/.mjs/.cjs; TypeScript requires precompiled .js plus adjacent .js.map"`
+	Program     string `json:"program" jsonschema:"Workspace-relative prebuilt Go/Rust executable, Python .py or Node .js/.mjs/.cjs; TypeScript requires compiled .js plus adjacent .js.map"`
 	FileVersion string `json:"file_version" jsonschema:"Exact program/source version from workspace_stat; stale versions are rejected"`
-	Language    string `json:"language,omitempty" jsonschema:"Optional debugger language: go (default), python, javascript or precompiled typescript source map for Node/js-debug"`
-	Mode        string `json:"mode,omitempty" jsonschema:"Go exec (default); Python script/module/test; JavaScript/TypeScript precompiled node; unsupported modes rejected"`
-	StopOnEntry bool   `json:"stop_on_entry,omitempty" jsonschema:"Pause the selected Go/Python/Node program at its entrypoint"`
+	Language    string `json:"language,omitempty" jsonschema:"Optional debugger language: go (default), rust, python, javascript or precompiled typescript"`
+	Mode        string `json:"mode,omitempty" jsonschema:"Go/Rust exec (default); Python script/module/test; JavaScript/TypeScript precompiled node; unsupported modes rejected"`
+	StopOnEntry bool   `json:"stop_on_entry,omitempty" jsonschema:"Pause the selected Go/Rust/Python/Node program at its entrypoint"`
 }
 type DebugOwnerInput struct {
 	Workspace string `json:"workspace" jsonschema:"Exact absolute workspace used at debug_launch"`
@@ -27,7 +27,7 @@ type DebugOwnerInput struct {
 type DebugBreakpointsInput struct {
 	Workspace   string `json:"workspace"`
 	SessionID   string `json:"session_id"`
-	Path        string `json:"path" jsonschema:"Workspace-relative .go, .py, .js/.mjs/.cjs or TypeScript .ts with pinned .js.map; exact file version required"`
+	Path        string `json:"path" jsonschema:"Workspace-relative .go/.rs/.py/.js/.mjs/.cjs or pinned TypeScript .ts; exact file_version required"`
 	FileVersion string `json:"file_version" jsonschema:"Exact current source version from workspace_stat"`
 	Lines       []int  `json:"lines" jsonschema:"1-based source lines, max 32; an empty array removes breakpoints"`
 }
@@ -55,21 +55,21 @@ type DebugEvaluateInput struct {
 
 func (s *Server) registerDebugTools() {
 
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "debug_adapter_status", Description: "Discover optional trusted Go/Delve, Python/debugpy or Node/js-debug JS/TypeScript source-map readiness without launching or installing tools; no remote/root attach.", Annotations: annotations(true, false, true, false)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugAdapterStatusInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "debug_adapter_status", Description: "Discover optional trusted Go/Delve, Rust/LLDB-DAP, Python/debugpy or Node/js-debug readiness without launching or installing tools; no remote/root attach.", Annotations: annotations(true, false, true, false)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugAdapterStatusInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		return s.callDebug(ctx, executor.Request{Action: "debug_adapter_status", Language: in.Language})
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-		Name: "debug_launch", Description: "Launch worker-only Go/Delve exec, Python/debugpy script/module/unittest, or Node/js-debug JavaScript and precompiled TypeScript source-map node DAP with exact source file_version and trusted optional adapter. Python and Node require atomic executor-owned private cgroup-v2 descendant containment and pinned full adapter resources. No remote attach, root, custom adapter or runInTerminal. Debugging explicitly executes selected project code.", Annotations: annotations(false, true, false, true),
+		Name: "debug_launch", Description: "Launch worker-only Go/Delve exec, Rust/LLDB-DAP prebuilt ELF, Python/debugpy script/module/unittest, or Node/js-debug JavaScript and precompiled TypeScript source-map node DAP with exact source file_version and trusted optional adapter. Rust, Python and Node require atomic executor-owned private cgroup-v2 descendant containment and pinned full adapter resources. No remote attach, root, custom adapter or runInTerminal. Debugging explicitly executes selected project code.", Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugLaunchInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		return s.callDebug(ctx, executor.Request{Action: "debug_launch", Workspace: in.Workspace, DebugProgram: in.Program, FileVersion: in.FileVersion, DebugStopOnEntry: in.StopOnEntry, Language: in.Language, DebugMode: in.Mode})
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-		Name: "debug_breakpoints", Description: "Set/remove Go, Python or Node JavaScript source breakpoints with exact worker source file_version, before debug_configure. This may alter debuggee execution.", Annotations: annotations(false, true, false, true),
+		Name: "debug_breakpoints", Description: "Set/remove Go, Rust, Python or Node JavaScript source breakpoints with exact worker source file_version, before debug_configure. This may alter debuggee execution.", Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugBreakpointsInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		return s.callDebug(ctx, executor.Request{Action: "debug_action", DebugMethod: "breakpoints", Workspace: in.Workspace, SessionID: in.SessionID, Path: in.Path, FileVersion: in.FileVersion, DebugLines: in.Lines})
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-		Name: "debug_evaluate", Description: "Evaluate a user-approved expression in the stopped Go/Delve, Python/debugpy or Node/js-debug target. This can execute code or cause side effects; do not treat as read-only or automatically retry after uncertainty.", Annotations: annotations(false, true, false, true),
+		Name: "debug_evaluate", Description: "Evaluate a user-approved expression in the stopped Go/Delve, Rust/LLDB-DAP, Python/debugpy or Node/js-debug target. This can execute code or cause side effects; do not treat as read-only or automatically retry after uncertainty.", Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugEvaluateInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		return s.callDebug(ctx, executor.Request{Action: "debug_action", DebugMethod: "evaluate", Workspace: in.Workspace, SessionID: in.SessionID, DebugFrameID: in.FrameID, DebugExpression: in.Expression})
 	})
@@ -83,7 +83,7 @@ func (s *Server) registerDebugTools() {
 		readOnly                  bool
 	}{
 		{"debug_configure", "configure", "Finish breakpoint configuration and run/stop-on-entry via real DAP configurationDone.", false},
-		{"debug_threads", "threads", "Inspect threads of the configured Go/Delve, Python/debugpy or Node/js-debug session.", true},
+		{"debug_threads", "threads", "Inspect threads of the configured Go/Delve, Rust/LLDB-DAP, Python/debugpy or Node/js-debug session.", true},
 	} {
 		item := x
 		mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: item.name, Description: item.description, Annotations: annotations(item.readOnly, !item.readOnly, item.readOnly, !item.readOnly)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugOwnerInput) (*mcpsdk.CallToolResult, executor.Response, error) {
@@ -94,7 +94,7 @@ func (s *Server) registerDebugTools() {
 		name, method, description string
 		readOnly                  bool
 	}{
-		{"debug_continue", "continue", "Continue a halted Go/Python/Node program; changes target execution state.", false},
+		{"debug_continue", "continue", "Continue a halted Go/Rust/Python/Node program; changes target execution state.", false},
 		{"debug_pause", "pause", "Pause running debuggee; changes target execution state.", false},
 		{"debug_next", "next", "Step over a statement; changes target execution state.", false},
 		{"debug_step_in", "stepIn", "Step into a function; changes target execution state.", false},
@@ -107,13 +107,13 @@ func (s *Server) registerDebugTools() {
 			return s.callDebug(ctx, executor.Request{Action: "debug_action", DebugMethod: item.method, Workspace: in.Workspace, SessionID: in.SessionID, DebugThreadID: in.ThreadID})
 		})
 	}
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "debug_scopes", Description: "Inspect variable scopes of a stopped Go/Python stack frame.", Annotations: annotations(true, false, true, false)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugFrameInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "debug_scopes", Description: "Inspect variable scopes of a stopped Go/Rust/Python stack frame.", Annotations: annotations(true, false, true, false)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugFrameInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		return s.callDebug(ctx, executor.Request{Action: "debug_action", DebugMethod: "scopes", Workspace: in.Workspace, SessionID: in.SessionID, DebugFrameID: in.FrameID})
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "debug_status", Description: "Inspect current debug session state and bounded asynchronous DAP events, including explicit dropped-events accounting. Does not imply the debuggee terminated on client disconnect.", Annotations: annotations(true, false, false, false)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugOwnerInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		return s.callDebug(ctx, executor.Request{Action: "debug_status", Workspace: in.Workspace, SessionID: in.SessionID})
 	})
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "debug_stop", Description: "Request debugger disconnect+terminateDebuggee and stop the executor-owned worker session with verified Go or Python descendant cleanup. Uncertain results are not reported as success.", Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugOwnerInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "debug_stop", Description: "Request debugger disconnect+terminateDebuggee and stop the executor-owned worker session with verified Go/Rust/Python/Node descendant cleanup. Uncertain results are not reported as success.", Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugOwnerInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		return s.callDebug(ctx, executor.Request{Action: "debug_stop", Workspace: in.Workspace, SessionID: in.SessionID})
 	})
 }
