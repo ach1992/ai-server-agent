@@ -68,7 +68,7 @@ func TestSQLColumnGraphRejectsUnsafeScope(t *testing.T) {
 		{"SELECT 'REFERENCES accounts(id)' AS s;", "postgres"},
 		{"DO $tag$ ALTER TABLE accounts ADD COLUMN fake INT; $tag$;", "postgres"},
 		{"ALTER TABLE accounts ADD CONSTRAINT pk PRIMARY KEY(id);", "postgres"},
-		{"ALTER TABLE accounts ADD INDEX idx_id (id);", "mysql"},
+		{"ALTER TABLE accounts ADD INDEX idx_id ((id+1));", "mysql"}, // expression indexes are not source-backed column identifiers
 		{"SELECT E'quoted\\'; INSERT INTO accounts (id) VALUES (1);' AS s;", "postgres"},
 	} {
 		out, valid := sqlNavAllOccurrences(tc.sql, tc.dialect)
