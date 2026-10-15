@@ -48,6 +48,10 @@ default="$(runtime_show)"
 grep -Fq 'Runtime settings' <<<"$default" || fail 'runtime settings heading missing'
 grep -Fq 'http_idle_timeout_seconds=90 seconds' <<<"$default" || fail 'legacy default is wrong'
 grep -Fq 'text_fallback_bytes=32768 bytes' <<<"$default" || fail 'text fallback default is wrong'
+grep -Fq 'worker_command_slots=0 slots' <<<"$default" || fail 'automatic worker concurrency default missing'
+grep -Fq 'persistent_task_slots=4 tasks' <<<"$default" || fail 'default persistent task concurrency missing'
+grep -Fq '  Range   : 0..8 slots' <<<"$default" || fail 'worker concurrency range missing'
+grep -Fq '  Range   : 1..8 tasks' <<<"$default" || fail 'task concurrency range missing'
 grep -Fq '  Default : 90 seconds' <<<"$default" || fail 'default value is not visually separated'
 grep -Fq '  Range   : 10..3600 seconds' <<<"$default" || fail 'supported range is not visually separated'
 grep -Fq '  Applies : Agent + Executor restart required' <<<"$default" || fail 'restart requirement is not explicit'
@@ -158,5 +162,25 @@ fi
 rm -f -- "$r4_snapshot"
 test -z "$(runtime_pending_backup)" || fail 'isolated R4 fixture retained stale backup'
 
+# New knobs use the same protected transactional runtime management path.
+# The rest of this fixture already proves failed restart/rollback state; this
+# particular isolated case models successful activation without touching PID1.
+restart_and_verify_local(){ return 0; }
+runtime_apply set worker_command_slots 8 >/dev/null
+runtime_apply set persistent_task_slots 8 >/dev/null
+[ "$(jq -r '.runtime.worker_command_slots' "$CONFIG_FILE")" = 8 ] || fail 'worker override was not persisted'
+[ "$(jq -r '.runtime.persistent_task_slots' "$CONFIG_FILE")" = 8 ] || fail 'task override was not persisted'
+grep -Fq 'worker_command_slots=8 slots' <(runtime_show) || fail 'worker override not visible'
+grep -Fq 'persistent_task_slots=8 tasks' <(runtime_show) || fail 'task override not visible'
+for key in worker_command_slots persistent_task_slots; do
+  before="$(sha256sum "$CONFIG_FILE" | cut -d' ' -f1)"
+  if (runtime_apply set "$key" 9 >/dev/null 2>&1); then fail "$key allowed more than eight slots"; fi
+  [ "$(sha256sum "$CONFIG_FILE" | cut -d' ' -f1)" = "$before" ] || fail "$key invalid setting changed config"
+  runtime_apply reset "$key" >/dev/null
+done
+grep -Fq 'worker_command_slots=0 slots' <(runtime_show) || fail 'worker default not restored'
+grep -Fq 'persistent_task_slots=4 tasks' <(runtime_show) || fail 'task default not restored'
+
 ASA_PROFILE_TEST_BINARY="$RUNTIME_BINARY" bash "$ROOT/tests/environment_profiles.sh"
+bash "$ROOT/tests/operator_menu.sh"
 echo 'Runtime settings management PASS'

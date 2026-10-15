@@ -104,6 +104,12 @@ After installation, the main entrypoint is:
 sudo ai-server-agent-manage
 ```
 
+### Interactive console navigation and safe cancellation
+
+The interactive manager shows the verified installed build, server identity/purpose and non-secret connection details in its header. Use **0/Back** to leave a menu, **b** to cancel setup inputs before any commit, or **No** to decline a confirmation. An invalid choice stays in the menu. Failed actions report their result and keep the console usable when the manager is still installed.
+
+**Ctrl+C** cancels a running *read-only* view (status/inspection) or a pending menu selection without ending the manager. In contrast, runtime/profile/credential/connection changes, Cloudflare transactions, updates, repair and uninstall may be holding a lifecycle lock, committing configuration, changing remote resources or restarting services. These protected operations **do not accept Ctrl+C cancellation mid-change**, because interruption could bypass rollback/recovery. Cancel at an offered input/confirmation, or let the protected action finish; if it fails, check its recovery/status message before retrying. Closing the terminal, killing the manager, or losing SSH cannot be assumed to roll back an active transaction. For unattended automation, use the documented noninteractive subcommands, whose existing exit/signal contracts are unchanged.
+
 ## Guided Cloudflare setup
 
 The recommended direct-public path uses Cloudflare for the selected MCP hostname only. It does not change the zone-wide SSL mode.
@@ -217,6 +223,22 @@ sudo ai-server-agent-manage purge
 **Development/Validation purpose profiles:** current `main` implements purpose labels and management commands, but published Stable `v0.1.12` does not. For the version-gated `profile-show`, `profile-set`, `profile-label` and `profile-label-clear` commands, first-install options, Agent-only restart/reconnect behavior, and direct-client metadata, see [Environment Purpose Profiles](ENVIRONMENT-PROFILES.md). Profiles do **not** change MCP/root/worker permissions or the independent connection mode. Verify the installed release contains the feature before using these commands.
 
 Runtime settings persist in the existing root-managed `/etc/ai-server-agent/config.json`. `runtime-show` lists the effective configured values, safe value ranges and units; `runtime-set` and `runtime-reset` validate with the installed binary **before** updating the config, restart Agent/Executor, verify local health, and restore the prior config on verified restart failure. Run those commands in an independent SSH/operator terminal because restarting the Agent may disconnect an MCP client. No source edit or new release is needed to change supported settings **once this capability has been installed**. A configured value is not guaranteed active until both services restart and health is checked. An invalid value never restarts them. These are per-request/network operational budgets, not a way to disable authentication, bypass approval or transfer an unlimited file in one MCP response. Large authorized files use bounded version-pinned reads and the separate staged worker upload contract; real-client attachment and typed-artifact acceptance remain Issue #99.
+
+### Execution concurrency (optional)
+
+The console's **Runtime limits and execution capacity** section offers separate guided controls for synchronous unprivileged commands and persistent task jobs. The safe defaults remain CPU-aware commands (`worker_command_slots=0`: `min(GOMAXPROCS, 4)`) and four active tasks (`persistent_task_slots=4`). An operator can optionally set either independently, up to eight:
+
+```bash
+sudo ai-server-agent-manage runtime-show
+sudo ai-server-agent-manage runtime-set worker_command_slots 8
+sudo ai-server-agent-manage runtime-set persistent_task_slots 8
+```
+
+These controls do not change the fixed one-at-a-time root command limit or two persistent service slots. Invalid values are rejected before changes, and all accepted changes use the existing privileged lock, validated restart, health check and rollback path. `runtime-reset worker_command_slots` and `runtime-reset persistent_task_slots` restore defaults.
+
+Lowering `persistent_task_slots` does **not** stop already-running tasks. `runtime_list` may temporarily report more active tasks than the newly configured limit; new task admission stays blocked until active tasks fall below that limit. The two persistent service slots remain independently available subject to their own quota and filesystem safety reserve. Job-log and audit disk reservations continue to cover the historical active task exposure up to the hard limit of eight.
+
+Eight available slots is an **admission ceiling**, not a CPU/RAM guarantee. On small hosts (notably two-vCPU machines with limited RAM or exhausted swap), leave the defaults or raise gradually while watching real resource usage. Only use these commands after the installed Agent version supports them; the source implementation alone does not modify the running service.
 
 Privileged install/update/manage/uninstall/purge operations share a root-only lifecycle lock under `/run/lock/ai-server-agent`. A concurrent management operation fails before state mutation rather than racing another lifecycle operation.
 

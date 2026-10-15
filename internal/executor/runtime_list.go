@@ -83,7 +83,7 @@ func (s *Server) runtimeListContext(parent context.Context, req Request) Respons
 		Status:          "observed",
 		GeneratedAt:     now,
 		RuntimeEntries:  []RuntimeEntry{},
-		RuntimeCapacity: &RuntimeCapacity{TaskLimit: maxActivePersistentJobs, ServiceLimit: maxActivePersistentServices},
+		RuntimeCapacity: &RuntimeCapacity{TaskLimit: s.persistentTaskCapacity(), ServiceLimit: maxActivePersistentServices},
 	}
 	cap := response.RuntimeCapacity
 	// A passive inspection never creates directories, claims, markers or units.

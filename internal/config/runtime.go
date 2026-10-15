@@ -19,6 +19,8 @@ type RuntimeSettings struct {
 	TransferStagingMiB           int `json:"transfer_staging_mib"`
 	TransferSessionTTLSeconds    int `json:"transfer_session_ttl_seconds"`
 	TransferActiveSessions       int `json:"transfer_active_sessions"`
+	WorkerCommandSlots           int `json:"worker_command_slots"`
+	PersistentTaskSlots          int `json:"persistent_task_slots"`
 }
 
 type RuntimeSettingSpec struct {
@@ -39,6 +41,8 @@ var runtimeSettingSpecs = []RuntimeSettingSpec{
 	{Key: "transfer_staging_mib", Default: 512, Minimum: 16, Maximum: 1048576, Unit: "MiB", Description: "Cumulative declared bytes for concurrent staged worker transfers; not a permanent file-size limit"},
 	{Key: "transfer_session_ttl_seconds", Default: 3600, Minimum: 60, Maximum: 86400, Unit: "seconds", Description: "Idle lifetime for resumable worker transfers, including final status receipts"},
 	{Key: "transfer_active_sessions", Default: 8, Minimum: 1, Maximum: 64, Unit: "sessions", Description: "Maximum simultaneous durable worker transfer sessions"},
+	{Key: "worker_command_slots", Default: 0, Minimum: 0, Maximum: 8, Unit: "slots", Description: "Parallel unprivileged run_command capacity; 0=automatic min(CPU,4), 1..8=operator override; root stays at one slot"},
+	{Key: "persistent_task_slots", Default: 4, Minimum: 1, Maximum: 8, Unit: "tasks", Description: "Simultaneous persistent task jobs; independent from two service slots and worker command slots"},
 }
 
 func RuntimeSettingSpecs() []RuntimeSettingSpec {
@@ -57,6 +61,8 @@ func DefaultRuntimeSettings() RuntimeSettings {
 		TransferStagingMiB:           512,
 		TransferSessionTTLSeconds:    3600,
 		TransferActiveSessions:       8,
+		WorkerCommandSlots:           0,
+		PersistentTaskSlots:          4,
 	}
 }
 
@@ -70,6 +76,8 @@ func (r RuntimeSettings) Validate() error {
 		"transfer_staging_mib":             r.TransferStagingMiB,
 		"transfer_session_ttl_seconds":     r.TransferSessionTTLSeconds,
 		"transfer_active_sessions":         r.TransferActiveSessions,
+		"worker_command_slots":             r.WorkerCommandSlots,
+		"persistent_task_slots":            r.PersistentTaskSlots,
 	}
 	for _, spec := range runtimeSettingSpecs {
 		got := values[spec.Key]

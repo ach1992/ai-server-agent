@@ -87,14 +87,17 @@ func NewServer(cfg config.Config, token string) (*Server, error) {
 	uid64, _ := strconv.ParseUint(u.Uid, 10, 32)
 	gid64, _ := strconv.ParseUint(u.Gid, 10, 32)
 	protected := []string{"ai-server-agent", "/usr/local/bin/ai-server-agent", "/etc/ai-server-agent", cfg.StateDir, cfg.LogDir, cfg.ExecutorSocket, cfg.ListenAddress}
+	// Audit reservation is initialized once at executor startup. Active
+	// systemd transient tasks survive configuration-driven executor restarts,
+	// so reserve for the hard 8-task ceiling even after a downscale.
 	return &Server{
 		cfg:               cfg,
 		token:             token,
 		guard:             policy.New(protected),
-		audit:             audit.NewWithKeyAndReserve(filepath.Join(cfg.LogDir, "audit.jsonl"), filepath.Join(filepath.Dir(cfg.ExecutorToken), "audit-fingerprint.key"), jobStateSafetyReserveBytes),
+		audit:             audit.NewWithKeyAndReserve(filepath.Join(cfg.LogDir, "audit.jsonl"), filepath.Join(filepath.Dir(cfg.ExecutorToken), "audit-fingerprint.key"), jobStateSafetyReserveBytesFor(maxActivePersistentJobs)),
 		workerUID:         uint32(uid64),
 		workerGID:         uint32(gid64),
-		runs:              newRunLimiter(),
+		runs:              newRunLimiterForSlots(cfg.EffectiveRuntime().WorkerCommandSlots),
 		sessions:          newStdioSessionBroker(),
 		lifecycleLockPath: lifecycleManagementLockPath,
 	}, nil
