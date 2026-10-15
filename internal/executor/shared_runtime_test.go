@@ -246,6 +246,55 @@ func TestSharedRuntimeServiceQuotaIndependentAndUnknownFailsClosed(t *testing.T)
 	}
 }
 
+func TestRuntimeConfiguredTaskCapacityAndAdmission(t *testing.T) {
+	s, state, root := newSharedRuntimeTestServer(t)
+	jobs, claims := filepath.Join(state, "jobs"), filepath.Join(state, "jobs", "claims")
+	if err := os.Mkdir(jobs, 0711); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(claims, 0700); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UTC().Format(time.RFC3339Nano)
+	for n := 1; n <= 4; n++ {
+		fixtureRuntimeClaim(t, claims, fmt.Sprint(n), "owner", "task", root, now)
+	}
+	mockActiveUnits(t, "1", "2", "3", "4")
+	if s.persistentTaskCapacity() != 4 {
+		t.Fatal("default task limit changed")
+	}
+	cap4 := s.runtimeList(Request{PrincipalID: "owner", PrincipalClass: "direct"})
+	if !cap4.OK || cap4.RuntimeCapacity == nil || cap4.RuntimeCapacity.TaskLimit != 4 || cap4.RuntimeCapacity.TasksActive != 4 {
+		t.Fatalf("default capacity not exposed: %+v", cap4)
+	}
+	if r := persistentJobAdmissionResponseWithLimit(jobs, 4, "task"); r == nil || r.Status != "busy" {
+		t.Fatalf("four active tasks over-admitted at default: %+v", r)
+	}
+	runtime := config.DefaultRuntimeSettings()
+	runtime.PersistentTaskSlots = 8
+	s.cfg.Runtime = &runtime
+	if s.persistentTaskCapacity() != 8 {
+		t.Fatal("override not effective")
+	}
+	cap8 := s.runtimeList(Request{PrincipalID: "owner", PrincipalClass: "direct"})
+	if !cap8.OK || cap8.RuntimeCapacity == nil || cap8.RuntimeCapacity.TaskLimit != 8 || cap8.RuntimeCapacity.TasksActive != 4 {
+		t.Fatalf("override capacity not exposed: %+v", cap8)
+	}
+	if r := persistentJobAdmissionResponseWithLimit(jobs, 8, "task"); r != nil {
+		t.Fatalf("eight-slot task admission rejected 4 running: %+v", r)
+	}
+	for n := 5; n <= 8; n++ {
+		fixtureRuntimeClaim(t, claims, fmt.Sprint(n), "owner", "task", root, now)
+	}
+	mockActiveUnits(t, "1", "2", "3", "4", "5", "6", "7", "8")
+	if r := persistentJobAdmissionResponseWithLimit(jobs, 8, "task"); r == nil || r.Status != "busy" {
+		t.Fatalf("eight active tasks over-admitted: %+v", r)
+	}
+	if r := persistentJobAdmissionResponseWithLimit(jobs, 8, "service"); r != nil {
+		t.Fatalf("service admission incorrectly coupled to full task slots: %+v", r)
+	}
+}
+
 // A successful systemctl stop is only a request; state must prove that the
 // exact unit is no longer active before advertising terminal completion.
 func TestSharedRuntimeStopRequiresVerifiedUnitTermination(t *testing.T) {

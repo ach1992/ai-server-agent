@@ -23,7 +23,7 @@ import (
 )
 
 const (
-	maxActivePersistentJobs           = 4
+	maxActivePersistentJobs           = 8 // hard bound; configured default is four
 	maxActivePersistentServices       = 2
 	maxCompletedJobArtifacts          = 32
 	maxFailedJobClaims                = maxCompletedJobArtifacts
@@ -34,7 +34,6 @@ const (
 	systemdOutputLimit                = 64 << 10
 	jobRunnerFailureExit              = 125
 	jobStateOverheadBytes       int64 = 64 << 20
-	jobStateSafetyReserveBytes        = int64(maxPersistentJobClaims)*maxJobLogBytes + jobStateOverheadBytes
 	lifecycleManagementLockPath       = "/run/lock/ai-server-agent/management.lock"
 )
 
@@ -194,7 +193,7 @@ func (s *Server) startJobBounded(req Request) (resp Response) {
 		}
 	}
 
-	if blocked := persistentJobAdmissionResponse(jobsDir, req.Kind); blocked != nil {
+	if blocked := persistentJobAdmissionResponseWithLimit(jobsDir, s.persistentTaskCapacity(), req.Kind); blocked != nil {
 		return *blocked
 	}
 
@@ -379,7 +378,7 @@ func (s *Server) resumeClaimedJob(req Request, jobsDir, claimPath string, claim 
 		}
 	}
 
-	if blocked := persistentJobAdmissionResponse(jobsDir, kind); blocked != nil {
+	if blocked := persistentJobAdmissionResponseWithLimit(jobsDir, s.persistentTaskCapacity(), kind); blocked != nil {
 		blocked.JobID = claim.JobID
 		blocked.IdempotentReplay = true
 		return *blocked
@@ -957,10 +956,26 @@ func terminalJobResponse(status, jobID string) Response {
 	}
 }
 
+func (s *Server) persistentTaskCapacity() int {
+	n := s.cfg.EffectiveRuntime().PersistentTaskSlots
+	if n < 1 || n > maxActivePersistentJobs {
+		return 4 // same safe default as a config with no runtime section
+	}
+	return n
+}
+
+// Kept for fixture-level checks of the maximum independently protected cap.
 func persistentJobAdmissionResponse(jobsDir string, kinds ...string) *Response {
 	kind := "task"
 	if len(kinds) > 0 {
 		kind = kinds[0]
+	}
+	return persistentJobAdmissionResponseWithLimit(jobsDir, maxActivePersistentJobs, kind)
+}
+
+func persistentJobAdmissionResponseWithLimit(jobsDir string, taskLimit int, kind string) *Response {
+	if taskLimit < 1 || taskLimit > maxActivePersistentJobs {
+		taskLimit = 4
 	}
 	counts, err := activeAgentJobKindCounts(jobsDir)
 	active := counts.tasks + counts.services
@@ -968,9 +983,9 @@ func persistentJobAdmissionResponse(jobsDir string, kinds ...string) *Response {
 		resp := jobStateError("job_state_unavailable", err)
 		return &resp
 	}
-	if (kind == "task" && counts.tasks >= maxActivePersistentJobs) ||
+	if (kind == "task" && counts.tasks >= taskLimit) ||
 		(kind == "service" && counts.services >= maxActivePersistentServices) ||
-		active >= maxActivePersistentJobs+maxActivePersistentServices {
+		active >= taskLimit+maxActivePersistentServices {
 		return &Response{
 			Error:      "persistent task/service execution capacity is busy",
 			ReasonCode: "resource_limit",
@@ -980,14 +995,15 @@ func persistentJobAdmissionResponse(jobsDir string, kinds ...string) *Response {
 			Status:     "busy",
 		}
 	}
-	ok, free, err := jobStateHasReserve(jobsDir)
+	reserve := jobStateSafetyReserveBytesFor(taskLimit)
+	ok, free, err := jobStateHasReserve(jobsDir, reserve)
 	if err != nil {
 		resp := jobStateError("job_state_unavailable", err)
 		return &resp
 	}
 	if !ok {
 		return &Response{
-			Error:      fmt.Sprintf("job state filesystem is below the %d-byte safety reserve (%d bytes available)", jobStateSafetyReserveBytes, free),
+			Error:      fmt.Sprintf("job state filesystem is below the %d-byte safety reserve (%d bytes available)", reserve, free),
 			ReasonCode: "resource_limit",
 			ErrorCode:  "resource_limit",
 			ErrorClass: "resource",
@@ -998,13 +1014,17 @@ func persistentJobAdmissionResponse(jobsDir string, kinds ...string) *Response {
 	return nil
 }
 
-func jobStateHasReserve(path string) (bool, int64, error) {
+func jobStateSafetyReserveBytesFor(taskLimit int) int64 {
+	return int64(2*maxCompletedJobArtifacts+taskLimit+maxActivePersistentServices)*maxJobLogBytes + jobStateOverheadBytes
+}
+
+func jobStateHasReserve(path string, reserve int64) (bool, int64, error) {
 	var stat syscall.Statfs_t
 	if err := syscall.Statfs(path, &stat); err != nil {
 		return false, 0, err
 	}
 	free := int64(stat.Bavail) * int64(stat.Bsize)
-	return free >= jobStateSafetyReserveBytes, free, nil
+	return free >= reserve, free, nil
 }
 
 func (s *Server) cleanupCompletedJobArtifacts(jobsDir, claimsDir string) error {

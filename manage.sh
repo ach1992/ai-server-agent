@@ -130,15 +130,101 @@ acquire_management_lock(){
 
 }
 
-if [ -t 1 ]; then
+
+if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
   BOLD=$'\033[1m'; DIM=$'\033[2m'; GREEN=$'\033[32m'; CYAN=$'\033[36m'; YELLOW=$'\033[33m'; RED=$'\033[31m'; RESET=$'\033[0m'
 else
   BOLD=""; DIM=""; GREEN=""; CYAN=""; YELLOW=""; RED=""; RESET=""
 fi
 
+# Clear only interactive terminals; never print untrusted control sequences.
+ui_safe_value(){
+  local width limit
+  width="$(ui_width)"
+  limit=$((width - 18))
+  # Remove controls, not valid UTF-8 bytes from a printable server label.
+  printf '%s' "$1" | LC_ALL=C tr -d '\000-\037\177' | cut -c "1-$limit"
+}
+ui_height(){
+  local lines="${LINES:-}"
+  if ! [[ "$lines" =~ ^[0-9]+$ ]]; then lines=""; fi
+  if [ -z "$lines" ] && [ -t 1 ] && command -v tput >/dev/null 2>&1; then
+    lines="$(tput lines 2>/dev/null || true)"
+  fi
+  [[ "$lines" =~ ^[0-9]+$ ]] || lines=24
+  printf '%s\n' "$lines"
+}
+ui_section(){
+  if [ "${UI_COMPACT:-0}" = 1 ]; then
+    printf '%s%s%s\n' "$BOLD" "$1" "$RESET"
+  else
+    printf '\n%s%s%s\n' "$BOLD" "$1" "$RESET"
+  fi
+}
+ui_detail(){
+  printf '  %-12s %s\n' "$1" "$(ui_safe_value "$2")"
+}
+ui_notice(){
+  local kind="$1" message="$2" color="$CYAN"
+  case "$kind" in
+    success) color="$GREEN" ;;
+    warning) color="$YELLOW" ;;
+    error) color="$RED" ;;
+  esac
+  printf '\n%s%s:%s\n' "$color" "${kind^^}" "$RESET"
+  ui_wrap '  ' "$message"
+  printf '\n'
+}
+# Child gets strict errexit, NOT conditional Bash invocation, so transactional
+# failure aborts the child instead of continuing with a half-completed step.
+ui_menu_action(){
+  local rc
+  set +e
+  ( set -Eeuo pipefail; "$@" )
+  rc=$?
+  set -e
+  if [ "$rc" -ne 0 ]; then
+    ui_notice error "Action failed (exit $rc). The menu remains available. Inspect the message above before retrying."
+  fi
+  return 0
+}
+ui_cancel_requested(){
+  case "$1" in b|B|back|Back|BACK) return 0 ;; *) return 1 ;; esac
+}
+
 header(){
-  printf '\n%sAI Server Agent%s\n' "$BOLD" "$RESET"
-  printf '%sSimple setup and management for your MCP server%s\n\n' "$DIM" "$RESET"
+  local width identity channel version ref label profile connection host port
+  width="$(ui_width)"
+  UI_COMPACT=0
+  [ "$(ui_height)" -lt 29 ] && UI_COMPACT=1
+  if [ -t 1 ] && [ "${TERM:-dumb}" != dumb ]; then printf '\033[H\033[2J'; fi
+  identity="$(installed_identity)"
+  IFS='|' read -r channel version ref <<<"$identity"
+  case "$channel" in
+    stable) version="Stable $version" ;;
+    source) version="Source ${ref:0:12}" ;;
+    *) version="Unknown (inspect Status)" ;;
+  esac
+  label="$(config_get server_label)"
+  profile="$(config_get environment_profile)"
+  host="$(managed_get '.hostname')"
+  port="$(current_port)"
+  if [ "$(current_mode)" = public ] && [ -n "$host" ]; then
+    connection="Public HTTPS: https://$host/mcp"
+  elif [ "$(current_mode)" = public ]; then
+    connection="Public listener, port $port (check TLS/domain)"
+  else
+    connection="Local/private: 127.0.0.1:$port (tunnel or SSH)"
+  fi
+  printf '%sAI Server Agent%s  %sManagement console%s\n' "$BOLD" "$RESET" "$DIM" "$RESET"
+  printf '%*s\n' "$width" '' | tr ' ' '-'
+  ui_detail 'Repository' 'ach1992/ai-server-agent'
+  ui_detail 'Build' "$version"
+  ui_detail 'Server' "${label:-$(hostname -s 2>/dev/null || printf 'unknown')} (${profile:-development})"
+  ui_detail 'Connection' "$connection"
+  if [ "$UI_COMPACT" != 1 ]; then
+    printf '%*s\n' "$width" '' | tr ' ' '-'
+  fi
 }
 
 pause(){
@@ -265,7 +351,7 @@ RUNTIME_BINARY="/usr/local/bin/ai-server-agent"
 
 runtime_setting_allowed(){
   case "${1:-}" in
-    http_read_header_timeout_seconds|http_idle_timeout_seconds|command_timeout_seconds|workspace_file_timeout_seconds|text_fallback_bytes|transfer_staging_mib|transfer_session_ttl_seconds|transfer_active_sessions) return 0 ;;
+    http_read_header_timeout_seconds|http_idle_timeout_seconds|command_timeout_seconds|workspace_file_timeout_seconds|text_fallback_bytes|transfer_staging_mib|transfer_session_ttl_seconds|transfer_active_sessions|worker_command_slots|persistent_task_slots) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -295,27 +381,59 @@ runtime_show(){
   printf '\n'
   COLUMNS="$width" "$RUNTIME_BINARY" -config "$CONFIG_FILE" runtime-settings
 }
+
 runtime_menu(){
   [ -r /dev/tty ] || die "Interactive runtime settings require a terminal."
   while true; do
     header
-    runtime_show
-    printf '\n  1) Set a supported setting\n  2) Reset a setting to default\n  0) Back\n'
-    local choice key value
-    read -r -p 'Choose: ' choice </dev/tty
+    ui_section 'Execution capacity'
+    local worker tasks choice key value
+    worker="$(config_get runtime.worker_command_slots)"
+    tasks="$(config_get runtime.persistent_task_slots)"
+    case "${worker:-0}" in
+      0) worker='Automatic: up to 4 commands, CPU-aware' ;;
+      *) worker="$worker simultaneous commands" ;;
+    esac
+    ui_detail 'Commands' "$worker"
+    ui_detail 'Tasks' "${tasks:-4} persistent jobs concurrently"
+    ui_detail 'Root' '1 concurrent root command (fixed)'
+    ui_detail 'Services' '2 persistent services (fixed)'
+    printf '\n'
+    ui_wrap '  ' 'Settings: worker_command_slots (0=auto, 1..8); persistent_task_slots (1..8).'
+    ui_wrap '  ' 'These limits are independent. Raise gradually on hosts with sufficient CPU and memory.'
+    ui_section 'Change settings'
+    printf '  1) Parallel worker command slots (0=auto, 1..8)\n'
+    printf '  2) Simultaneous persistent task jobs (1..8)\n'
+    printf '  3) Change another runtime setting (advanced)\n'
+    printf '  4) Reset a setting to its default\n'
+    printf '  5) Show all values, purposes and ranges\n'
+    printf '  0) Back\n'
+    read -r -p 'Choose: ' choice </dev/tty || return 0
     case "$choice" in
-      1)
-        read -r -p 'Setting key: ' key </dev/tty
-        read -r -p 'New integer value: ' value </dev/tty
-        runtime_apply set "$key" "$value"; pause ;;
-      2)
-        read -r -p 'Setting key: ' key </dev/tty
-        runtime_apply reset "$key"; pause ;;
-      0) return ;;
-      *) warn "Choose 1, 2, or 0." ;;
+      1|2)
+        if [ "$choice" = 1 ]; then key=worker_command_slots; else key=persistent_task_slots; fi
+        read -r -p 'New value (b=cancel): ' value </dev/tty || continue
+        if ui_cancel_requested "$value"; then continue; fi
+        ui_menu_action runtime_apply set "$key" "$value"
+        pause ;;
+      3|4)
+        read -r -p 'Setting key (b=cancel): ' key </dev/tty || continue
+        if ui_cancel_requested "$key"; then continue; fi
+        if [ "$choice" = 3 ]; then
+          read -r -p 'New integer value (b=cancel): ' value </dev/tty || continue
+          if ui_cancel_requested "$value"; then continue; fi
+          ui_menu_action runtime_apply set "$key" "$value"
+        else
+          ui_menu_action runtime_apply reset "$key"
+        fi
+        pause ;;
+      5) ui_menu_action runtime_show; pause ;;
+      0|b|B) return ;;
+      *) ui_notice warning 'Choose a listed number or 0 to return.'; pause ;;
     esac
   done
 }
+
 runtime_apply(){
   local operation="$1" key="$2" value="${3:-}" staged backup restore_stage restored=false
   runtime_setting_allowed "$key" || die "Unknown runtime setting: $key. See runtime-show."
@@ -470,23 +588,43 @@ profile_apply(){
   fi
   die "Environment update failed and recovery is NOT verified. Rollback snapshot preserved at $backup; reconcile installed config and services manually before another change."
 }
+
 profile_menu(){
-  [ -r /dev/tty ] || die "Interactive environment profile selection requires a terminal."
+  [ -r /dev/tty ] || die "Interactive purpose management requires a terminal."
   while true; do
     header
-    profile_show
-    printf '\n  1) Development\n  2) Validation\n  3) Set server label\n  4) Clear server label\n  0) Back\n\n'
+    ui_section 'Current environment'
+    ui_menu_action profile_show
+    ui_section 'Change server purpose / label'
+    printf '  1) Development (build and debug)\n'
+    printf '  2) Validation (test and accept)\n'
+    printf '  3) Set server label\n'
+    printf '  4) Clear server label\n'
+    printf '  0) Back\n\n'
     local choice label
-    read -r -p 'Choose: ' choice </dev/tty
+    read -r -p 'Choose: ' choice </dev/tty || return 0
     case "$choice" in
-      1) profile_apply environment_profile development; pause ;;
-      2) profile_apply environment_profile validation; pause ;;
-      3) label="$(prompt_value 'Server label (max 80 printable characters)')"; profile_apply server_label "$label"; pause ;;
-      4) profile_apply server_label ""; pause ;;
-      0) return ;;
-      *) warn "Choose 1, 2, 3, 4, or 0." ;;
+      1) ui_menu_action profile_apply environment_profile development; pause ;;
+      2) ui_menu_action profile_apply environment_profile validation; pause ;;
+      3)
+        read -r -p 'Server label (b=cancel, max 80 characters): ' label </dev/tty || continue
+        if ui_cancel_requested "$label"; then continue; fi
+        ui_menu_action profile_apply server_label "$label"; pause ;;
+      4) ui_menu_action profile_apply server_label ""; pause ;;
+      0|b|B) return ;;
+      *) ui_notice warning 'Select a number, or 0 to go back.'; pause ;;
     esac
   done
+}
+
+ui_state_value(){
+  local state="$1" color=""
+  case "$state" in
+    active|ok) color="$GREEN" ;;
+    failed|inactive|deactivating|unknown) color="$RED" ;;
+    activating|reloading) color="$YELLOW" ;;
+  esac
+  printf '%s%s%s' "$color" "$state" "$RESET"
 }
 
 status(){
@@ -505,9 +643,9 @@ status(){
   printf '%sStatus%s\n' "$BOLD" "$RESET"
   printf '  Version:       %s (%s)\n' "$version" "$channel"
   [ -n "$ref" ] && printf '  Ref:           %s\n' "$ref"
-  printf '  Agent:         %s\n' "$service"
-  printf '  Executor:      %s\n' "$executor"
-  printf '  Local health:  %s\n' "$health"
+  printf '  Agent:         %s\n' "$(ui_state_value "$service")"
+  printf '  Executor:      %s\n' "$(ui_state_value "$executor")"
+  printf '  Local health:  %s\n' "$(ui_state_value "$health")"
   printf '  Mode:          %s\n' "$mode"
   printf '  Purpose:       %s\n' "$(config_get environment_profile)"
   [ -n "$(config_get server_label)" ] && printf '  Server label:  %s\n' "$(config_get server_label)"
@@ -681,23 +819,36 @@ credential_revoke(){ (
   printf '%sCredential revoked:%s %s\n' "$GREEN" "$RESET" "$principal"
 ) }
 
+
 credential_menu(){
   while true; do
     header
-    credential_status
-    printf '\n  1) Issue / rotate direct/default credential\n'
-    printf '  2) Issue / rotate mcp-gateway credential\n'
-    printf '  3) Revoke direct/default credential\n'
-    printf '  4) Revoke mcp-gateway credential\n'
+    ui_section 'Current MCP credentials'
+    ui_menu_action credential_status
+    ui_section 'Manage credentials'
+    printf '  1) Issue / rotate direct/default credential\n'
+    printf '  2) Issue / rotate MCP Gateway credential\n'
+    printf '  %s3)%s Revoke direct/default credential\n' "$YELLOW" "$RESET"
+    printf '  %s4)%s Revoke MCP Gateway credential\n' "$YELLOW" "$RESET"
     printf '  0) Back\n\n'
-    read -r -p 'Choose: ' choice </dev/tty
+    local choice principal action
+    read -r -p 'Choose: ' choice </dev/tty || return 0
     case "$choice" in
-      1) confirm "Rotate direct/default now? Existing direct clients must reconnect with the new value." no && credential_issue direct-default; pause ;;
-      2) confirm "Issue/rotate mcp-gateway now? An existing Gateway connection must reconnect with the new value." no && credential_issue mcp-gateway; pause ;;
-      3) confirm "Revoke direct/default now?" no && credential_revoke direct-default; pause ;;
-      4) confirm "Revoke mcp-gateway now?" no && credential_revoke mcp-gateway; pause ;;
-      0) return ;;
-      *) warn "Invalid choice."; pause ;;
+      1|2|3|4)
+        case "$choice" in
+          1) principal=direct-default; action=credential_issue ;;
+          2) principal=mcp-gateway; action=credential_issue ;;
+          3) principal=direct-default; action=credential_revoke ;;
+          4) principal=mcp-gateway; action=credential_revoke ;;
+        esac
+        if confirm "Confirm $action for $principal? Clients using changed credentials must reconnect." no; then
+          ui_menu_action "$action" "$principal"
+        else
+          ui_notice warning 'Cancelled; credentials unchanged.'
+        fi
+        pause ;;
+      0|b|B) return ;;
+      *) ui_notice warning 'Choose 1, 2, 3, 4 or 0.'; pause ;;
     esac
   done
 }
@@ -2200,43 +2351,54 @@ run_uninstall(){
   fi
 }
 
+
 connection_menu(){
+  [ -r /dev/tty ] || die "Interactive connection setup requires a terminal."
   while true; do
     header
-    printf 'Connection setup\n'
-    printf '  1) Cloudflare domain (guided, recommended for direct HTTPS)\n'
-    printf '  2) Local/private mode\n'
-    printf '  3) Existing certificate (advanced)\n'
+    ui_section 'Connection setup'
+    printf '  1) Cloudflare domain (guided HTTPS)\n'
+    printf '  2) Local/private (use a tunnel or SSH)\n'
+    printf '  3) Existing TLS certificate (advanced)\n'
     printf '  0) Back\n\n'
-    read -r -p 'Choose: ' choice </dev/tty
+    local choice
+    read -r -p 'Choose: ' choice </dev/tty || return 0
     case "$choice" in
-      1) configure_cloudflare; pause; return ;;
-      2) configure_local; pause; return ;;
-      3) configure_manual_tls; pause; return ;;
-      0) return ;;
-      *) warn "Invalid choice."; pause ;;
+      1) ui_menu_action configure_cloudflare; pause; return ;;
+      2) ui_menu_action configure_local; pause; return ;;
+      3) ui_menu_action configure_manual_tls; pause; return ;;
+      0|b|B) return ;;
+      *) ui_notice warning 'Choose 1, 2, 3 or 0.'; pause ;;
     esac
   done
 }
 
+
 first_run(){
-  header
-  printf 'The Agent core is installed and healthy. Choose how ChatGPT will reach it.\n\n'
-  printf '  1) %sCloudflare domain%s - guided HTTPS/domain setup\n' "$GREEN" "$RESET"
-  printf '  2) Local/private - keep loopback-only for Secure MCP Tunnel\n'
-  printf '  3) Existing certificate - advanced/manual TLS\n'
-  printf '  0) Configure later - keep the healthy local Agent\n\n'
+  [ -r /dev/tty ] || die "First-run setup requires an interactive terminal."
   local choice
-  read -r -p 'Choose [1]: ' choice </dev/tty; choice="${choice:-1}"
-  # Do not propagate a fresh install's one-use bearer into non-Cloudflare
-  # setup subprocesses, which never need to inspect the credential.
+  while true; do
+    header
+    ui_section 'Initial connection setup'
+    ui_wrap '  ' 'The Agent core is installed. Choose how an authorized MCP client will connect.'
+    printf '\n  1) %sCloudflare domain%s - guided HTTPS/domain setup\n' "$GREEN" "$RESET"
+    printf '  2) Local/private - keep loopback-only for a private tunnel\n'
+    printf '  3) Existing TLS certificate - advanced/manual setup\n'
+    printf '  0) Configure later - keep the healthy local Agent\n\n'
+    read -r -p 'Choose [1]: ' choice </dev/tty || return 20
+    choice="${choice:-1}"
+    case "$choice" in
+      0|1|2|3) break ;;
+      *) ui_notice warning 'Select 1, 2, 3 or 0. No setup action started.'; pause ;;
+    esac
+  done
+  # One-use credential handoff is only relevant to Cloudflare setup.
   if [ "$choice" != 1 ] && [ "${AI_SERVER_AGENT_MCP_AUTH_FD:-}" = 3 ]; then exec 3<&-; fi
   case "$choice" in
     1) configure_cloudflare ;;
     2) configure_local ;;
     3) configure_manual_tls ;;
-    0) printf '\nSetup deferred. The Agent remains installed and healthy in local mode.\n'; return 20 ;;
-    *) die "Invalid choice." ;;
+    0) ui_notice success 'Setup deferred. Agent stays healthy in local mode.'; return 20 ;;
   esac
   printf '\n%sDone.%s\n' "$GREEN" "$RESET"
   ui_wrap '' 'Use sudo ai-server-agent-manage any time to change settings.'
@@ -2244,39 +2406,58 @@ first_run(){
   chatgpt_setup
 }
 
+
 menu(){
-  [ -r /dev/tty ] || die "The interactive menu requires a terminal. Run a subcommand for automation."
+  [ -r /dev/tty ] || die "The interactive menu requires a terminal. Use a subcommand for automation."
   while true; do
     header
-    printf '  %s1)%s Status / health\n' "$CYAN" "$RESET"
-    printf '  %s2)%s ChatGPT setup\n' "$CYAN" "$RESET"
-    printf '  %s3)%s Configure or change domain / connection\n' "$CYAN" "$RESET"
+    ui_section 'Connection and status'
+    printf '  %s1)%s Status / health (connection)\n' "$CYAN" "$RESET"
+    printf '  %s2)%s ChatGPT setup / MCP client guide\n' "$CYAN" "$RESET"
+    printf '  %s3)%s Configure or change domain / connection / TLS\n' "$CYAN" "$RESET"
     printf '  %s4)%s Rotate / renew Cloudflare TLS certificate\n' "$CYAN" "$RESET"
+    ui_section 'Agent operations'
     printf '  %s5)%s Update Agent\n' "$CYAN" "$RESET"
     printf '  %s6)%s Repair / restart\n' "$CYAN" "$RESET"
+    printf '  %s11)%s Runtime limits and execution capacity\n' "$CYAN" "$RESET"
+    printf '  %s12)%s Server purpose / label\n' "$CYAN" "$RESET"
+    ui_section 'Access and removal'
+    printf '  %s10)%s MCP credentials\n' "$CYAN" "$RESET"
     printf '  %s7)%s Safe uninstall (preserve data)\n' "$YELLOW" "$RESET"
     printf '  %s8)%s Purge Agent-owned server data\n' "$RED" "$RESET"
     printf '  %s9)%s Remove recorded Cloudflare resources\n' "$YELLOW" "$RESET"
-    printf '  %s10)%s MCP credential management\n' "$CYAN" "$RESET"
-    printf '  %s11)%s Runtime limits and timeouts\n' "$CYAN" "$RESET"
-    printf '  %s12)%s Environment purpose / server label\n' "$CYAN" "$RESET"
-    printf '  0) Exit\n\n'
-    read -r -p 'Choose: ' choice </dev/tty
+    if [ "$UI_COMPACT" = 1 ]; then printf '  0) Exit\n'; else printf '\n  0) Exit\n\n'; fi
+    local choice
+    read -r -p 'Choose: ' choice </dev/tty || return 0
     case "$choice" in
-      1) status; pause ;;
-      2) chatgpt_setup; pause ;;
+      1) ui_menu_action status; pause ;;
+      2) ui_menu_action chatgpt_setup; pause ;;
       3) connection_menu ;;
-      4) [ "$(managed_get '.cloudflare.zone_id')" != "" ] || { warn "No Cloudflare-managed setup is recorded. Use option 3 first."; pause; continue; }; configure_cloudflare; pause ;;
-      5) update_agent; pause ;;
-      6) repair; pause ;;
-      7) run_uninstall 0; return ;;
-      8) run_uninstall 1; return ;;
-      9) cloudflare_cleanup; pause ;;
+      4)
+        if [ -z "$(managed_get '.cloudflare.zone_id')" ]; then
+          ui_notice warning 'No managed Cloudflare domain recorded; configure a domain first.'
+        else
+          ui_menu_action configure_cloudflare
+        fi
+        pause ;;
+      5) ui_menu_action update_agent; pause ;;
+      6) ui_menu_action repair; pause ;;
+      7|8)
+        if [ "$choice" = 7 ]; then
+          ui_menu_action run_uninstall 0
+        else
+          ui_menu_action run_uninstall 1
+        fi
+        # Successful removal replaces the normal return path: the management
+        # binary may have been uninstalled and the menu must not keep running.
+        [ -x "$RUNTIME_BINARY" ] || return 0
+        pause ;;
+      9) ui_menu_action cloudflare_cleanup; pause ;;
       10) credential_menu ;;
       11) runtime_menu ;;
       12) profile_menu ;;
-      0) return ;;
-      *) warn "Invalid choice."; pause ;;
+      0|q|Q) return ;;
+      *) ui_notice warning 'Unknown option; select a listed number or 0 to exit.'; pause ;;
     esac
   done
 }

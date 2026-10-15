@@ -218,6 +218,20 @@ sudo ai-server-agent-manage purge
 
 Runtime settings persist in the existing root-managed `/etc/ai-server-agent/config.json`. `runtime-show` lists the effective configured values, safe value ranges and units; `runtime-set` and `runtime-reset` validate with the installed binary **before** updating the config, restart Agent/Executor, verify local health, and restore the prior config on verified restart failure. Run those commands in an independent SSH/operator terminal because restarting the Agent may disconnect an MCP client. No source edit or new release is needed to change supported settings **once this capability has been installed**. A configured value is not guaranteed active until both services restart and health is checked. An invalid value never restarts them. These are per-request/network operational budgets, not a way to disable authentication, bypass approval or transfer an unlimited file in one MCP response. Large authorized files use bounded version-pinned reads and the separate staged worker upload contract; real-client attachment and typed-artifact acceptance remain Issue #99.
 
+### Execution concurrency (optional)
+
+The console's **Runtime limits and execution capacity** section offers separate guided controls for synchronous unprivileged commands and persistent task jobs. The safe defaults remain CPU-aware commands (`worker_command_slots=0`: `min(GOMAXPROCS, 4)`) and four active tasks (`persistent_task_slots=4`). An operator can optionally set either independently, up to eight:
+
+```bash
+sudo ai-server-agent-manage runtime-show
+sudo ai-server-agent-manage runtime-set worker_command_slots 8
+sudo ai-server-agent-manage runtime-set persistent_task_slots 8
+```
+
+These controls do not change the fixed one-at-a-time root command limit or two persistent service slots. Invalid values are rejected before changes, and all accepted changes use the existing privileged lock, validated restart, health check and rollback path. `runtime-reset worker_command_slots` and `runtime-reset persistent_task_slots` restore defaults.
+
+Eight available slots is an **admission ceiling**, not a CPU/RAM guarantee. On small hosts (notably two-vCPU machines with limited RAM or exhausted swap), leave the defaults or raise gradually while watching real resource usage. Only use these commands after the installed Agent version supports them; the source implementation alone does not modify the running service.
+
 Privileged install/update/manage/uninstall/purge operations share a root-only lifecycle lock under `/run/lock/ai-server-agent`. A concurrent management operation fails before state mutation rather than racing another lifecycle operation.
 
 ## Stable updates

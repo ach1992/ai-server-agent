@@ -71,10 +71,10 @@ func NewServer(cfg config.Config, token string) (*Server, error) {
 		cfg:               cfg,
 		token:             token,
 		guard:             policy.New(protected),
-		audit:             audit.NewWithKeyAndReserve(filepath.Join(cfg.LogDir, "audit.jsonl"), filepath.Join(filepath.Dir(cfg.ExecutorToken), "audit-fingerprint.key"), jobStateSafetyReserveBytes),
+		audit:             audit.NewWithKeyAndReserve(filepath.Join(cfg.LogDir, "audit.jsonl"), filepath.Join(filepath.Dir(cfg.ExecutorToken), "audit-fingerprint.key"), jobStateSafetyReserveBytesFor(cfg.EffectiveRuntime().PersistentTaskSlots)),
 		workerUID:         uint32(uid64),
 		workerGID:         uint32(gid64),
-		runs:              newRunLimiter(),
+		runs:              newRunLimiterForSlots(cfg.EffectiveRuntime().WorkerCommandSlots),
 		sessions:          newStdioSessionBroker(),
 		lifecycleLockPath: lifecycleManagementLockPath,
 	}, nil
