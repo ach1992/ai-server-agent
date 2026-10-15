@@ -316,6 +316,9 @@ func (s *Server) sqlOfflineNavigation(parent context.Context, req Request, sourc
 	query.Action, query.Path, query.FileVersion = "workspace_text_search", "", ""
 	query.Pattern = "(?i)" + regexp.QuoteMeta(selected.searchTerm)
 	query.SearchLimit, query.Globs = sqlNavigationSearchMatches, sqlNavSearchGlobs(req.SQLDialect)
+	// Positive SQL-only globs with hidden traversal avoid silent loss of
+	// migration files in dot-prefixed directories.
+	query.SearchHidden = true
 	search := func() (WorkspaceSearchResult, error) {
 		response := s.workerWorkspaceFile(ctx, query)
 		if !response.OK {

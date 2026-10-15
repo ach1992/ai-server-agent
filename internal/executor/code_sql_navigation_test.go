@@ -125,12 +125,14 @@ func TestSQLSourceNavigationWorkerCrossFileVersionsAndHistory(t *testing.T) {
 	}
 	s.workspaceHelperBinary = binary
 	files := map[string]string{
-		"migrations/001_accounts.sql": "CREATE TABLE accounts (id BIGINT PRIMARY KEY);\n",
-		"migrations/002_payments.sql": "CREATE TABLE payments (account_id BIGINT REFERENCES accounts(id));\nALTER TABLE accounts ADD COLUMN active BOOLEAN;\n",
-		"queries/read.sql":            "SELECT a.id FROM accounts a JOIN payments p ON a.id = p.account_id;\n",
-		"migrations/004_upper.SQL":    "INSERT INTO accounts (id) VALUES (2);\n",
-		".gitignore":                  "migrations/004_upper.SQL\n",
-		"migrations/ignored.sql":      "-- CREATE TABLE accounts (id INT);\nSELECT 'FROM accounts' AS ignored;\n",
+		"migrations/001_accounts.sql":          "CREATE TABLE accounts (id BIGINT PRIMARY KEY);\n",
+		"migrations/002_payments.sql":          "CREATE TABLE payments (account_id BIGINT REFERENCES accounts(id));\nALTER TABLE accounts ADD COLUMN active BOOLEAN;\n",
+		"queries/read.sql":                     "SELECT a.id FROM accounts a JOIN payments p ON a.id = p.account_id;\n",
+		"migrations/004_upper.SQL":             "INSERT INTO accounts (id) VALUES (2);\n",
+		"migrations/.hidden/005_private.sql":   "INSERT INTO accounts (id) VALUES (3);\n",
+		"migrations/.hidden/.git/internal.sql": "CREATE TABLE accounts (id INT);\n",
+		".gitignore":                           "migrations/004_upper.SQL\n",
+		"migrations/ignored.sql":               "-- CREATE TABLE accounts (id INT);\nSELECT 'FROM accounts' AS ignored;\n",
 	}
 	for name, data := range files {
 		path := filepath.Join(workspace, name)
@@ -175,10 +177,10 @@ func TestSQLSourceNavigationWorkerCrossFileVersionsAndHistory(t *testing.T) {
 	if !refs.OK {
 		t.Fatalf("source-only cross-file references failed: %+v", refs)
 	}
-	if err := json.Unmarshal([]byte(refs.Output), &targets); err != nil || len(targets) != 5 {
+	if err := json.Unmarshal([]byte(refs.Output), &targets); err != nil || len(targets) != 6 {
 		t.Fatalf("wrong migration references: %+v (%v)", refs, err)
 	}
-	wantPaths := []string{"migrations/001_accounts.sql", "migrations/002_payments.sql", "migrations/002_payments.sql", "migrations/004_upper.SQL", "queries/read.sql"}
+	wantPaths := []string{"migrations/.hidden/005_private.sql", "migrations/001_accounts.sql", "migrations/002_payments.sql", "migrations/002_payments.sql", "migrations/004_upper.SQL", "queries/read.sql"}
 	for i, target := range targets {
 		if target.URI != wantPaths[i] || target.FileVersion != version(target.URI) {
 			t.Fatalf("unstable/wrong reference %d: %+v", i, target)

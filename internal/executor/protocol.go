@@ -62,6 +62,7 @@ type Request struct {
 	Globs            []string            `json:"globs,omitempty"`
 	SearchLimit      int                 `json:"search_limit,omitempty"`
 	Literal          bool                `json:"literal,omitempty"`
+	SearchHidden     bool                `json:"search_hidden,omitempty"`
 	WorkspaceEdits   []WorkspaceFileEdit `json:"workspace_edits,omitempty"`
 	TransferKey      string              `json:"transfer_key,omitempty"`
 	TransferOp       string              `json:"transfer_op,omitempty"`

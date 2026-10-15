@@ -52,6 +52,7 @@ type workspaceFileOperation struct {
 	SearchPaths         []string            `json:"search_paths,omitempty"`
 	Globs               []string            `json:"globs,omitempty"`
 	Literal             bool                `json:"literal,omitempty"`
+	SearchHidden        bool                `json:"search_hidden,omitempty"`
 	TimeoutMS           int64               `json:"timeout_ms,omitempty"`
 }
 
@@ -78,7 +79,7 @@ func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp 
 			return fileError("php_index_invalid_request", "validation", errors.New("PHP index manifest accepts only the workspace"))
 		}
 	} else if req.Action == "workspace_text_search" {
-		probe := workspaceFileOperation{Action: req.Action, Pattern: req.Pattern, SearchLimit: req.SearchLimit, SearchPaths: req.SearchPaths, Globs: req.Globs, Literal: req.Literal, TimeoutMS: req.TimeoutMS}
+		probe := workspaceFileOperation{Action: req.Action, Pattern: req.Pattern, SearchLimit: req.SearchLimit, SearchPaths: req.SearchPaths, Globs: req.Globs, Literal: req.Literal, SearchHidden: req.SearchHidden, TimeoutMS: req.TimeoutMS}
 		if err := validateWorkerTextSearch(probe); err != nil {
 			return fileError("invalid_text_search", "validation", err)
 		}
@@ -141,7 +142,7 @@ func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp 
 		Offset: req.Offset, Limit: req.Limit, Content: req.Content,
 		FileVersion: req.FileVersion, MustNotExist: req.MustNotExist,
 		Edits: req.WorkspaceEdits, Pattern: req.Pattern, SearchLimit: req.SearchLimit,
-		SearchPaths: req.SearchPaths, Globs: req.Globs, Literal: req.Literal,
+		SearchPaths: req.SearchPaths, Globs: req.Globs, Literal: req.Literal, SearchHidden: req.SearchHidden,
 		TimeoutMS: req.TimeoutMS,
 	}
 	payload, err := json.Marshal(op)
