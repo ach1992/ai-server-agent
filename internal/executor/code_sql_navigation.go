@@ -377,6 +377,7 @@ func (s *Server) sqlOfflineNavigation(parent context.Context, req Request, sourc
 	versions := make(map[string]string, len(paths))
 	var foundItems []sqlNavFound
 	tableLifecycleChanged := false
+	var tableLifecycle []sqlNavFound
 	total := 0
 	for _, path := range paths {
 		check := req
@@ -409,9 +410,13 @@ func (s *Server) sqlOfflineNavigation(parent context.Context, req Request, sourc
 			tableLifecycleChanged = true
 		}
 		for _, occ := range occurrences {
+			item := sqlNavFound{sqlNavOccurrence: occ,
+				sqlNavLocation: sqlNavLocation{URI: path, Range: occ.span, FileVersion: read.FileVersion}}
 			if occ.identity == selected.identity {
-				foundItems = append(foundItems, sqlNavFound{sqlNavOccurrence: occ,
-					sqlNavLocation: sqlNavLocation{URI: path, Range: occ.span, FileVersion: read.FileVersion}})
+				foundItems = append(foundItems, item)
+			}
+			if selected.isColumn && !occ.isColumn && occ.drop && occ.identity == selected.tableIdentity {
+				tableLifecycle = append(tableLifecycle, item)
 			}
 		}
 	}
@@ -445,8 +450,11 @@ func (s *Server) sqlOfflineNavigation(parent context.Context, req Request, sourc
 			}
 		}
 		if drops > 0 || tableLifecycleChanged || len(locations) > 1 {
-			return fileError("sql_schema_history_ambiguous", "validation",
-				errors.New("table was dropped, renamed or redefined; static migration ordering cannot prove the active schema")), true
+			location, resolveErr := sqlNavResolveOrderedDefinition(foundItems, tableLifecycle, sourcePath)
+			if resolveErr != nil {
+				return fileError("sql_schema_history_ambiguous", "validation", resolveErr), true
+			}
+			locations = []sqlNavLocation{location}
 		}
 	} else {
 		for _, item := range foundItems {

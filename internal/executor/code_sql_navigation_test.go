@@ -214,6 +214,63 @@ func TestSQLSourceNavigationWorkerCrossFileVersionsAndHistory(t *testing.T) {
 	if ambiguous := s.codeInspect(ctx, owner); ambiguous.OK || ambiguous.ErrorCode != "sql_schema_history_ambiguous" {
 		t.Fatalf("a DROP was silently treated as still-active schema: %+v", ambiguous)
 	}
+	// A later *re-creation* has one provable post-migration source only for
+	// a query outside the history itself. A cursor inside an old migration
+	// must retain its prior fail-closed behavior.
+	if err := os.WriteFile(filepath.Join(workspace, "migrations/006_recreate.sql"),
+		[]byte("CREATE TABLE accounts (id BIGINT NOT NULL);\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	owner.Path, owner.FileVersion, owner.Line, owner.Character = "queries/read.sql", version("queries/read.sql"), 0, 20
+	resolved := s.codeInspect(ctx, owner)
+	if !resolved.OK {
+		t.Fatalf("ordered offline post-migration definition failed: %+v", resolved)
+	}
+	if err := json.Unmarshal([]byte(resolved.Output), &targets); err != nil || len(targets) != 1 ||
+		targets[0].URI != "migrations/006_recreate.sql" ||
+		targets[0].FileVersion != version("migrations/006_recreate.sql") {
+		t.Fatalf("wrong last versioned CREATE source: %+v (%v)", resolved, err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "migrations/006_collision.sql"),
+		[]byte("CREATE TABLE accounts (id INT);\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if duplicate := s.codeInspect(ctx, owner); duplicate.OK || duplicate.ErrorCode != "sql_schema_history_ambiguous" {
+		t.Fatalf("colliding migration versions were not rejected: %+v", duplicate)
+	}
+	if err := os.Remove(filepath.Join(workspace, "migrations/006_collision.sql")); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(workspace, "queries/write.sql"),
+		[]byte("INSERT INTO accounts (id) VALUES (7);\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	owner.Path, owner.FileVersion, owner.Line, owner.Character = "queries/write.sql", version("queries/write.sql"), 0, 22
+	resolved = s.codeInspect(ctx, owner)
+	if !resolved.OK {
+		t.Fatalf("post-migration column reference failed: %+v", resolved)
+	}
+	if err := json.Unmarshal([]byte(resolved.Output), &targets); err != nil || len(targets) != 1 ||
+		targets[0].URI != "migrations/006_recreate.sql" {
+		t.Fatalf("column was not re-created after parent table DROP: %+v (%v)", resolved, err)
+	}
+	for name, body := range map[string]string{
+		"migrations/007_drop_column.sql": "ALTER TABLE accounts DROP COLUMN id;\n",
+		"migrations/008_add_column.sql":  "ALTER TABLE accounts ADD COLUMN id BIGINT;\n",
+	} {
+		if err := os.WriteFile(filepath.Join(workspace, name), []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	resolved = s.codeInspect(ctx, owner)
+	if !resolved.OK {
+		t.Fatalf("re-introduced SQL column definition failed: %+v", resolved)
+	}
+	if err := json.Unmarshal([]byte(resolved.Output), &targets); err != nil || len(targets) != 1 ||
+		targets[0].URI != "migrations/008_add_column.sql" ||
+		targets[0].FileVersion != version("migrations/008_add_column.sql") {
+		t.Fatalf("wrong last active column declaration: %+v (%v)", resolved, err)
+	}
 }
 
 func TestSQLSourceNavigationLimitsAndDuplicateDeclarations(t *testing.T) {
