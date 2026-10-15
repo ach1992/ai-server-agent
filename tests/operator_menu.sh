@@ -9,8 +9,8 @@ cat > "$TMP/console.sh" <<'SH'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 export AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1
-source "$ASA_MANAGE_SOURCE"
 export NO_COLOR=1 TERM=dumb COLUMNS=60 LINES=24
+source "$ASA_MANAGE_SOURCE"
 RUNTIME_BINARY=/bin/true
 installed_identity(){ printf 'source|source|0123456789abcdef0123456789abcdef01234567\n'; }
 config_get(){
@@ -35,18 +35,36 @@ credential_revoke(){ echo 'REVOKED_UNEXPECTEDLY'; exit 1; }
 profile_show(){ printf 'Profile: validation\n'; }
 profile_apply(){ echo 'PROFILE_CHANGED_UNEXPECTEDLY'; exit 1; }
 runtime_apply(){ echo 'RUNTIME_CHANGED_UNEXPECTEDLY'; exit 1; }
-configure_cloudflare(){ echo 'CLOUDFLARE_CHANGED_UNEXPECTEDLY'; exit 1; }
-configure_local(){ echo 'CONNECTION_CHANGED_UNEXPECTEDLY'; exit 1; }
+configure_cloudflare(){
+  if [ "${ASA_SIMULATE_FAILED_CLOUDFLARE:-0}" = 1 ]; then
+    echo 'BEGIN_CLOUDFLARE_FAILED_SETUP'
+    die 'TEST ONLY: aborted before any external change'
+    echo 'AFTER_CLOUDFLARE_FAILURE'
+  fi
+  echo 'CLOUDFLARE_CHANGED_UNEXPECTEDLY'; exit 1
+}
+configure_local(){
+  if [ "${ASA_SIMULATE_LOCAL_SUCCESS:-0}" = 1 ]; then
+    echo 'SIMULATED_LOCAL_CONFIG_SUCCESS'; return 0
+  fi
+  echo 'CONNECTION_CHANGED_UNEXPECTEDLY'; exit 1
+}
+chatgpt_setup(){ echo 'SIMULATED_CLIENT_GUIDANCE'; }
 configure_manual_tls(){ echo 'TLS_CHANGED_UNEXPECTEDLY'; exit 1; }
 case "${1:-}" in
   menu) menu; printf 'MENU_EXITED_CLEANLY\n' ;;
-  first-run)
+  first-run|first-run-failed-setup|first-run-success)
+    if [ "$1" = first-run-failed-setup ]; then
+      export ASA_SIMULATE_FAILED_CLOUDFLARE=1
+    elif [ "$1" = first-run-success ]; then
+      export ASA_SIMULATE_LOCAL_SUCCESS=1
+    fi
     set +e
     first_run
     code=$?
     set -e
     printf 'FIRST_RUN_EXIT_CODE=%s\n' "$code"
-    [ "$code" -eq 20 ] ;;
+    if [ "$1" = first-run-success ]; then [ "$code" -eq 0 ]; else [ "$code" -eq 20 ]; fi ;;
 esac
 SH
 chmod 700 "$TMP/console.sh"
@@ -118,5 +136,25 @@ grep -Fq 'No setup action started' "$TMP/first.out"
 grep -Fq 'FIRST_RUN_EXIT_CODE=20' "$TMP/first.out"
 ! grep -Fq 'CONNECTION_CHANGED_UNEXPECTEDLY' "$TMP/first.out"
 ! grep -Fq 'CLOUDFLARE_CHANGED_UNEXPECTEDLY' "$TMP/first.out"
+
+cat > "$TMP/first-failed.in" <<'INPUT'
+1
+
+0
+INPUT
+ASA_MANAGE_SOURCE="$ROOT/manage.sh" script -q -e -c "bash '$TMP/console.sh' first-run-failed-setup" /dev/null < "$TMP/first-failed.in" > "$TMP/first-failed.out"
+grep -Fq 'BEGIN_CLOUDFLARE_FAILED_SETUP' "$TMP/first-failed.out"
+grep -Fq 'Action failed (exit 1)' "$TMP/first-failed.out"
+grep -Fq 'Connection setup was not verified' "$TMP/first-failed.out"
+grep -Fq 'FIRST_RUN_EXIT_CODE=20' "$TMP/first-failed.out"
+! grep -Fq 'AFTER_CLOUDFLARE_FAILURE' "$TMP/first-failed.out"
+
+cat > "$TMP/first-success.in" <<'INPUT'
+2
+INPUT
+ASA_MANAGE_SOURCE="$ROOT/manage.sh" script -q -e -c "bash '$TMP/console.sh' first-run-success" /dev/null < "$TMP/first-success.in" > "$TMP/first-success.out"
+grep -Fq 'SIMULATED_LOCAL_CONFIG_SUCCESS' "$TMP/first-success.out"
+grep -Fq 'SIMULATED_CLIENT_GUIDANCE' "$TMP/first-success.out"
+grep -Fq 'FIRST_RUN_EXIT_CODE=0' "$TMP/first-success.out"
 
 echo 'Operator menu TTY navigation/strict failure/back/cancel/no-color PASS'

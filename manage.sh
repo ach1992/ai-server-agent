@@ -178,13 +178,17 @@ ui_notice(){
 # Child gets strict errexit, NOT conditional Bash invocation, so transactional
 # failure aborts the child instead of continuing with a half-completed step.
 ui_menu_action(){
-  local rc
+  local rc had_errexit=0
+  case $- in *e*) had_errexit=1 ;; esac
+  UI_LAST_ACTION_OK=0
   set +e
   ( set -Eeuo pipefail; "$@" )
   rc=$?
-  set -e
+  if [ "$had_errexit" = 1 ]; then set -e; fi
   if [ "$rc" -ne 0 ]; then
     ui_notice error "Action failed (exit $rc). The menu remains available. Inspect the message above before retrying."
+  else
+    UI_LAST_ACTION_OK=1
   fi
   return 0
 }
@@ -2374,9 +2378,10 @@ connection_menu(){
 }
 
 
+
 first_run(){
   [ -r /dev/tty ] || die "First-run setup requires an interactive terminal."
-  local choice
+  local choice attempted=0
   while true; do
     header
     ui_section 'Initial connection setup'
@@ -2384,28 +2389,44 @@ first_run(){
     printf '\n  1) %sCloudflare domain%s - guided HTTPS/domain setup\n' "$GREEN" "$RESET"
     printf '  2) Local/private - keep loopback-only for a private tunnel\n'
     printf '  3) Existing TLS certificate - advanced/manual setup\n'
-    printf '  0) Configure later - keep the healthy local Agent\n\n'
+    if [ "$attempted" = 0 ] && [ "$(current_mode)" = local ]; then
+      printf '  0) Configure later - keep the healthy local Agent\n\n'
+    else
+      printf '  0) Configure later - inspect the connection before retrying\n\n'
+    fi
     read -r -p 'Choose [1]: ' choice </dev/tty || return 20
     choice="${choice:-1}"
     case "$choice" in
-      0|1|2|3) break ;;
-      *) ui_notice warning 'Select 1, 2, 3 or 0. No setup action started.'; pause ;;
+      0)
+        # A prior failed attempt might have changed the connection before
+        # verified rollback. Never assert that the listener is still local.
+        if [ "${AI_SERVER_AGENT_MCP_AUTH_FD:-}" = 3 ]; then exec 3<&-; fi
+        if [ "$attempted" = 0 ] && [ "$(current_mode)" = local ]; then
+          printf '\nSetup deferred. The Agent remains installed and healthy in local mode.\n'
+        else
+          ui_notice warning 'Setup deferred after an attempted change. Check current Status/health and recovery state before retrying.'
+        fi
+        return 20 ;;
+      1|2|3) ;;
+      *) ui_notice warning 'Select 1, 2, 3 or 0. No setup action started.'; pause; continue ;;
     esac
+    attempted=1
+    # Do not propagate the one-use credential to non-Cloudflare operations.
+    if [ "$choice" != 1 ] && [ "${AI_SERVER_AGENT_MCP_AUTH_FD:-}" = 3 ]; then exec 3<&-; fi
+    case "$choice" in
+      1) ui_menu_action configure_cloudflare ;;
+      2) ui_menu_action configure_local ;;
+      3) ui_menu_action configure_manual_tls ;;
+    esac
+    if [ "$UI_LAST_ACTION_OK" = 1 ]; then break; fi
+    ui_notice warning 'Connection setup was not verified. Review the error or recovery state, choose another connection option, or select 0 to defer.'
+    pause
   done
-  # One-use credential handoff is only relevant to Cloudflare setup.
-  if [ "$choice" != 1 ] && [ "${AI_SERVER_AGENT_MCP_AUTH_FD:-}" = 3 ]; then exec 3<&-; fi
-  case "$choice" in
-    1) configure_cloudflare ;;
-    2) configure_local ;;
-    3) configure_manual_tls ;;
-    0) ui_notice success 'Setup deferred. Agent stays healthy in local mode.'; return 20 ;;
-  esac
   printf '\n%sDone.%s\n' "$GREEN" "$RESET"
   ui_wrap '' 'Use sudo ai-server-agent-manage any time to change settings.'
   printf '\n'
   chatgpt_setup
 }
-
 
 menu(){
   [ -r /dev/tty ] || die "The interactive menu requires a terminal. Use a subcommand for automation."
