@@ -12,14 +12,21 @@ import (
 // the existing executor session broker. No daemon, public port or second
 // Chromium runtime/profile is created. A Browser session is not a project
 // artifact; its entire state dies with this child process.
-func managedSessionRunner(engine, profile, downloads string, ignoreHTTPS bool) (string, error) {
+func managedSessionRunner(engine, profile, downloads string, ignoreHTTPS bool, modes ...string) (string, error) {
+	mode := "shared"
+	if len(modes) > 0 {
+		mode = modes[0]
+	}
+	if _, err := normalizeProfileMode(mode); err != nil {
+		return "", err
+	}
 	if !filepath.IsAbs(engine) || !filepath.IsAbs(profile) || !filepath.IsAbs(downloads) ||
 		filepath.Clean(engine) != engine || filepath.Clean(profile) != profile || filepath.Clean(downloads) != downloads {
 		return "", errors.New("managed Browser paths must be clean absolute paths")
 	}
 	engineURL := (&url.URL{Scheme: "file", Path: filepath.ToSlash(filepath.Join(engine, "node_modules/playwright/index.mjs"))}).String()
 	items := make([]string, 0, 5)
-	for _, value := range []string{engineURL, profile, downloads, filepath.Join(engine, "browsers"), browserFlowJS} {
+	for _, value := range []string{engineURL, profile, downloads, filepath.Join(engine, "browsers"), browserFlowJS, mode} {
 		raw, err := json.Marshal(value)
 		if err != nil {
 			return "", err
@@ -28,13 +35,14 @@ func managedSessionRunner(engine, profile, downloads string, ignoreHTTPS bool) (
 	}
 	return fmt.Sprintf(`import { createInterface } from 'node:readline';
 import { createHash } from 'node:crypto';
-import { statfsSync, mkdtempSync, rmSync, openSync, fstatSync, readSync, closeSync, constants, readdirSync } from 'node:fs';
+import { statfsSync, mkdtempSync, rmSync, openSync, fstatSync, readSync, closeSync, constants, readdirSync, opendirSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 process.env.PLAYWRIGHT_BROWSERS_PATH = %s;
 const { chromium } = await import(%s);
 const profile = %s;
 const downloads = %s;
 const flowTemplate = %s;
+const profileMode = %s;
 const state = { refs: new Map(), sequence: 0 };
 // One bounded, short-lived, per-session trace slot. The artifact's bytes
 // are only held in this worker's memory after Playwright finalizes its ZIP.
@@ -56,24 +64,69 @@ if (!diskSafe()) throw new Error('browser_session_disk_reserve_unavailable');
 // abandoned trace directories, including those from SIGKILL/crash. Never
 // traverse an arbitrary browser profile/worktree or follow a symlink.
 for (const entry of readdirSync(downloads, {withFileTypes:true})) {
-  if (!entry.isDirectory() || !/^asa-trace-[A-Za-z0-9]{6}$/.test(entry.name)) continue;
+  if (!entry.isDirectory() ||
+      !(/^asa-trace-[A-Za-z0-9]{6}$/.test(entry.name) ||
+        /^asa-profile-[A-Za-z0-9]{6}$/.test(entry.name))) continue;
   rmSync(join(downloads,entry.name),{recursive:true,force:true});
 }
 
-const context = await chromium.launchPersistentContext(profile, {
-  headless: true, ignoreHTTPSErrors: %t, acceptDownloads: false, downloadsPath: downloads,
-  args: ['--disk-cache-size=67108864', '--media-cache-size=33554432']
-});
+// One exclusive Browser lease also protects admission and stale-profile
+// reclamation. A private profile stays under Agent-owned disposable state;
+// unlike the shared profile it is never reused by another session.
+const isolatedProfile = profileMode === 'isolated' ? mkdtempSync(join(downloads, 'asa-profile-')) : '';
+// Bounded private profile retention: no extra monitor process, host scheduler,
+// or arbitrary project cleanup. Never follow symlinks; fail closed if the
+// profile grows beyond 256 MiB or 8192 on-disk entries.
+const privateProfileSafe = () => {
+  if (!isolatedProfile) return true;
+  let bytes = 0;
+  let seen = 0;
+  const pending = [isolatedProfile];
+  try {
+    while (pending.length) {
+      if (++seen > 8192) return false;
+      const path = pending.pop();
+      const info = lstatSync(path, {throwIfNoEntry:false});
+      if (!info) continue; // Chromium can retire a cache file mid-inspection.
+      if (info.isSymbolicLink()) continue;
+      bytes += info.size;
+      if (bytes > 256 * 1024 * 1024) return false;
+      if (!info.isDirectory()) continue;
+      const handle = opendirSync(path);
+      try {
+        let entry;
+        while ((entry = handle.readSync()) !== null) {
+          pending.push(join(path, entry.name));
+          if (pending.length + seen > 8192) return false;
+        }
+      } finally { handle.closeSync(); }
+    }
+    return true;
+  } catch { return false; }
+};
+let context;
+try {
+  context = await chromium.launchPersistentContext(isolatedProfile || profile, {
+    headless: true, ignoreHTTPSErrors: %t, acceptDownloads: false, downloadsPath: downloads,
+    args: ['--disk-cache-size=67108864', '--media-cache-size=33554432']
+  });
+} catch (error) {
+  if (isolatedProfile) rmSync(isolatedProfile, {recursive:true,force:true});
+  throw error;
+}
 const browser = context.browser();
 const page = context.pages()[0] || await context.newPage();
 // Bounded persistent sessions need the same filesystem safety reserve as
 // browser_run, including while a page is busy between client calls.
 let diskPressure = false;
 const diskMonitor = setInterval(() => {
-  if (!diskPressure && !diskSafe()) {
+  if (!diskPressure && (!diskSafe() || !privateProfileSafe())) {
     diskPressure = true;
     clearInterval(diskMonitor);
-    void context.close().finally(() => process.exit(73));
+    void context.close().finally(() => {
+      try { if (isolatedProfile) rmSync(isolatedProfile, {recursive:true,force:true}); } catch {}
+      process.exit(73);
+    });
   }
 }, 1000);
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
@@ -234,7 +287,8 @@ try {
 } finally {
   clearInterval(diskMonitor);
   await context.close();
+  if (isolatedProfile) rmSync(isolatedProfile, {recursive:true,force:true});
   process.exit(0);
 }
-`, items[3], items[0], items[1], items[2], items[4], ignoreHTTPS), nil
+`, items[3], items[0], items[1], items[2], items[4], items[5], ignoreHTTPS), nil
 }

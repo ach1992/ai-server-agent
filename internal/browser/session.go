@@ -12,6 +12,7 @@ import (
 )
 
 type SessionOptions struct {
+	ProfileMode       string
 	Workspace         string
 	SessionID         string
 	Steps             []FlowStep
@@ -29,6 +30,10 @@ type SessionOptions struct {
 // Unlike browser_e2e, refs remain valid across calls until navigation,
 // next snapshot, same-document identity change, close or expiry.
 func (m *Manager) SessionOpen(ctx context.Context, opts SessionOptions) (executor.Response, error) {
+	mode, err := normalizeProfileMode(opts.ProfileMode)
+	if err != nil {
+		return browserError("invalid_browser_profile_mode", "validation", err.Error()), nil
+	}
 	if opts.Workspace == "" || !filepath.IsAbs(opts.Workspace) || filepath.Clean(opts.Workspace) != opts.Workspace {
 		return browserError("invalid_browser_workspace", "validation", "exact absolute workspace is required"), nil
 	}
@@ -39,7 +44,7 @@ func (m *Manager) SessionOpen(ctx context.Context, opts SessionOptions) (executo
 	if status := m.inspectStatus(ctx, true); !status.Ready {
 		return browserError("browser_runtime_not_ready", "state", "pinned Browser runtime is not ready: "+status.Reason), nil
 	}
-	script, err := managedSessionRunner(m.engineDir(), filepath.Join(m.dataDir(), "profile"), filepath.Join(m.dataDir(), "tmp"), opts.IgnoreHTTPSErrors)
+	script, err := managedSessionRunner(m.engineDir(), filepath.Join(m.dataDir(), "profile"), filepath.Join(m.dataDir(), "tmp"), opts.IgnoreHTTPSErrors, mode)
 	if err != nil {
 		return browserError("invalid_browser_session", "validation", err.Error()), nil
 	}

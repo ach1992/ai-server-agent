@@ -42,10 +42,14 @@ func TestRunLimiterSeparatesWorkerAndRootWithoutQueue(t *testing.T) {
 }
 
 func TestRunCapacityResponseIsStructured(t *testing.T) {
+	state := t.TempDir()
+	provisionSharedWorkerHome(t, state)
 	s := &Server{
-		cfg:   config.Config{WorkspaceDir: t.TempDir()},
-		guard: policy.New(nil),
-		runs:  newRunLimiterWith(1, 1),
+		cfg:       config.Config{WorkspaceDir: t.TempDir(), StateDir: state},
+		guard:     policy.New(nil),
+		runs:      newRunLimiterWith(1, 1),
+		workerUID: uint32(os.Geteuid()),
+		workerGID: uint32(os.Getegid()),
 	}
 	release, ok := s.runs.acquire(false)
 	if !ok {
