@@ -563,7 +563,7 @@ func TestPersistentServiceClaimReplayUsesServiceCapacity(t *testing.T) {
 					t.Fatal(err)
 				}
 				server := &Server{
-					cfg:   config.Config{StateDir: state, WorkspaceDir: workspace, WorkerUser: current.Username},
+					cfg:   config.Config{StateDir: state, WorkspaceDir: workspace, WorkerUser: current.Username, Runtime: &config.RuntimeSettings{PersistentTaskSlots: maxActivePersistentJobs}},
 					token: "test-executor-token", guard: policy.New(nil),
 					audit:     audit.New(filepath.Join(t.TempDir(), "audit.jsonl")),
 					workerUID: uint32(os.Geteuid()), workerGID: uint32(os.Getegid()),

@@ -41,6 +41,43 @@ func TestRunLimiterSeparatesWorkerAndRootWithoutQueue(t *testing.T) {
 	}
 }
 
+func TestRunLimiterConfigurableCommandSlotsAndRootSeparation(t *testing.T) {
+	automatic := newRunLimiterForSlots(0)
+	if got := cap(automatic.worker); got < 1 || got > maxWorkerRunConcurrency {
+		t.Fatalf("auto command capacity = %d", got)
+	}
+	for _, wanted := range []int{1, 4, 8} {
+		limiter := newRunLimiterForSlots(wanted)
+		if cap(limiter.worker) != wanted || cap(limiter.root) != 1 {
+			t.Fatalf("configured capacity %d: worker=%d root=%d", wanted, cap(limiter.worker), cap(limiter.root))
+		}
+		var releases []func()
+		for n := 0; n < wanted; n++ {
+			release, ok := limiter.acquire(false)
+			if !ok {
+				t.Fatalf("slot %d of %d rejected", n, wanted)
+			}
+			releases = append(releases, release)
+		}
+		if _, ok := limiter.acquire(false); ok {
+			t.Fatal("worker overadmission")
+		}
+		releaseRoot, ok := limiter.acquire(true)
+		if !ok {
+			t.Fatal("root admission coupled to workers")
+		}
+		releaseRoot()
+		for _, release := range releases {
+			release()
+		}
+		if release, ok := limiter.acquire(false); !ok {
+			t.Fatal("slot not restored after release")
+		} else {
+			release()
+		}
+	}
+}
+
 func TestRunCapacityResponseIsStructured(t *testing.T) {
 	state := t.TempDir()
 	provisionSharedWorkerHome(t, state)

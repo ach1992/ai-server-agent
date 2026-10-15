@@ -35,6 +35,19 @@ type runLimiter struct {
 }
 
 func newRunLimiter() *runLimiter {
+	return newRunLimiterForSlots(0)
+}
+
+// Zero retains the current CPU-aware default. A validated positive override
+// deliberately allows I/O-bound work to exceed the vCPU count, but never
+// changes the separately protected root command capacity.
+func newRunLimiterForSlots(configured int) *runLimiter {
+	if configured > 0 {
+		if configured > 8 {
+			configured = 8
+		}
+		return newRunLimiterWith(configured, rootRunConcurrency)
+	}
 	workerLimit := runtime.GOMAXPROCS(0)
 	if workerLimit < 1 {
 		workerLimit = 1
