@@ -143,3 +143,43 @@ func TestAppendSQLDDLSymbolsPreservesCTEsAndDoesNotDuplicate(t *testing.T) {
 		t.Fatal("invalid LSP JSON accepted as valid result")
 	}
 }
+
+func TestSQLDDLPostgresEscapedLiteralMustNotFabricateDeclarations(t *testing.T) {
+	source := "SELECT E'hello\\'; CREATE TABLE forged (id INT);' AS literal;\n" +
+		"CREATE TABLE verified (id INT);"
+	got := sqlDDLSymbols(source, "postgres")
+	if len(got) != 1 || got[0].Name != "verified" {
+		t.Fatalf("PostgreSQL escaped string fabricated DDL: %+v", got)
+	}
+}
+
+func TestSQLDDLPostgresCopyStdinDataMustNotFabricateDeclarations(t *testing.T) {
+	source := "COPY raw_events FROM STDIN;\n" +
+		"CREATE TABLE fake (id INT);\n" +
+		"\\.\n" +
+		"CREATE TABLE verified (id INT);\n"
+	got := sqlDDLSymbols(source, "postgres")
+	if len(got) != 1 || got[0].Name != "verified" {
+		t.Fatalf("PostgreSQL COPY STDIN data fabricated DDL: %+v", got)
+	}
+}
+
+func TestSQLDDLPostgresIncompleteCopyFailsClosed(t *testing.T) {
+	source := "COPY raw_events FROM STDIN;\n" +
+		"CREATE TABLE forged (id INT);\n"
+	if got := sqlDDLSymbols(source, "postgres"); len(got) != 0 {
+		t.Fatalf("incomplete COPY data was lexed as SQL: %+v", got)
+	}
+}
+
+func TestSQLDDLPostgresCRLFCopyAndEscapeLiteral(t *testing.T) {
+	source := "COPY raw_events FROM STDIN;\r\n" +
+		"CREATE TABLE fake (id INT);\r\n" +
+		"\\.\r\n" +
+		"SELECT E'quoted\\'; CREATE TABLE fake2 (id INT);' AS text;\r\n" +
+		"CREATE TABLE real (id INT);\r\n"
+	got := sqlDDLSymbols(source, "postgresql")
+	if len(got) != 1 || got[0].Name != "real" || got[0].Range.Start.Line != 4 {
+		t.Fatalf("PostgreSQL CRLF COPY/literal produced false symbols: %+v", got)
+	}
+}

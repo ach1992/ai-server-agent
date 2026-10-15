@@ -48,6 +48,54 @@ func (t sqlDDLToken) keyword() string {
 	return ""
 }
 
+// psql COPY FROM STDIN embeds non-SQL data. A row that happens to contain
+// CREATE TABLE is data, not a declaration. Skip through the exact terminator.
+func sqlDDLPGCopyStdin(tokens []sqlDDLToken) bool {
+	start := len(tokens) - 2
+	for start >= 0 && tokens[start].text != ";" {
+		start--
+	}
+	statement := tokens[start+1 : len(tokens)-1]
+	if len(statement) < 4 || statement[0].keyword() != "COPY" {
+		return false
+	}
+	for i := 1; i+1 < len(statement); i++ {
+		if statement[i].keyword() == "FROM" && statement[i+1].keyword() == "STDIN" {
+			return true
+		}
+	}
+	return false
+}
+
+func sqlDDLPGCopyDataEnd(source string, at int) (int, bool) {
+	if at < len(source) && source[at] == '\r' {
+		at++
+	}
+	if at >= len(source) || source[at] != '\n' {
+		return 0, false
+	}
+	at++
+	for at < len(source) {
+		end := strings.IndexByte(source[at:], '\n')
+		if end < 0 {
+			end = len(source)
+		} else {
+			end += at
+		}
+		if strings.TrimSuffix(source[at:end], "\r") == "\\." {
+			if end < len(source) {
+				return end + 1, true
+			}
+			return end, true
+		}
+		if end == len(source) {
+			break
+		}
+		at = end + 1
+	}
+	return 0, false
+}
+
 func sqlWordStart(r rune) bool { return r == '_' || unicode.IsLetter(r) }
 func sqlWordContinue(r rune) bool {
 	return r == '_' || r == '$' || unicode.IsLetter(r) || unicode.IsDigit(r)
@@ -134,14 +182,26 @@ func sqlDDLTokens(source, dialect string) ([]sqlDDLToken, bool) {
 				continue
 			}
 		}
-		if source[i] == '\'' || source[i] == '"' || (mysql && source[i] == '`') {
-			quote := source[i]
+		quoteAt, pgEscapeString := i, false
+		if !mysql && (source[i] == 'E' || source[i] == 'e') &&
+			i+1 < len(source) && source[i+1] == '\'' {
+			boundary := true
+			if i > 0 {
+				last, _ := utf8.DecodeLastRuneInString(source[:i])
+				boundary = !sqlWordContinue(last)
+			}
+			if boundary {
+				quoteAt, pgEscapeString = i+1, true
+			}
+		}
+		if source[quoteAt] == '\'' || source[quoteAt] == '"' || (mysql && source[quoteAt] == '`') {
+			quote := source[quoteAt]
 			quotedIdentifier := (quote == '"' && !mysql) || quote == '`'
-			end := i + 1
+			end := quoteAt + 1
 			var value strings.Builder
 			closed := false
 			for end < len(source) {
-				if mysql && source[end] == '\\' && end+1 < len(source) {
+				if (mysql || pgEscapeString) && source[end] == '\\' && end+1 < len(source) {
 					if quotedIdentifier {
 						value.WriteByte(source[end+1])
 					}
@@ -195,6 +255,13 @@ func sqlDDLTokens(source, dialect string) ([]sqlDDLToken, bool) {
 		}
 		advance(i + width)
 		add(source[begin:i], 'p', start)
+		if !mysql && source[begin] == ';' && sqlDDLPGCopyStdin(tokens) {
+			end, ok := sqlDDLPGCopyDataEnd(source, i)
+			if !ok {
+				return nil, false
+			}
+			advance(end)
+		}
 	}
 	return tokens, true
 }

@@ -178,6 +178,21 @@ func TestCodeInspectRealOfflineSQLPostgresMySQL(t *testing.T) {
 			t.Fatalf("%s DDL semantic table/column outline unavailable: %s", migration.dialect, out.Output)
 		}
 	}
+	// The real SQL language server may still parse user SQL while its DDL
+	// postprocessor must never report declarations embedded in E'' literals.
+	literalSource := "SELECT E'hello\\'; CREATE TABLE forged (id INT);' AS literal;\n" +
+		"CREATE TABLE verified (id INT);\n"
+	if err := os.WriteFile(filepath.Join(workspace, "postgres.sql"), []byte(literalSource), 0600); err != nil {
+		t.Fatal(err)
+	}
+	check := owner
+	check.Action, check.Language, check.SQLDialect = "code_inspect", "sql", "postgres"
+	check.Path, check.FileVersion, check.CodeMethod = "postgres.sql", stat("postgres.sql").FileVersion, "symbols"
+	outlined := s.codeInspect(ctx, check)
+	if !outlined.OK || !strings.Contains(outlined.Output, "verified") ||
+		strings.Contains(outlined.Output, "forged") {
+		t.Fatalf("SQL server + DDL scanner fabricated table from escaped literal: %+v", outlined)
+	}
 	if _, err := os.Stat(filepath.Join(workspace, "SQL-MUST-NOT-EXECUTE")); !os.IsNotExist(err) {
 		t.Fatalf("untrusted SQL project plugin executed: %v", err)
 	}
