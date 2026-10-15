@@ -60,6 +60,7 @@ type dapState struct {
 	initialized         bool // DAP initialized event: adapter ready for config
 	pendingLaunchSeq    int  // one deferred launch response, bound to its request
 	socketDir           string
+	phpProxy            *phpDBGpProxy // CLI-only verified DBGp Unix peer/proxy; broker owns lifecycle
 }
 
 func dapFrame(conn net.Conn, obj any) error {

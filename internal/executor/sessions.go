@@ -519,6 +519,9 @@ func (e *stdioSession) wait() {
 	d := e.dap
 	e.mu.Unlock()
 	if d != nil {
+		if d.phpProxy != nil {
+			d.phpProxy.shutdown()
+		}
 		d.mu.Lock()
 		cleanupErr = errors.Join(cleanupErr, d.stopPinnedDebuggee())
 		if d.adapterPin != nil {
@@ -660,6 +663,9 @@ func (b *stdioSessionBroker) removeAndStop(entry *stdioSession) error {
 	entry.mu.Lock()
 	entry.closed = true
 	if entry.dap != nil {
+		if entry.dap.phpProxy != nil {
+			entry.dap.phpProxy.shutdown()
+		}
 		entry.dap.mu.Lock()
 		if entry.dap.conn != nil {
 			_ = entry.dap.conn.Close()
@@ -746,14 +752,20 @@ func (b *stdioSessionBroker) removeAndStop(entry *stdioSession) error {
 	// DAP's private socket is transport runtime state only, not a second
 	// process owner. Clean it only after pidfd-pinned broker cleanup succeeds.
 	if entry.dap != nil {
-		dir := entry.dap.socketDir
-		if dir != "" {
-			socket := filepath.Join(dir, "dap.sock")
-			if err := os.Remove(socket); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("dap_socket_cleanup_uncertain: %w", err)
+		if entry.dap.phpProxy != nil {
+			if err := entry.dap.phpProxy.removeAfterStop(); err != nil {
+				return fmt.Errorf("php_dap_proxy_cleanup_uncertain: %w", err)
 			}
-			if err := os.Remove(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("dap_runtime_cleanup_uncertain: %w", err)
+		} else {
+			dir := entry.dap.socketDir
+			if dir != "" {
+				socket := filepath.Join(dir, "dap.sock")
+				if err := os.Remove(socket); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return fmt.Errorf("dap_socket_cleanup_uncertain: %w", err)
+				}
+				if err := os.Remove(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return fmt.Errorf("dap_runtime_cleanup_uncertain: %w", err)
+				}
 			}
 		}
 	}

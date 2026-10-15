@@ -74,6 +74,10 @@ type Server struct {
 	javascriptDAPNode                 string                                                    // test-only JS adapter Node fixture
 	javascriptDAPCLI                  string                                                    // test-only JS adapter entrypoint fixture
 	rustLLDBDAPBinary                 string                                                    // test-only known LLDB-DAP executable fixture
+	phpDAPNodeBinary                  string                                                    // test-only trusted Node fixture
+	phpDAPCLIBinary                   string                                                    // test-only verified PHP adapter entrypoint
+	phpDAPNativeBinary                string                                                    // test-only recognized PHP interpreter
+	phpDAPXdebugModule                string                                                    // test-only native Xdebug extension
 }
 
 func NewServer(cfg config.Config, token string) (*Server, error) {

@@ -86,7 +86,7 @@ func (d *dapState) pinDebuggeeProcess(body json.RawMessage) error {
 		if d.containment == nil || !d.containment.containsPID(pid) {
 			return errors.New("rust_dap_debuggee_not_root_contained")
 		}
-	} else if d.adapter == "python/debugpy" || d.adapter == "javascript/js-debug" {
+	} else if d.adapter == "python/debugpy" || d.adapter == "javascript/js-debug" || d.adapter == "php/xdebug" {
 		// Python and Node may use an intermediate launcher, so an OS parent
 		// relation to the adapter is not a safe or correct DAP contract.
 		// The stronger kernel proof is membership in this exact private

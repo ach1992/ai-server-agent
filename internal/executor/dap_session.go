@@ -63,6 +63,22 @@ func (s *Server) debugAction(ctx context.Context, req Request) Response {
 			}
 			return Response{OK: true, Status: status, Output: string(b), OutputEncoding: "json", BytesReturned: int64(len(b)), BytesSeen: int64(len(b))}
 		}
+		if req.Language == "php" {
+			_, _, _, _, trustErr := systemexec.PHPDAP()
+			available := trustErr == nil || (s.phpDAPNodeBinary != "" && s.phpDAPCLIBinary != "" && s.phpDAPNativeBinary != "" && s.phpDAPXdebugModule != "")
+			payload, _ := json.Marshal(map[string]any{
+				"adapter": "php/xdebug", "installed": available,
+				"modes": []string{"cli"}, "attach_supported": false,
+				"http_request_mode": "not_yet_verified", "privileged": false,
+				"transport":   "single_verified_unix_dbgp_peer",
+				"containment": "executor_owned_private_cgroup_v2_required",
+			})
+			status := "unavailable"
+			if available {
+				status = "installed_containment_unverified"
+			}
+			return Response{OK: true, Status: status, Output: string(payload), OutputEncoding: "json", BytesSeen: int64(len(payload)), BytesReturned: int64(len(payload))}
+		}
 		if req.Language == "rust" {
 			_, trustErr := systemexec.RustLLDBDAP()
 			available := trustErr == nil || s.rustLLDBDAPBinary != ""
@@ -79,7 +95,7 @@ func (s *Server) debugAction(ctx context.Context, req Request) Response {
 			return Response{OK: true, Status: status, Output: string(body), OutputEncoding: "json", BytesSeen: int64(len(body)), BytesReturned: int64(len(body))}
 		}
 		if req.Language != "" && req.Language != "go" {
-			return fileError("unsupported_debug_language", "validation", errors.New("debugger readiness supports go, rust, python, javascript and typescript only"))
+			return fileError("unsupported_debug_language", "validation", errors.New("debugger readiness supports go, rust, php, python, javascript and typescript only"))
 		}
 		_, err := s.debugBinary()
 		available := err == nil
@@ -222,6 +238,9 @@ func (s *Server) debugLaunch(ctx context.Context, req Request) (response Respons
 	}
 	if req.Language == "rust" {
 		return s.debugLaunchRust(ctx, req)
+	}
+	if req.Language == "php" {
+		return s.debugLaunchPHP(ctx, req)
 	}
 	if (req.Language != "" && req.Language != "go") || (req.DebugMode != "" && req.DebugMode != "exec") {
 		return fileError("unsupported_debug_language_or_mode", "validation", errors.New("supported Go debug mode is exec; Python requires explicit trusted script/module/test mode"))
@@ -541,6 +560,9 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 		if d.adapter == "rust/lldb-dap" {
 			extension = ".rs"
 		}
+		if d.adapter == "php/xdebug" {
+			extension = ".php"
+		}
 		sourceExt := filepath.Ext(relative)
 		validJS := d.adapter == "javascript/js-debug" && (sourceExt == ".js" || sourceExt == ".mjs" || sourceExt == ".cjs" || (d.sourceLanguage == "typescript" && (sourceExt == ".ts" || sourceExt == ".tsx")))
 		if err != nil || (d.adapter == "javascript/js-debug" && !validJS) ||
@@ -658,6 +680,20 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 		// response. Never expose control over a Python target until its
 		// pidfd, worker UID, trusted interpreter and dedicated cgroup
 		// membership have been verified by the common DAP event consumer.
+		if d.adapter == "php/xdebug" {
+			if d.phpProxy == nil {
+				return fileError("php_dap_missing_verified_proxy", "state", errors.New("PHP DBGp verifier absent; stop session"))
+			}
+			verifyCtx, verifyCancel := context.WithTimeout(ctx, 5*time.Second)
+			proofErr := d.phpProxy.await(verifyCtx)
+			verifyCancel()
+			if proofErr != nil {
+				d.mu.Lock()
+				d.uncertain, d.stage = true, "uncertain"
+				d.mu.Unlock()
+				return fileError("php_dap_unverified_debuggee_identity", "state", proofErr)
+			}
+		}
 		if d.adapter == "python/debugpy" {
 			deadline := time.Now().Add(3 * time.Second)
 			for {
