@@ -24,10 +24,12 @@ const (
 )
 
 type sqlNavOccurrence struct {
-	name, identity, searchTerm string
-	span                       sqlDDLRange
-	declaration                bool
-	drop                       bool
+	name, identity, searchTerm     string
+	tableIdentity, tableSearchTerm string
+	span                           sqlDDLRange
+	declaration                    bool
+	drop                           bool
+	isColumn                       bool
 }
 
 type sqlNavLocation struct {
@@ -90,7 +92,17 @@ func sqlNavAt(span sqlDDLRange, line, character int) bool {
 		(line < end.Line || line == end.Line && character < end.Character)
 }
 
+// Preserve the existing table-only parser contract; column navigation opts
+// in explicitly, without changing the semantics tested by table consumers.
 func sqlNavOccurrences(source, dialect string) ([]sqlNavOccurrence, bool) {
+	return sqlNavSourceOccurrences(source, dialect, false)
+}
+
+func sqlNavAllOccurrences(source, dialect string) ([]sqlNavOccurrence, bool) {
+	return sqlNavSourceOccurrences(source, dialect, true)
+}
+
+func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNavOccurrence, bool) {
 	tokens, ok := sqlDDLTokens(source, dialect)
 	if !ok {
 		return nil, false
@@ -233,6 +245,9 @@ func sqlNavOccurrences(source, dialect string) ([]sqlNavOccurrence, bool) {
 			}
 			appendName(at, false, false)
 		}
+		if withColumns {
+			result = append(result, sqlNavColumns(statement)...)
+		}
 		for i := 1; i+1 < len(statement); i++ {
 			keyword := statement[i].keyword()
 			switch keyword {
@@ -280,7 +295,7 @@ func sqlNavOccurrences(source, dialect string) ([]sqlNavOccurrence, bool) {
 }
 
 func sqlNavSelected(source, dialect string, line, character int) (sqlNavOccurrence, bool) {
-	occurrences, valid := sqlNavOccurrences(source, dialect)
+	occurrences, valid := sqlNavAllOccurrences(source, dialect)
 	if !valid {
 		return sqlNavOccurrence{}, false
 	}
@@ -315,6 +330,9 @@ func (s *Server) sqlOfflineNavigation(parent context.Context, req Request, sourc
 	query := req
 	query.Action, query.Path, query.FileVersion = "workspace_text_search", "", ""
 	query.Pattern = "(?i)" + regexp.QuoteMeta(selected.searchTerm)
+	if selected.isColumn {
+		query.Pattern = "(?i)(?:" + regexp.QuoteMeta(selected.searchTerm) + "|" + regexp.QuoteMeta(selected.tableSearchTerm) + ")"
+	}
 	query.SearchLimit, query.Globs = sqlNavigationSearchMatches, sqlNavSearchGlobs(req.SQLDialect)
 	// Positive SQL-only globs with hidden traversal avoid silent loss of
 	// migration files in dot-prefixed directories.
@@ -358,6 +376,7 @@ func (s *Server) sqlOfflineNavigation(parent context.Context, req Request, sourc
 	sort.Strings(paths)
 	versions := make(map[string]string, len(paths))
 	var foundItems []sqlNavFound
+	tableLifecycleChanged := false
 	total := 0
 	for _, path := range paths {
 		check := req
@@ -382,9 +401,12 @@ func (s *Server) sqlOfflineNavigation(parent context.Context, req Request, sourc
 			return fileError("file_changed", "conflict", errors.New("requested SQL file changed")), true
 		}
 		versions[path] = read.FileVersion
-		occurrences, valid := sqlNavOccurrences(read.Output, req.SQLDialect)
+		occurrences, valid := sqlNavAllOccurrences(read.Output, req.SQLDialect)
 		if !valid {
 			return fileError("sql_schema_unparseable", "validation", errors.New("SQL target cannot be safely tokenized")), true
+		}
+		if sqlNavTableLifecycle(occurrences, selected) {
+			tableLifecycleChanged = true
 		}
 		for _, occ := range occurrences {
 			if occ.identity == selected.identity {
@@ -422,7 +444,7 @@ func (s *Server) sqlOfflineNavigation(parent context.Context, req Request, sourc
 				locations = append(locations, item.sqlNavLocation)
 			}
 		}
-		if drops > 0 || len(locations) > 1 {
+		if drops > 0 || tableLifecycleChanged || len(locations) > 1 {
 			return fileError("sql_schema_history_ambiguous", "validation",
 				errors.New("table was dropped, renamed or redefined; static migration ordering cannot prove the active schema")), true
 		}
