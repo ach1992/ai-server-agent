@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -207,8 +208,12 @@ func TestPHPDBGpPrivateProxyShutdownReclaimsOnlyItsOwnSockets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := peer.Write(phpDBGpTestInitFrame(strconv.Itoa(os.Getpid()), "file:///test/main.php")); err != nil {
-		t.Fatal(err)
+	// With no adapter/cgroup provenance the proxy may reject and close
+	// the accepted socket before the client finishes writing. EPIPE or
+	// ECONNRESET is successful fail-closed rejection, not a test failure.
+	if _, err := peer.Write(phpDBGpTestInitFrame(strconv.Itoa(os.Getpid()), "file:///test/main.php")); err != nil &&
+		!errors.Is(err, syscall.EPIPE) && !errors.Is(err, syscall.ECONNRESET) {
+		t.Fatalf("unexpected unverified DBGp write error: %v", err)
 	}
 	ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
 	defer cancel()
