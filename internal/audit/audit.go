@@ -45,29 +45,31 @@ type Logger struct {
 }
 
 type Entry struct {
-	SchemaVersion         int    `json:"schema_version"`
-	EventID               string `json:"event_id"`
-	Time                  string `json:"time"`
-	Phase                 string `json:"phase"`
-	Action                string `json:"action"`
-	Mode                  string `json:"mode,omitempty"`
-	PolicyCategory        string `json:"policy_category,omitempty"`
-	Decision              string `json:"decision,omitempty"`
-	Success               *bool  `json:"success,omitempty"`
-	ExitCode              int    `json:"exit_code,omitempty"`
-	DurationMS            int64  `json:"duration_ms,omitempty"`
-	ErrorClass            string `json:"error_class,omitempty"`
-	ReasonCode            string `json:"reason_code,omitempty"`
-	RequestID             string `json:"request_id,omitempty"`
-	OperationID           string `json:"operation_id,omitempty"`
-	ApprovalID            string `json:"approval_id,omitempty"`
-	JobID                 string `json:"job_id,omitempty"`
-	PrincipalID           string `json:"principal_id,omitempty"`
-	PrincipalClass        string `json:"principal_class,omitempty"`
-	PrincipalName         string `json:"principal_name,omitempty"`
-	CommandFingerprint    string `json:"command_fingerprint,omitempty"`
-	FingerprintKeyVersion int    `json:"fingerprint_key_version,omitempty"`
-	FingerprintKeyID      string `json:"fingerprint_key_id,omitempty"`
+	SchemaVersion         int      `json:"schema_version"`
+	EventID               string   `json:"event_id"`
+	Time                  string   `json:"time"`
+	Phase                 string   `json:"phase"`
+	Action                string   `json:"action"`
+	Mode                  string   `json:"mode,omitempty"`
+	PolicyCategory        string   `json:"policy_category,omitempty"`
+	Decision              string   `json:"decision,omitempty"`
+	Success               *bool    `json:"success,omitempty"`
+	ExitCode              int      `json:"exit_code,omitempty"`
+	DurationMS            int64    `json:"duration_ms,omitempty"`
+	ErrorClass            string   `json:"error_class,omitempty"`
+	ReasonCode            string   `json:"reason_code,omitempty"`
+	RequestID             string   `json:"request_id,omitempty"`
+	OperationID           string   `json:"operation_id,omitempty"`
+	ApprovalID            string   `json:"approval_id,omitempty"`
+	JobID                 string   `json:"job_id,omitempty"`
+	PrincipalID           string   `json:"principal_id,omitempty"`
+	PrincipalClass        string   `json:"principal_class,omitempty"`
+	PrincipalName         string   `json:"principal_name,omitempty"`
+	CommandFingerprint    string   `json:"command_fingerprint,omitempty"`
+	TargetPaths           []string `json:"target_paths,omitempty"`
+	TargetPathsOmitted    int      `json:"target_paths_omitted,omitempty"`
+	FingerprintKeyVersion int      `json:"fingerprint_key_version,omitempty"`
+	FingerprintKeyID      string   `json:"fingerprint_key_id,omitempty"`
 
 	Command string `json:"-"`
 }

@@ -43,6 +43,8 @@ func New(protected []string) *Guard {
 		}),
 		dangerous: compile([]string{
 			`(?i)\brm\s+(-[^ ]*r[^ ]*f|-[^ ]*f[^ ]*r)\b`,
+			// Common split/long-option spellings of rm -rf, not a shell parser.
+			`(?i)\brm\s+(?:-r\s+-f|-f\s+-r|--recursive\s+--force|--force\s+--recursive)(?:\s|$)`,
 			`(?i)\bmkfs(\.|\s)`, `(?i)\b(fdisk|parted|wipefs)\b`,
 			`(?i)\bDROP\s+(DATABASE|SCHEMA|TABLE)\b`,
 			`(?i)\bdocker\s+(system|volume)\s+prune\b`,

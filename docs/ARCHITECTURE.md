@@ -135,7 +135,8 @@ The durable execution/data rules are:
 The durable local audit rules are:
 
 - external principal + request/operation/job/approval correlation is non-secret and structured;
-- raw arbitrary shell command text is not persisted by default as the audit source of truth;
+- raw arbitrary shell command text and privileged host-file paths are kept fingerprint-only;
+- structured worker workspace writes, batch edits and transfer commits record only bounded, validated workspace-relative intended target paths (at most 12 names of 256 bytes each, with omission count); actual per-file outcomes remain in tool responses; paths may contain sensitive filenames, so audit storage stays protected;
 - audit storage is locally bounded/rotated and remains usable without a mandatory telemetry service.
 
 These are host-protection and integration-contract requirements, not a move toward a distributed scheduler, generic file-transfer service, mandatory Redis/queue, container runtime, or fleet controller.
