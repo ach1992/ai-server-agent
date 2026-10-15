@@ -172,11 +172,10 @@ func TestCodeInspectRealOfflineSQLPostgresMySQL(t *testing.T) {
 		if !out.OK || out.FileVersion != req.FileVersion {
 			t.Fatalf("%s real migration LSP processing failed: %+v", migration.dialect, out)
 		}
-		if !strings.Contains(out.Output, migration.table) {
-			// Known unmet acceptance: SQLLens v0.5.0 emits [] for
-			// CREATE TABLE even though it provides real CTE semantics.
-			// Do not invent schema insight or call this a positive proof.
-			t.Logf("UNMET_SQL_SCHEMA_INSIGHT: %s DDL documentSymbol=%s", migration.dialect, out.Output)
+		if !strings.Contains(out.Output, migration.table) ||
+			!strings.Contains(out.Output, "DDL column") ||
+			!strings.Contains(out.Output, "selectionRange") {
+			t.Fatalf("%s DDL semantic table/column outline unavailable: %s", migration.dialect, out.Output)
 		}
 	}
 	if _, err := os.Stat(filepath.Join(workspace, "SQL-MUST-NOT-EXECUTE")); !os.IsNotExist(err) {

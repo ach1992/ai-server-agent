@@ -230,6 +230,12 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 		}
 		return fileError("code_inspection_failed", "runtime", err)
 	}
+	if actualLanguage == "sql" && req.CodeMethod == "symbols" {
+		data, err = appendSQLDDLSymbols(data, source.Output, req.SQLDialect)
+		if err != nil {
+			return fileError("sql_lsp_invalid_symbols", "runtime", err)
+		}
+	}
 	// Recheck worker-authority file identity AFTER semantic computation. Do
 	// not claim a location against an edit made concurrently by a shell/AI.
 	check.Action = "workspace_stat"
