@@ -295,9 +295,12 @@ confirm(){
   fi
 }
 
+# /dev/tty can be permission-readable without a controlling terminal
+# (notably inside sudo / CI). Noninteractive management must never prompt.
+ui_has_interactive_tty(){ [ -t 0 ] && [ -r /dev/tty ]; }
 prompt_value(){
   local prompt="$1" default="${2:-}" value
-  [ -r /dev/tty ] || die "Interactive input requires a terminal. Use the documented AI_SERVER_AGENT_* variables for automation."
+  ui_has_interactive_tty || die "Interactive input requires a terminal. Use the documented AI_SERVER_AGENT_* variables for automation."
   if [ -n "$default" ]; then
     read -r -p "$prompt [$default] (b=cancel): " value </dev/tty
     if ui_cancel_requested "$value"; then
@@ -2327,7 +2330,8 @@ configure_local(){ (
   acquire_management_lock
   [ ! -e "$CF_TXN_STATE" ] && [ ! -L "$CF_TXN_STATE" ] || die "Resolve the pending Cloudflare transaction with cloudflare-cleanup before changing local connection state."
   local port
-  port="${AI_SERVER_AGENT_PORT:-$(current_port)}"; [ -r /dev/tty ] && port="$(prompt_value 'Local MCP port' "$port")"
+  port="${AI_SERVER_AGENT_PORT:-$(current_port)}"
+  if ui_has_interactive_tty; then port="$(prompt_value 'Local MCP port' "$port")"; fi
   write_config local "$port" "" ""
   restart_and_verify_local || die "Agent did not recover in local mode."
   save_local_state "$port"
@@ -2340,7 +2344,8 @@ configure_manual_tls(){ (
   need_cmd openssl; need_cmd jq
   local host port src_crt src_key key_pub cert_pub config_backup backup
   host="${AI_SERVER_AGENT_HOSTNAME:-}"; [ -n "$host" ] || host="$(prompt_value 'Public MCP hostname')"; host="${host,,}"; validate_hostname "$host"
-  port="${AI_SERVER_AGENT_PORT:-$(current_port)}"; [ -r /dev/tty ] && port="$(prompt_value 'Public MCP port' "$port")"
+  port="${AI_SERVER_AGENT_PORT:-$(current_port)}"
+  if ui_has_interactive_tty; then port="$(prompt_value 'Public MCP port' "$port")"; fi
   src_crt="${AI_SERVER_AGENT_TLS_CERT_FILE:-}"; [ -n "$src_crt" ] || src_crt="$(prompt_value 'Existing TLS certificate PEM path')"
   src_key="${AI_SERVER_AGENT_TLS_KEY_FILE:-}"; [ -n "$src_key" ] || src_key="$(prompt_value 'Existing TLS private key PEM path')"
   [ -r "$src_crt" ] && [ -r "$src_key" ] || die "Certificate/key path is not readable."

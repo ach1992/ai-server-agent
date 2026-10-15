@@ -272,4 +272,28 @@ grep -Fq 'Cancelled; credentials unchanged' "$TMP/sigint-confirm.out"
 grep -Fq 'MENU_EXITED_CLEANLY' "$TMP/sigint-confirm.out"
 ! grep -Eq 'ISSUED_UNEXPECTEDLY|REVOKED_UNEXPECTEDLY' "$TMP/sigint-confirm.out"
 
-echo 'Operator menu TTY navigation/strict failure/Back/precommit/SIGINT read+confirm/protected commit/one-use FD3/no-color PASS'
+# Permissions on /dev/tty are not proof of a controlling terminal. A
+# noninteractive fresh reinstall must be able to choose local mode using
+# config/default port without getting stuck at an unreachable prompt.
+cat > "$TMP/no-tty-local.sh" <<'SH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+export AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1
+source "$ASA_MANAGE_SOURCE"
+CF_TXN_STATE="$ASA_SIGNAL_MARKER/missing-cloudflare-transaction"
+current_port(){ printf '3210\n'; }
+acquire_management_lock(){ :; }
+write_config(){
+  [ "$1" = local ] && [ "$2" = 3210 ] || exit 20
+  printf 'NON_TTY_LOCAL_CONFIG_SAVED\n'
+}
+restart_and_verify_local(){ :; }
+save_local_state(){ printf 'NON_TTY_MANAGED_STATE_SAVED\n'; }
+configure_local
+SH
+ASA_SIGNAL_MARKER="$TMP" ASA_MANAGE_SOURCE="$ROOT/manage.sh" bash "$TMP/no-tty-local.sh" > "$TMP/no-tty-local.out" 2>&1
+grep -Fq 'NON_TTY_LOCAL_CONFIG_SAVED' "$TMP/no-tty-local.out"
+grep -Fq 'NON_TTY_MANAGED_STATE_SAVED' "$TMP/no-tty-local.out"
+! grep -Eq 'requires a terminal|No such device or address' "$TMP/no-tty-local.out"
+
+echo 'Operator menu TTY navigation/strict failure/Back/precommit/SIGINT read+confirm/protected commit/one-use FD3/non-TTY reinstall/no-color PASS'
