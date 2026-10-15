@@ -36,7 +36,7 @@ func sqlNavColumnList(table sqlNavOccurrence, tokens []sqlDDLToken, at int, decl
 		}
 		if declaration {
 			switch first.keyword() {
-			case "CONSTRAINT", "PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "KEY", "INDEX", "EXCLUDE", "LIKE", "PERIOD":
+			case "CONSTRAINT", "PRIMARY", "FOREIGN", "UNIQUE", "CHECK", "KEY", "INDEX", "FULLTEXT", "SPATIAL", "VECTOR", "EXCLUDE", "LIKE", "PERIOD":
 				return
 			}
 			if start+1 >= end || (tokens[start+1].kind != 'i' && tokens[start+1].kind != 'q') {
@@ -131,6 +131,7 @@ func sqlNavColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurrence {
 			return nil
 		}
 		result = append(result, sqlNavColumnList(table, statement, at, true)...)
+		result = append(result, sqlNavConstraintColumns(statement, dialect, table, at, false)...)
 	} else if operation == "INSERT" {
 		if at < len(statement) && statement[at].text == "(" {
 			// The names are source-backed column uses of this exact table,
@@ -199,6 +200,7 @@ func sqlNavColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurrence {
 	}
 	if operation == "ALTER" {
 		result = append(result, sqlNavAlterIndexColumns(statement, dialect, table, at)...)
+		result = append(result, sqlNavConstraintColumns(statement, dialect, table, at, true)...)
 	}
 	if operation == "CREATE" || operation == "ALTER" {
 		for i := at; i+2 < len(statement); i++ {

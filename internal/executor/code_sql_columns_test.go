@@ -34,7 +34,7 @@ func TestSQLColumnSourceGraphAndTombstones(t *testing.T) {
 			}
 		}
 	}
-	for name, want := range map[string]int{"accounts.id": 3, "accounts.label": 3, "orders.id": 1,
+	for name, want := range map[string]int{"accounts.id": 4, "accounts.label": 3, "orders.id": 1,
 		"orders.account_id": 1, "accounts.active": 2, "accounts.title": 1} {
 		if counts[name] != want {
 			t.Fatalf("column %q count %d not %d: %+v", name, counts[name], want, all)
@@ -67,7 +67,7 @@ func TestSQLColumnGraphRejectsUnsafeScope(t *testing.T) {
 		{"WITH accounts AS (SELECT 1 AS id) SELECT id FROM accounts;", "postgres"},
 		{"SELECT 'REFERENCES accounts(id)' AS s;", "postgres"},
 		{"DO $tag$ ALTER TABLE accounts ADD COLUMN fake INT; $tag$;", "postgres"},
-		{"ALTER TABLE accounts ADD CONSTRAINT pk PRIMARY KEY(id);", "postgres"},
+		{"ALTER TABLE accounts ADD CONSTRAINT pk PRIMARY KEY((id+1));", "postgres"},
 		{"ALTER TABLE accounts ADD INDEX idx_id ((id+1));", "mysql"}, // expression indexes are not source-backed column identifiers
 		{"SELECT E'quoted\\'; INSERT INTO accounts (id) VALUES (1);' AS s;", "postgres"},
 	} {
