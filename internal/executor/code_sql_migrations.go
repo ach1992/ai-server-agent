@@ -5,15 +5,17 @@ import (
 	"path"
 	"regexp"
 	"sort"
+	"strconv"
 	"strings"
 )
 
 // Offline source-history only: one homogeneous, ordered SQL migration family
-// (numeric-prefix or default Flyway V...__...). Never infer live database
+// (numeric-prefix, Flyway V...__..., or golang-migrate .up.sql). Never infer live database
 // state, implicit runner configuration, rollback or repeatable migrations.
 var (
 	sqlNavVersionedMigration = regexp.MustCompile(`(?i)^([0-9]{3,20})[_-][^/]+\.sql$`)
 	sqlNavFlywayMigration    = regexp.MustCompile(`^V([0-9]{1,20}(?:[._][0-9]{1,20}){0,7})__[^/]+\.sql$`)
+	sqlNavGoMigrate          = regexp.MustCompile(`^([0-9]{1,20})_[^/]+\.up\.sql$`)
 )
 
 type sqlNavMigrationEvent struct {
@@ -21,13 +23,34 @@ type sqlNavMigrationEvent struct {
 	version string
 }
 
+func sqlNavRollbackFile(file string) bool {
+	return sqlNavInsideMigrationTree(file) && strings.HasSuffix(strings.ToLower(path.Base(file)), ".down.sql")
+}
+
 func sqlNavMigrationInfo(file string) (dir, family, version string, ok bool) {
 	dir = path.Dir(file)
 	base := path.Base(file)
-	// Migration rollback scripts are not part of the forward schema.
-	if strings.HasSuffix(strings.ToLower(base), ".up.sql") ||
-		strings.HasSuffix(strings.ToLower(base), ".down.sql") {
+	// A golang-migrate up/down pair supplies one forward version. Never use
+	// its rollback side to prove a schema or follow a selected rollback file.
+	if sqlNavRollbackFile(file) {
 		return "", "", "", false
+	}
+	if strings.HasSuffix(strings.ToLower(base), ".up.sql") {
+		if path.Base(dir) != "migrations" && path.Base(dir) != "migration" {
+			return "", "", "", false
+		}
+		match := sqlNavGoMigrate.FindStringSubmatch(base)
+		if match == nil {
+			return "", "", "", false
+		}
+		version = strings.TrimLeft(match[1], "0")
+		if version == "" {
+			version = "0"
+		}
+		if _, err := strconv.ParseUint(version, 10, 64); err != nil {
+			return "", "", "", false
+		}
+		return dir, "golang-migrate", version, true
 	}
 	if path.Base(dir) == "migrations" {
 		if match := sqlNavVersionedMigration.FindStringSubmatch(base); match != nil {

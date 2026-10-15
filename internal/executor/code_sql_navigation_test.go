@@ -356,6 +356,49 @@ func TestSQLSourceNavigationWorkerCrossFileVersionsAndHistory(t *testing.T) {
 			t.Fatalf("unsupported migration was accepted as forward schema: %s %+v", tc.path, unsafe)
 		}
 	}
+
+	// Real worker search through checked-in golang-migrate up/down pairs
+	// and Goose Up/Down sections, never DB-state inference.
+	for name, body := range map[string]string{
+		"db/migrations/1_create.up.sql":   "CREATE TABLE shipments (id INT PRIMARY KEY);\n",
+		"db/migrations/1_create.down.sql": "DROP TABLE shipments;\nCREATE TABLE phantom_down (id INT);\n",
+		"db/migrations/2_drop.up.sql":     "DROP TABLE shipments;\n",
+		"db/migrations/10_restore.up.sql": "CREATE TABLE shipments (id BIGINT PRIMARY KEY);\n",
+		"queries/shipments.sql":           "SELECT * FROM shipments;\n",
+		"migrations/020_goose.sql":        "-- +goose Up\nCREATE TABLE goose_audit (id INT);\n-- +goose Down\nDROP TABLE goose_audit;\nCREATE TABLE phantom_goose (id INT);\n",
+		"queries/goose_audit.sql":         "SELECT * FROM goose_audit;\n",
+	} {
+		p := filepath.Join(workspace, name)
+		if err := os.MkdirAll(filepath.Dir(p), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(p, []byte(body), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, tc := range []struct {
+		source, want string
+		char         int
+	}{
+		{"queries/shipments.sql", "db/migrations/10_restore.up.sql", 16},
+		{"queries/goose_audit.sql", "migrations/020_goose.sql", 16},
+	} {
+		owner.SQLDialect, owner.CodeMethod = "postgres", "definition"
+		owner.Path, owner.FileVersion, owner.Line, owner.Character = tc.source, version(tc.source), 0, tc.char
+		got := s.codeInspect(ctx, owner)
+		if !got.OK {
+			t.Fatalf("forward-only source lookup failed %s: %+v", tc.source, got)
+		}
+		if err := json.Unmarshal([]byte(got.Output), &targets); err != nil || len(targets) != 1 ||
+			targets[0].URI != tc.want || targets[0].FileVersion != version(tc.want) {
+			t.Fatalf("forward-only migration resolved wrong source %s: %+v (%v)", tc.source, got, err)
+		}
+	}
+	owner.Path, owner.FileVersion, owner.Line, owner.Character = "db/migrations/1_create.down.sql", version("db/migrations/1_create.down.sql"), 0, 16
+	rolled := s.codeInspect(ctx, owner)
+	if rolled.OK || rolled.ErrorCode != "sql_schema_rollback_unsupported" {
+		t.Fatalf("selected golang-migrate rollback admitted: %+v", rolled)
+	}
 }
 
 func TestSQLSourceNavigationLimitsAndDuplicateDeclarations(t *testing.T) {

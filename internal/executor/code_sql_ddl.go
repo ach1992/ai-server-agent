@@ -109,6 +109,17 @@ func sqlDDLTokens(source, dialect string) ([]sqlDDLToken, bool) {
 	if len(source) > codeMaxDocumentBytes {
 		return nil, false
 	}
+	forward, ok := sqlDDLGooseForwardSQL(source, dialect)
+	if !ok {
+		return nil, false
+	}
+	return sqlDDLTokensRaw(forward, dialect)
+}
+
+func sqlDDLTokensRaw(source, dialect string) ([]sqlDDLToken, bool) {
+	if len(source) > codeMaxDocumentBytes {
+		return nil, false
+	}
 	mysql := dialect == "mysql" || dialect == "mariadb"
 	if !mysql && dialect != "postgres" && dialect != "postgresql" {
 		return nil, false

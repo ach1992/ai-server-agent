@@ -323,6 +323,9 @@ func sqlNavSearchGlobs(dialect string) []string {
 // repeated at completion and every target version rechecked: truncation,
 // concurrent changes or unsafe files cannot become apparently complete links.
 func (s *Server) sqlOfflineNavigation(parent context.Context, req Request, sourcePath, source string) (Response, bool) {
+	if sqlNavRollbackFile(sourcePath) {
+		return fileError("sql_schema_rollback_unsupported", "validation", errors.New("rollback migration cannot prove forward SQL references")), true
+	}
 	selected, found := sqlNavSelected(source, req.SQLDialect, req.Line, req.Character)
 	if !found {
 		return Response{}, false
@@ -358,6 +361,7 @@ func (s *Server) sqlOfflineNavigation(parent context.Context, req Request, sourc
 		return fileError("sql_schema_search_incomplete", "resource", err), true
 	}
 	pathSet := map[string]bool{sourcePath: true}
+	rollbackMatches := false
 	for _, match := range first.Matches {
 		if !isSQLSourcePath(match.File) {
 			continue
@@ -365,6 +369,10 @@ func (s *Server) sqlOfflineNavigation(parent context.Context, req Request, sourc
 		path, pathErr := safeWorkspaceRelativeFile(match.File)
 		if pathErr != nil || path != match.File {
 			return fileError("sql_schema_unsafe_path", "security", errors.New("unsafe SQL search target")), true
+		}
+		if sqlNavRollbackFile(path) {
+			rollbackMatches = true
+			continue // down migration SQL is not forward-schema evidence
 		}
 		pathSet[path] = true
 		if len(pathSet) > sqlNavigationMaxFiles {
@@ -469,6 +477,9 @@ func (s *Server) sqlOfflineNavigation(parent context.Context, req Request, sourc
 		for _, item := range foundItems {
 			locations = append(locations, item.sqlNavLocation)
 		}
+	}
+	if len(locations) == 0 && rollbackMatches {
+		return fileError("sql_schema_history_ambiguous", "validation", errors.New("no forward SQL source identified, only rollback migration matches")), true
 	}
 	if len(locations) > sqlNavigationMaxLocations {
 		return fileError("sql_schema_result_limit", "resource", errors.New("too many SQL reference locations")), true

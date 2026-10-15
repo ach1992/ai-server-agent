@@ -24,7 +24,11 @@ func TestSQLMigrationVersionOrderingAndSourceBoundaries(t *testing.T) {
 		{"db/migration/U1__undo.sql", "", "", false},
 		{"db/migration/R__repeatable.sql", "", "", false},
 		{"db/migration/V1__undo.down.sql", "", "", false},
-		{"migrations/001_create.up.sql", "", "", false},
+		{"migrations/001_create.up.sql", "migrations", "1", true},
+		{"migration/1_base.up.sql", "migration", "1", true},
+		{"db/migrations/18446744073709551615_last.up.sql", "db/migrations", "18446744073709551615", true},
+		{"db/migrations/18446744073709551616_overflow.up.sql", "", "", false},
+		{"db/migrations/2_bad.up.SQL", "", "", false},
 		{"migrations/001_create.down.sql", "", "", false},
 		{"db/schema.sql", "", "", false},
 		{"migrations/01_create.sql", "", "", false},
@@ -110,6 +114,30 @@ func TestSQLFlywayMigrationHistoryRemainsSourceOnly(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			if loc, err := sqlNavResolveOrderedDefinition(tc.items, nil, tc.source); err == nil {
 				t.Fatalf("ambiguous migration source was accepted: %+v", loc)
+			}
+		})
+	}
+}
+
+func TestSQLGolangMigrateSourceHistory(t *testing.T) {
+	create := sqlNavHistoryFixture("db/migrations/1_create.up.sql", true, false, 0)
+	drop := sqlNavHistoryFixture("db/migrations/2_drop.up.sql", false, true, 0)
+	recreate := sqlNavHistoryFixture("db/migrations/10_recreate.up.sql", true, false, 0)
+	got, err := sqlNavResolveOrderedDefinition([]sqlNavFound{recreate, drop, create}, nil, "db/query.sql")
+	if err != nil || got.URI != recreate.URI {
+		t.Fatalf("ordered forward-only migration resolution failed: %+v %v", got, err)
+	}
+	for _, tc := range []struct {
+		name  string
+		items []sqlNavFound
+	}{
+		{"rollback is not forward", []sqlNavFound{sqlNavHistoryFixture("db/migrations/1_create.down.sql", true, false, 0)}},
+		{"mixed runner families", []sqlNavFound{create, sqlNavHistoryFixture("db/migrations/002_drop.sql", false, true, 0)}},
+		{"duplicate numeric up version", []sqlNavFound{create, sqlNavHistoryFixture("db/migrations/01_other.up.sql", true, false, 0)}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if found, err := sqlNavResolveOrderedDefinition(tc.items, nil, "db/query.sql"); err == nil {
+				t.Fatalf("ambiguous migration history accepted: %+v", found)
 			}
 		})
 	}
