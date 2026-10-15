@@ -15,10 +15,17 @@ missing_cf_token=/run/ai-server-agent-ci-no-cloudflare-token
 sudo test ! -e "$missing_cf_token"
 output="$(mktemp)"
 owns_fixture=0
+stage='pre-install prerequisites'
+# Emit only a non-secret stage name and script line on failure. Never dump
+# installer output, which can contain one-use bearer material on a regression.
+trap 'printf "fresh Cloudflare handoff: unhandled failure at line %s (stage: %s; exit %s)\n" "$LINENO" "$stage" "$?" >&2' ERR
 
 cleanup(){
   local rc="$?"
   trap - EXIT
+  if [ "$rc" -ne 0 ]; then
+    printf 'fresh Cloudflare handoff: failed during %s (exit %s; installer output withheld for credential safety)\n' "$stage" "$rc" >&2
+  fi
   if [ "$owns_fixture" -eq 1 ]; then
     if ! sudo env AI_SERVER_AGENT_YES=1 bash "$ROOT/uninstall.sh" --purge >/dev/null 2>&1; then
       echo "fresh Cloudflare handoff: could not purge the disposable CI installation" >&2
@@ -33,6 +40,7 @@ trap cleanup EXIT
 # Fresh install creates/verifies a named bearer, removes legacy plaintext, and
 # passes that bearer to the actual installed manager over one-use FD3.
 # Intentionally stop BEFORE any provider access via an absent token file.
+stage='fresh noninteractive Cloudflare installation and intentional absent-token refusal'
 owns_fixture=1
 result=0
 sudo env \
@@ -47,6 +55,7 @@ sudo env \
   AI_SERVER_AGENT_CLOUDFLARE_API_TOKEN_FILE="$missing_cf_token" \
   bash "$ROOT/install.sh" >"$output" 2>&1 || result=$?
 
+stage='verify named bearer preflight and no provider access'
 [ "$result" -ne 0 ] || {
   echo "fresh Cloudflare handoff unexpectedly completed without a provider token" >&2
   exit 1
@@ -68,6 +77,7 @@ if grep -Eq '(Authorization: Bearer |Bearer )[0-9a-f]{64}' "$output"; then
   exit 1
 fi
 
+stage='verify installed manager binary and fresh protected state'
 sudo cmp -s "$ROOT/manage.sh" /usr/local/lib/ai-server-agent/manage.sh
 sudo test -x /usr/local/sbin/ai-server-agent-manage
 sudo test ! -e /etc/ai-server-agent/mcp.authorization
@@ -88,6 +98,7 @@ curl -fsS --max-time 5 http://127.0.0.1:3210/healthz >/dev/null
 # New-baseline live management: only the Agent restarts for a purpose change.
 # The authorization store, immutable instance identity and Executor service
 # are independent of profile choice.
+stage='profile setting and executor identity preservation'
 executor_pid="$(sudo systemctl show -p MainPID --value ai-server-agent-executor.service)"
 instance_id="$(sudo jq -r .instance_id /etc/ai-server-agent/config.json)"
 credential_digest="$(sudo sha256sum /etc/ai-server-agent/mcp-credentials.json | cut -d' ' -f1)"
@@ -103,8 +114,10 @@ test "$(sudo sha256sum /etc/ai-server-agent/mcp-credentials.json | cut -d' ' -f1
 # Install the SAME new-baseline candidate again in the disposable fixture.
 # The purpose and label survive the installer regeneration, without relying
 # on compatibility machinery for earlier Agent generations.
+stage='second noninteractive new-baseline installer'
 sudo env AI_SERVER_AGENT_BINARY="$BINARY" AI_SERVER_AGENT_NONINTERACTIVE=1 \
   AI_SERVER_AGENT_SETUP_MODE=local bash "$ROOT/install.sh" >"$output" 2>&1
+stage='post-second-install manifest/credential/service verification'
 sudo jq -e '.environment_profile=="validation" and .server_label=="QA Agent Host"' /etc/ai-server-agent/config.json >/dev/null
 sudo jq -e '.environment_profile=="validation" and .server_label=="QA Agent Host"' /var/lib/ai-server-agent/AI_ENVIRONMENT.json >/dev/null
 test "$(sudo jq -r .instance_id /etc/ai-server-agent/config.json)" = "$instance_id"
