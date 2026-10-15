@@ -42,10 +42,27 @@ Support for another commercial AI client is claimed only after its current proto
 | `browser_session_open` / `browser_session_flow` / `browser_session_status` / `browser_session_close` | manage principal/workspace-bound cross-call Chromium interaction and verified cleanup; session refs are not durable handles |
 | `browser_session_capture` / `browser_session_trace` | opt-in bounded typed JPEG or version-pinned ZIP trace retrieval; actual client/model visibility is a separate acceptance requirement (#99) |
 | `terminal_open` / `terminal_read` / `terminal_write` / `terminal_resize` / `terminal_interrupt` / `terminal_reconnect` / `terminal_close` | optional bounded interactive worker/root tmux Control Mode with principal/workspace/epoch checks; real root terminal requires separate authorization (#60) |
-| `code_definition` / `code_references` / `code_symbols` / `code_diagnostics` | optional Go/gopls semantic inspection using an exact worker file version; initial source-size and result budgets are narrow (#56) |
-| `debug_adapter_status` / `debug_*` | optional worker-authority Delve/DAP debugging; require verified containment before target launch; evaluation may change execution state (#57) |
+| `code_definition` / `code_references` / `code_symbols` / `code_diagnostics` | version-pinned Go/gopls plus optional PHP, JavaScript/TypeScript, Python, Shell, Rust, HTML/CSS or PostgreSQL/MySQL/MariaDB SQL adapters; bounded per-method support (#56/#140) |
+| `debug_adapter_status` / `debug_*` | optional contained worker-owned Go/Delve, PHP CLI/Xdebug, Python/debugpy, Rust/LLDB, JS/Node, precompiled TypeScript and local HTML/Chromium DAP; **no** PHP HTTP-service, Shell DAP, extension host or remote attach (#57/#140/#149) |
 
 The source-level presence of a tool does **not** prove availability on a particular kernel, compatible optional tool installation, installed server, connected client, or Stable release. Use `agent_environment`, the capability's status/error response and the current installation to check readiness; verify changed tool discovery using the current ChatGPT plugin refresh flow. Accepted architecture and remaining delivery gates: [Developer Runtime](DEVELOPER-RUNTIME.md), [#59](https://github.com/ach1992/ai-server-agent/issues/59), [#99](https://github.com/ach1992/ai-server-agent/issues/99).
+
+### Optional multi-language code and debugger readiness
+
+The first Stable slice of Issue #140 includes only tested, bounded supported modes. Language servers and debuggers are optional administrator-owned runtimes; the core installer does **not** install Node, PHP, Python, Rust, their language adapters, database tools or Chromium automatically. MCP discovery of a tool does not mean the selected runtime is installed. Pass an exact worker workspace, `file_version` and explicit SQL dialect. A successful `debug_adapter_status` **tool call** can correctly report `status=unavailable`.
+
+| Language | Optional language intelligence | Optional contained DAP |
+| --- | --- | --- |
+| Go | trusted `gopls` | prebuilt worker executable with Delve |
+| PHP | pinned Phpactor with no Composer/project execution | **CLI `.php` only**, Xdebug/DBGp-to-DAP, private Unix peer and verified descendant cleanup |
+| JavaScript / TypeScript | pinned native TypeScript server | local Node, precompiled TS JavaScript+source map, or local HTML/Chromium Browser pipe; **no extension host** |
+| Python | pinned `ty`, versioned source | debugpy script/module/test |
+| Bash / POSIX Shell | pinned Bash Language Server and optional ShellCheck | **No structured Shell DAP**; use authorized worker CLI/Terminal |
+| Rust | pinned rust-analyzer/compiler without implicit Cargo scripts/macros | prebuilt ELF and pinned LLDB DAP |
+| HTML / CSS | pinned VS Code language services with per-method support | No generic HTML/CSS DAP; use Browser/E2E and supported local JS/HTML Browser mode |
+| PostgreSQL / MySQL / MariaDB SQL | pinned SQLLens plus bounded conservative offline DDL/migration/reference supplement, explicit dialect | No SQL debugger, implicit database connection or query execution |
+
+**Deferred to [#149](https://github.com/ach1992/ai-server-agent/issues/149):** PHP HTTP/Job/Service DBGp request debugging (standalone proof is not product integration), a safe Shell DAP choice, JS extension-host debugging, advanced SQL migration/procedural semantics and broader optional-arm64/client runtime evidence. Unsupported methods or ambiguous SQL migration history return typed errors, not guessed results. `debug_launch` intentionally executes selected workspace code under worker authority; it is never passive inspection. Verify exact installed release and optional runtime readiness.
 
 ### Structured worker workspace editing
 

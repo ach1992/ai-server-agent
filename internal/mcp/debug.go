@@ -7,10 +7,10 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-// Debug tools reuse the same focused Go/Delve, Python/debugpy and Node/js-debug DAP control loop;
+// Debug tools reuse the same focused Go/Delve, Rust/LLDB, PHP/Xdebug, Python/debugpy and Node/js-debug DAP control loop;
 // there is no generic raw DAP command/socket API or privileged attach.
 type DebugAdapterStatusInput struct {
-	Language string `json:"language,omitempty" jsonschema:"Optional language: go (default), python, javascript or typescript; passive trusted adapter readiness only"`
+	Language string `json:"language,omitempty" jsonschema:"Optional language: go (default), rust, php, python, javascript or typescript; passive trusted adapter readiness only"`
 }
 type DebugLaunchInput struct {
 	Workspace   string `json:"workspace" jsonschema:"Exact absolute worker workspace/worktree directory"`

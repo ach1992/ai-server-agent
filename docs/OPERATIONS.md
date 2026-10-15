@@ -4,7 +4,7 @@
 
 ## Platform support
 
-Published immutable Stable [`v0.1.12`](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.12) and the current `main` branch support:
+The stable supported-platform policy (including published immutable [`v0.1.12`](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.12) and later compatible source/releases) is:
 
 - **Ubuntu 22.04 or newer**
 - **Debian 11 or newer** (Debian 11 application compatibility is retained, but upstream Debian LTS ended on 2026-08-31; use Debian 12+ for an officially security-maintained base unless you have an ELTS arrangement)
@@ -20,7 +20,7 @@ AI Server Agent does not require nginx, Apache, Caddy, Docker, PHP, a database, 
 
 ## Install the latest stable release
 
-Stable installation starts with a small bootstrap loaded from an **immutable published release tag**, separate from the release `install.sh` asset it authenticates. The current verified trust anchor is the immutable [`v0.1.12` release](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.12), not the mutable `main` branch. GitHub Releases, rather than this page, remain authoritative if a newer version is published.
+Stable installation starts with a small bootstrap loaded from an **immutable published release tag**, separate from the release `install.sh` asset it authenticates. The currently documented verified bootstrap trust anchor is the immutable [`v0.1.12` release](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.12), not the mutable `main` branch. This anchor can resolve a newer *published* immutable Stable; it is not a declaration that `v0.1.12` remains the latest release. GitHub Releases, rather than this page, remain authoritative if a newer version is published.
 
 To install the **latest immutable Stable** identified by the GitHub Releases API using that pinned bootstrap:
 
@@ -28,7 +28,7 @@ To install the **latest immutable Stable** identified by the GitHub Releases API
 curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.12/scripts/install-stable.sh | bash
 ```
 
-To install **exactly `v0.1.12`** instead of following future latest releases:
+To install the **older immutable `v0.1.12`** explicitly instead of following the latest release:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.12/scripts/install-stable.sh | bash -s -- v0.1.12
@@ -47,6 +47,12 @@ The stable bootstrap does **not** fall back to `main`. It:
 5. downloads `install.sh` without root execution and verifies its bytes against that digest;
 6. crosses the privilege boundary only after that unprivileged verification succeeds;
 7. copies the candidate into a root-controlled staging directory, re-verifies the same authenticated digest on the protected copy, and executes only that protected copy.
+
+### Fresh-install baseline and upgrade compatibility
+
+The first multi-language Stable slice of Issue #140 is accepted against **first-ever installation on an empty supported host**. Passing that fresh-install test does **not** prove a state-preserving in-place upgrade from the older `v0.1.12` installation or validate migration of its credentials, active jobs, Browser profiles and terminals. Do not assume an occupied older Agent host can safely auto-update to the new baseline without a separately verified backup/recovery and upgrade procedure. This limitation concerns old-to-new installed state, **not** ordinary backward-compatible MCP tool names or the Agent's required restart/reconnect/cleanup guarantees within the new baseline. Later upgrades from the new baseline need their own compatibility proof.
+
+Optional language-server/debugger runtimes are **not** core dependencies or automatically installed. Missing complete, administrator-controlled and version-verified adapter resources return explicit unavailable/dependency errors. For supported language methods/modes and deferred functionality, see [Tool Reference](TOOL-REFERENCE.md#optional-multi-language-code-and-debugger-readiness) and [Issue #149](https://github.com/ach1992/ai-server-agent/issues/149). Real DAP launches execute selected workspace code; use an authorized test host, not an assumed read-only inspection.
 
 ### What the verified release installer does
 
