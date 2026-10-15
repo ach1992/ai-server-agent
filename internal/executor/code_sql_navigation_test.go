@@ -57,7 +57,7 @@ func TestSQLSourceNavigationGrammarAndSafeContexts(t *testing.T) {
 		"RENAME TABLE accounts TO account_archive;",
 	} {
 		items, valid := sqlNavOccurrences(rename, "mysql")
-		if !valid || len(items) != 1 || !items[0].drop || items[0].name != "accounts" {
+		if !valid || len(items) != 2 || !items[0].drop || items[0].name != "accounts" || !items[1].drop || items[1].name != "account_archive" {
 			t.Fatalf("schema rename must invalidate naive declaration linking: %q %+v", rename, items)
 		}
 	}
@@ -219,5 +219,58 @@ func TestSQLSourceNavigationLimitsAndDuplicateDeclarations(t *testing.T) {
 	got, valid := sqlNavOccurrences(source, "postgres")
 	if !valid || len(got) != 2 || !got[0].declaration || !got[1].declaration {
 		t.Fatalf("recreated table must retain distinct definitions: %+v", got)
+	}
+}
+
+func TestSQLSourceNavigationQuotedSchemaIdentityAndMultitargetHistory(t *testing.T) {
+	source := `CREATE TABLE "public.accounts" (id INT);
+CREATE TABLE public.accounts (id INT);
+SELECT * FROM "public.accounts";
+`
+	occ, valid := sqlNavOccurrences(source, "postgres")
+	if !valid || len(occ) != 3 || occ[0].identity == occ[1].identity ||
+		occ[0].identity != occ[2].identity {
+		t.Fatalf("quoted dotted identifier conflated with schema-qualified name: %+v", occ)
+	}
+	quotedUnicode := `CREATE TABLE "درخت😀" (id INT);
+SELECT * FROM "درخت😀";`
+	occ, valid = sqlNavOccurrences(quotedUnicode, "postgres")
+	if !valid || len(occ) != 2 || occ[0].identity != occ[1].identity ||
+		occ[0].searchTerm != "درخت😀" {
+		t.Fatalf("quoted UTF-8 SQL identifiers unavailable: %+v", occ)
+	}
+	pgLowercase := `CREATE TABLE accounts (id INT);
+SELECT * FROM "accounts";`
+	occ, valid = sqlNavOccurrences(pgLowercase, "postgres")
+	if !valid || len(occ) != 2 || occ[0].identity != occ[1].identity {
+		t.Fatalf("quoted lowercase vs unquoted Postgres table identity broken: %+v", occ)
+	}
+	mysql := "CREATE TABLE \u0060order-item\u0060 (id INT); SELECT * FROM \u0060order-item\u0060;"
+	occ, valid = sqlNavOccurrences(mysql, "mysql")
+	if !valid || len(occ) != 2 || occ[0].identity != occ[1].identity {
+		t.Fatalf("MySQL quoted hyphen name unavailable: %+v", occ)
+	}
+	for _, tc := range []struct {
+		sql   string
+		names []string
+	}{
+		{"DROP TABLE IF EXISTS accounts, archive;", []string{"accounts", "archive"}},
+		{"DROP VIEW public.first, public.second;", []string{"public.first", "public.second"}},
+		{"RENAME TABLE old TO new, second TO third;", []string{"old", "new", "second", "third"}},
+		{"ALTER TABLE records RENAME TO archived;", []string{"records", "archived"}},
+	} {
+		got, valid := sqlNavOccurrences(tc.sql, "mysql")
+		if !valid || len(got) != len(tc.names) {
+			t.Fatalf("SQL schema-history changes lost: %q %+v", tc.sql, got)
+		}
+		for i, name := range tc.names {
+			if got[i].name != name || !got[i].drop {
+				t.Fatalf("SQL rename/drop %q incorrect item %d: %+v", tc.sql, i, got[i])
+			}
+		}
+	}
+	columnRename, valid := sqlNavOccurrences("ALTER TABLE records RENAME COLUMN old TO new;", "postgres")
+	if !valid || len(columnRename) != 1 || columnRename[0].name != "records" || columnRename[0].drop {
+		t.Fatalf("column rename must not tombstone entire table: %+v", columnRename)
 	}
 }

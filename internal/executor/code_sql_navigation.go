@@ -24,10 +24,10 @@ const (
 )
 
 type sqlNavOccurrence struct {
-	name, searchTerm string
-	span             sqlDDLRange
-	declaration      bool
-	drop             bool
+	name, identity, searchTerm string
+	span                       sqlDDLRange
+	declaration                bool
+	drop                       bool
 }
 
 type sqlNavLocation struct {
@@ -57,10 +57,21 @@ func sqlNavName(tokens []sqlDDLToken, at int) (sqlNavOccurrence, int, bool) {
 	parts := make([]string, 0, 3)
 	term := ""
 	for i := at; i < next; i += 2 {
-		if !sqlNavSimpleName.MatchString(tokens[i].text) || len(tokens[i].text) > 128 {
+		word := tokens[i]
+		if len(word.text) > 128 || len(word.text) == 0 ||
+			strings.ContainsAny(word.text, "\x00\r\n") {
 			return sqlNavOccurrence{}, at, false
 		}
-		part := tokens[i].text
+		if word.kind == 'i' && !sqlNavSimpleName.MatchString(word.text) {
+			return sqlNavOccurrence{}, at, false
+		}
+		// Embedded quote/backtick/backslash requires dialect-specific escape
+		// reconstruction for exhaustive cross-file discovery. Do not claim a
+		// complete search of names that cannot be matched literally.
+		if word.kind == 'q' && strings.ContainsAny(word.text, "\"`\\") {
+			return sqlNavOccurrence{}, at, false
+		}
+		part := word.text
 		if tokens[i].kind != 'q' {
 			part = strings.ToLower(part)
 		}
@@ -70,7 +81,7 @@ func sqlNavName(tokens []sqlDDLToken, at int) (sqlNavOccurrence, int, bool) {
 	// A cursor on the schema prefix names a schema, not the table itself.
 	// Keep navigation selection on the final identifier only.
 	span = sqlDDLRange{Start: tokens[next-1].start, End: tokens[next-1].end}
-	return sqlNavOccurrence{name: strings.Join(parts, "."), searchTerm: term, span: span}, next, true
+	return sqlNavOccurrence{name: strings.Join(parts, "."), identity: strings.Join(parts, "\x00"), searchTerm: term, span: span}, next, true
 }
 
 func sqlNavAt(span sqlDDLRange, line, character int) bool {
@@ -165,18 +176,50 @@ func sqlNavOccurrences(source, dialect string) ([]sqlNavOccurrence, bool) {
 				}
 				isLifecycleChange := operation == "DROP"
 				if operation == "ALTER" {
-					for _, tok := range statement[at:] {
-						if tok.keyword() == "RENAME" {
+					for i := at; i+1 < len(statement); i++ {
+						if statement[i].keyword() == "RENAME" &&
+							(statement[i+1].keyword() == "TO" || statement[i+1].keyword() == "AS") {
 							isLifecycleChange = true
 							break
 						}
 					}
 				}
-				appendName(at, false, isLifecycleChange)
+				end := appendName(at, false, isLifecycleChange)
+				if operation == "DROP" {
+					// DROP TABLE/VIEW accepts comma-separated object names.
+					for end > at && end < len(statement) && statement[end].text == "," {
+						next := appendName(end+1, false, true)
+						if next == end+1 {
+							break
+						}
+						end = next
+					}
+				} else if isLifecycleChange {
+					// Both the old and new names need lifecycle tombstones: a
+					// prior CREATE for either cannot prove the active schema.
+					for i := end; i+1 < len(statement); i++ {
+						if statement[i].keyword() == "RENAME" &&
+							(statement[i+1].keyword() == "TO" || statement[i+1].keyword() == "AS") {
+							appendName(i+2, false, true)
+							break
+						}
+					}
+				}
 			}
 		case "RENAME":
 			if statement[at].keyword() == "TABLE" {
-				appendName(at+1, false, true)
+				at++
+				for at < len(statement) {
+					end := appendName(at, false, true)
+					if end == at || end >= len(statement) || statement[end].keyword() != "TO" {
+						break
+					}
+					end = appendName(end+1, false, true)
+					if end >= len(statement) || statement[end].text != "," {
+						break
+					}
+					at = end + 1
+				}
 			}
 		case "INSERT":
 			if statement[at].keyword() == "INTO" {
@@ -341,7 +384,7 @@ func (s *Server) sqlOfflineNavigation(parent context.Context, req Request, sourc
 			return fileError("sql_schema_unparseable", "validation", errors.New("SQL target cannot be safely tokenized")), true
 		}
 		for _, occ := range occurrences {
-			if occ.name == selected.name {
+			if occ.identity == selected.identity {
 				foundItems = append(foundItems, sqlNavFound{sqlNavOccurrence: occ,
 					sqlNavLocation: sqlNavLocation{URI: path, Range: occ.span, FileVersion: read.FileVersion}})
 			}
