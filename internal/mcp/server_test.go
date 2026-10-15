@@ -572,27 +572,33 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 func TestInstructionsRouteToolsConciselyAndPreserveSafety(t *testing.T) {
 	maxLabel := strings.TrimSpace(strings.Repeat("a ", 40)) // 79 characters, 40 words.
 	for _, tc := range []struct {
-		profile string
-		label   string
+		profile   string
+		label     string
+		workspace string
 	}{
 		{profile: "development"},
 		{profile: "development", label: maxLabel},
 		{profile: "validation", label: "QA Server"},
 		{profile: "validation", label: maxLabel},
+		{profile: "development", label: maxLabel, workspace: "/srv/shared developer workspace"},
+		{profile: "validation", label: maxLabel, workspace: "/srv/shared developer workspace"},
 	} {
 		cfg := config.Default()
 		cfg.EnvironmentProfile = tc.profile
 		cfg.ServerLabel = tc.label
+		if tc.workspace != "" {
+			cfg.WorkspaceDir = tc.workspace
+		}
 		if err := cfg.Validate(); err != nil {
 			t.Fatalf("valid instruction profile rejected: %+v: %v", tc, err)
 		}
 		if got := instructions(cfg); len(strings.Fields(got)) > 180 {
-			t.Fatalf("MCP instructions use %d words for profile=%q label=%q, want at most 180", len(strings.Fields(got)), tc.profile, tc.label)
+			t.Fatalf("MCP instructions use %d words for profile=%q label=%q workspace=%q, want at most 180", len(strings.Fields(got)), tc.profile, tc.label, cfg.WorkspaceDir)
 		}
 	}
 	got := instructions(config.Default())
 	for _, want := range []string{
-		"/srv/ai-workspace is persistent",
+		"Configured workspace root is persistent",
 		"repository_discover/repository_inspect",
 		"worktree_create/worktree_remove",
 		"run_command for bounded unprivileged",
