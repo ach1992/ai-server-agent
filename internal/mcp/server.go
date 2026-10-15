@@ -88,17 +88,25 @@ type Server struct {
 
 type EmptyInput struct{}
 type RunInput struct {
-	Command string `json:"command" jsonschema:"Bash command to execute"`
+	Command   string `json:"command" jsonschema:"Bash command to execute"`
+	Workspace string `json:"workspace,omitempty" jsonschema:"Optional existing worker directory within configured workspace root; defaults to workspace root; not a filesystem sandbox"`
 }
 type RootRunInput struct {
 	Command  string `json:"command" jsonschema:"Bash command to execute as root"`
 	Approval bool   `json:"approval,omitempty" jsonschema:"Set true only after explicit user approval when a previous call returned approval_required"`
 }
 type StartJobInput struct {
+	Workspace   string `json:"workspace,omitempty" jsonschema:"Optional existing worker CWD under workspace root; forbidden for root jobs"`
+	Kind        string `json:"kind,omitempty" jsonschema:"task (default) or service; service is a long-running foreground process"`
+	Label       string `json:"label,omitempty" jsonschema:"Short non-secret purpose; required for service, optional for task"`
 	Command     string `json:"command" jsonschema:"Command to run as a persistent background job"`
 	Root        bool   `json:"root,omitempty" jsonschema:"Run as root instead of aiworker"`
 	Approval    bool   `json:"approval,omitempty" jsonschema:"Set true only after explicit user approval when a previous call returned approval_required"`
 	OperationID string `json:"operation_id,omitempty" jsonschema:"Optional caller-generated idempotency key; retry the same material request with the same key after a lost response"`
+}
+type RuntimeListInput struct {
+	Workspace string `json:"workspace,omitempty" jsonschema:"Optional exact canonical existing worker directory filter"`
+	Kind      string `json:"kind,omitempty" jsonschema:"Optional task, service or terminal filter"`
 }
 type JobInput struct {
 	JobID string `json:"job_id" jsonschema:"Persistent job id"`
@@ -127,12 +135,14 @@ type BrowserSetupInput struct {
 	Approval bool `json:"approval,omitempty" jsonschema:"Set true to allow downloading the private browser runtime and installing required shared libraries"`
 }
 type BrowserRunInput struct {
+	ProfileMode       string `json:"profile_mode,omitempty" jsonschema:"shared (default) or isolated ephemeral cookies/localStorage; same global exclusive Browser admission"`
 	Script            string `json:"script" jsonschema:"JavaScript statements using the pre-created Playwright browser, context, and page variables; maximum 131072 raw bytes"`
 	TimeoutMS         int64  `json:"timeout_ms,omitempty" jsonschema:"Browser execution timeout in milliseconds; default 90000, maximum 300000"`
 	IgnoreHTTPSErrors bool   `json:"ignore_https_errors,omitempty" jsonschema:"Explicit scoped exception for local/self-signed development; default false preserves normal HTTPS certificate validation"`
 }
 
 type BrowserE2EInput struct {
+	ProfileMode       string             `json:"profile_mode,omitempty" jsonschema:"shared (default) or isolated ephemeral Browser state"`
 	Steps             []browser.FlowStep `json:"steps" jsonschema:"1..12 ordered steps: goto, snapshot (returns bounded eN refs), click/fill/assert_text by ref or role/name or CSS, assert_url, console, network. Refs are flow-only, never cross-call."`
 	TimeoutMS         int64              `json:"timeout_ms,omitempty" jsonschema:"Total flow timeout milliseconds; default 90000, maximum 300000"`
 	IgnoreHTTPSErrors bool               `json:"ignore_https_errors,omitempty" jsonschema:"Explicit scoped exception for self-signed development; default false"`
@@ -178,7 +188,7 @@ func New(cfg config.Config) (*Server, error) {
 	s.mcp = mcpsdk.NewServer(
 		&mcpsdk.Implementation{Name: "ai-server-agent", Version: mcpImplementationVersion()},
 		&mcpsdk.ServerOptions{
-			Instructions: instructions(cfg.WorkspaceDir),
+			Instructions: instructions(cfg),
 			Capabilities: &mcpsdk.ServerCapabilities{},
 		},
 	)
@@ -187,12 +197,22 @@ func New(cfg config.Config) (*Server, error) {
 	return s, nil
 }
 
-func instructions(workspaceDir string) string {
-	return fmt.Sprintf(`AI Server Agent provides MCP access to an authorized Linux development/test host. Workspace %s is persistent.
+func instructions(cfg config.Config) string {
+	role := "Development: prefer source work, builds and debugging."
+	if cfg.EnvironmentProfile == "validation" {
+		role = "Validation: prefer installs, integration/E2E and acceptance; development tools remain available."
+	}
+	label := ""
+	if cfg.ServerLabel != "" {
+		label = fmt.Sprintf("Server label: %s. ", cfg.ServerLabel)
+	}
+	return fmt.Sprintf(`Configured workspace root is persistent.
 
-Choose tools by task: repository_discover/repository_inspect for Git identity, worktree_create/worktree_remove for isolation, run_command for bounded unprivileged shell/Git tasks, and start_job with job_status/job_output for long or high-output tasks. Use workspace_* for bounded worker file/search operations, code_* for Go/LSP, terminal_* for interactive PTY, debug_* for Go/DAP, browser_e2e for single-call browser workflows, browser_session_* for multi-call workflows, and browser_run for custom Playwright. Check optional runtime availability before use.
+Environment purpose: %s. %s%s Routing guidance; it is not an authorization boundary or tool restriction.
 
-Before host-wide or connection-sensitive changes call agent_environment and preserve Agent access. Reuse existing repositories, worktrees and sessions; never delete dirty, untracked, unknown or ambiguous state. Use run_root_command or privileged host read_file/write_file only when necessary. If approval_required, explain the specific risk and obtain explicit human authorization before retrying. Follow each tool's description and schema for detailed limits; instructions grant no additional permissions.`, workspaceDir)
+Use repository_discover/repository_inspect for identity; worktree_create/worktree_remove for isolation; run_command for bounded unprivileged work; start_job with job_status/job_output for tasks; workspace_* for bounded worker files/search; code_* for Go/LSP; terminal_* for interactive PTY; debug_* for Go/DAP; browser_e2e for single-call use, browser_session_* for multi-call flows, browser_run for custom Playwright. Check optional runtime availability. After handoff use runtime_list for passive task/service/eligible Terminal discovery and browser_status separately for Browser readiness; workspace labels are not project ACLs.
+
+Before host changes call agent_environment and preserve Agent access; never delete dirty, untracked, unknown or ambiguous state. Use run_root_command or privileged host read_file/write_file only when necessary. If approval_required, explain risk and obtain explicit human authorization; instructions grant no additional permissions.`, cfg.EnvironmentProfile, label, role)
 }
 
 func annotations(readOnly, destructive, idempotent, openWorld bool) *mcpsdk.ToolAnnotations {
@@ -315,10 +335,10 @@ func (s *Server) registerTools() {
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "run_command",
-		Description: "Run an arbitrary Bash command as the unprivileged aiworker user in the dedicated workspace. Commands can change files or external systems; MCP hints do not replace server-side permissions. Use for normal project work, builds, tests, Git, package managers inside the project, and diagnostics that do not require host privileges. " + s.commandTimeoutDescription(),
+		Description: "Run Bash as the unprivileged aiworker in an optional existing canonical workspace CWD (default: configured workspace root; Git not required). Shared Agent-private HOME/XDG is independent of CWD. Commands can change files or external systems; MCP hints do not replace server-side permissions. Use for normal project work, builds, tests, Git, package managers inside the project, and diagnostics that do not require host privileges. " + s.commandTimeoutDescription(),
 		Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input RunInput) (*mcpsdk.CallToolResult, executor.Response, error) {
-		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "run", Command: input.Command, TimeoutMS: s.commandTimeoutMS()})
+		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "run", Command: input.Command, Workspace: input.Workspace, TimeoutMS: s.commandTimeoutMS()})
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
@@ -339,15 +359,24 @@ func (s *Server) registerTools() {
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "start_job",
-		Description: "Start a persistent background Bash command using a transient systemd unit. Use for installs, large builds/test suites, migrations, crawls, and other work expected to run long or produce substantial output. The job and bounded retained output continue if ChatGPT disconnects or the MCP service restarts. Supply operation_id when a lost response may be retried so the same material request returns the same job handle instead of starting a duplicate.",
+		Description: "Start a persistent task (default) or explicitly labeled foreground service using the existing transient ai-job systemd runner, optional existing worker workspace CWD, and shared private HOME/XDG. Root jobs reject worker workspaces. Acceptance proves launch, not application readiness. The job and bounded retained output continue if ChatGPT disconnects or the MCP service restarts. Use a stable unique per-project/task operation_id to reconcile lost responses; changed command/authority/CWD/kind/label conflicts and must not be retried under a new key without reconciliation.",
 		Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input StartJobInput) (*mcpsdk.CallToolResult, executor.Response, error) {
-		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "start_job", Command: input.Command, Root: input.Root, Approval: input.Approval, OperationID: input.OperationID})
+		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "start_job", Command: input.Command, Workspace: input.Workspace, Kind: input.Kind, Label: input.Label, Root: input.Root, Approval: input.Approval, OperationID: input.OperationID})
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
 		return s.responseResult(resp)
 	})
+
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "runtime_list", Description: "Passive bounded read-only snapshot of this principal's task/service and eligible worker Terminal identities. Filter by exact existing workspace or task/service/terminal kind. Includes explicit truncated and unknown states; does not reconcile or change any runtime state. Use browser_status separately for Browser availability.", Annotations: annotations(true, false, true, false)},
+		func(ctx context.Context, req *mcpsdk.CallToolRequest, input RuntimeListInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+			resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "runtime_list", Workspace: input.Workspace, Kind: input.Kind})
+			if err != nil {
+				return executorTransportErrorResult(err)
+			}
+			return s.responseResult(resp)
+		})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "job_status", Description: "Read and reconcile the current state and exit status of a persistent job. Reconciliation may persist an unknown-completion marker and retire a stale protected command handoff after the transient unit is gone.", Annotations: annotations(false, false, true, false)},
 		func(ctx context.Context, req *mcpsdk.CallToolRequest, input JobInput) (*mcpsdk.CallToolResult, executor.Response, error) {
@@ -409,9 +438,9 @@ func (s *Server) registerTools() {
 			return s.responseResult(resp)
 		})
 
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_run", Description: "Run bounded Playwright JavaScript in headless Chromium using the Agent-wide shared persistent browser profile. Variables browser, context, and page are pre-created; use console.log for observations. HTTPS certificate validation is enabled by default; ignore_https_errors is an explicit request-scoped development exception. Browser execution is action-capable and may reuse cookies/local-storage/session state created by other authorized browser callers.", Annotations: annotations(false, true, false, true)},
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_run", Description: "Run bounded Playwright JavaScript in headless Chromium using the shared persistent profile by default; profile_mode=isolated uses a bounded disposable private profile. Variables browser, context, and page are pre-created; use console.log for observations. HTTPS certificate validation is enabled by default; ignore_https_errors is an explicit request-scoped development exception. Browser execution is action-capable; the shared default may reuse cookies/local-storage from other authorized callers, while isolated mode has disposable private state.", Annotations: annotations(false, true, false, true)},
 		func(ctx context.Context, req *mcpsdk.CallToolRequest, input BrowserRunInput) (*mcpsdk.CallToolResult, executor.Response, error) {
-			resp, err := s.browser.Run(ctx, browser.RunOptions{Script: input.Script, TimeoutMS: input.TimeoutMS, IgnoreHTTPSErrors: input.IgnoreHTTPSErrors})
+			resp, err := s.browser.Run(ctx, browser.RunOptions{Script: input.Script, TimeoutMS: input.TimeoutMS, IgnoreHTTPSErrors: input.IgnoreHTTPSErrors, ProfileMode: input.ProfileMode})
 			if err != nil {
 				return executorTransportErrorResult(err)
 			}
@@ -419,10 +448,10 @@ func (s *Server) registerTools() {
 		})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-		Name: "browser_e2e", Description: "Run a compact ordered Browser/E2E workflow: navigate, take an accessible snapshot, click/fill by exact role+name or CSS locator, assert text/URL and inspect bounded console/network events. Uses the SAME managed Chromium/profile/admission/TLS/resource limits as browser_run, in one browser execution; no extra daemon or profile. This is not a cross-call live session. Use browser_run for arbitrary Playwright JavaScript and advanced scenarios; use browser_e2e for common bounded flows. Snapshots are explicitly truncated at 8192 UTF-8 bytes; complete stable snapshots MAY issue bounded eN refs (role + within-role index, no raw DOM name/tag hints) for later steps in THIS call (click/fill/assert_text). Unstable or inaccessible DOM returns refs_unavailable instead of guessed handles; refs expire on navigation, detachment and call completion, and do not authorize cross-call interaction. Binary trace/screenshot retrieval is not provided by this one-call tool; use browser_session_capture for bounded typed JPEG or browser_session_trace for one separately authenticated bounded ZIP trace flow, not a general-purpose artifact store.",
+		Name: "browser_e2e", Description: "Run a compact ordered Browser/E2E workflow: navigate, take an accessible snapshot, click/fill by exact role+name or CSS locator, assert text/URL and inspect bounded console/network events. Uses the same pinned Chromium, exclusive admission, TLS/resource limits and shared-by-default or isolated ephemeral profile as browser_run; no extra daemon or engine. All steps complete within one browser execution. This is not a cross-call live session. Use browser_run for arbitrary Playwright JavaScript and advanced scenarios; use browser_e2e for common bounded flows. Snapshots are explicitly truncated at 8192 UTF-8 bytes; complete stable snapshots MAY issue bounded eN refs (role + within-role index, no raw DOM name/tag hints) for later steps in THIS call (click/fill/assert_text). Unstable or inaccessible DOM returns refs_unavailable instead of guessed handles; refs expire on navigation, detachment and call completion, and do not authorize cross-call interaction. Binary trace/screenshot retrieval is not provided by this one-call tool; use browser_session_capture for bounded typed JPEG or browser_session_trace for one separately authenticated bounded ZIP trace flow, not a general-purpose artifact store.",
 		Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input BrowserE2EInput) (*mcpsdk.CallToolResult, executor.Response, error) {
-		resp, err := s.browser.Flow(ctx, browser.FlowOptions{Steps: input.Steps, TimeoutMS: input.TimeoutMS, IgnoreHTTPSErrors: input.IgnoreHTTPSErrors})
+		resp, err := s.browser.Flow(ctx, browser.FlowOptions{Steps: input.Steps, TimeoutMS: input.TimeoutMS, IgnoreHTTPSErrors: input.IgnoreHTTPSErrors, ProfileMode: input.ProfileMode})
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}

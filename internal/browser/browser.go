@@ -86,6 +86,7 @@ type RunOptions struct {
 	Script            string
 	TimeoutMS         int64
 	IgnoreHTTPSErrors bool
+	ProfileMode       string
 }
 
 // Manager owns one optional browser runtime and one Agent-wide persistent
@@ -489,6 +490,10 @@ func (m *Manager) Setup(ctx context.Context, approval bool) (executor.Response, 
 }
 
 func (m *Manager) Run(ctx context.Context, opts RunOptions) (executor.Response, error) {
+	mode, err := normalizeProfileMode(opts.ProfileMode)
+	if err != nil {
+		return browserError("invalid_browser_profile_mode", "validation", err.Error()), nil
+	}
 	if len([]byte(opts.Script)) > maxBrowserScriptBytes {
 		return browserError("input_too_large", "validation", fmt.Sprintf("browser script exceeds the %d-byte tool limit", maxBrowserScriptBytes)), nil
 	}
@@ -514,7 +519,7 @@ func (m *Manager) Run(ctx context.Context, opts RunOptions) (executor.Response, 
 	resp, err := executor.ClientCallContext(clientCtx, m.cfg.ExecutorSocket, m.token, executor.Request{
 		Action:      "run",
 		AuditAction: "browser_run",
-		Command:     m.runCommand(opts.Script, opts.IgnoreHTTPSErrors),
+		Command:     m.runCommand(opts.Script, opts.IgnoreHTTPSErrors, mode),
 		Root:        false,
 		TimeoutMS:   int64(timeout / time.Millisecond),
 	})
@@ -722,7 +727,11 @@ printf 'browser runtime converged: node=%%s playwright=%%s chromium=%%s/%%s\n' "
 		browserEnginePermissionsCommand,
 	), nil
 }
-func (m *Manager) runCommand(script string, ignoreHTTPSErrors bool) string {
+func (m *Manager) runCommand(script string, ignoreHTTPSErrors bool, modes ...string) string {
+	mode := "shared"
+	if len(modes) > 0 {
+		mode = modes[0]
+	} // Run validates public input before generating the shell body.
 	payload := base64.StdEncoding.EncodeToString([]byte(script))
 	ignoreHTTPS := "false"
 	if ignoreHTTPSErrors {
@@ -732,6 +741,7 @@ func (m *Manager) runCommand(script string, ignoreHTTPSErrors bool) string {
 engine=%s
 data=%s
 profile="$data/profile"
+profile_mode=%s
 ignore_https_errors=%s
 [ -x "$engine/node/bin/node" ] || { echo "Browser runtime is not installed. Call browser_setup first." >&2; exit 2; }
 export PLAYWRIGHT_BROWSERS_PATH="$engine/browsers"
@@ -744,13 +754,20 @@ find "$data/tmp" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
 cleanup_cache() {
   rm -rf --     "$data/profile/Default/Cache"     "$data/profile/Default/Code Cache"     "$data/profile/Default/GPUCache"     "$data/profile/GPUCache"     "$data/profile/ShaderCache"     "$data/profile/GrShaderCache"     "$data/profile/GraphiteDawnCache"     "$data/profile/DawnGraphiteCache"     "$data/profile/DawnWebGPUCache"
 }
-cleanup_cache
+if [ "$profile_mode" = shared ]; then cleanup_cache; fi
 run_tmp=$(mktemp -d "$data/tmp/run.XXXXXX")
+if [ "$profile_mode" = isolated ]; then
+  profile="$run_tmp/isolated-profile"
+  export TMPDIR="$run_tmp"
+fi
 body="$run_tmp/body.js"
 runner="$run_tmp/runner.mjs"
 downloads="$run_tmp/downloads"
 mkdir "$downloads"
-cleanup() { rm -rf -- "$run_tmp"; cleanup_cache || true; }
+cleanup() {
+  rm -rf -- "$run_tmp"
+  if [ "$profile_mode" = shared ]; then cleanup_cache || true; fi
+}
 trap cleanup EXIT
 printf '%%s' %s | base64 -d > "$body"
 {
@@ -820,6 +837,7 @@ case "$node_code" in
 esac`,
 		shellQuote(m.engineDir()),
 		shellQuote(m.dataDir()),
+		shellQuote(mode),
 		ignoreHTTPS,
 		browserRunMinFreeBytes/1024,
 		browserRunMaxDisposableBytes/1024,

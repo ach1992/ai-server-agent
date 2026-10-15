@@ -26,6 +26,7 @@ func useInactiveSystemctl(t *testing.T) {
 
 func TestPersistentJobFailedSystemdRunLoadedInactiveIsUnknown(t *testing.T) {
 	state := t.TempDir()
+	provisionSharedWorkerHome(t, state)
 	jobs := filepath.Join(state, "jobs")
 	if err := os.Mkdir(jobs, 0711); err != nil {
 		t.Fatal(err)
@@ -74,6 +75,7 @@ func TestWorkerTerminalMarkerDoesNotOverrideActiveUnit(t *testing.T) {
 	for _, statusValue := range []string{"7\n", jobStatusUnknown + "\n"} {
 		t.Run(strings.TrimSpace(statusValue), func(t *testing.T) {
 			state := t.TempDir()
+			provisionSharedWorkerHome(t, state)
 			jobs := filepath.Join(state, "jobs")
 			claims := filepath.Join(jobs, "claims")
 			if err := os.Mkdir(jobs, 0711); err != nil {
@@ -204,6 +206,7 @@ func TestRunJobHelperRetiresCommandOnStartedMarkerFailure(t *testing.T) {
 
 func TestRunJobHelperRetiresRejectedCommandHandoff(t *testing.T) {
 	state := t.TempDir()
+	provisionSharedWorkerHome(t, state)
 	jobs := filepath.Join(state, "jobs")
 	if err := os.Mkdir(jobs, 0711); err != nil {
 		t.Fatal(err)
@@ -269,6 +272,7 @@ func TestJobStatusSurfacesTerminalCommandCleanupFailure(t *testing.T) {
 		t.Skip("permission-denial cleanup test requires a non-root test user")
 	}
 	state := t.TempDir()
+	provisionSharedWorkerHome(t, state)
 	jobs := filepath.Join(state, "jobs")
 	if err := os.Mkdir(jobs, 0711); err != nil {
 		t.Fatal(err)
@@ -317,7 +321,12 @@ func TestPersistentJobAdmissionUsesLifecycleLock(t *testing.T) {
 	}
 	defer syscall.Flock(int(holder.Fd()), syscall.LOCK_UN)
 
+	state := t.TempDir()
+	provisionSharedWorkerHome(t, state)
 	server := &Server{
+		cfg:               config.Config{StateDir: state, WorkspaceDir: t.TempDir()},
+		workerUID:         uint32(os.Geteuid()),
+		workerGID:         uint32(os.Getegid()),
 		guard:             policy.New(nil),
 		lifecycleLockPath: lockPath,
 	}
@@ -329,6 +338,7 @@ func TestPersistentJobAdmissionUsesLifecycleLock(t *testing.T) {
 
 func TestPersistentJobHoldsLifecycleLockThroughLaunch(t *testing.T) {
 	state := t.TempDir()
+	provisionSharedWorkerHome(t, state)
 	jobs := filepath.Join(state, "jobs")
 	if err := os.Mkdir(jobs, 0711); err != nil {
 		t.Fatal(err)

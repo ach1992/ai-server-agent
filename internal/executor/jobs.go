@@ -24,9 +24,10 @@ import (
 
 const (
 	maxActivePersistentJobs           = 4
+	maxActivePersistentServices       = 2
 	maxCompletedJobArtifacts          = 32
 	maxFailedJobClaims                = maxCompletedJobArtifacts
-	maxPersistentJobClaims            = 2*maxCompletedJobArtifacts + maxActivePersistentJobs
+	maxPersistentJobClaims            = 2*maxCompletedJobArtifacts + maxActivePersistentJobs + maxActivePersistentServices
 	maxJobLogBytes              int64 = 8 << 20
 	jobLogHeaderSize                  = 32
 	maxOperationIDBytes               = 128
@@ -49,11 +50,17 @@ type jobPaths struct {
 }
 
 type jobClaim struct {
-	Version     int    `json:"version"`
-	JobID       string `json:"job_id"`
-	Fingerprint string `json:"fingerprint"`
-	State       string `json:"state"`
-	CreatedAt   string `json:"created_at"`
+	Version        int    `json:"version"`
+	JobID          string `json:"job_id"`
+	Fingerprint    string `json:"fingerprint"`
+	State          string `json:"state"`
+	CreatedAt      string `json:"created_at"`
+	PrincipalID    string `json:"principal_id,omitempty"`
+	PrincipalClass string `json:"principal_class,omitempty"`
+	Root           bool   `json:"root,omitempty"`
+	Workspace      string `json:"workspace,omitempty"`
+	Kind           string `json:"kind,omitempty"`
+	Label          string `json:"label,omitempty"`
 }
 
 type jobLogHeader struct {
@@ -77,12 +84,39 @@ func (s *Server) startJobBounded(req Request) (resp Response) {
 	if bad := commandInputError(req.Command); bad != nil {
 		return *bad
 	}
+	if req.Root && req.Workspace != "" {
+		return fileError("invalid_workspace", "validation", errors.New("worker workspace cannot be supplied for a root job"))
+	}
 	dec := s.guard.Evaluate(req.Command, req.Root)
 	if !dec.Allowed {
 		return Response{Error: dec.Reason, ReasonCode: "policy_denied", ErrorCode: "policy_denied", ErrorClass: "policy"}
 	}
 	if dec.RequiresApproval && !req.Approval {
 		return Response{Error: "approval_required", ReasonCode: "approval_required", ErrorCode: "approval_required", ErrorClass: "approval", Approval: dec}
+	}
+	if req.Kind == "" {
+		req.Kind = "task"
+	}
+	if req.Kind != "task" && req.Kind != "service" {
+		return fileError("invalid_job_kind", "validation", errors.New("kind must be task or service"))
+	}
+	if err := validateJobLabel(req.Kind, req.Label); err != nil {
+		return fileError("invalid_job_label", "validation", err)
+	}
+	if req.Root {
+		if req.Workspace != "" {
+			return fileError("invalid_workspace", "validation", errors.New("worker workspace cannot be supplied for a root job"))
+		}
+		req.Workspace = "/root"
+	} else {
+		cwd, err := s.workerCommandWorkspace(req.Workspace)
+		if err != nil {
+			return fileError("invalid_workspace", "validation", err)
+		}
+		if _, err := s.workerSessionHome(); err != nil {
+			return fileError("worker_home_unavailable", "state", err)
+		}
+		req.Workspace = cwd
 	}
 	if err := validateOperationID(req.OperationID); err != nil {
 		return Response{Error: err.Error(), ReasonCode: "invalid_operation_id", ErrorCode: "invalid_operation_id", ErrorClass: "validation"}
@@ -160,18 +194,24 @@ func (s *Server) startJobBounded(req Request) (resp Response) {
 		}
 	}
 
-	if blocked := persistentJobAdmissionResponse(jobsDir); blocked != nil {
+	if blocked := persistentJobAdmissionResponse(jobsDir, req.Kind); blocked != nil {
 		return *blocked
 	}
 
 	id := strconv.FormatInt(time.Now().UnixNano(), 10)
 	paths := jobPathsFor(jobsDir, id)
 	claim := jobClaim{
-		Version:     1,
-		JobID:       id,
-		Fingerprint: fingerprint,
-		State:       "claimed",
-		CreatedAt:   time.Now().UTC().Format(time.RFC3339Nano),
+		Version:        1,
+		JobID:          id,
+		Fingerprint:    fingerprint,
+		State:          "claimed",
+		CreatedAt:      time.Now().UTC().Format(time.RFC3339Nano),
+		PrincipalID:    req.PrincipalID,
+		PrincipalClass: req.PrincipalClass,
+		Root:           req.Root,
+		Workspace:      req.Workspace,
+		Kind:           req.Kind,
+		Label:          req.Label,
 	}
 	if claimPath != "" {
 		if err := createJobClaim(claimPath, claim); err != nil {
@@ -235,6 +275,18 @@ func (s *Server) resumeClaimedJob(req Request, jobsDir, claimPath string, claim 
 			ErrorClass: "conflict",
 			JobID:      claim.JobID,
 		}
+	}
+	kind := claim.Kind
+	if kind == "" {
+		// Claims created before task/service classification were tasks only.
+		kind = "task"
+	}
+	reqKind := req.Kind
+	if reqKind == "" {
+		reqKind = "task"
+	}
+	if (kind != "task" && kind != "service") || kind != reqKind {
+		return jobStateError("job_state_unavailable", errors.New("persistent job claim kind is invalid or does not match replay request"))
 	}
 	if _, err := safeID(claim.JobID); err != nil {
 		return jobStateError("job_state_unavailable", fmt.Errorf("invalid claimed job id: %w", err))
@@ -327,7 +379,7 @@ func (s *Server) resumeClaimedJob(req Request, jobsDir, claimPath string, claim 
 		}
 	}
 
-	if blocked := persistentJobAdmissionResponse(jobsDir); blocked != nil {
+	if blocked := persistentJobAdmissionResponse(jobsDir, kind); blocked != nil {
 		blocked.JobID = claim.JobID
 		blocked.IdempotentReplay = true
 		return *blocked
@@ -364,8 +416,8 @@ func (s *Server) resumeClaimedJob(req Request, jobsDir, claimPath string, claim 
 }
 
 func (s *Server) launchPreparedJob(req Request, paths jobPaths, id string) Response {
-	home := s.cfg.WorkspaceDir
-	workDir := s.cfg.WorkspaceDir
+	home := filepath.Join(s.cfg.StateDir, "worker-home")
+	workDir := req.Workspace
 	if req.Root {
 		home = "/root"
 		workDir = "/root"
@@ -382,6 +434,9 @@ func (s *Server) launchPreparedJob(req Request, paths jobPaths, id string) Respo
 	args = append(args,
 		"/usr/bin/env", "-i",
 		"HOME="+home,
+		"XDG_CONFIG_HOME="+filepath.Join(home, ".config"),
+		"XDG_CACHE_HOME="+filepath.Join(home, ".cache"),
+		"XDG_DATA_HOME="+filepath.Join(home, ".local", "share"),
 		"PATH="+safeCommandPath,
 		"LANG=C.UTF-8",
 		"LC_ALL=C.UTF-8",
@@ -559,6 +614,26 @@ func cleanupJobPaths(paths jobPaths) {
 	_ = removeJobPaths(paths)
 }
 
+// Labels are public, bounded operational hints, not commands or credentials.
+func validateJobLabel(kind, label string) error {
+	if kind == "service" && label == "" {
+		return errors.New("service requires a non-secret label")
+	}
+	if len(label) > 48 {
+		return errors.New("job label exceeds 48 bytes")
+	}
+	for i, c := range label {
+		alnum := (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9')
+		if alnum {
+			continue
+		}
+		if i == 0 || (c != '_' && c != '-' && c != '.') {
+			return errors.New("job label must start with a letter or digit and contain only ASCII letters, digits, dot, dash or underscore")
+		}
+	}
+	return nil
+}
+
 func validateOperationID(id string) error {
 	if id == "" {
 		return nil
@@ -597,6 +672,21 @@ func (s *Server) jobFingerprint(req Request) string {
 	} else {
 		_, _ = io.WriteString(mac, "worker\x00")
 	}
+	kind := req.Kind
+	if kind == "" {
+		kind = "task"
+	}
+	cwd := req.Workspace
+	if cwd == "" {
+		if req.Root {
+			cwd = "/root"
+		} else if root, err := s.workspaceRoot(); err == nil {
+			cwd = root
+		} else {
+			cwd = s.cfg.WorkspaceDir
+		}
+	}
+	_, _ = io.WriteString(mac, cwd+"\x00"+kind+"\x00"+req.Label+"\x00")
 	_, _ = mac.Write([]byte(req.Command))
 	return hex.EncodeToString(mac.Sum(nil))
 }
@@ -867,15 +957,22 @@ func terminalJobResponse(status, jobID string) Response {
 	}
 }
 
-func persistentJobAdmissionResponse(jobsDir string) *Response {
-	active, err := activeAgentJobCount()
+func persistentJobAdmissionResponse(jobsDir string, kinds ...string) *Response {
+	kind := "task"
+	if len(kinds) > 0 {
+		kind = kinds[0]
+	}
+	counts, err := activeAgentJobKindCounts(jobsDir)
+	active := counts.tasks + counts.services
 	if err != nil {
 		resp := jobStateError("job_state_unavailable", err)
 		return &resp
 	}
-	if active >= maxActivePersistentJobs {
+	if (kind == "task" && counts.tasks >= maxActivePersistentJobs) ||
+		(kind == "service" && counts.services >= maxActivePersistentServices) ||
+		active >= maxActivePersistentJobs+maxActivePersistentServices {
 		return &Response{
-			Error:      "persistent job execution capacity is busy",
+			Error:      "persistent task/service execution capacity is busy",
 			ReasonCode: "resource_limit",
 			ErrorCode:  "resource_limit",
 			ErrorClass: "resource",

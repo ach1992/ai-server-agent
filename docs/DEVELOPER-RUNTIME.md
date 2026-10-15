@@ -1,10 +1,8 @@
 # Developer Runtime Target Architecture
 
-> Status: **the principal source capabilities shipped in published immutable Stable and passed real installed direct-MCP tests on one dedicated host; full cross-client, optional-platform and extended acceptance remains tracked by Issues #59/#99**. GitHub Releases and the current Issue #59 receipt identify the exact latest Stable.
->
-> The latest published immutable release is [`v0.1.12`](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.12), source/tag `9b06c085c1ff75f3a314215657d3b04f510c9432`; it includes the reviewed fresh Cloudflare named-credential repair. This release is NOW **verified byte-identical in the running Agent/Executor processes** of the new `hDE01` Test Server, publicly reachable at `aitestserver.ach.li` with TLS health 200 and unauthenticated MCP 401. Live connected Browser/LSP/DAP/PTY/Jobs, small bounded binary SHA-256 and read-only GitHub recovery/short Go suite passed. Native ChatGPT inline/downloadable JPEG/ZIP/file presentation, long-soak/recovery, full GitHub write/PR loop and runtime settings matrices are **still OPEN** under #59/#99/#63/#118; see [verified live receipt](https://github.com/ach1992/ai-server-agent/issues/59#issuecomment-6137123091).
->
-> Current runtime behavior is documented by `README.md` and the current implementation. This document defines the accepted Developer Runtime target delivered by the relevant workstreams tracked under Issues #54-#66 and the cross-cutting data-delivery Issue #99. Phase A architecture/documentation is integrated and its execution boundary was owner-accepted on 2026-10-07; optional/deferred workstreams in that range are explicitly non-blocking below.
+**Authority:** [PROJECT-SPEC.md](PROJECT-SPEC.md) is the Owner-approved product-level north star. This document owns capability-specific technical design and defer/acceptance boundaries; [ARCHITECTURE.md](ARCHITECTURE.md) owns host, security and lifecycle architecture. Current integrated and released behavior must not be inferred from target architecture alone.
+
+> **Status and evidence:** This document records accepted capability architecture, not a live release or installed-server status ledger. Verify implemented/integrated work against current source and the owning [GitHub Issues](https://github.com/ach1992/ai-server-agent/issues) and PRs; [Releases](https://github.com/ach1992/ai-server-agent/releases) own shipped versions. [Issue #59](https://github.com/ach1992/ai-server-agent/issues/59) owns real workflow/installed-client acceptance, [#99](https://github.com/ach1992/ai-server-agent/issues/99) data delivery, [#137](https://github.com/ach1992/ai-server-agent/issues/137) shared runtime, and [#140](https://github.com/ach1992/ai-server-agent/issues/140) multi-language LSP/DAP. Phase A architecture was accepted; runtime integration and installed evidence remain independent.
 
 ## 1. Outcome
 
@@ -384,6 +382,8 @@ These may be revisited from real usage without changing the fundamental architec
 
 ## 14. Capability-complete, policy-gated
 
+**Environment purpose is not a capability or security profile:** The proposed `development` and `validation` roles help an AI choose the right authorized host, but both have the same core tool and worker/root capability surface. Their hints are independent of GitHub credential provisioning, installed language adapters, chosen workspace, connection method, and actual permission/approval checks. The `agent_environment` manifest and MCP instructions should expose this purpose once implemented ([Issue #143](https://github.com/ach1992/ai-server-agent/issues/143)); do not create duplicate tool catalogs or per-role process/security engines. The operational role can be changed after installation, and an explicit authorized task may override the preference.
+
 Technical capability and project/action authorization remain separate.
 
 - ordinary development defaults to worker authority;
@@ -485,7 +485,7 @@ Activate bounded dependency-aware slices rather than everything at once:
 
 Optional/deferred work is not a blocker.
 
-**Issue #140 has a separate Owner-gated documentation-first prerequisite:** finish and review its revised architecture/acceptance contract before writing any multi-language implementation. The accepted first-expansion language scope is not optional/deferred. Keep #137 Shared Runtime independent: do not bundle #140 changes into another workstream's frozen or independently reviewed candidate. Reconcile the **current** Issue/PR/target identity before implementation or integration.
+**Issue #140's historical Owner-gated documentation-first prerequisite was completed:** source work has separate authorization; integration, release and host changes remain separately gated. The accepted first-expansion language scope is not optional/deferred. Keep #137 Shared Runtime independent: do not bundle #140 changes into another workstream's frozen or independently reviewed candidate. Reconcile the **current** Issue/PR/target identity before implementation or integration.
 
 ## 18. Promotion rule for future capabilities
 
@@ -501,7 +501,7 @@ Do not promote capabilities merely because they are powerful, modern, or availab
 
 ## 19. Language-neutral extensions and fresh-install delivery (Issue #140; target, not shipped)
 
-**Design status:** The Owner selected a protocol-first, capability-driven direction and explicitly ordered a **documentation/Issue review before implementation**. No source coding, source PR integration, installed-server change or release for #140 is authorized until a subsequent explicit Owner approval. The latest Issue #140 body owns its accepted per-language coverage and its implementation/acceptance gates; this document owns durable architecture only.
+**Design status:** The Owner selected a protocol-first, capability-driven direction; the historical documentation-first review gate was satisfied, and subsequent source-development authority was granted on 2026-10-14. Any source candidate remains separate from acceptance, review, integration, installed-client evidence and release. The latest Issue #140 body and its live PRs own those gates; this document owns durable architecture only.
 
 **Extension test:** For an adapter that already implements LSP/DAP, adding a language should normally be a bounded integration of a trusted tool, its narrow profile, and conformance fixtures. It must not require a new MCP family, file writer, process/session registry or security model. Genuine language-specific runtime differences may require a small typed launch/transport handler. Do not promise that every third-party adapter behaves identically.
 
@@ -538,9 +538,9 @@ Do not promote capabilities merely because they are powerful, modern, or availab
 
 **Clean-install baseline for the next release candidate.** The *new candidate* is designed and accepted as a **first-ever installation on an authorized empty supported Linux host**. Once released, that candidate becomes a **new forward-compatibility baseline**: future versions must decide schema evolution and upgrade guarantees for actual new-baseline users when warranted. No speculative migration framework or support for earlier installed releases is needed today, but fresh-install permission is not a permanent exemption from disciplined future upgrades. Preserve bounded state identity, reconnect and lifecycle contracts within the new build. There is no obligation to migrate or preserve prior Agent install scripts, old config layouts, legacy job/operation claims, historical browser profiles, previous terminal handles, or mixed-version in-place upgrade compatibility; do not manufacture compatibility wrappers or migration tests for those absent users. This does **not** authorize wiping an occupied host, changing the running Stable, weakening signed-release/install verification, or dropping recovery *within the newly installed build* after chat disconnect, Agent/Executor restart or proven persistent runtime ownership. Public MCP tool names, output meanings and independent external clients remain valuable product contracts; any intentional breaking client-facing change must be explicitly reviewed rather than smuggled in as "no legacy install migration." Current shipped Stable install/update behavior remains documented separately and unchanged by this design decision.
 
-**Proof-oriented delivery sequence (no code until Owner accepts the documents):**
+**Proof-oriented delivery sequence (the original documentation-first gate was satisfied; integration and delivery remain separately gated):**
 
-1. Reconcile the **current controlling revision of Issue #140** with this target architecture and #52/#137/#59/#99, propose docs only, and obtain explicit Owner sign-off to begin implementation. Do not change another workstream's frozen or independently reviewed candidate to implement #140.
+1. **Historical decision already completed:** The Owner approved the Issue #140 documentation/design gate and separately authorized its source work after PR #141 was integrated. For further implementation or acceptance, reconcile the live #140 Issue/PR with this architecture and #52/#137/#59/#99; obtain new Owner approval only when materially changing the accepted scope, authority or delivery contract. Do not change another workstream's frozen or independently reviewed candidate to implement #140.
 2. On an independently isolated implementation branch **after that approval**, prove a *small* language-neutral LSP/DAP mechanism against real Go and at least one behaviorally different adapter each: push/pull diagnostics, delayed DAP launch response, source versions, cancellation, private transport and verified process cleanup. Verify DAP reverse-launch requirements and a separately service-owned PHP HTTP attach/detach topology before freezing common launch/cleanup assumptions. Compare existing small wire code against focused maintained Go protocol libraries; adopt only if measurably simpler to maintain.
 3. Expand LSP, then DAP using the same small registry/typed launch seams for all accepted #140 languages. Every first-wave language needs at least one substantive **positive** real semantic/diagnostic proof (plus its required runtime proof); typed unsupported results are correct for optional operations, **not** substitutes for required first-class capability. CLI PHP must prove owned-target termination; HTTP PHP must prove authorized request attach/detach while preserving the service. PHP/Node/Python/Rust DAP, Shell DAP feasibility gate, HTML/CSS Browser verification, SQL offline PG+MySQL/MariaDB are each validated on representative real files. An adapter's unsupported operation returns an actionable typed error rather than a fabricated feature.
 4. Run concurrent, independent worktrees with different languages; check missing-tool degradation, retained process/evidence bounds, negative permissions, crash/soak/recovery and actual connected-client behavior. Required exact-HEAD CI/Security, author-separated HIGH_ASSURANCE for material process/security changes, Owner-gated integration/release/deployment, and #59/#99 program acceptance remain independent obligations.
@@ -564,7 +564,9 @@ Do not promote capabilities merely because they are powerful, modern, or availab
 - #65 — optional evidence-triggered Incus;
 - #66 — internal stateful-session substrate;
 - #99 — AI-facing bounded data delivery and typed-artifact acceptance;
+- #118 — operator-managed runtime budgets, effective configuration and resource acceptance;
 - #137 — separate first-install Shared Runtime; its current PR and acceptance state live in GitHub;
-- #140 — language-neutral multi-language LSP/DAP, docs-first Owner gate and adapter acceptance.
+- #140 — language-neutral multi-language LSP/DAP, accepted first-expansion languages and per-adapter real acceptance (the historical docs-first Owner gate was satisfied);
+- #143 — descriptive Development/Validation host-purpose profiles, with implementation/client acceptance distinct from project authorization and tool availability.
 
-After this document is integrated, use it for stable architecture and use Issues for active work/dependencies. Do not reconstruct these decisions from chat history.
+This integrated architecture is the durable capability reference; use Issues for active work/dependencies. Do not reconstruct these decisions from chat history.

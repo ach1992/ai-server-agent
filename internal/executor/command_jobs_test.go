@@ -75,6 +75,7 @@ func TestBoundedOutputCollectorDoesNotEmitBrokenUTF8Boundary(t *testing.T) {
 
 func TestBoundedJobLogRetainsLogicalTail(t *testing.T) {
 	state := t.TempDir()
+	provisionSharedWorkerHome(t, state)
 	jobs := filepath.Join(state, "jobs")
 	if err := os.Mkdir(jobs, 0711); err != nil {
 		t.Fatal(err)
@@ -117,6 +118,7 @@ func TestBoundedJobLogRetainsLogicalTail(t *testing.T) {
 
 func TestJobOutputIsBinarySafe(t *testing.T) {
 	state := t.TempDir()
+	provisionSharedWorkerHome(t, state)
 	jobs := filepath.Join(state, "jobs")
 	if err := os.Mkdir(jobs, 0711); err != nil {
 		t.Fatal(err)
@@ -216,6 +218,7 @@ func TestRunJobHelperConsumesProtectedCommandHandoff(t *testing.T) {
 
 func TestPersistentJobIdempotencyAndCommandPrivacy(t *testing.T) {
 	state := t.TempDir()
+	provisionSharedWorkerHome(t, state)
 	jobs := filepath.Join(state, "jobs")
 	if err := os.Mkdir(jobs, 0711); err != nil {
 		t.Fatal(err)
@@ -226,7 +229,7 @@ func TestPersistentJobIdempotencyAndCommandPrivacy(t *testing.T) {
 	count := filepath.Join(t.TempDir(), "systemd-run.count")
 
 	systemctl := filepath.Join(fakeBin, "systemctl")
-	systemctlScript := "#!/bin/sh\ncase \"$1\" in\n  list-units) printf 'ai-job-test.service loaded active running test\\n'; exit 0 ;;\n  show) printf 'loaded\\n'; exit 0 ;;\n  *) exit 64 ;;\nesac\n"
+	systemctlScript := "#!/bin/sh\ncase \"$1\" in\n  list-units)\n    if [ -s " + shellQuote(capture) + " ]; then\n      unit=$(awk '{for(i=1;i<=NF;i++) if($i==\"--unit\") print $(i+1)}' " + shellQuote(capture) + " | tail -1)\n      if [ -n \"$unit\" ]; then printf '%s.service loaded active running test\\n' \"$unit\"; fi\n    fi ;;\n  show) printf 'loaded\\n' ;;\n  *) exit 64 ;;\nesac\n"
 	if err := os.WriteFile(systemctl, []byte(systemctlScript), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -298,10 +301,17 @@ func TestPersistentJobIdempotencyAndCommandPrivacy(t *testing.T) {
 
 func TestPersistentJobCapacityFailsWithoutQueue(t *testing.T) {
 	state := t.TempDir()
+	provisionSharedWorkerHome(t, state)
 	jobs := filepath.Join(state, "jobs")
 	if err := os.Mkdir(jobs, 0711); err != nil {
 		t.Fatal(err)
 	}
+	claims := filepath.Join(jobs, "claims")
+	if err := os.Mkdir(claims, 0700); err != nil {
+		t.Fatal(err)
+	}
+	workspace := t.TempDir()
+	provisionActiveTaskClaims(t, claims, workspace, maxActivePersistentJobs)
 	fakeBin := t.TempDir()
 	systemctl := filepath.Join(fakeBin, "systemctl")
 	systemctlScript := "#!/bin/sh\nif [ \"$1\" = list-units ]; then\n  printf 'ai-job-1.service loaded active running x\\nai-job-2.service loaded active running x\\nai-job-3.service loaded active running x\\nai-job-4.service loaded active running x\\n'\n  exit 0\nfi\nexit 64\n"
@@ -311,7 +321,7 @@ func TestPersistentJobCapacityFailsWithoutQueue(t *testing.T) {
 	t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
 
 	s := &Server{
-		cfg:       config.Config{StateDir: state, WorkspaceDir: t.TempDir(), WorkerUser: "aiworker"},
+		cfg:       config.Config{StateDir: state, WorkspaceDir: workspace, WorkerUser: "aiworker"},
 		token:     "test-executor-token",
 		guard:     policy.New(nil),
 		audit:     audit.New(filepath.Join(t.TempDir(), "audit.jsonl")),
@@ -326,6 +336,7 @@ func TestPersistentJobCapacityFailsWithoutQueue(t *testing.T) {
 
 func TestPersistentJobDefinitiveLaunchFailureRemovesPreparedArtifacts(t *testing.T) {
 	state := t.TempDir()
+	provisionSharedWorkerHome(t, state)
 	jobs := filepath.Join(state, "jobs")
 	if err := os.Mkdir(jobs, 0711); err != nil {
 		t.Fatal(err)
@@ -376,6 +387,7 @@ func TestPersistentJobDefinitiveLaunchFailureRemovesPreparedArtifacts(t *testing
 
 func TestPersistentJobUnknownLaunchOutcomeKeepsRecoverableClaim(t *testing.T) {
 	state := t.TempDir()
+	provisionSharedWorkerHome(t, state)
 	jobs := filepath.Join(state, "jobs")
 	if err := os.Mkdir(jobs, 0711); err != nil {
 		t.Fatal(err)
@@ -424,6 +436,7 @@ func TestPersistentJobUnknownLaunchOutcomeKeepsRecoverableClaim(t *testing.T) {
 
 func TestPersistentJobClaimReplayCannotBypassActiveCapacity(t *testing.T) {
 	state := t.TempDir()
+	provisionSharedWorkerHome(t, state)
 	jobs := filepath.Join(state, "jobs")
 	claims := filepath.Join(jobs, "claims")
 	if err := os.Mkdir(jobs, 0711); err != nil {
@@ -432,9 +445,14 @@ func TestPersistentJobClaimReplayCannotBypassActiveCapacity(t *testing.T) {
 	if err := os.Mkdir(claims, 0700); err != nil {
 		t.Fatal(err)
 	}
+	workspace := t.TempDir()
+	provisionActiveTaskClaims(t, claims, workspace, maxActivePersistentJobs)
 	fakeBin := t.TempDir()
 	systemctl := filepath.Join(fakeBin, "systemctl")
-	activeLines := strings.Repeat("ai-job-active.service loaded active running test\n", maxActivePersistentJobs)
+	activeLines := ""
+	for i := 1; i <= maxActivePersistentJobs; i++ {
+		activeLines += fmt.Sprintf("ai-job-%d.service loaded active running test\n", i)
+	}
 	systemctlScript := "#!/bin/sh\ncase \"$1\" in\n  list-units) printf '%s' '" + activeLines + "'; exit 0 ;;\n  show) printf 'not-found\\n'; exit 0 ;;\n  *) exit 64 ;;\nesac\n"
 	if err := os.WriteFile(systemctl, []byte(systemctlScript), 0755); err != nil {
 		t.Fatal(err)
@@ -451,7 +469,7 @@ func TestPersistentJobClaimReplayCannotBypassActiveCapacity(t *testing.T) {
 		t.Fatal(err)
 	}
 	server := &Server{
-		cfg:       config.Config{StateDir: state, WorkspaceDir: t.TempDir(), WorkerUser: current.Username},
+		cfg:       config.Config{StateDir: state, WorkspaceDir: workspace, WorkerUser: current.Username},
 		token:     "test-executor-token",
 		guard:     policy.New(nil),
 		audit:     audit.New(filepath.Join(t.TempDir(), "audit.jsonl")),
@@ -490,8 +508,116 @@ func TestPersistentJobClaimReplayCannotBypassActiveCapacity(t *testing.T) {
 	}
 }
 
+func TestPersistentServiceClaimReplayUsesServiceCapacity(t *testing.T) {
+	for _, claimState := range []string{"claimed", "launching"} {
+		for _, tc := range []struct {
+			name       string
+			activeKind string
+			active     int
+			wantOK     bool
+		}{
+			{name: "full_tasks_allow_service", activeKind: "task", active: maxActivePersistentJobs, wantOK: true},
+			{name: "full_services_block_service", activeKind: "service", active: maxActivePersistentServices, wantOK: false},
+		} {
+			t.Run(claimState+"/"+tc.name, func(t *testing.T) {
+				state := t.TempDir()
+				provisionSharedWorkerHome(t, state)
+				jobs := filepath.Join(state, "jobs")
+				claims := filepath.Join(jobs, "claims")
+				if err := os.Mkdir(jobs, 0711); err != nil {
+					t.Fatal(err)
+				}
+				if err := os.Mkdir(claims, 0700); err != nil {
+					t.Fatal(err)
+				}
+				workspace := t.TempDir()
+				now := time.Now().UTC().Format(time.RFC3339Nano)
+				var activeLines strings.Builder
+				for i := 1; i <= tc.active; i++ {
+					id := fmt.Sprintf("%d", i)
+					activeLines.WriteString(fmt.Sprintf("ai-job-%s.service loaded active running fixture\n", id))
+					activeClaim := jobClaim{
+						Version: 1, JobID: id, Fingerprint: "fixture-fingerprint", State: "started",
+						CreatedAt: now, PrincipalID: "fixture-owner", PrincipalClass: "direct",
+						Workspace: workspace, Kind: tc.activeKind,
+					}
+					if tc.activeKind == "service" {
+						activeClaim.Label = "fixture-service"
+					}
+					if err := createJobClaim(filepath.Join(claims, "active-"+id+".json"), activeClaim); err != nil {
+						t.Fatal(err)
+					}
+				}
+				fakeBin := t.TempDir()
+				systemctlScript := "#!/bin/sh\ncase \"$1\" in\n  list-units) printf '%s' " + shellQuote(activeLines.String()) + " ;;\n  show) printf 'not-found\\n' ;;\n  *) exit 64 ;;\nesac\n"
+				if err := os.WriteFile(filepath.Join(fakeBin, "systemctl"), []byte(systemctlScript), 0755); err != nil {
+					t.Fatal(err)
+				}
+				launchMarker := filepath.Join(t.TempDir(), "launched")
+				if err := os.WriteFile(filepath.Join(fakeBin, "systemd-run"), []byte("#!/bin/sh\ntouch "+shellQuote(launchMarker)+"\nexit 0\n"), 0755); err != nil {
+					t.Fatal(err)
+				}
+				t.Setenv("PATH", fakeBin+":"+os.Getenv("PATH"))
+				current, err := user.Current()
+				if err != nil {
+					t.Fatal(err)
+				}
+				server := &Server{
+					cfg:   config.Config{StateDir: state, WorkspaceDir: workspace, WorkerUser: current.Username},
+					token: "test-executor-token", guard: policy.New(nil),
+					audit:     audit.New(filepath.Join(t.TempDir(), "audit.jsonl")),
+					workerUID: uint32(os.Geteuid()), workerGID: uint32(os.Getegid()),
+				}
+				req := Request{Command: "printf recovered-service", OperationID: "service-replay-" + claimState, Kind: "service", Label: "api"}
+				claim := jobClaim{
+					Version: 1, JobID: "9000001", Fingerprint: server.jobFingerprint(req),
+					State: claimState, CreatedAt: now, Workspace: workspace, Kind: "service", Label: "api",
+				}
+				claimPath := filepath.Join(claims, operationClaimName(req.OperationID))
+				if err := createJobClaim(claimPath, claim); err != nil {
+					t.Fatal(err)
+				}
+				if claimState == "launching" {
+					prepared := req
+					prepared.Workspace = workspace
+					if err := server.prepareJobFiles(jobPathsFor(jobs, claim.JobID), prepared); err != nil {
+						t.Fatal(err)
+					}
+				}
+				resp := server.startJobBounded(req)
+				recovered, found, err := readJobClaim(claimPath)
+				if err != nil || !found {
+					t.Fatalf("read replay claim: found=%v err=%v", found, err)
+				}
+				if tc.wantOK {
+					if !resp.OK || !resp.IdempotentReplay || resp.JobID != claim.JobID {
+						t.Fatalf("service replay should use independent service capacity: %+v", resp)
+					}
+					if recovered.State != "started" {
+						t.Fatalf("allowed service replay state = %q, want started", recovered.State)
+					}
+					if _, err := os.Stat(launchMarker); err != nil {
+						t.Fatalf("allowed service replay did not launch: %v", err)
+					}
+				} else {
+					if resp.OK || resp.ErrorCode != "resource_limit" || resp.Status != "busy" || !resp.Retryable || !resp.IdempotentReplay || resp.JobID != claim.JobID {
+						t.Fatalf("service replay bypassed service quota: %+v", resp)
+					}
+					if recovered.State != claimState {
+						t.Fatalf("blocked service replay state = %q, want %q", recovered.State, claimState)
+					}
+					if _, err := os.Stat(launchMarker); !os.IsNotExist(err) {
+						t.Fatalf("capacity-blocked service replay invoked systemd-run: %v", err)
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestPersistentJobClaimRecoversBeforeLaunch(t *testing.T) {
 	state := t.TempDir()
+	provisionSharedWorkerHome(t, state)
 	jobs := filepath.Join(state, "jobs")
 	claims := filepath.Join(jobs, "claims")
 	if err := os.Mkdir(jobs, 0711); err != nil {
@@ -565,6 +691,7 @@ func TestPersistentJobClaimRecoversBeforeLaunch(t *testing.T) {
 func TestPersistentJobReplayPreservesUnknownTerminalState(t *testing.T) {
 	useInactiveSystemctl(t)
 	state := t.TempDir()
+	provisionSharedWorkerHome(t, state)
 	jobs := filepath.Join(state, "jobs")
 	claims := filepath.Join(jobs, "claims")
 	if err := os.Mkdir(jobs, 0711); err != nil {
@@ -606,6 +733,7 @@ func TestPersistentJobReplayPreservesUnknownTerminalState(t *testing.T) {
 func TestPersistentJobReplayReportsCompletedStatus(t *testing.T) {
 	useInactiveSystemctl(t)
 	state := t.TempDir()
+	provisionSharedWorkerHome(t, state)
 	jobs := filepath.Join(state, "jobs")
 	claims := filepath.Join(jobs, "claims")
 	if err := os.Mkdir(jobs, 0711); err != nil {
@@ -646,6 +774,7 @@ func TestPersistentJobReplayReportsCompletedStatus(t *testing.T) {
 
 func TestFailedJobClaimCleanupRemovesPreparedArtifacts(t *testing.T) {
 	state := t.TempDir()
+	provisionSharedWorkerHome(t, state)
 	jobs := filepath.Join(state, "jobs")
 	claims := filepath.Join(jobs, "claims")
 	if err := os.Mkdir(jobs, 0711); err != nil {
@@ -689,6 +818,7 @@ func TestFailedJobClaimCleanupRemovesPreparedArtifacts(t *testing.T) {
 
 func TestPersistentJobIdempotencyStateIsBounded(t *testing.T) {
 	state := t.TempDir()
+	provisionSharedWorkerHome(t, state)
 	jobs := filepath.Join(state, "jobs")
 	claims := filepath.Join(jobs, "claims")
 	if err := os.Mkdir(jobs, 0711); err != nil {
@@ -727,6 +857,7 @@ func TestPersistentJobIdempotencyStateIsBounded(t *testing.T) {
 
 func TestInterruptedPersistentJobsEnterBoundedRetention(t *testing.T) {
 	state := t.TempDir()
+	provisionSharedWorkerHome(t, state)
 	jobs := filepath.Join(state, "jobs")
 	claims := filepath.Join(jobs, "claims")
 	if err := os.Mkdir(jobs, 0711); err != nil {
@@ -827,6 +958,7 @@ func TestInterruptedPersistentJobsEnterBoundedRetention(t *testing.T) {
 
 func TestActivePersistentJobIsNotRetiredAsUnknown(t *testing.T) {
 	state := t.TempDir()
+	provisionSharedWorkerHome(t, state)
 	jobs := filepath.Join(state, "jobs")
 	claims := filepath.Join(jobs, "claims")
 	if err := os.Mkdir(jobs, 0711); err != nil {
@@ -868,6 +1000,7 @@ func TestActivePersistentJobIsNotRetiredAsUnknown(t *testing.T) {
 
 func TestJobStatusReconcilesInterruptedJobWithoutExitStatus(t *testing.T) {
 	state := t.TempDir()
+	provisionSharedWorkerHome(t, state)
 	jobs := filepath.Join(state, "jobs")
 	if err := os.Mkdir(jobs, 0711); err != nil {
 		t.Fatal(err)
@@ -903,6 +1036,7 @@ func TestJobStatusReconcilesInterruptedJobWithoutExitStatus(t *testing.T) {
 
 func TestJobStatusReconcilesAcceptedJobBeforeRunnerStart(t *testing.T) {
 	state := t.TempDir()
+	provisionSharedWorkerHome(t, state)
 	jobs := filepath.Join(state, "jobs")
 	claims := filepath.Join(jobs, "claims")
 	if err := os.Mkdir(jobs, 0711); err != nil {
@@ -959,6 +1093,7 @@ func TestJobStatusReconcilesAcceptedJobBeforeRunnerStart(t *testing.T) {
 func TestJobStatusReportsUnknownCompletionMarker(t *testing.T) {
 	useInactiveSystemctl(t)
 	state := t.TempDir()
+	provisionSharedWorkerHome(t, state)
 	jobs := filepath.Join(state, "jobs")
 	if err := os.Mkdir(jobs, 0711); err != nil {
 		t.Fatal(err)
@@ -977,6 +1112,7 @@ func TestJobStatusReportsUnknownCompletionMarker(t *testing.T) {
 func TestJobStatusReturnsStructuredExitCode(t *testing.T) {
 	useInactiveSystemctl(t)
 	state := t.TempDir()
+	provisionSharedWorkerHome(t, state)
 	jobs := filepath.Join(state, "jobs")
 	if err := os.Mkdir(jobs, 0711); err != nil {
 		t.Fatal(err)
@@ -997,6 +1133,7 @@ func TestJobStatusReturnsStructuredExitCode(t *testing.T) {
 
 func TestStartJobWithoutCallerOperationIDStillGetsRecoveryClaim(t *testing.T) {
 	state := t.TempDir()
+	provisionSharedWorkerHome(t, state)
 	jobs := filepath.Join(state, "jobs")
 	if err := os.Mkdir(jobs, 0711); err != nil {
 		t.Fatal(err)
@@ -1046,6 +1183,7 @@ func TestStartJobWithoutCallerOperationIDStillGetsRecoveryClaim(t *testing.T) {
 
 func TestStalePrelaunchClaimRetiresProtectedHandoff(t *testing.T) {
 	state := t.TempDir()
+	provisionSharedWorkerHome(t, state)
 	jobs := filepath.Join(state, "jobs")
 	claims := filepath.Join(jobs, "claims")
 	if err := os.Mkdir(jobs, 0711); err != nil {

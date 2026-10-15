@@ -18,9 +18,11 @@ import (
 func newAuditContractServer(t *testing.T) (*Server, string, string) {
 	t.Helper()
 	workspace := t.TempDir()
+	state := t.TempDir()
+	provisionSharedWorkerHome(t, state)
 	auditPath := filepath.Join(t.TempDir(), "audit.jsonl")
 	return &Server{
-		cfg:       config.Config{WorkspaceDir: workspace, StateDir: t.TempDir()},
+		cfg:       config.Config{WorkspaceDir: workspace, StateDir: state},
 		guard:     policy.New(nil),
 		audit:     audit.New(auditPath),
 		workerUID: uint32(os.Geteuid()),

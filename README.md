@@ -1,586 +1,108 @@
 # AI Server Agent
 
-AI Server Agent turns a dedicated Linux development/test server into a bearer-authenticated MCP control endpoint. ChatGPT is the current first validated/documented AI client integration; the Agent core and MCP capability/security model are intentionally AI-client/vendor neutral. Ordinary commands run as an unprivileged worker; host-level actions go through a separate root executor with policy and approval guardrails.
+**AI Server Agent** gives an authorized AI client a practical Linux development and testing environment through a lightweight, bearer-authenticated MCP control plane. It exposes real shell, file, job, Git/worktree, Browser, code-inspection, and debugging capabilities without turning the server into a heavyweight IDE or hosting panel.
 
-The project is intentionally a **development/test-server control plane**, not a general hosting panel. It gives an authorized MCP client enough capability to work on a dedicated Linux host while keeping the Agent's own control plane, credentials, connectivity, and destructive operations behind explicit boundaries.
+Ordinary engineering work uses the unprivileged `aiworker` account. Privileged host actions are available through a separate root executor with approval and self-preservation safeguards. This is a **root-capable** dedicated-server product, not a sandbox for untrusted tenants.
 
-The Agent is a standalone product: every supported host capability is available through direct MCP access. MCP Gateway is an optional future upstream integration; its development or availability is not required for Agent installation, operation, capability delivery or standalone release. Future Gateway compatibility is validated separately against the same Agent tools and bounded contracts.
+Direct MCP access is a first-class standalone mode; MCP Gateway is an **optional future integration**, not a runtime dependency. ChatGPT is the first documented/validated AI client, but the core is deliberately client/vendor neutral.
 
-## How an AI client discovers and uses this Agent
+For the agreed product vision, boundaries, and non-goals, see **[Project Specification](docs/PROJECT-SPEC.md)**. Current implementation is not the same as future accepted work.
 
-The MCP server provides **concise routing instructions** for the persistent workspace, choosing between Git/worktree, worker shell/jobs, workspace, Go/LSP, PTY, DAP and Browser/E2E tools, and preserving critical approval and access boundaries. Per-tool descriptions, argument schemas and safety annotations carry the detailed usage limits, capability requirements and warnings; optional runtimes must be checked before use. Compatible clients can discover these capabilities without a separately pasted global prompt, but what each client passes to its AI model or can render remains client-dependent. Neither instructions nor MCP hints grant additional permissions or override repository-specific rules.
+## Supported hosts
 
-## Platform support
+- Ubuntu **22.04+** or Debian **11+**, with `systemd`
+- Linux **amd64/x86_64** or **arm64/aarch64**
+- A dedicated server the owner authorizes for AI-controlled development or validation
 
-Published immutable Stable [`v0.1.12`](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.12) and the current `main` branch support:
+Debian 11 has limited upstream security maintenance; prefer Debian 12+ unless an appropriate extended-support arrangement is in place.
 
-- **Ubuntu 22.04 or newer**
-- **Debian 11 or newer** (Debian 11 application compatibility is retained, but upstream Debian LTS ended on 2026-08-31; use Debian 12+ for an officially security-maintained base unless you have an ELTS arrangement)
-- **amd64/x86_64 and arm64/aarch64**
-- systemd
-- a dedicated development/test server where you are comfortable granting an AI-controlled MCP endpoint the documented capabilities
+The Agent itself does **not** require a web server, database, Docker, a hosting panel, Node.js, Python, PHP, or a permanent claim on ports 80/443. Optional capabilities may require separately installed tools. See [platform and dependency details](docs/OPERATIONS.md#platform-support).
 
-OS support is minimum-version based, while CI keeps explicit compatibility cases for current Ubuntu/Debian releases and native lifecycle coverage on both supported CPU architectures. Stable release architectures are declared in `scripts/release-arches.txt`; installer architecture aliases are normalized at the install boundary so adding a future architecture does not require rewriting release publication logic.
+## Install
 
-`v0.1.7` is the first stable release with this expanded platform matrix.
-
-AI Server Agent does not require nginx, Apache, Caddy, Docker, PHP, a database, Node.js, Python, `cloudflared`, or a hosting panel as core dependencies, and it does not need to take over ports 80/443.
-
-## Install the latest stable release
-
-Stable installation starts with a small bootstrap loaded from an **immutable published release tag**, separate from the release `install.sh` asset it authenticates. The current verified trust anchor is the immutable [`v0.1.12` release](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.12), not the mutable `main` branch. GitHub Releases, rather than this page, remain authoritative if a newer version is published.
-
-To install the **latest immutable Stable** identified by the GitHub Releases API using that pinned bootstrap:
+The currently documented authenticated bootstrap for the latest **published immutable Stable release** is:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.12/scripts/install-stable.sh | bash
 ```
 
-To install **exactly `v0.1.12`** instead of following future latest releases:
+To install **exactly `v0.1.12`** instead of resolving the latest published Stable:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.12/scripts/install-stable.sh | bash -s -- v0.1.12
 ```
 
-The bootstrap authenticates the release-scoped installer digest **before** privileged execution. The first command resolves GitHub's current latest immutable release; the second requires the named release. On the next release, update the documented bootstrap trust anchor only after its tag is immutable and its bootstrap has been verified.
+This bootstrap authenticates the selected release installer before privileged execution and installs verified release assets. **GitHub Releases is authoritative for the latest release**; the pinned bootstrap tag above is the currently documented trust anchor, not a claim that `main` is stable.
 
-Do **not** use `releases/latest/download/install.sh | sudo bash` as the stable trust path: that executes release-supplied code as root before the same asset can be authenticated.
+For an exact-version install, troubleshooting, advanced or source installations and supply-chain verification, use the [installation guide](docs/OPERATIONS.md#install-the-latest-stable-release).
 
-The stable bootstrap does **not** fall back to `main`. It:
+A successful core installation is separate from public connection setup. The first-run wizard provides Cloudflare-hostname HTTPS, local/private, existing certificate/TLS, or configure later. The core can remain healthy when public connection configuration is deferred.
 
-1. resolves the requested release or GitHub's latest release metadata;
-2. requires a published, non-draft, non-prerelease, immutable release;
-3. requires exactly one uploaded `install.sh` asset at the exact tag-scoped release URL;
-4. requires the GitHub release asset `sha256:` digest;
-5. downloads `install.sh` without root execution and verifies its bytes against that digest;
-6. crosses the privilege boundary only after that unprivileged verification succeeds;
-7. copies the candidate into a root-controlled staging directory, re-verifies the same authenticated digest on the protected copy, and executes only that protected copy.
+## Configure and use
 
-### What the verified release installer does
-
-The release-scoped `install.sh` is generated with its version/ref pinned to the release tag. After the bootstrap authenticates it, the installer:
-
-1. checks the supported stable OS/architecture;
-2. downloads the matching release archive and `SHA256SUMS`;
-3. verifies the archive checksum before installation;
-4. installs the Agent/services and management helpers;
-5. starts the core Agent locally and verifies health;
-6. optionally launches the first-run connection wizard.
-
-Stable installation rejects a local `AI_SERVER_AGENT_BINARY` override. Stable payload identity is the published immutable release, not a mutable branch.
-
-## What gets installed
-
-Main paths:
-
-| Path | Purpose |
-| --- | --- |
-| `/usr/local/bin/ai-server-agent` | Agent binary |
-| `/usr/local/sbin/ai-server-agent-manage` | supported management entrypoint |
-| `/usr/local/lib/ai-server-agent/` | management/update/uninstall implementation |
-| `/etc/ai-server-agent/` | root-controlled configuration, TLS and managed state |
-| `/etc/ai-server-agent/control/` | root-only install identity and recovery control state |
-| `/var/lib/ai-server-agent/` | Agent runtime/state, browser profile data and persistent-job metadata |
-| `/var/log/ai-server-agent/` | logs/audit data |
-| `/srv/ai-workspace/` | `aiworker` project workspace; intentionally preserved by purge |
-| `/run/lock/ai-server-agent/` | root lifecycle serialization lock |
-
-System users:
-
-- `aiagent`: unprivileged MCP/API service account;
-- `aiworker`: ordinary command/workspace account.
-
-Services:
-
-- `ai-server-agent.service`
-- `ai-server-agent-executor.service`
-
-## First-run choices
-
-A successful core install is independent from public connection setup. The wizard offers:
-
-1. **Cloudflare domain** — guided hostname-scoped HTTPS setup;
-2. **Local/private** — keep the Agent loopback-only;
-3. **Existing certificate** — advanced manual native TLS;
-4. **Configure later** — finish the healthy core installation now and run management later.
-
-Choosing **Configure later** is not an installation failure.
-
-After installation, the main entrypoint is:
+Open the server management menu:
 
 ```bash
 sudo ai-server-agent-manage
 ```
 
-## Guided Cloudflare setup
-
-The recommended direct-public path uses Cloudflare for the selected MCP hostname only. It does not change the zone-wide SSL mode.
-
-Before entering a token, the manager prints the required scope. Restrict zone permissions to the intended zone. Because the current Cloudflare phase-entrypoint read requires an accepted account Rulesets permission in the live guided flow, restrict that account resource to the account that owns the selected zone. The token needs these permissions:
-
-- `Zone > Zone > Read`
-- `Zone > DNS > Edit`
-- `Zone > SSL and Certificates > Edit`
-- `Zone > Origin Rules > Edit`
-- `Zone > Config Rules > Edit`
-- `Account > Account Rulesets > Read`
-
-The manager creates/reconciles only the selected hostname's resources:
-
-- proxied `A` record;
-- hostname-scoped Origin Rule for the Agent port;
-- hostname-scoped Configuration Rule setting SSL to `strict`;
-- Origin CA certificate.
-
-### Token handling
-
-The Cloudflare API token is entered in a **hidden terminal prompt**. Do not paste it into ChatGPT, chat, tickets, screenshots, logs or source control.
-
-The interactive manager uses the Cloudflare API token only for the current command and does not store it in Agent managed state. Noninteractive automation can supply a protected Cloudflare API token file through the documented environment variable instead of putting the token on a command line.
-
-Cloudflare verification separately requires an **active MCP bearer**, not the Cloudflare API token. A fresh installer supplies its newly issued direct/default bearer to the manager over a one-use inherited file descriptor; no recoverable plaintext file is created. Later interactive Cloudflare reconfiguration requests the current MCP bearer in a hidden terminal prompt and validates it against the local Agent **before any Cloudflare mutation**, then proves public HTTPS `/healthz`, unauthorized MCP rejection, and authenticated MCP initialization. Existing bearer plaintext is not recoverable from `mcp-credentials.json` (verifier digests only); if lost, use `sudo ai-server-agent-manage credential-rotate direct-default`, securely update the connected client, and retry. Do **not** recreate legacy `/etc/ai-server-agent/mcp.authorization`. For noninteractive reconfiguration with an existing credential, provision a one-use descriptor 3 to `AI_SERVER_AGENT_MCP_AUTH_FD=3` using your automation secret store; never put a bearer in an argument, environment value or repository.
-
-### Ownership and recovery
-
-The manager does not silently adopt or overwrite conflicting external Cloudflare state.
-
-Ruleset reads are reconciled through a fail-closed identity/version chain so Cloudflare's retained-empty response variants do not become silent absence guesses. When a Rulesets read cannot be trusted, the manager reports the failing stage and non-secret phase/Ruleset/version context where available. It does not print the Cloudflare API token or Authorization material.
-
-Transaction-created resources are durably journaled. Confirmed Agent-owned resources are fingerprinted and re-read before destructive cleanup. If a POST response is lost, recovery requires both an unpredictable ownership marker and the exact durable pre-POST representation fingerprint before deleting the discovered resource. Concurrent representation drift fails closed.
-
-Cloudflare Ruleset recovery deletes only the exact Agent-owned rule, never a shared Ruleset container. Equivalent external/manual hostname-scoped rules are not silently adopted or deleted; recorded Agent-owned rules remain authoritative on rerun, while stale ownership plus an external semantic equivalent fails closed.
-
-If old Agent-managed resources remain after a hostname/certificate change, use the explicit Cloudflare cleanup path; do not rely on purge to delete remote resources.
-
-## Local/private mode
-
-Local mode keeps the Agent on loopback. This is suitable when another trusted private connectivity mechanism will carry MCP traffic.
-
-Use the management menu or:
-
-```bash
-sudo ai-server-agent-manage configure-local
-```
-
-## Manual native TLS
-
-For an existing certificate/key pair:
-
-```bash
-sudo ai-server-agent-manage configure-manual-tls
-```
-
-The manager validates the certificate hostname and key pairing before switching the Agent to public mode. Public mode requires native TLS; plaintext public binding is not the supported direct-public model.
-
-## Client and vendor neutrality
-
-MCP is the current primary common client boundary; it is not OpenAI-specific. ChatGPT is the current supported/validated client path and keeps dedicated setup documentation below.
-
-Future AI/MCP clients may be supported through bounded client-specific integration/authentication paths, but they must reuse the same Agent tools, executor, policy, approval and lifecycle semantics. A provider-specific UI, credential, tunnel or confirmation mechanism must not become a core safety dependency.
-
-Support for another commercial AI client is claimed only after its current protocol/auth/tool behavior has been verified and accepted; this architecture does not imply universal compatibility.
-
-## ChatGPT setup
-
-After public setup succeeds:
-
-```bash
-sudo ai-server-agent-manage chatgpt-setup
-```
-
-The manager prints the MCP URL and bearer-auth setup guidance. Active bearer plaintext is **not** retained for generic re-display: the server stores a versioned one-way verifier plus non-secret principal metadata. Use `sudo ai-server-agent-manage credential-rotate direct-default` to issue a replacement direct credential and reveal it once in the protected terminal at issuance.
-
-ChatGPT full MCP/custom-app support is an evolving client-side feature. For managed workspaces, creation and administration currently use the available Plugins/custom-MCP surfaces and workspace controls; exact labels and navigation can change independently of the Agent. Use the current OpenAI product guidance and live UI at connection time rather than treating a historical `Developer mode`, `Apps -> Create`, screenshot, or menu sequence as a protocol contract.
-
-See [docs/CONNECT_CHATGPT.md](docs/CONNECT_CHATGPT.md) for connection topologies and the validation checklist. When that document's client-side UI wording differs from the current ChatGPT product, current OpenAI guidance and the live UI are authoritative for the client-side steps; the Agent-side endpoint/auth/tool contract remains the durable part documented here.
-
-The public endpoint remains bearer-authenticated. Treat the bearer credential as a privileged server-control credential and provide it only to the trusted ChatGPT connection UI when configuring the app.
-
-### MCP credential lifecycle
-
-The Agent keeps a bounded named-principal credential set. `direct/default` is the normal direct-client principal; `mcp-gateway` is an optional separately managed principal for a future Gateway connection and does not make Gateway a runtime dependency. The server derives principal ID/class/name from the matched verifier and attaches it to request context; callers cannot select or override that identity.
-
-Use `sudo ai-server-agent-manage credential-status` for non-secret state, `credential-rotate direct-default|mcp-gateway` to issue or rotate a credential, and `credential-revoke direct-default|mcp-gateway` to revoke one. Rotation is immediate after verified service cutover: there is no grace overlap. Revoking the last active credential is refused. Safe uninstall preserves the credential store; update/repair preserve it; purge removes Agent-owned credential state so a later fresh install gets fresh credentials.
-
-Existing installations migrate the current bearer into `direct/default` without forced rotation. Migration activates and verifies the verifier-backed store before the legacy plaintext token/header file is removed; on failed activation the previous known-good legacy configuration is restored for recovery.
-
-## MCP capability surface
-
-`main` defines the complete MCP tool inventory in `internal/mcp/`; the connected client sees only the inventory advertised by the **installed** Agent build after client tool refresh. The published Stable and `main` can differ after new code merges; compare the installed build with the current release and refresh the MCP client catalog when necessary. These grouped entries describe the current source capability surface, not a guarantee that each optional tool works on every server/client:
-
-| Tool | Purpose |
-| --- | --- |
-| `agent_environment` | read the current self-preservation manifest before host-wide changes |
-| `run_command` | run ordinary Bash as `aiworker` in `/srv/ai-workspace` |
-| `workspace_search` | run bounded read-only `text` regex/literal searches with trusted `ripgrep` under worker authority, or `structural` AST searches with `ast-grep`; LSP continues to own semantic meaning |
-| `workspace_stat` | metadata-only readable regular-file size/version as `aiworker`, without reading/returning file content |
-| `workspace_read` / `workspace_write` | bounded regular source-file I/O as `aiworker`, not root; explicit workspace, symlink-safe containment, version-aware replacement and must-not-exist creation |
-| `workspace_apply_edits` | preflight up to 12 versioned create/replace/exact-text edits before any mutation; report each committed, failed, unknown or unattempted file without claiming a multi-file transaction |
-| `workspace_transfer` | binary-safe resumable worker-side file ingestion with per-chunk/full-object SHA-256, durable status and atomic versioned publication |
-| `repository_environment` | inspect repository-owned language/toolchain/environment declarations and current host compatibility without installing or running project tasks |
-| `repository_discover` / `repository_inspect` | discover or prove exact Git repository/worktree identity, HEAD, branch/upstream, dirty/conflict state and linked worktrees without trusting directory names |
-| `worktree_create` / `worktree_remove` | create exact-SHA task worktrees and safely remove only clean linked worktrees after durability/disposable-state checks |
-| `run_root_command` | run Bash as root, subject to executor policy/approval guardrails |
-| `start_job` | start a persistent transient-systemd background job that survives MCP/client disconnects |
-| `job_status` / `job_output` / `job_stop` | inspect, read output from, or stop a persistent Agent job |
-| `read_file` | read a host file through the privileged root executor; this is broad root-readable file authority, and protected Agent state may additionally require approval |
-| `write_file` | write complete host-file content through the privileged root executor; this is root-capable host mutation, and protected Agent state may additionally require approval |
-| `browser_setup` | install the optional private Node.js + Playwright + Chromium runtime and required shared libraries |
-| `browser_e2e` | run a bounded structured Browser/E2E sequence (navigate, accessible snapshot with flow-only refs, fill/click by role/CSS/ref, assert, inspect console/network) on the existing managed Chromium/profile |
-| `browser_run` | run Playwright JavaScript in server-side headless Chromium using a persistent browser profile |
-| `browser_status` | report optional Browser runtime readiness and the shared profile state |
-| `browser_session_open` / `browser_session_flow` / `browser_session_status` / `browser_session_close` | manage principal/workspace-bound cross-call Chromium interaction and verified cleanup; session refs are not durable handles |
-| `browser_session_capture` / `browser_session_trace` | opt-in bounded typed JPEG or version-pinned ZIP trace retrieval; actual client/model visibility is a separate acceptance requirement (#99) |
-| `terminal_open` / `terminal_read` / `terminal_write` / `terminal_resize` / `terminal_interrupt` / `terminal_reconnect` / `terminal_close` | optional bounded interactive worker/root tmux Control Mode with principal/workspace/epoch checks; real root terminal requires separate authorization (#60) |
-| `code_definition` / `code_references` / `code_symbols` / `code_diagnostics` | optional Go/gopls semantic inspection using an exact worker file version; initial source-size and result budgets are narrow (#56) |
-| `debug_adapter_status` / `debug_*` | optional worker-authority Delve/DAP debugging; require verified containment before target launch; evaluation may change execution state (#57) |
-
-The source-level presence of a tool does **not** prove availability on a particular kernel, compatible optional tool installation, installed server, connected client, or Stable release. Use `agent_environment`, the capability's status/error response and the current installation to check readiness; verify changed tool discovery using the current ChatGPT plugin refresh flow. Accepted architecture and remaining delivery gates: [Developer Runtime](docs/DEVELOPER-RUNTIME.md), [#59](https://github.com/ach1992/ai-server-agent/issues/59), [#99](https://github.com/ach1992/ai-server-agent/issues/99).
-
-### Structured worker workspace editing
-
-`workspace_stat`, `workspace_read`, `workspace_write`, `workspace_apply_edits`, `workspace_transfer`, and `workspace_search` in `text` mode use a separate worker-credential helper. This is **not** a general sandbox for worker shell access: `run_command` and intentional worker tools retain their documented Linux authority. The helper uses descriptor-relative `openat2` access and a per-request Landlock filesystem boundary; it fails closed with `workspace_sandbox_unavailable` when the kernel does not expose Landlock ABI v2 or when a container disables it. This kernel capability is not present in every stock Ubuntu 22.04 or Debian 11 installation; Agent core/platform support does not imply these optional structured worker tools are available on that kernel. Text search also needs a trusted `/usr/bin/rg` binary, but the core installer does not automatically install it.
-
-For unfamiliar or large source files, `workspace_stat` reports size and file version without reading any file bytes; it does not detect MIME type or interpret binary/media. Use a small explicit `workspace_read` range with a matching `file_version` instead of the up-to-1 MiB default. This separates byte limits from model context budgets. Ordinary project reads/writes remain limited to a chosen workspace and regular files, and never automatically stage or commit Git changes. Existing privileged `read_file` / `write_file` retain **root-host-file** authority and are not silently rewritten into worker operations. Batch edits require explicit version/must-not-exist preconditions, validate every path and replacement before the first mutation, and report per-file outcomes when later writes race or fail. The helper request is bounded by the same 8 MiB wire budget as the executor; JSON escaping is counted before pre-action audit and helper launch, and oversized serialized batches return a deterministic `input_too_large` rather than `unknown_completion`. They do not silently discard unrelated changes or claim filesystem-wide atomicity. LSP WorkspaceEdit and future structural rewrite application must reuse this same edit/precondition layer rather than introduce a second writer.
-
-### Resumable worker-side file ingress (Issue #99 Rev 3)
-
-`workspace_transfer` implements a single direct-mode Agent contract: `begin` with a stable 16–128-character ASCII `transfer_key`, exact workspace/relative path, total bytes, full SHA-256 and exactly one destination precondition (`must_not_exist` or `file_version`); `chunk` with base64 bytes up to 256 KiB, exact raw `offset` and per-chunk SHA-256; `status` with durable `next_offset`, `prepared_bytes` and expiry; `commit` with **bounded, durable 4 MiB preparation windows** followed by whole-object SHA-256 validation and atomic final publish; and `abort` for any state not already publishing. A successful `commit` may return `status=preparing` (not yet published): call `commit` again with the same `transfer_id` until `status=committed`. Completed windows and SHA-256 continuation survive helper crash/restart and are not recopied on retry. Retry identical begin with the same key after a lost response; the handle embeds a material fingerprint and a partial begin retains its key/material reservation through startup/periodic GC for its configured TTL. A different-material retry is rejected until that reservation expires; an identical retry reclaims only an empty, manifest-less partial begin. An existing-file replacement uses a durable displaced-inode metadata snapshot and persists exchange verification before deleting the displaced original. After a recoverable post-exchange race, `status=conflicted` means **not committed** and the concurrent destination was restored; `commit` returns `file_changed` rather than republishing. Uncertain commits are reconciled by `status` or same-handle retry; incomplete prepared bytes never appear as a completed destination. The same worker-only openat2/Landlock confinement applies, extended solely to its private `state_dir/worker-home/transfers` staging area. This is a scoped structured-tool boundary, **not** isolation from separately authorized worker shell access sharing the `aiworker` Unix identity.
-
-Operators can tune `runtime.transfer_staging_mib` (default 512; 16–1048576), `runtime.transfer_active_sessions` (default 8; 1–64), and `runtime.transfer_session_ttl_seconds` (default 3600; 60–86400). These are cumulative staging, active-session and retention budgets; they do not raise global MCP/IPC request limits or confer root authority. The running Executor launches a bounded worker-only Landlock cleanup at startup and every minute, regardless of new client traffic; expiration also sweeps on new begin. Retained bytes in aborted/committed records remain quota-accounted until unlink, and status/abort/commit retry terminal cleanup. The receipt namespace itself has a bounded 4096-entry admission budget and automatically frees expired entries; a full namespace returns an actionable resource error. Physical expiry can be delayed if Executor is stopped or cleanup is blocked by unsafe state, which is reported rather than silently deleting unproven user data. Prepared destination temporary files may require up to one additional whole-object allocation on the destination filesystem; each 4 MiB preparation window checks disk headroom. Secure preparation requires Linux unnamed destination-inode creation (`O_TMPFILE`) plus successful post-journal linking; unsupported destination filesystems or link restrictions fail closed with `transfer_prepare_unavailable`/`transfer_prepare_link_failed`, not unsafe deletion or root fallback. An unlinked temp inode is automatically reclaimed on helper death, while every named temp must match an earlier fsynced inode journal before cleanup. Ambiguous publication fails closed for explicit reconciliation. Version-pinned outgoing content still uses `workspace_stat` and bounded `workspace_read` windows, including binary base64 encoding. Neither an uploaded byte stream nor `structuredContent` proves that a particular ChatGPT client supports attachments, native typed files, or unlimited model-visible text. Issue #99/#59 retain those direct-client acceptance gates.
-
-### Ordinary commands and root commands
-
-Use `run_command` for normal development work, builds, tests, Git, project package managers and diagnostics that do not require host privilege. It runs as `aiworker` with `/srv/ai-workspace` as HOME/CWD. Synchronous `run_command` / `run_root_command` calls use the administrator-configured `command_timeout_seconds` (default 300 seconds; validated range 10–1800 seconds); the effective value is advertised to the model in both tool descriptions. Work expected to exceed the configured limit or produce high output should use `start_job`. Command bodies are limited to 256 KiB and are delivered to Bash through stdin rather than being copied into the spawned process argv. Synchronous stdout/stderr is captured with a 1 MiB production-time head/tail bound and returns explicit encoding, raw-byte, truncation and duration/timeout metadata; binary output is base64-encoded instead of being treated as UTF-8. Active synchronous worker and root execution have separate bounded capacity and fail immediately with a structured `busy/resource_limit` result instead of entering a hidden queue. Cancellation/timeout terminates the command process group with TERM followed by a bounded KILL fallback, and ordinary same-process-group background children are cleaned up; a command that deliberately escapes that process group cannot be claimed as stopped, so durable/background work belongs in `start_job` or an intentionally managed service.
-
-`/srv/ai-workspace` is persistent. Connected models are instructed to inspect and reuse existing repositories, worktrees and task environments before creating duplicates, prefer `git worktree` when another checkout of the same repository is appropriate, and never treat dirty, untracked, ambiguous or unknown workspace state as safe to delete.
-
-### Code search: text, structural and semantic
-
-Use the lowest inspection layer that answers the question correctly: `workspace_search mode=text` for ordinary bounded literal/regex text occurrences, `workspace_search mode=structural` for AST/syntax-tree shapes, and LSP for symbol/type/reference meaning. Advanced or unstructured `rg`/`git grep` through `run_command` remains the intentional CLI escape hatch, with ordinary `aiworker` authority rather than the structured helper's Landlock sandbox. Structured text mode requires a trusted `/usr/bin/rg` and available Landlock ABI >=2; if either is missing, it fails closed instead of silently changing authority. Both search modes return bounded results with workspace-relative files, zero-based ranges and explicit partial/truncation metadata; the structural mode also returns bounded metavariable captures.
-
-The first-class structural path is read-only. It never exposes ast-grep rewrite/apply flags, never creates a code index, uses one scan thread, rejects requested search paths that resolve outside the selected workspace, does not enable ast-grep `--follow`, and runs ast-grep with `--config /dev/null` so repository `sgconfig.yml`/advanced rule configuration is not implicitly loaded. Advanced ast-grep rules/codemods remain an intentional direct-CLI escape hatch rather than an expanded MCP surface; any future first-class structural edit must flow through the safe workspace-edit/precondition semantics tracked separately instead of making ast-grep a second filesystem writer.
-
-The Agent detects a trusted full `ast-grep` executable and requires version 0.40.5 or newer for the current JSON-stream contract. Linux `/usr/bin/sg` is not treated as ast-grep because that name is commonly owned by util-linux. Structural search does not silently install tooling: if no trusted compatible engine is present, it fails clearly so installation/provisioning can remain an explicit lifecycle action.
-
-### Repository environment discovery
-
-`repository_environment` takes an explicit repository/worktree path inside the configured workspace and returns a bounded structured summary of repository-owned development intent. It recognizes common native manifests/lockfiles and toolchain pins plus declared mise, devenv, Dev Container and Dagger mechanisms, reports repository-owned setup/test/build entrypoint identities where they are explicitly declared without returning package-script bodies, and compares required tools/versions with compatible host/system or worker-cache executables. Git-tracked declarations are distinguished from both untracked state and tracked-but-uncommitted changes so server-local state does not silently become durable project truth.
-
-Discovery is descriptive only. It does not install packages/toolchains, execute repository tasks/scripts, choose a hidden precedence between conflicting environment/package-manager declarations, or create an Agent-owned environment database/provider abstraction. Multiple declared mechanisms or conflicting pins return explicit selection/conflict state. Agent-managed capability tools such as tmux/LSP/DAP/ast-grep/Playwright remain a separate ownership class from repository dependencies. Declaration content is read with worker authority. System-tool version probes run only for trusted root-owned, non-writable system executables; probes are bounded and run as the worker outside the project checkout. Worker-cache candidates are not executed merely for discovery; a recognizable cache path may supply a version hint, but compatibility remains unknown until a later intentional execution/verification path proves it. Repository declaration paths that escape through symlinks are ignored.
-### Repository and worktree lifecycle
-
-The structured repository tools solve checkout **identity and lifecycle correctness**; they do not replace Git. `repository_discover` finds bounded Git identities under the configured workspace and can filter by canonical remote identity without contacting the remote. `repository_inspect` reports the exact repository/worktree path, common Git directory, HEAD, branch or detached state, upstream divergence, staged/unstaged/untracked/conflict counts, in-progress Git operations, remotes and linked worktrees. Optional `verify_remote=true` checks either an explicitly selected configured remote/branch or the current upstream with `git ls-remote` without fetching or moving local refs; this is the structured reconciliation step after an ordinary CLI push. Credential-bearing URL userinfo/query data is not returned.
-
-`worktree_create` requires an exact expected start SHA and refuses stale refs, a branch already checked out elsewhere, path collisions and ambiguous state. `worktree_remove` never removes the main worktree or local branch, never uses force, and refuses dirty/untracked/conflicted/in-progress or incompletely inspected state. Normal removal additionally proves that the selected external remote branch is exactly at the expected HEAD; `disposable=true` is an explicit escape hatch only for a clean task worktree whose external durability is intentionally not required.
-
-Ordinary `git status`, `git diff`, `git log`, `git fetch`, `git commit`, `git push` and similar verbs remain normal Git CLI through `run_command` or future PTY use. Structured lifecycle Git runs under `aiworker`, stays inside the configured workspace (including Git/common metadata), disables repository hooks/external fsmonitor integration, refuses repository checkout filters on the structured create path, and uses non-interactive Git arguments rather than shell-composed path/ref commands. Repositories that intentionally require checkout filters remain usable through ordinary Git CLI.
-
-Use `run_root_command` only when host-level privilege is genuinely required. Normal root commands can execute directly, but commands that reference protected Agent resources, can interrupt connectivity/control-plane services, or match destructive-operation policy return `approval_required` first. The connected client/model should explain the exact risk and retry with `approval=true` only after explicit user confirmation.
-
-This is a safety guardrail, not a claim that arbitrary root shell access is mathematically incapable of causing damage. Root remains powerful; the design combines AI-visible self-preservation instructions, server-enforced approval policy, minimal/sanitized root execution environment, audit logging and explicit human gates for known high-risk categories.
-
-### Self-preservation manifest
-
-Before host-wide package, service, firewall, network, disk, user, web-stack or control-panel changes, connected clients/models are instructed to call `agent_environment` and preserve the critical resources it reports.
-
-The manifest identifies, among other things:
-
-- `ai-server-agent.service` and `ai-server-agent-executor.service`;
-- `/usr/local/bin/ai-server-agent`;
-- `/etc/ai-server-agent`;
-- `/var/lib/ai-server-agent`;
-- `/var/log/ai-server-agent`;
-- the private executor Unix socket under `/run/ai-server-agent/`;
-- the configured MCP listen endpoint/port;
-- required host primitives such as Bash, systemd and `systemd-run`;
-- read-only capacity for the filesystem backing the configured workspace, including an advisory warning when available space is below 2 GiB or 10%; filesystem telemetry never performs cleanup and a telemetry read failure does not make `agent_environment` fail.
-- a non-secret random `instance_id` (`asa_` plus 128 random bits) in the root-managed Agent config, included in authenticated `agent_environment` and `/agent-environment.json`. Normal update, repair, reinstall, credential rotation, hostname/IP changes and state-preserving VM copies retain the same ID; explicit purge and fresh installation generate a new one. A copied VM cannot register as a distinct Gateway Target until its Agent undergoes explicit fresh-state initialization; duplicate binding checks belong to #47.
-
-The executor separately protects Agent names/paths/socket/listen address and known connection-risk/destructive command patterns. The intent is that ChatGPT both **knows what must survive** and is **server-side gated** when a command directly threatens those resources.
-
-### File I/O and downloads
-
-`read_file` and `write_file` operate on host paths through the Agent. Ordinary project files can also be created/read through `run_command` as `aiworker` inside `/srv/ai-workspace`.
-
-These MCP file tools are intentionally privileged host-file operations, not an unprivileged workspace filesystem. A caller allowed to use `read_file` may reach root-readable sensitive files; `write_file` can produce root-equivalent host changes. Agent protected-resource approval is defense-in-depth and does not classify every sensitive path on the host.
-
-`read_file` is a bounded regular-file ranged read. It accepts raw-byte `offset`/`limit` values (maximum 1 MiB per call), returns `next_offset`, `file_size`, `file_version`, `eof`, byte/truncation metadata and explicit `utf-8` or `base64` encoding, and never loads an arbitrary whole file before applying the limit. A caller assembling several ranges should send the previous `file_version`; replacement/truncation/modification fails with `file_changed` instead of silently stitching different generations together. Kernel/control pseudo-filesystems and non-regular targets such as FIFOs, sockets and devices are not treated as ordinary files.
-
-`write_file` remains a bounded complete replacement for ordinary source/config/text files (maximum 1 MiB). The destination parent must already exist. The executor resolves the parent through a held directory descriptor, rejects final symlinks/special nodes, writes and fsyncs a private temporary file, and preserves existing ownership and mode unless an explicit mode is supplied. Existing files may use the prior `file_version` as an optimistic precondition; those writes use an atomic exchange so the exact destination displaced at commit time can be identity-checked against the validated object. If another object won the pathname race, the executor restores that displaced object only when rollback identity can be proven and returns `file_changed`; any uncertain committed/final state returns `unknown_completion` rather than false success. New-file workflows use `must_not_exist` with `RENAME_NOREPLACE`. Ordinary success is returned only when the final pathname is verified to name the prepared replacement before and after parent-directory fsync.
-
-Protected-resource approval is evaluated against both the requested path and the safely resolved effective path, so a normal symlinked parent/alias cannot turn an Agent-protected target into an unprotected spelling. Unsafe or ambiguous file types fail closed; broad arbitrary host access remains available only through the explicitly privileged shell boundary.
-
-The host can download project dependencies or public files through ordinary command-line tools such as `curl` when the project needs them. Agent credentials/config/state remain protected and must not be copied into chat, source control or public logs.
-
-The MCP file tools are content/path based; they are **not a generic automatic synchronization layer for arbitrary ChatGPT UI attachments**. If a workflow needs a user attachment transferred to/from the VPS, use an explicit supported transfer path and validate that path for the specific client/runtime instead of assuming attachment sync from `read_file`/`write_file` alone.
-
-### Persistent jobs
-
-Use `start_job` for commands that should continue if ChatGPT disconnects or the MCP request ends. The Agent uses transient systemd units and stores job state under the root-controlled Agent state directory. Non-root jobs run as `aiworker`; root jobs go through the same approval policy before starting.
-
-Persistent execution is fail-fast and bounded: at most four Agent jobs may be active at once, there is no hidden queue, each job retains at most 8 MiB of stdout/stderr in a bounded on-disk ring, and the newest 32 terminal job artifact sets are retained. `job_output` uses logical byte offsets and reports the earliest retained offset when older bytes have rolled out; binary chunks are returned as base64. Before accepting new disk-growing job work the executor also requires a state-filesystem safety reserve derived from the hard global persistent-job recovery-state bound, so even abnormal retained jobs remain inside the modeled disk envelope.
-
-`start_job` accepts an optional caller-generated `operation_id`. Retrying the same material request with the same key returns the original job handle; reusing that key for different command/root material fails with `idempotency_conflict`. The durable idempotency/recovery record contains a keyed fingerprint rather than the shell body. Every job gets a bounded internal recovery claim even when the caller does not supply `operation_id`; the caller key only adds replay identity. The protected shell body itself is handed to a fixed `job-runner` entrypoint through a normally short-lived protected job file rather than `bash -c <command>` argv. The runner scrubs the command contents as soon as it has safely consumed them (and on definitive setup failures where it can); privileged terminal reconciliation retires any leftover handoff before reporting a terminal result. A worker-writable status marker never overrides authoritative systemd active/pending state. If the executor dies in the pre-launch window, later job admission retires stale handoffs after the executor's broad connection deadline when no runner/unit evidence exists.
-
-`start_job` also participates in the global lifecycle lock: admission through launch holds a shared lock, while install/update/uninstall/purge use the exclusive lifecycle lock. That makes destructive lifecycle removal mutually exclusive with a new persistent-job launch instead of relying on a racy one-time active-job check. Safe uninstall and purge still refuse to proceed while any `ai-job-*.service` unit is active. Stop the jobs first, then retry the lifecycle action.
-
-### Browser capability
-
-Browser automation is optional and installed on demand. The core MCP service does not depend on system Node.js or Chromium.
-
-`browser_status` reports bounded, non-secret readiness and the desired/installed Node, Playwright and Chromium build identity. `browser_setup` requires explicit approval because it downloads a private runtime and may install Chromium system libraries. Setup is bounded to twenty minutes, runs one-at-a-time without a hidden queue, holds the global Agent lifecycle lock while changing the private runtime/host packages, and converges `/opt/ai-server-agent/browser` to an Agent-pinned manifest rather than treating an existing Node binary as proof that the runtime is current. Node downloads are SHA-256 pinned for supported architectures, Playwright dependencies are installed from the repository-embedded exact `package-lock.json` with registry integrity metadata, and the expected Playwright/Chromium/FFmpeg versions plus architecture-specific SHA-256 content-tree digests are verified before a staged runtime replaces the old engine. Transient setup directories/caches are cleaned separately from persistent browser state. If setup is interrupted after moving the previous engine aside, the next setup restores the single known backup before doing new work; multiple ambiguous backups fail closed for operator reconciliation.
-
-`browser_run` uses **server-side headless Chromium**, not the user's personal desktop browser. Scripts are limited to 128 KiB, handed to the worker-side browser process through the already bounded executor stdin path and a per-run temporary file rather than process argv, and execute with a 90-second default / five-minute maximum timeout. Combined output uses the same bounded structured UTF-8/base64 executor result contract as synchronous commands. Browser execution is fail-fast one-at-a-time; saturation returns `resource_limit` instead of queueing. HTTPS certificate validation is enabled by default. `ignore_https_errors=true` is an explicit request-scoped exception for local/self-signed development and does not change the default for later runs.
-
-### Playwright CLI compatibility and E2E acceptance
-
-The existing private Playwright runtime also bundles the compact agent-oriented `playwright cli` command (snapshot/element refs, interaction, console, network and tracing). It can be exercised by an unprivileged `run_command` without installing another npm package or browser. Unlike `browser_run`, the CLI maintains its own browser process and session across CLI invocations; **do not assume the two share a page or cookies**. A bare CLI open defaults to system Google Chrome, which can be absent. An explicit CLI configuration must select Chromium with the verified pinned engine executable; set `PLAYWRIGHT_BROWSERS_PATH` to the installed private engine's browsers directory. Keep CLI HOME/XDG, snapshots, traces and downloads in a worker-owned private location **outside Git worktrees**, then close the session.
-
-The reproducible opt-in compatibility test is `AI_SERVER_AGENT_BROWSER_CLI_ACCEPTANCE=1 bash tests/browser_cli_acceptance.sh`. Run it only on an authorized development/test host where `browser_status.ready=true`. The test uses a synthetic, local DOM with a private disposable CLI session and does not install tooling, contact a website or touch the Agent-wide browser profile. It proves only the pinned CLI consumer path. Direct CLI daemon sessions do **not yet** participate in `browser_run`'s serialized admission, lifecycle or disk-retention controls; do not treat this compatibility proof as an approved replacement for the managed Browser/E2E capability (#63), real installed-client acceptance (#59) or typed screenshot/trace delivery (#99).
-
-### Managed Browser/E2E flows
-
-`browser_e2e` runs up to **12 ordered steps in one bounded managed Chromium execution**. A minimal form test uses a `steps` array like:
-
-```json
-[
-  {"action":"goto","url":"http://127.0.0.1:8080/"},
-  {"action":"snapshot"},
-  {"action":"fill","role":"textbox","name":"Email","value":"test@example.invalid"},
-  {"action":"click","role":"button","name":"Submit"},
-  {"action":"assert_text","selector":"#result","expected":"Saved"},
-  {"action":"console"},
-  {"action":"network"}
-]
-```
-
-The `goto` URL above is **illustrative**, not a service started by Agent. Element operations accept **either** a CSS `selector`, an accessible `role` plus exact `name`, or a snapshot-issued `ref` for `click`, `fill` and `assert_text` within the **same call**. A complete, stable accessibility snapshot may return a bounded `refs` list (e.g. `e1`, `e2`) with `refs_scope=flow_only`, accessibility `role` and within-role `role_index`, and `refs_dropped`. Refs never carry raw DOM `tag`, `name`, `title` or `placeholder` hints. They are issued only when an independently verified second accessibility snapshot matches, the role/order headers are unambiguous, each staged handle is **re-resolved after final snapshot verification and compared by exact DOM identity**, and a document/root mutation guard remains stable; unprovable snapshots return no refs with `refs_unavailable=true` and an actionable `refs_reason`. This intentionally fails closed for shadow DOM scopes and inaccessible/inert controls rather than guessing. Refs identify the originally selected DOM element; they do not silently retarget replacement nodes. Invalid/expired refs fail safely, and navigation discards previous refs. Text assertions poll within a bounded step timeout; failures identify the step and stop subsequent actions. An accessible snapshot is capped at 8192 UTF-8 bytes and explicitly marks truncation (overly large DOM trees are rejected before snapshot creation, and a narrower CSS/role scope can be supplied); a shared output budget of 12000 bytes bounds returned snapshots and events. Console/network event counts are bounded, and network URLs omit query/fragment values. Every flow shares the existing `browser_run` profile, TLS behavior, fail-fast admission, executor time/resource budgets and temporary-file cleanup. **The steps and their element refs share one live page only within the call**; this is not a persistent cross-call browser session or a reusable CLI element-ref handle. For authenticated cross-call refs use `browser_session_open` and `browser_session_flow` (`refs_scope=session_until_invalidated`); direct detached CLI sessions do not inherit managed Browser lifecycle limits. Binary trace/screenshot delivery remains under Issue #99; flow step timings are not a Playwright trace ZIP. The old `browser_run` JavaScript escape hatch remains unchanged.
-
-The persistent browser profile is intentionally **Agent-wide shared state**. It is not isolated per ChatGPT/Gateway user or per MCP client: any authorized browser caller may act through cookies, local-storage and session state left by another authorized browser caller. Durable profile state is preserved across runs/setup. Per-run downloads/temp files and ordinary relative artifacts are confined to a disposable working directory capped at 256 MiB, known Chromium caches are explicitly size-limited/cleaned, and browser execution maintains a 512 MiB state-filesystem safety reserve without deleting the durable profile. Browser scripts still have ordinary worker filesystem authority for explicitly chosen absolute paths; `browser_run` is not a filesystem sandbox. Setup requires a 2 GiB engine-filesystem reserve so the staged verified runtime can coexist safely with the previous runtime and download/package overhead.
-
-## Management commands
-
-Interactive management:
-
-```bash
-sudo ai-server-agent-manage
-```
-
-Useful subcommands:
+Common commands:
 
 ```bash
 sudo ai-server-agent-manage status
 sudo ai-server-agent-manage runtime-show
-sudo ai-server-agent-manage runtime-set http_idle_timeout_seconds 300
-sudo ai-server-agent-manage runtime-reset http_idle_timeout_seconds
-sudo ai-server-agent-manage chatgpt-setup
-sudo ai-server-agent-manage configure-cloudflare
-sudo ai-server-agent-manage configure-local
-sudo ai-server-agent-manage configure-manual-tls
-sudo ai-server-agent-manage cloudflare-cleanup
 sudo ai-server-agent-manage update
 sudo ai-server-agent-manage repair
-sudo ai-server-agent-manage uninstall
-sudo ai-server-agent-manage purge
 ```
 
-Runtime settings persist in the existing root-managed `/etc/ai-server-agent/config.json`. `runtime-show` lists the effective configured values, safe value ranges and units; `runtime-set` and `runtime-reset` validate with the installed binary **before** updating the config, restart Agent/Executor, verify local health, and restore the prior config on verified restart failure. Run those commands in an independent SSH/operator terminal because restarting the Agent may disconnect an MCP client. No source edit or new release is needed to change supported settings **once this capability has been installed**. A configured value is not guaranteed active until both services restart and health is checked. An invalid value never restarts them. These are per-request/network operational budgets, not a way to disable authentication, bypass approval or transfer an unlimited file in one MCP response. Large authorized files use bounded version-pinned reads and the separate staged worker upload contract; real-client attachment and typed-artifact acceptance remain Issue #99.
+For credentials, Cloudflare, local/private mode, manual TLS, safe uninstall, purge and configurable runtime budgets, see [Operations](docs/OPERATIONS.md#management-commands). To connect ChatGPT, see [Connect ChatGPT](docs/CONNECT_CHATGPT.md). Other clients must be validated against their actual MCP/transport and tool-presentation support.
 
-Privileged install/update/manage/uninstall/purge operations share a root-only lifecycle lock under `/run/lock/ai-server-agent`. A concurrent management operation fails before state mutation rather than racing another lifecycle operation.
+## Main capabilities
 
-## Stable updates
+| Area | What the Agent provides |
+| --- | --- |
+| Host execution | Worker/root commands, privileged file operations, service/process diagnostics |
+| Workspace and Git | Repository/worktree identity, versioned worker file/search/edit/transfer, normal Git CLI |
+| Long-running work | Persistent jobs with status and ranged output; optional interactive Terminal |
+| Browser and testing | Optional Playwright/Chromium, structured E2E steps, controlled Browser sessions |
+| Code intelligence | Go LSP and optional language-specific adapters when **integrated and installed** |
+| Debugging | Optional DAP sessions with adapter- and host-dependent readiness |
+| Environment | Authenticated Agent/environment identity, available tools, host footprint and warnings |
 
-For a stable installation:
+Not every source-branch capability is in the current Stable release or ready on every OS/kernel/client. Use `agent_environment`, the applicable tool status and actual installed version rather than inferring availability from this table.
 
-```bash
-sudo ai-server-agent-manage update
-```
+Read the [Tool Reference](docs/TOOL-REFERENCE.md) for tools, limits, examples, and important caveats. [Developer Runtime](docs/DEVELOPER-RUNTIME.md) documents the accepted future composition and unresolved delivery gates.
 
-The stable updater does not trust a mutable `main` installer. It:
+## Development and Validation server roles
 
-1. reads strict root-only install identity;
-2. resolves the latest published immutable stable release unless an explicit stable tag is requested;
-3. requires the release to be non-draft, non-prerelease and immutable;
-4. requires exactly one uploaded tag-scoped `install.sh` asset;
-5. verifies the downloaded `install.sh` bytes against the SHA-256 digest recorded on that GitHub release asset **before executing it**;
-6. lets the release-scoped installer verify the release archive against `SHA256SUMS`.
+The current `main` source implements two **Environment Purpose Profiles** (not included in published Stable `v0.1.12`):
 
-Missing/malformed/contradictory stable install identity fails closed. It does not silently become a source/`main` update.
+- **Development:** preferred for source/Git changes, builds, debugging and routine project development.
+- **Validation:** preferred for candidate installation, real E2E/integration tests, reproduction and acceptance evidence.
 
-## Repair
+The profiles label and guide compatible clients; **they are not access-control tiers or separate Agent binaries**. Both preserve the same MCP/root/worker tools. GitHub authentication and optional tool installation remain separate operator decisions.
 
-```bash
-sudo ai-server-agent-manage repair
-```
+**Delivery status:** implemented on `main`, but **not shipped in Stable `v0.1.12`**. Use profile management commands only after installing a version that includes this feature; an existing installation does not gain them by merging source. Do not confuse these purposes with `local/public` connection modes. See [Profile setup, management, and client discovery](docs/ENVIRONMENT-PROFILES.md), the [Project Specification](docs/PROJECT-SPEC.md#10-environment-purpose-profiles), and [Issue #143](https://github.com/ach1992/ai-server-agent/issues/143) for installed/client acceptance.
 
-Repair first restarts and validates the existing services. If local health still fails, it invokes the channel-aware updater rather than guessing a different installation source.
+## Security and resource use
 
-## Uninstall and purge
+An authenticated principal with root-shell authority is effectively root-capable. Tool annotations and AI instructions do not constrain what authorized shell commands can do. Authentication, protected control-plane resources, approval, verified dependencies, bounded outputs and truthful failure reporting remain important; broad usable capabilities are deliberately preserved.
 
-### Safe uninstall
+Resource budgets, timeouts and concurrency are bounded to protect host reliability. Some are configurable without source changes; other fixed implementation limits and remaining tests are tracked in [Issue #118](https://github.com/ach1992/ai-server-agent/issues/118). See [Operations](docs/OPERATIONS.md#security-model).
 
-```bash
-sudo ai-server-agent-manage uninstall
-```
+## Project documentation
 
-Safe uninstall removes services, the binary and management command while preserving configuration/state/users/workspace needed for reinstall or repair.
+- **[PROJECT-SPEC.md](docs/PROJECT-SPEC.md):** canonical purpose, scope, success criteria and durable principles
+- **[ARCHITECTURE.md](docs/ARCHITECTURE.md):** trust boundaries, host resources, runtime architecture, install/update contracts
+- **[DEVELOPER-RUNTIME.md](docs/DEVELOPER-RUNTIME.md):** detailed accepted capability design and future architecture
+- **[ENVIRONMENT-PROFILES.md](docs/ENVIRONMENT-PROFILES.md):** Development/Validation purpose, install options, management and client metadata (source-only until released)
+- **[TESTING.md](docs/TESTING.md):** validation strategy and evidence expectations
+- **[OPERATIONS.md](docs/OPERATIONS.md):** full install, connectivity, management, updates and repair instructions
+- **[TOOL-REFERENCE.md](docs/TOOL-REFERENCE.md):** MCP tool and feature details
+- **[CONNECT_CHATGPT.md](docs/CONNECT_CHATGPT.md):** current client-specific connection help
+- **[AGENTS.md](AGENTS.md):** engineering/contributor instructions
 
-### Purge
-
-```bash
-sudo ai-server-agent-manage purge
-```
-
-Purge removes Agent-owned server config/state/log/runtime and the `aiagent` identity.
-
-Purge intentionally preserves:
-
-- `/srv/ai-workspace`
-- the `aiworker` user and group
-
-Purge does **not** silently delete Cloudflare resources. If recorded Cloudflare resources should be removed, run `cloudflare-cleanup` through the supported management path first.
-
-## Security model
-
-Key boundaries:
-
-- public MCP access requires bearer authentication;
-- MCP bearer credentials are named principals (`direct/default` and optional `mcp-gateway`) with independently revocable/rotatable verifier records; bearer plaintext is not retained after issuance/migration;
-- direct public mode requires native TLS;
-- ordinary commands run as `aiworker`;
-- root commands are intentional capabilities evaluated by executor policy/approval guardrails;
-- connected MCP clients/models are instructed to inspect the current `agent_environment` manifest before host-wide changes;
-- protected Agent resources and known connection-risk/destructive root command patterns require explicit approval before execution;
-- root shell execution uses `/root` HOME/CWD, a minimal explicit environment and shell startup-file suppression;
-- root-consumed control state is stored under root-controlled directories and validated before use;
-- persistent job files use no-follow/exclusive creation and checked reads under root-controlled state containers;
-- worker-writable workspace/state must not implicitly influence root execution;
-- Cloudflare destructive recovery requires ownership plus current representation proof;
-- stable install/update/release identity must remain immutable and must not drift to `main`;
-- release installer bytes must be authenticated before privileged execution through a bootstrap source anchored to an immutable release tag;
-- optional browser binaries are root-owned and browser profile/session data is isolated under Agent state;
-- secrets such as an issued Agent bearer and Cloudflare token must never be persisted in repository content, issue comments, screenshots, chat transcripts or ordinary shell history; the installed MCP credential store contains verifier digests and non-secret principal metadata only.
-
-See [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for details.
-
-## Release model
-
-Stable release publication is manual and exact-SHA based. The release workflow requires successful `main` CI and High Assurance Security for the exact release SHA and promotes the already-built CI release artifact rather than rebuilding it.
-
-Immediately before publication, the operator must separately verify repository controls that the workflow credential cannot authoritatively prove, including release immutability and release-tag protection/no-bypass conditions. Automation must not treat an omitted Rulesets `bypass_actors` field as proof that no bypass exists.
-
-The release workflow then creates the previously absent tag at the exact validated SHA, publishes with `--verify-tag`, and performs post-publication immutable-release/tag/attestation checks. Once that release is immutable, its associated tag is the durable source identity for the stable bootstrap path.
-
-Documentation-only commits do not imply a release. The release workflow is manually dispatched with an explicit tag and exact validated `main` SHA.
-
-## Source/development install
-
-Source installation is intentionally separate from stable installation. It may track a source ref and resolves that ref to a commit SHA before installation/update.
-
-Example development checkout:
-
-```bash
-git clone https://github.com/ach1992/ai-server-agent.git
-cd ai-server-agent
-sudo bash install.sh
-```
-
-Do not present a mutable source/`main` path as an equivalent stable installer.
-
-## Development and testing
-
-See [docs/TESTING.md](docs/TESTING.md) for the current validation model and known coverage limits.
-
-Typical non-destructive development checks:
-
-```bash
-test -z "$(gofmt -l .)"
-go vet ./...
-go test -race -vet=off ./...
-bash -n install.sh update.sh uninstall.sh manage.sh scripts/build-release.sh scripts/install-stable.sh scripts/ci-change-scope.sh tests/*.sh
-```
-
-Cloudflare, privileged lifecycle and release-provenance changes also have dedicated High Assurance Security coverage.
-
-### Live acceptance baseline
-
-#### Published `v0.1.12` delivery and validation
-
-[Immutable Stable `v0.1.12`](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.12) is the current published non-draft/non-prerelease release at protected tag/commit `9b06c085c1ff75f3a314215657d3b04f510c9432`. The official [Release workflow #38332527481](https://github.com/ach1992/ai-server-agent/actions/runs/38332527481) completed successfully after exact-main [CI #38332359804](https://github.com/ach1992/ai-server-agent/actions/runs/38332359804) and [Security #38332360238](https://github.com/ach1992/ai-server-agent/actions/runs/38332360238). Publication verified the immutable tag, the authenticated `install.sh`, the `SHA256SUMS` manifest, Linux amd64/arm64 archives and GitHub attestations.
-
-This release fixes the **fresh-install Cloudflare verification regression** in `v0.1.11`: the manager incorrectly read the retired plaintext `/etc/ai-server-agent/mcp.authorization` instead of authenticating with the active verifier-backed named MCP credential. The [independently reviewed fix PR #133](https://github.com/ach1992/ai-server-agent/pull/133) sends the newly issued bearer through one-use FD3 on fresh install, supports newline or EOF-only token framing, checks the active bearer against the local Agent before Cloudflare changes, and preserves public HTTPS health, unauthenticated MCP `401`, authenticated `initialize` and Cloudflare transaction rollback/recovery. High Assurance Security passed a real disposable **installer -> installed manager** credential test, deliberately stopping before live Cloudflare API access.
-
-**Verified installed-host acceptance (2026-10-13):** the NEW `hDE01` Test Server runs **the exact immutable `v0.1.12` release executable**: the SHA-256 digest `7062224ecc08ecdbb6f51dba49666d91396af91da8ec7c988d6d6e1e8e287ac1` matches the checksum-verified GitHub amd64 release archive, installed binary and both running Agent/Executor processes. Its actual Cloudflare hostname is **`aitestserver.ach.li`** (not the older `testserver.ach.li`): independently tested valid public HTTPS `/healthz=200` and unauthenticated `/mcp=401`, with successful authenticated ChatGPT-connected tool calls. On this exact host, official pinned Browser E2E passed six of six steps, real Go `gopls` and Delve DAP breakpoint/variable inspection passed, tmux PTY and bounded persistent Job calls passed, and a two-chunk non-UTF8 binary transfer committed with verified readback and SHA-256. A fresh read-only exact-main GitHub clone passed `go vet` and `go test -short ./...` after provisioning the standard `make` dependency; all disposable test fixtures were cleaned. See [installed-host acceptance #59](https://github.com/ach1992/ai-server-agent/issues/59#issuecomment-6137123091) and [PTY/Jobs continuation](https://github.com/ach1992/ai-server-agent/issues/59#issuecomment-6137146124).
-
-**Remaining delivery boundary:** this does **not** prove native ChatGPT inline/downloadable JPEG/file/ZIP presentation (the current image-mode connector returned metadata only, while a 2,107-byte JPEG Base64 fallback succeeded), complete authenticated-public standalone client/cutover evidence, extended crash/soak/cross-platform matrices, full GitHub create/edit/commit/push/PR acceptance or every runtime-budget rollback setting. The original Stable `v0.1.11` evidence remains historical. Keep [#59](https://github.com/ach1992/ai-server-agent/issues/59), [#99](https://github.com/ach1992/ai-server-agent/issues/99), [#63](https://github.com/ach1992/ai-server-agent/issues/63) and [#118](https://github.com/ach1992/ai-server-agent/issues/118) OPEN for their distinct incomplete conditions.
-
-#### Published `v0.1.11` delivery and validation
-
-[Immutable Stable `v0.1.11`](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.11) was published as a non-draft/non-prerelease immutable Stable at exact protected tag/commit `8c85a48d3e8559d0bf16e366f00ddeee6927dc47`. The [official Release workflow #38304046568](https://github.com/ach1992/ai-server-agent/actions/runs/38304046568) completed successfully after exact-main CI and Security validation, including immutable-release and asset attestation verification. The release contains the authenticated `install.sh`, `SHA256SUMS`, and amd64/arm64 archives.
-
-On the authorized disposable Ubuntu 24.04 amd64 Test Server, the *published* `v0.1.11` Stable was installed with the existing verified Stable updater. Both running Agent and Executor process executables match SHA-256 `819aac1ae8888b6ee71275b57f95eec2833c7f6bdbb675610c62e22b5dc46370`, independently matched to the executable extracted from the actual GitHub release archive. Install-state is pinned to `stable/v0.1.11`; service health and identity passed. The protected configuration and MCP credential files were verified byte-identical to their pre-upgrade backups; the retained Browser profile remained present, and the pinned Browser reported `ready=true`.
-
-Direct connected MCP acceptance included real HTTPS Browser navigation/assertions, multi-call managed Browser interaction and bounded JPEG capture, versioned workspace operations, multi-chunk binary transfer with SHA-256 integrity, Go `gopls` symbols, an actual `Delve` DAP session, and persistent `tmux` terminal recovery across a real Executor restart. The previously tested offline source-preview-to-`v0.1.10` rollback snapshot remains retained and verified; **a new live downgrade from `v0.1.11` to `v0.1.10` was not rehearsed**. This host-specific evidence does not prove native ChatGPT model-visible file/JPEG attachments, every supported host's optional tools, all abnormal-recovery cases or long-soak/performance targets. See the [exact installed release evidence in Issue #59](https://github.com/ach1992/ai-server-agent/issues/59#issuecomment-6132301377).
-
-#### Published `v0.1.10` delivery and validation
-
-[Stable `v0.1.10`](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.10) is a **published, non-prerelease immutable release** from the [verified release workflow](https://github.com/ach1992/ai-server-agent/actions/runs/38259516653), with Linux amd64/arm64 archives, the checksum manifest, the verified bootstrap-facing `install.sh` asset and GitHub release attestations.
-
-On one **authorized disposable Ubuntu 24.04 amd64 Test Server**, the released installer was exercised against the protected Agent/Executor services. Actual running executable SHA-256, install-state `stable/v0.1.10`, HTTPS health and preserved instance identity/config/credentials were verified. An independent protected backup was integrity-checked, and actual candidate-to-prior-install rollback was successfully rehearsed before publication. Direct MCP workspace/transfer, worker/root PTY restart/reconnect, gopls, Delve and the pinned Playwright Browser were tested against the same release candidate; after stable promotion, Browser `browser_run` passed again. This is **installed-host acceptance**, not automatic readiness of optional developer tools on every supported host. See the [controlling acceptance Issue #59](https://github.com/ach1992/ai-server-agent/issues/59) and [Browser evidence #63](https://github.com/ach1992/ai-server-agent/issues/63).
-
-Remaining **non-blocking or separately scoped** limits include native ChatGPT model-visible typed-image/attachment presentation, some extended soak/resource and abnormal-recovery scenarios, optional tool provisioning on other hosts, and vendor-CDN availability for new browser installations in some locations. The portable Browser setup must retain exact version/content hash checks; never disable TLS or substitute a different Chromium build merely to work around a CDN `403`. Track open work in Issues #59/#99 and the relevant child Issues. A published release is not a claim that these future or client-owned contracts are complete.
-
-#### Historical `v0.1.5` acceptance
-
-Immutable `v0.1.5` received a real end-to-end acceptance on the supported dedicated VPS path, including:
-
-- supported stable update and installed identity/health;
-- real Cloudflare hostname-scoped reconciliation and public native-TLS connectivity;
-- missing/invalid bearer rejection plus authenticated MCP initialize;
-- real ChatGPT Business custom-MCP connection and tool discovery;
-- `agent_environment` self-preservation discovery;
-- ordinary `run_command` as `aiworker` in `/srv/ai-workspace`;
-- root execution plus `approval_required` behavior for protected/connection-risk operations;
-- protected-file guard behavior;
-- server-side file read/write and outbound download;
-- a real persistent transient-systemd job;
-- on-demand Playwright/Chromium installation and a real `browser_run` page/DOM read.
-
-The durable acceptance record is [Issue #11](https://github.com/ach1992/ai-server-agent/issues/11). It is historical evidence, not a reason to skip revalidation when a future change affects the relevant contract.
-
-### When to repeat expensive live/fresh-install validation
-
-Use change impact rather than ritual repetition:
-
-- repeat clean/fresh-install validation when `install.sh`, `scripts/install-stable.sh`, lifecycle/bootstrap logic, supported OS/architecture assumptions, or a defect specifically involving fresh-install state changes;
-- repeat live Cloudflare validation when Cloudflare reconciliation, ownership/recovery, TLS, DNS, public binding or provider API assumptions change;
-- repeat real ChatGPT custom-MCP validation when endpoint/auth behavior, MCP tool schema/annotations, approval semantics, or important client-side compatibility assumptions change;
-- repeat browser setup/run validation when browser installer/runtime/profile behavior changes;
-- repeat repository/worktree lifecycle validation when repository identity, Git execution isolation, worktree create/remove or remote-durability semantics change;
-- repeat privileged/root safety validation when executor policy, protected resources, root execution environment or approval behavior changes.
-
-A documentation-only change that does not alter these contracts does not by itself require a new stable release or destructive fresh-install cycle.
-
-## Project map and future development
-
-For future work, use the repository as a graph of authoritative sources rather than reconstructing state from old chat history:
-
-- **README.md** — supported installation, operation, capabilities and safety overview;
-- **[AGENTS.md](AGENTS.md)** — stable engineering invariants, development rules and validation expectations for coding agents/contributors;
-- **[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md)** — trust boundaries and implementation architecture;
-- **[docs/DEVELOPER-RUNTIME.md](docs/DEVELOPER-RUNTIME.md)** — accepted target and shipped Developer Runtime composition, with explicitly deferred capabilities and host/client-specific acceptance limits;
-- **[docs/TESTING.md](docs/TESTING.md)** — validation model, behavioral coverage and known limits;
-- **[docs/CONNECT_CHATGPT.md](docs/CONNECT_CHATGPT.md)** — ChatGPT connection topologies and client-side validation guidance; current OpenAI UI/docs override stale UI wording;
-- **Issue #37** — historical decision record for the AI-client/vendor-neutral invariant now owned by `AGENTS.md` and `docs/ARCHITECTURE.md`;
-- **Issue #47** — optional future MCP Gateway integration with independent credentials; its real end-to-end acceptance does not block standalone Agent completion;
-- **GitHub Issues** — authoritative place for unresolved actionable work; do not create speculative backlog merely for ceremony;
-- **Pull requests and commit history** — implementation/review/integration evidence;
-- **GitHub Releases and attestations** — immutable stable-delivery identities and provenance;
-- **Issue #11** — completed `v0.1.5` live VPS/Cloudflare/ChatGPT acceptance evidence;
-- **Issue #12 / PR #19** — completed root-cause/fix evidence for the Cloudflare Rulesets response-contract defect that led to `v0.1.5`.
-
-When new development begins, start from current `main`, inspect open Issues/PRs and the nearest relevant source/docs/tests, then create only the smallest durable Issue/PR state needed for the new outcome. Do not reopen historical acceptance work unless the same unresolved problem actually returns.
+GitHub [Issues](https://github.com/ach1992/ai-server-agent/issues), [Pull Requests](https://github.com/ach1992/ai-server-agent/pulls), [Actions](https://github.com/ach1992/ai-server-agent/actions), and [Releases](https://github.com/ach1992/ai-server-agent/releases) own live work, reviews, CI, and published-delivery status. Historical installed validation and remaining client limitations are tracked primarily in [Issue #59](https://github.com/ach1992/ai-server-agent/issues/59), not in this README.
 
 ## License
 

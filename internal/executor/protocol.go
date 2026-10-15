@@ -17,6 +17,8 @@ type Request struct {
 	PrincipalClass   string              `json:"principal_class,omitempty"`
 	PrincipalName    string              `json:"principal_name,omitempty"`
 	JobID            string              `json:"job_id,omitempty"`
+	Kind             string              `json:"kind,omitempty"`
+	Label            string              `json:"label,omitempty"`
 	SessionID        string              `json:"session_id,omitempty"`
 	SessionEpoch     string              `json:"session_epoch,omitempty"`
 	Cursor           uint64              `json:"cursor,omitempty"`
@@ -95,6 +97,8 @@ type Response struct {
 	ExitCode            int                        `json:"exit_code"`
 	Approval            interface{}                `json:"approval,omitempty"`
 	JobID               string                     `json:"job_id,omitempty"`
+	RuntimeEntries      []RuntimeEntry             `json:"runtime_entries,omitempty"`
+	RuntimeCapacity     *RuntimeCapacity           `json:"runtime_capacity,omitempty"`
 	SessionID           string                     `json:"session_id,omitempty"`
 	SessionEpoch        string                     `json:"session_epoch,omitempty"`
 	TerminalEvents      []TerminalOutputEvent      `json:"terminal_events,omitempty"`
