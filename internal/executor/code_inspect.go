@@ -83,6 +83,14 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 	if source.FileVersion != req.FileVersion || source.EOF == nil || !*source.EOF || source.OutputEncoding != "utf-8" {
 		return fileError("code_source_unstable", "conflict", errors.New("version mismatch, binary source, or incomplete read"))
 	}
+	// SQL schema navigation has an independently bounded, read-only source
+	// path; unlike language-server dialect parsing it does not require an
+	// installed optional adapter or a database connection.
+	if actualLanguage == "sql" && (req.CodeMethod == "definition" || req.CodeMethod == "references") {
+		if result, handled := s.sqlOfflineNavigation(parent, req, path, source.Output); handled {
+			return result
+		}
+	}
 	binary := ""
 	var phpArchive, phpCache string
 	if actualLanguage == "go" {
