@@ -233,6 +233,9 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 	if actualLanguage == "sql" && req.CodeMethod == "symbols" {
 		data, err = appendSQLDDLSymbols(data, source.Output, req.SQLDialect)
 		if err != nil {
+			if errors.Is(err, errSQLDDLOutputLimit) {
+				return fileError("sql_ddl_symbols_too_large", "resource", err)
+			}
 			return fileError("sql_lsp_invalid_symbols", "runtime", err)
 		}
 	}

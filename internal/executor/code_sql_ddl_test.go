@@ -2,6 +2,8 @@ package executor
 
 import (
 	"encoding/json"
+	"errors"
+	"strconv"
 	"strings"
 	"testing"
 )
@@ -100,6 +102,22 @@ func TestSQLDDLFailClosedOrUnsupportedDoesNotClaimSymbols(t *testing.T) {
 		if got := sqlDDLSymbols(tc.sql, tc.dialect); len(got) != 0 {
 			t.Fatalf("unsafe/unsupported SQL fabricated declarations: %q/%q %+v", tc.sql, tc.dialect, got)
 		}
+	}
+}
+
+func TestSQLDDLOutputBoundFailsClosed(t *testing.T) {
+	var source strings.Builder
+	for i := 0; i < 1800; i++ {
+		source.WriteString("CREATE TABLE t")
+		source.WriteString(strconv.Itoa(i))
+		source.WriteString(" (id INT);\n")
+	}
+	if source.Len() > codeMaxDocumentBytes {
+		t.Fatalf("test source exceeded LSP document budget: %d", source.Len())
+	}
+	_, err := appendSQLDDLSymbols([]byte("[]"), source.String(), "postgres")
+	if !errors.Is(err, errSQLDDLOutputLimit) {
+		t.Fatalf("oversized SQL outline returned unbounded or truncated payload: %v", err)
 	}
 }
 

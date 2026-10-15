@@ -14,6 +14,8 @@ import (
 // source-only outline adds table/view and column declarations without reading
 // any other file, loading project SQL configuration or connecting to a DB.
 // It is not a substitute for a DB schema catalog or a complete SQL grammar.
+var errSQLDDLOutputLimit = errors.New("sql_ddl_symbols_result_too_large")
+
 type sqlDDLPosition struct {
 	Line      int `json:"line"`
 	Character int `json:"character"`
@@ -54,7 +56,7 @@ func sqlWordContinue(r rune) bool {
 // Lex only the small structural vocabulary needed by DDL declarations. Trivia,
 // literal values, comments and PostgreSQL dollar-quoted function bodies cannot
 // produce fake CREATE/ALTER symbols. Tokens and work are bounded by the existing
-// codeMaxDocumentBytes input budget and this fixed token bound.
+// codeMaxDocumentBytes input bound; outputs have an independent LSP bound.
 func sqlDDLTokens(source, dialect string) ([]sqlDDLToken, bool) {
 	if len(source) > codeMaxDocumentBytes {
 		return nil, false
@@ -63,7 +65,6 @@ func sqlDDLTokens(source, dialect string) ([]sqlDDLToken, bool) {
 	if !mysql && dialect != "postgres" && dialect != "postgresql" {
 		return nil, false
 	}
-	const maxTokens = 8192
 	tokens := make([]sqlDDLToken, 0, 128)
 	i, line, character := 0, 0, 0
 	position := func() sqlDDLPosition { return sqlDDLPosition{Line: line, Character: character} }
@@ -81,9 +82,8 @@ func sqlDDLTokens(source, dialect string) ([]sqlDDLToken, bool) {
 			}
 		}
 	}
-	add := func(text string, kind byte, start sqlDDLPosition) bool {
+	add := func(text string, kind byte, start sqlDDLPosition) {
 		tokens = append(tokens, sqlDDLToken{text: text, kind: kind, start: start, end: position()})
-		return len(tokens) <= maxTokens
 	}
 	for i < len(source) {
 		start := position()
@@ -170,8 +170,8 @@ func sqlDDLTokens(source, dialect string) ([]sqlDDLToken, bool) {
 				return nil, false
 			}
 			advance(end)
-			if quotedIdentifier && !add(value.String(), 'q', start) {
-				return nil, false
+			if quotedIdentifier {
+				add(value.String(), 'q', start)
 			}
 			continue
 		}
@@ -190,15 +190,11 @@ func sqlDDLTokens(source, dialect string) ([]sqlDDLToken, bool) {
 				end += size
 			}
 			advance(end)
-			if !add(source[begin:end], 'i', start) {
-				return nil, false
-			}
+			add(source[begin:end], 'i', start)
 			continue
 		}
 		advance(i + width)
-		if !add(source[begin:i], 'p', start) {
-			return nil, false
-		}
+		add(source[begin:i], 'p', start)
 	}
 	return tokens, true
 }
@@ -397,5 +393,12 @@ func appendSQLDDLSymbols(result []byte, source, dialect string) ([]byte, error) 
 		existing = append(existing, raw)
 		seen[identity] = true
 	}
-	return json.Marshal(existing)
+	encoded, err := json.Marshal(existing)
+	if err != nil {
+		return nil, err
+	}
+	if len(encoded) > lspMaxFrameBytes {
+		return nil, errSQLDDLOutputLimit
+	}
+	return encoded, nil
 }
