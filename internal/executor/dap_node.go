@@ -401,6 +401,8 @@ func (d *dapState) receiveTypedNodeChild(ctx context.Context) (string, error) {
 		return "", errors.New("node_dap_reverse_wrong_adapter_or_repeated_child")
 	}
 	if d.pendingLaunchSeq != 0 {
+		// The parent launch response must be reconciled before consuming
+		// the single typed child token, regardless of packet ordering.
 		// The pinned upstream adapter normally acknowledges parent launch
 		// before issuing the typed child request. Never discard an in-flight
 		// launch reply when promoting the single child DAP connection.
@@ -409,6 +411,14 @@ func (d *dapState) receiveTypedNodeChild(ctx context.Context) (string, error) {
 	deadline := time.Now().Add(8 * time.Second)
 	if limit, ok := ctx.Deadline(); ok && limit.Before(deadline) {
 		deadline = limit
+	}
+	if d.queuedNodeTargetID != "" {
+		token := d.queuedNodeTargetID
+		d.queuedNodeTargetID = ""
+		return token, nil
+	}
+	if d.nodeChildAccepted {
+		return "", errors.New("node_dap_reverse_already_accepted")
 	}
 	if err := d.conn.SetDeadline(deadline); err != nil {
 		return "", err
@@ -441,61 +451,73 @@ func (d *dapState) receiveTypedNodeChild(ctx context.Context) (string, error) {
 				return "", errors.New("node_dap_unexpected_parent_reply")
 			}
 		case "request":
-			if packet.Seq < 1 || packet.Command != "startDebugging" {
-				return "", errors.New("node_dap_untrusted_reverse_operation")
-			}
-			// No adapter-origin command, port, environment, attach
-			// address or executable selector may be smuggled through a
-			// permitted startDebugging request. The pinned upstream Node
-			// adapter supplies only type/name/opaque pending target ID.
-			var request struct {
-				Seq       int    `json:"seq"`
-				Type      string `json:"type"`
-				Command   string `json:"command"`
-				Arguments struct {
-					Request       string `json:"request"`
-					Configuration struct {
-						Type      string `json:"type"`
-						Name      string `json:"name"`
-						PendingID string `json:"__pendingTargetId"`
-					} `json:"configuration"`
-				} `json:"arguments"`
-			}
-			decoder := json.NewDecoder(bytes.NewReader(raw))
-			decoder.DisallowUnknownFields()
-			if err := decoder.Decode(&request); err != nil ||
-				request.Seq != packet.Seq || request.Command != packet.Command || request.Type != "request" {
-				return "", errors.New("node_dap_malformed_or_extra_reverse_payload")
-			}
-			token := request.Arguments.Configuration.PendingID
-			wanted := "pwa-node"
-			if d.browserMode {
-				wanted = "pwa-chrome"
-			}
-			if request.Arguments.Request != "launch" || request.Arguments.Configuration.Type != wanted ||
-				len(token) < 16 || len(token) > 128 {
-				return "", errors.New("node_dap_reverse_outside_single_local_target")
-			}
-			for _, ch := range token {
-				isHex := ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f'
-				if d.browserMode {
-					isHex = isHex || ch >= 'A' && ch <= 'F'
-				}
-				if !isHex {
-					return "", errors.New("javascript_dap_nonopaque_target_token")
-				}
-			}
-			d.seq++
-			if err := dapFrame(d.conn, map[string]any{
-				"seq": d.seq, "type": "response", "request_seq": packet.Seq,
-				"command": "startDebugging", "success": true, "body": map[string]any{},
-			}); err != nil {
-				return "", fmt.Errorf("node_dap_reverse_response_unknown: %w", err)
-			}
-			return token, nil
+			return d.acceptTypedNodeChild(raw, packet)
 		default:
 			return "", errors.New("node_dap_unexpected_parent_packet")
 		}
 	}
 	return "", errors.New("node_dap_reverse_event_limit")
+}
+
+// acceptTypedNodeChild is called only with the DAP protocol mutex held. It
+// verifies one js-debug-internal child request on the exact original adapter.
+// No reverse-supplied command, path, address, environment or port is allowed.
+func (d *dapState) acceptTypedNodeChild(raw []byte, packet dapPacket) (string, error) {
+	if d.adapter != "javascript/js-debug" || d.parentConn != nil || d.nodeChildAccepted ||
+		d.queuedNodeTargetID != "" {
+		return "", errors.New("node_dap_reverse_wrong_adapter_or_repeated_child")
+	}
+	if packet.Seq < 1 || packet.Command != "startDebugging" {
+		return "", errors.New("node_dap_untrusted_reverse_operation")
+	}
+	// No adapter-origin command, port, environment, attach
+	// address or executable selector may be smuggled through a
+	// permitted startDebugging request. The pinned upstream Node
+	// adapter supplies only type/name/opaque pending target ID.
+	var request struct {
+		Seq       int    `json:"seq"`
+		Type      string `json:"type"`
+		Command   string `json:"command"`
+		Arguments struct {
+			Request       string `json:"request"`
+			Configuration struct {
+				Type      string `json:"type"`
+				Name      string `json:"name"`
+				PendingID string `json:"__pendingTargetId"`
+			} `json:"configuration"`
+		} `json:"arguments"`
+	}
+	decoder := json.NewDecoder(bytes.NewReader(raw))
+	decoder.DisallowUnknownFields()
+	if err := decoder.Decode(&request); err != nil ||
+		request.Seq != packet.Seq || request.Command != packet.Command || request.Type != "request" {
+		return "", errors.New("node_dap_malformed_or_extra_reverse_payload")
+	}
+	token := request.Arguments.Configuration.PendingID
+	wanted := "pwa-node"
+	if d.browserMode {
+		wanted = "pwa-chrome"
+	}
+	if request.Arguments.Request != "launch" || request.Arguments.Configuration.Type != wanted ||
+		len(token) < 16 || len(token) > 128 {
+		return "", errors.New("node_dap_reverse_outside_single_local_target")
+	}
+	for _, ch := range token {
+		isHex := ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f'
+		if d.browserMode {
+			isHex = isHex || ch >= 'A' && ch <= 'F'
+		}
+		if !isHex {
+			return "", errors.New("javascript_dap_nonopaque_target_token")
+		}
+	}
+	d.seq++
+	if err := dapFrame(d.conn, map[string]any{
+		"seq": d.seq, "type": "response", "request_seq": packet.Seq,
+		"command": "startDebugging", "success": true, "body": map[string]any{},
+	}); err != nil {
+		return "", fmt.Errorf("node_dap_reverse_response_unknown: %w", err)
+	}
+	d.nodeChildAccepted = true
+	return token, nil
 }

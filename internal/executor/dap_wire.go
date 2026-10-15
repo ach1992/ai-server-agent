@@ -31,6 +31,8 @@ type dapState struct {
 	actionMu            sync.Mutex // serializes complete user operations and close
 	conn                net.Conn
 	parentConn          net.Conn // Node target-only: second protocol connection to SAME pinned adapter
+	queuedNodeTargetID  string   // one strictly typed child accepted during parent configuration
+	nodeChildAccepted   bool     // true after authenticated reverse response; never accept another
 	pending             []byte   // incomplete frame retained across status timeouts
 	workspace           string
 	adapter             string
@@ -294,6 +296,18 @@ func (d *dapState) callWithMode(ctx context.Context, command string, args any, d
 				return json.RawMessage(`{}`), nil
 			}
 		case "request":
+			// js-debug can ask for its ONE typed child while the parent
+			// configurationDone response is still in flight. Authenticate
+			// and cache that token instead of rejecting and losing the child.
+			if d.adapter == "javascript/js-debug" && d.parentConn == nil &&
+				command == "configurationDone" && packet.Command == "startDebugging" {
+				token, tokenErr := d.acceptTypedNodeChild(raw, packet)
+				if tokenErr != nil {
+					return nil, d.markUncertain(fmt.Errorf("node_dap_reverse_unverified: %w", tokenErr))
+				}
+				d.queuedNodeTargetID = token
+				continue
+			}
 			// Explicitly reject adapter-initiated runInTerminal/other reverse
 			// commands; never add a hidden PTY or privileged process path.
 			d.seq++
