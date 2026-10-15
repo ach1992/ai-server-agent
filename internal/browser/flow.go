@@ -41,6 +41,7 @@ type FlowOptions struct {
 	Steps             []FlowStep
 	TimeoutMS         int64
 	IgnoreHTTPSErrors bool
+	ProfileMode       string
 }
 
 func validFlowRef(ref string) bool {
@@ -144,6 +145,7 @@ func (m *Manager) Flow(ctx context.Context, opts FlowOptions) (executor.Response
 	return m.Run(ctx, RunOptions{
 		Script: script, TimeoutMS: opts.TimeoutMS,
 		IgnoreHTTPSErrors: opts.IgnoreHTTPSErrors,
+		ProfileMode:       opts.ProfileMode,
 	})
 }
 

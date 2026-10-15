@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -89,7 +90,7 @@ func connectionContext(c net.Conn) (context.Context, context.CancelFunc) {
 
 func (s *Server) dispatchContext(ctx context.Context, req Request) Response {
 	switch req.Action {
-	case "browser_admission_status", "browser_session_open", "browser_session_flow", "browser_session_capture", "browser_session_trace", "browser_session_status", "browser_session_close", "run", "code_inspect", "debug_adapter_status", "debug_launch", "debug_action", "debug_status", "debug_stop", "workspace_stat", "workspace_read", "workspace_write", "workspace_apply_edits", "workspace_transfer", "workspace_text_search", "workspace_search", "repository_environment", "repository_discover", "repository_inspect", "worktree_create", "worktree_remove":
+	case "browser_admission_status", "browser_session_open", "browser_session_flow", "browser_session_capture", "browser_session_trace", "browser_session_status", "browser_session_close", "run", "runtime_list", "code_inspect", "debug_adapter_status", "debug_launch", "debug_action", "debug_status", "debug_stop", "workspace_stat", "workspace_read", "workspace_write", "workspace_apply_edits", "workspace_transfer", "workspace_text_search", "workspace_search", "repository_environment", "repository_discover", "repository_inspect", "worktree_create", "worktree_remove":
 		if !s.auth(req.Token) {
 			return Response{Error: "unauthorized"}
 		}
@@ -103,6 +104,8 @@ func (s *Server) dispatchContext(ctx context.Context, req Request) Response {
 			return s.browserSessionAction(ctx, req)
 		case "run":
 			return s.runContext(ctx, req)
+		case "runtime_list":
+			return s.runtimeListContext(ctx, req)
 		case "code_inspect":
 			return s.codeInspect(ctx, req)
 		case "debug_adapter_status", "debug_launch", "debug_action", "debug_status", "debug_stop":
@@ -191,7 +194,7 @@ func newShellCommandContext(ctx context.Context, command, home, dir string) *exe
 	cmd := exec.CommandContext(ctx, "/bin/bash", "--noprofile", "--norc", "-s")
 	cmd.Stdin = strings.NewReader(command)
 	cmd.Dir = dir
-	cmd.Env = sanitizedCommandEnv(home)
+	cmd.Env = sanitizedSessionEnv(home)
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
@@ -209,8 +212,11 @@ func newShellCommandContext(ctx context.Context, command, home, dir string) *exe
 
 func (s *Server) commandContext(ctx context.Context, req Request) (*exec.Cmd, policy.Decision) {
 	dec := s.guard.Evaluate(req.Command, req.Root)
-	home := s.cfg.WorkspaceDir
+	home := filepath.Join(s.cfg.StateDir, "worker-home")
 	dir := s.cfg.WorkspaceDir
+	if req.Workspace != "" {
+		dir = req.Workspace
+	}
 	if req.Root {
 		home = "/root"
 		dir = "/root"
@@ -263,6 +269,20 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 	ctx, cancel := context.WithTimeout(parent, requestRunTimeout(req))
 	defer cancel()
 
+	if req.Root {
+		if req.Workspace != "" {
+			return fileError("invalid_workspace", "validation", errors.New("worker workspace is invalid for root execution"))
+		}
+	} else {
+		cwd, err := s.workerCommandWorkspace(req.Workspace)
+		if err != nil {
+			return fileError("invalid_workspace", "validation", err)
+		}
+		if _, err := s.workerSessionHome(); err != nil {
+			return fileError("worker_home_unavailable", "state", err)
+		}
+		req.Workspace = cwd
+	}
 	cmd, dec := s.commandContext(ctx, req)
 	if !dec.Allowed {
 		return Response{Error: dec.Reason, ReasonCode: "policy_denied", ErrorCode: "policy_denied", ErrorClass: "policy", DurationMS: time.Since(started).Milliseconds()}
