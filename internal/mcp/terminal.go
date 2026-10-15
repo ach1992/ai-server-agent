@@ -49,7 +49,7 @@ type TerminalResizeInput struct {
 
 func (s *Server) registerTerminalTools() {
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-		Name: "terminal_open", Description: "Open a real persistent tmux Control Mode-backed aiworker PTY in an explicit workspace. Requires optional /usr/bin/tmux; does not install anything or emulate interactive execution as separate shell commands. Default aiworker; real root PTY requires root=true AND explicit approval=true, and separate owner/operator authorization for the privileged effect. Returns session ID for cross-call use.",
+		Name: "terminal_open", Description: "Open a persistent tmux PTY as aiworker in a workspace. root=true requires approval=true and separate operator authorization. Returns session_id for later calls.",
 		Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, input TerminalOpenInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "terminal_open", Workspace: input.Workspace, Columns: input.Columns, Rows: input.Rows, Root: input.Root, Approval: input.Approval})
@@ -59,7 +59,7 @@ func (s *Server) registerTerminalTools() {
 		return s.responseResult(resp)
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-		Name: "terminal_read", Description: "Read bounded incremental binary-safe terminal output, base64 encoded, with next_cursor/earliest/latest and explicit retention_truncated/disconnected state. Does not resend consumed output when passing next_cursor. Read-only, but the terminal process itself may continue executing.",
+		Name: "terminal_read", Description: "Read incremental base64 PTY output with next_cursor, retention_truncated and disconnected markers. The process may still run.",
 		Annotations: annotations(true, false, true, false),
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, input TerminalReadInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "terminal_read", Workspace: input.Workspace, SessionID: input.SessionID, Root: input.Root, Approval: input.Approval, SessionEpoch: input.SessionEpoch, Cursor: input.Cursor, Limit: input.Limit})
@@ -69,7 +69,7 @@ func (s *Server) registerTerminalTools() {
 		return s.responseResult(resp)
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-		Name: "terminal_write", Description: "Send literal input into the existing worker or explicitly approved root PTY across MCP calls, not through a one-shot command. Input and output are not stored in audit logs. A confirmed control acknowledgement does not prove the shell command succeeded; inspect terminal_read.",
+		Name: "terminal_write", Description: "Send literal input to an existing PTY across MCP calls. Acknowledgement does not prove command success; inspect terminal_read.",
 		Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, input TerminalWriteInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "terminal_write", Workspace: input.Workspace, SessionID: input.SessionID, Root: input.Root, Approval: input.Approval, SessionEpoch: input.SessionEpoch, Content: input.Content})
@@ -97,7 +97,7 @@ func (s *Server) registerTerminalTools() {
 		return s.responseResult(resp)
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-		Name: "terminal_reconnect", Description: "Reattach Control Mode to a root/executor-owned tmux runtime record after executor restart. Requires the SAME authenticated principal, explicit workspace and authority as the original session; verifies tmux socket, pane and generation. Returns a fresh session_epoch, with previous incremental output explicitly unavailable. Does not create a new terminal shell.",
+		Name: "terminal_reconnect", Description: "Reconnect to existing tmux PTY after Executor restart with same principal/workspace. Returns fresh session_epoch; previous incremental output is unavailable. No new shell.",
 		Annotations: annotations(false, false, false, false),
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, input TerminalIDInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "terminal_reconnect", Workspace: input.Workspace, SessionID: input.SessionID, Root: input.Root, Approval: input.Approval})

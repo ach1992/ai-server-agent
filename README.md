@@ -75,14 +75,14 @@ Read the [Tool Reference](docs/TOOL-REFERENCE.md) for tools, limits, examples, a
 
 ## Development and Validation server roles
 
-The implementation includes two **Environment Purpose Profiles**, available only in installed releases/builds that actually include this feature (the earlier immutable `v0.1.12` did not):
+Immutable Stable `v0.1.13` introduced two **Environment Purpose Profiles** (verify the installed version):
 
 - **Development:** preferred for source/Git changes, builds, debugging and routine project development.
 - **Validation:** preferred for candidate installation, real E2E/integration tests, reproduction and acceptance evidence.
 
 The profiles label and guide compatible clients; **they are not access-control tiers or separate Agent binaries**. Both preserve the same MCP/root/worker tools. GitHub authentication and optional tool installation remain separate operator decisions.
 
-**Delivery status:** the feature was added after `v0.1.12`; consult [GitHub Releases](https://github.com/ach1992/ai-server-agent/releases) and your installed build before using profile commands. Source integration alone does not upgrade an installed Agent. Do not confuse these purposes with `local/public` connection modes. See [Profile setup, management, and client discovery](docs/ENVIRONMENT-PROFILES.md), the [Project Specification](docs/PROJECT-SPEC.md#10-environment-purpose-profiles), and [Issue #143](https://github.com/ach1992/ai-server-agent/issues/143) for installed/client acceptance.
+Use a supporting installed release (`v0.1.13` or later); publishing new source does not upgrade an existing Agent. Purpose profiles are independent of `local/public` connection modes. See [Profile setup, management, and client discovery](docs/ENVIRONMENT-PROFILES.md), the [Project Specification](docs/PROJECT-SPEC.md#10-environment-purpose-profiles), and [Issue #143](https://github.com/ach1992/ai-server-agent/issues/143) for installed/client acceptance.
 
 ## Security and resource use
 

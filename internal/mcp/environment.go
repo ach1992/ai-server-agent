@@ -16,7 +16,7 @@ type RepositoryEnvironmentInput struct {
 func (s *Server) registerRepositoryEnvironmentTool() {
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "repository_environment",
-		Description: "Read a bounded structured summary of repository-owned language/toolchain/environment declarations and current host compatibility for one explicit Git worktree. Detects native manifests/locks plus declared mise, devenv, Dev Container and Dagger mechanisms without installing anything, running repository tasks, inventing task definitions or choosing precedence between conflicting declarations.",
+		Description: "Inspect language/toolchain manifests and host readiness for a Git worktree, including mise, devenv, Dev Container and Dagger. Does not install or execute project tasks; conflicting declarations require selection.",
 		Annotations: annotations(true, false, true, false),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input RepositoryEnvironmentInput) (*mcpsdk.CallToolResult, executor.RepositoryEnvironmentSummary, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{
