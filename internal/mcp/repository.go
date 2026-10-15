@@ -71,7 +71,7 @@ func (s *Server) registerRepositoryTools() {
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "worktree_create",
-		Description: "Create/reconcile isolated Git worktree from exact expected commit. Rejects stale refs, branch conflicts, dirty paths and unsupported checkout filters. No fetch/push/merge/branch deletion.",
+		Description: "Create or reconcile a Git task worktree at an exact expected commit. Rejects stale refs, path/branch conflicts and unsupported checkout filters. No fetch, push, merge or branch deletion.",
 		Annotations: annotations(false, false, true, false),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input WorktreeCreateInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{

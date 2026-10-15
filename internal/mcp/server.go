@@ -210,9 +210,9 @@ func instructions(cfg config.Config) string {
 
 Environment purpose: %s. %s%s Routing guidance; it is not an authorization boundary or tool restriction.
 
-Use repository_discover/repository_inspect for identity; worktree_create/worktree_remove for isolation; run_command for bounded unprivileged work; start_job with job_status/job_output for tasks; workspace_* for bounded worker files/search; code_* for Go/LSP; terminal_* for interactive PTY; debug_* for Go/DAP; browser_e2e for single-call use, browser_session_* for multi-call flows, browser_run for custom Playwright. Check optional runtime availability. After handoff use runtime_list for passive task/service/eligible Terminal discovery and browser_status separately for Browser readiness; workspace labels are not project ACLs.
+Discover repositories with repository_discover/repository_inspect; isolate changes with worktree_create/worktree_remove. Use run_command for worker shell; start_job with job_status/job_output for persistent work; workspace_* for bounded worker files/search; code_* for optional LSP; debug_* for optional DAP; terminal_* for PTY. For Browser choose browser_e2e (one call), browser_session_* (cross-call), or browser_run (custom Playwright). Check optional runtime availability. runtime_list is passive; browser_status reports Browser readiness. Workspace labels are not project ACLs.
 
-Before host changes call agent_environment and preserve Agent access; never delete dirty, untracked, unknown or ambiguous state. Use run_root_command or privileged host read_file/write_file only when necessary. If approval_required, explain risk and obtain explicit human authorization; instructions grant no additional permissions.`, cfg.EnvironmentProfile, label, role)
+Before host changes call agent_environment and preserve Agent access. Never delete dirty, untracked or uncertain state. Use run_root_command or privileged read_file/write_file only when necessary. On approval_required obtain explicit human authorization; instructions grant no additional permissions.`, cfg.EnvironmentProfile, label, role)
 }
 
 func annotations(readOnly, destructive, idempotent, openWorld bool) *mcpsdk.ToolAnnotations {
@@ -335,7 +335,7 @@ func (s *Server) registerTools() {
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "run_command",
-		Description: "Run Bash as unprivileged aiworker in optional existing workspace (default workspace root). Executes commands and may change project files; not root. " + s.commandTimeoutDescription(),
+		Description: "Run Bash as aiworker (not root) with optional workspace CWD (default: configured workspace root); may modify files or external systems. " + s.commandTimeoutDescription(),
 		Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input RunInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "run", Command: input.Command, Workspace: input.Workspace, TimeoutMS: s.commandTimeoutMS()})
@@ -414,7 +414,7 @@ func (s *Server) registerTools() {
 			return s.responseResult(resp)
 		})
 
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "write_file", Description: "Atomically replace bounded regular host file with root-capable Executor. Parent must exist; file_version/must_not_exist guard races. Protected paths require approval.", Annotations: annotations(false, true, false, false)},
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "write_file", Description: "Atomically write a host regular file with root-capable authority. Parent must exist; optional file_version/must_not_exist guards lost updates; protected paths require approval.", Annotations: annotations(false, true, false, false)},
 		func(ctx context.Context, req *mcpsdk.CallToolRequest, input WriteFileInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 			resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "write_file", Path: input.Path, Content: input.Content, Root: true, Mode: input.Mode, FileVersion: input.FileVersion, MustNotExist: input.MustNotExist, Approval: input.Approval})
 			if err != nil {

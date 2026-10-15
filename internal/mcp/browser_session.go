@@ -45,7 +45,7 @@ type BrowserSessionFlowInput struct {
 }
 
 func (s *Server) registerBrowserSessionTools() {
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_open", Description: "Open authenticated Browser session in workspace with shared or isolated profile. Only one Browser job/session may run at once; session_id alone is not authorization. State persists until close/expiry.", Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionOpenInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_open", Description: "Open a workspace-scoped Chromium session using a shared or isolated profile. One Browser session/run at a time. A session_id is not authorization; sessions survive client disconnects, not Executor restarts.", Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionOpenInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := s.browser.SessionOpen(ctx, browser.SessionOptions{Workspace: in.Workspace, IgnoreHTTPSErrors: in.IgnoreHTTPSErrors, ProfileMode: in.ProfileMode})
 		if err != nil {
 			return executorTransportErrorResult(err)
@@ -59,7 +59,7 @@ func (s *Server) registerBrowserSessionTools() {
 		}
 		return s.responseResult(resp)
 	})
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_capture", Description: "Capture a viewport JPEG from an authorized Browser session as typed image (default) or base64 fallback. Limits: 1024 CSS-pixel width, 720 height, 32 KiB raw; reduce max_width/quality if too_large. Includes SHA256. Shared-session screenshots may be sensitive. No file or public URL is created.", Annotations: annotations(true, false, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionCaptureInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_capture", Description: "Capture a session viewport JPEG (not full-page) as a typed image or base64 fallback. Max 1024x720 CSS pixels, 32 KiB raw JPEG; text-only base64 mode is capped at 16 KiB. Reduce max_width/quality if too_large. Returns SHA256; image may contain sensitive content. No stored file.", Annotations: annotations(true, false, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionCaptureInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		if in.Representation != "" && in.Representation != "image" && in.Representation != "base64" {
 			resp := executor.Response{Error: "representation must be image or base64", ErrorCode: "invalid_browser_capture", ErrorClass: "validation"}
 			return s.responseResult(resp)
@@ -91,7 +91,7 @@ func (s *Server) registerBrowserSessionTools() {
 		summary := fmt.Sprintf("Browser JPEG screenshot captured: %d bytes, %s, digest %s. If no image is visible in this client, retry with representation=base64, quality=15 and max_width=320 (text-only cap 16 KiB). No persistent artifact was created.", len(raw), resp.MIMEType, resp.FileVersion)
 		return &mcpsdk.CallToolResult{Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: summary}, &mcpsdk.ImageContent{Data: raw, MIMEType: "image/jpeg"}}}, meta, nil
 	})
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_trace", Description: "Record one Browser session flow as private ZIP (<=512 KiB), read base64 windows of <=8192 raw bytes with offset and SHA256, or discard. Recording can affect the page; never automatically retry uncertain actions. Traces can contain sensitive content; no public URL. Data expires when the session closes, expires or is discarded.", Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionTraceInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_trace", Description: "Record one Browser flow to a private ZIP (max 512 KiB), read base64 windows (max 8192 raw bytes, offset/SHA256), or discard. Recording can change the page: do not replay uncertain actions. May contain sensitive data; held in session memory only until discard/close/expiry.", Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionTraceInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := s.browser.SessionTrace(ctx, browser.SessionOptions{Workspace: in.Workspace, SessionID: in.SessionID, Steps: in.Steps, TraceOperation: in.Operation, TraceOffset: in.Offset, TraceVersion: in.FileVersion})
 		if err != nil {
 			return executorTransportErrorResult(err)

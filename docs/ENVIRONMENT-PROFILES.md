@@ -21,14 +21,14 @@ For **noninteractive first installation**, the installer accepts:
 For a release **that includes this feature**, put environment variables on the **`bash` side** of the verified Stable bootstrap pipe (not only on `curl`). The bootstrap passes only these three non-secret inputs through `sudo` to the integrity-verified installer; it does not forward arbitrary environment variables:
 
 ```bash
-RELEASE_TAG='REPLACE_WITH_PUBLISHED_PROFILE_RELEASE_TAG'
+RELEASE_TAG='v0.1.13' # or a newer published immutable Stable
 curl -fsSL "https://raw.githubusercontent.com/ach1992/ai-server-agent/${RELEASE_TAG}/scripts/install-stable.sh" | \
   AI_SERVER_AGENT_NONINTERACTIVE=1 \
   AI_SERVER_AGENT_ENVIRONMENT_PROFILE=validation \
   AI_SERVER_AGENT_SERVER_LABEL='QA Server' bash
 ```
 
-Replace `RELEASE_TAG` with a **published immutable Stable** tag that includes the feature; the older `v0.1.12` does **not** include profiles. Never substitute a mutable branch or unreleased candidate. The verified release installer continues to validate the values. For direct source installation, pass the same settings to the privileged `install.sh` process.
+Use a **published immutable Stable** tag with profile support (`v0.1.13` or later); older `v0.1.12` has no profiles. Never substitute a mutable branch or unreleased candidate. The verified release installer continues to validate the values. For direct source installation, pass the same settings to the privileged `install.sh` process.
 
 The existing Connection Mode (local/public/Cloudflare) is an independent setup choice. Do not infer the Profile from the hostname or network address.
 
@@ -57,4 +57,4 @@ Some clients may not show or obey server-provided instructions; inspect the auth
 
 ## Feature delivery
 
-The feature was implemented in source after immutable Stable `v0.1.12`; it becomes installable only through a subsequently published supporting release. The owning [Issue #143](https://github.com/ach1992/ai-server-agent/issues/143) separately tracks installed and client-side acceptance evidence. Inspect the **actual installed release** and [GitHub Releases](https://github.com/ach1992/ai-server-agent/releases) before assuming these commands are available. The durable product-level decision is in the Owner-approved [Project Specification](PROJECT-SPEC.md#10-environment-purpose-profiles).
+Environment profiles first shipped in immutable Stable [`v0.1.13`](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.13). The owning [Issue #143](https://github.com/ach1992/ai-server-agent/issues/143) separately tracks installed and client-side acceptance evidence. Inspect the **actual installed release** and [GitHub Releases](https://github.com/ach1992/ai-server-agent/releases) before assuming these commands are available. The durable product-level decision is in the Owner-approved [Project Specification](PROJECT-SPEC.md#10-environment-purpose-profiles).

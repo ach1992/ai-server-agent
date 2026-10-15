@@ -59,7 +59,7 @@ func (s *Server) registerDebugTools() {
 		return s.callDebug(ctx, executor.Request{Action: "debug_adapter_status", Language: in.Language})
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-		Name: "debug_launch", Description: "Launch worker-only DAP for Go/Delve, Rust prebuilt/LLDB-DAP, PHP CLI/Xdebug, Python/debugpy, Node/precompiled TypeScript, or local HTML Browser. Needs exact file_version and trusted optional adapters; executes project code with worker-owned descendant containment. No root/remote attach, custom adapter, runInTerminal, TCP inspector, PHP HTTP attach or JS extension-host.", Annotations: annotations(false, true, false, true),
+		Name: "debug_launch", Description: "Launch worker-only DAP for Go, Rust ELF, PHP CLI, Python, Node/precompiled TypeScript or local HTML Browser with trusted optional adapters and exact file_version. Executes project code under Executor-owned cgroup-v2 containment where required. No root/remote attach, PHP HTTP/Shell/extension-host DAP, TCP inspector or runInTerminal.", Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugLaunchInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		return s.callDebug(ctx, executor.Request{Action: "debug_launch", Workspace: in.Workspace, DebugProgram: in.Program, FileVersion: in.FileVersion, DebugStopOnEntry: in.StopOnEntry, Language: in.Language, DebugMode: in.Mode})
 	})

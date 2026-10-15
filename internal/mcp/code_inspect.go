@@ -19,15 +19,15 @@ type CodeInspectInput struct {
 
 func (s *Server) registerCodeTools() {
 	tools := []struct{ suffix, description string }{
-		{"definition", "Resolve a source symbol definition using the trusted Go, JS/TS, Python, Shell, HTML/CSS, SQL, Rust or PHP LSP profile and exact aiworker file_version"},
-		{"references", "Retrieve bounded source references through trusted Go, JS/TS, Python, Shell, HTML/CSS, SQL, Rust or PHP LSP; output never mutates files"},
-		{"symbols", "Retrieve bounded Go, JavaScript/TypeScript, Python, Shell, HTML/CSS, SQL, Rust or PHP document symbols via real language semantics"},
-		{"diagnostics", "Retrieve bounded Go, JavaScript/TypeScript, Python, Shell, HTML/CSS, SQL, Rust or PHP LSP diagnostics, negotiated as push or pull"},
+		{"definition", "Find a symbol definition using a trusted workspace LSP"},
+		{"references", "Find bounded symbol references using a trusted workspace LSP"},
+		{"symbols", "List document symbols using a trusted workspace LSP"},
+		{"diagnostics", "Get bounded source diagnostics using a trusted workspace LSP"},
 	}
 	for _, tool := range tools {
 		method := tool.suffix
 		mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-			Name: "code_" + method, Description: tool.description + ". Optional pinned local adapters; method support varies by language. SQL requires explicit dialect and never opens a database. Requires exact file_version; no implicit installs or project scripts; unsupported methods fail closed.",
+			Name: "code_" + method, Description: tool.description + ". Optional adapters; requires exact file_version and explicit SQL dialect. No project execution, implicit install or database connection; unsupported methods fail closed.",
 			Annotations: annotations(true, false, true, false),
 		}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, input CodeInspectInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 			resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{

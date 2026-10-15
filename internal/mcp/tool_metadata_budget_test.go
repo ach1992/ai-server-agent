@@ -62,8 +62,11 @@ func TestMCPToolMetadataFootprint(t *testing.T) {
 	// and recovery behavior; long implementation tutorials belong in docs.
 	const maxDescriptionBytes = 750
 	const maxAverageDescriptionBytes = 260
-	if len(rows) < 50 {
-		t.Fatalf("tool catalog unexpectedly small: %d", len(rows))
+	// This snapshot is tied to the published v0.1.13 catalog. Update the
+	// versioned tool-reference count when intentionally changing the inventory.
+	const expectedCatalogCount = 59
+	if len(rows) != expectedCatalogCount {
+		t.Fatalf("MCP tools/list count = %d; expected %d (update docs/TOOL-REFERENCE.md on intentional change)", len(rows), expectedCatalogCount)
 	}
 	if rows[0].descriptionBytes > maxDescriptionBytes {
 		t.Errorf("longest MCP tool description %q: %d > %d bytes", rows[0].name, rows[0].descriptionBytes, maxDescriptionBytes)

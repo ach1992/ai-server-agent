@@ -54,7 +54,7 @@ type WorkspaceTransferInput struct {
 func (s *Server) registerWorkspaceFileTools() {
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "workspace_transfer",
-		Description: "Stage binary/UTF-8 file transfers as aiworker. begin: stable transfer_key, size, SHA256, must_not_exist/file_version; chunk: <=256 KiB base64 at exact offset with SHA256. commit: <=4 MiB preparation per call; repeat the SAME handle while status=preparing. status reconciles unknown outcomes, expiry and version conflicts; abort drops uncommitted data. Staging counts against quota. If an outcome is unknown, check status before retrying. No root access.",
+		Description: "Stage binary/UTF-8 file transfers as aiworker. begin: stable transfer_key, size, SHA256, must_not_exist/file_version; chunk: <=256 KiB base64 at exact offset with SHA256. commit: <=4 MiB preparation per call; repeat the SAME handle while status=preparing. status reports progress, expiry and conflicts; abort drops uncommitted data. Staging counts against quota. If completion is uncertain, check status before retrying. No root access.",
 		Annotations: annotations(false, true, false, false),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input WorkspaceTransferInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{

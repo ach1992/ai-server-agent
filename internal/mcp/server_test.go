@@ -501,7 +501,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 						t.Fatalf("screenshot schema missing %s: %s", field, input)
 					}
 				}
-				if !strings.Contains(tool.Description, "32 KiB") || !strings.Contains(tool.Description, "SHA256") || !strings.Contains(tool.Description, "base64") {
+				if !strings.Contains(tool.Description, "32 KiB") || !strings.Contains(tool.Description, "16 KiB") || !strings.Contains(tool.Description, "SHA256") || !strings.Contains(tool.Description, "base64") {
 					t.Fatal("screenshot missing limits, integrity, or text-only fallback description")
 				}
 			}
@@ -601,22 +601,22 @@ func TestInstructionsRouteToolsConciselyAndPreserveSafety(t *testing.T) {
 		"Configured workspace root is persistent",
 		"repository_discover/repository_inspect",
 		"worktree_create/worktree_remove",
-		"run_command for bounded unprivileged",
+		"run_command for worker shell",
 		"start_job with job_status/job_output",
 		"workspace_* for bounded worker",
-		"code_* for Go/LSP",
-		"terminal_* for interactive PTY",
-		"debug_* for Go/DAP",
-		"browser_e2e for single-call",
-		"browser_session_* for multi-call",
-		"browser_run for custom Playwright",
-		"runtime_list for passive task/service/eligible Terminal discovery",
-		"browser_status separately for Browser readiness",
-		"workspace labels are not project ACLs",
+		"code_* for optional LSP",
+		"debug_* for optional DAP",
+		"terminal_* for PTY",
+		"browser_e2e (one call)",
+		"browser_session_* (cross-call)",
+		"browser_run (custom Playwright)",
+		"runtime_list is passive",
+		"browser_status reports Browser readiness",
+		"Workspace labels are not project ACLs",
 		"Check optional runtime availability",
 		"agent_environment and preserve Agent access",
-		"never delete dirty, untracked, unknown or ambiguous state",
-		"run_root_command or privileged host read_file/write_file only when necessary",
+		"Never delete dirty, untracked or uncertain state",
+		"privileged read_file/write_file only when necessary",
 		"approval_required",
 		"explicit human authorization",
 		"instructions grant no additional permissions",
