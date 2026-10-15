@@ -175,21 +175,60 @@ ui_notice(){
   ui_wrap '  ' "$message"
   printf '\n'
 }
-# Child gets strict errexit, NOT conditional Bash invocation, so transactional
-# failure aborts the child instead of continuing with a half-completed step.
+# An interrupted interactive prompt must keep the enclosing menu alive;
+# standalone noninteractive CLI subcommands keep their original signal model.
+ui_enable_menu_interrupt(){
+  UI_SIGINT_CAUGHT=0
+  trap 'UI_SIGINT_CAUGHT=1' INT
+}
+ui_read_choice(){
+  local dest="$1" prompt="$2" answer
+  UI_SIGINT_CAUGHT=0
+  if IFS= read -r -p "$prompt" answer </dev/tty; then
+    printf -v "$dest" '%s' "$answer"
+    return 0
+  fi
+  if [ "${UI_SIGINT_CAUGHT:-0}" = 1 ]; then
+    ui_notice warning 'Input cancelled (Ctrl+C); no operation started.'
+    return 130
+  fi
+  return 1
+}
+# Read-only views are interruptible in flight. State-changing functions may
+# be midway through a local commit, service restart, or remote Cloudflare
+# transaction, so they must finish or roll back without SIGINT interruption.
+# Safe cancellation of those actions is offered at interactive inputs.
+# Children retain strict errexit; never call transactional functions in if/&&.
 ui_menu_action(){
-  local rc had_errexit=0
+  local rc had_errexit=0 protected=1
+  case "$1" in
+    status|runtime_show|profile_show|credential_status|chatgpt_setup) protected=0 ;;
+  esac
   case $- in *e*) had_errexit=1 ;; esac
   UI_LAST_ACTION_OK=0
+  UI_SIGINT_CAUGHT=0
+  if [ "$protected" = 1 ]; then
+    ui_notice warning 'Protected change: use Back/No at prompts to cancel. Once writes/restarts begin, Ctrl+C cannot safely interrupt; wait for success or verified recovery.'
+  fi
   set +e
-  ( set -Eeuo pipefail; "$@" )
+  if [ "$protected" = 1 ]; then
+    ( trap '' INT; set -Eeuo pipefail; "$@" )
+  else
+    ( trap - INT; set -Eeuo pipefail; "$@" )
+  fi
   rc=$?
   if [ "$had_errexit" = 1 ]; then set -e; fi
-  if [ "$rc" -ne 0 ]; then
-    ui_notice error "Action failed (exit $rc). The menu remains available. Inspect the message above before retrying."
-  else
-    UI_LAST_ACTION_OK=1
-  fi
+  case "$rc" in
+    0) UI_LAST_ACTION_OK=1 ;;
+    20) ui_notice warning 'Operation deferred/cancelled (exit 20). Inspect preceding output and current state; no rollback or unchanged-state claim is implied.' ;;
+    130)
+      if [ "$protected" = 0 ] && [ "${UI_SIGINT_CAUGHT:-0}" = 1 ]; then
+        ui_notice warning 'Read-only operation interrupted (Ctrl+C); returned to the menu.'
+      else
+        ui_notice error 'Action ended unexpectedly (exit 130). Inspect the operation result and any affected state before retrying.'
+      fi ;;
+    *) ui_notice error "Action failed (exit $rc). The menu remains available. Inspect the message above before retrying." ;;
+  esac
   return 0
 }
 ui_cancel_requested(){
@@ -236,16 +275,22 @@ pause(){
 }
 
 confirm(){
-  local prompt="$1" default="${2:-no}" ans
+  local prompt="$1" default="${2:-no}" ans=""
   if [ ! -r /dev/tty ]; then
     [ "$default" = "yes" ]
     return
   fi
   if [ "$default" = "yes" ]; then
-    read -r -p "$prompt [Y/n]: " ans </dev/tty
+    if ! read -r -p "$prompt [Y/n]: " ans </dev/tty; then
+      # Interrupted/EOF confirmation is a refusal; caller reports cancellation.
+      return 1
+    fi
     case "$ans" in ''|y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
   else
-    read -r -p "$prompt [y/N]: " ans </dev/tty
+    if ! read -r -p "$prompt [y/N]: " ans </dev/tty; then
+      # Interrupted/EOF confirmation is a refusal; caller reports cancellation.
+      return 1
+    fi
     case "$ans" in y|Y|yes|YES) return 0 ;; *) return 1 ;; esac
   fi
 }
@@ -254,10 +299,18 @@ prompt_value(){
   local prompt="$1" default="${2:-}" value
   [ -r /dev/tty ] || die "Interactive input requires a terminal. Use the documented AI_SERVER_AGENT_* variables for automation."
   if [ -n "$default" ]; then
-    read -r -p "$prompt [$default]: " value </dev/tty
+    read -r -p "$prompt [$default] (b=cancel): " value </dev/tty
+    if ui_cancel_requested "$value"; then
+      printf 'Cancelled at input prompt; no operation committed.\n' >&2
+      return 20
+    fi
     printf '%s\n' "${value:-$default}"
   else
-    read -r -p "$prompt: " value </dev/tty
+    read -r -p "$prompt (b=cancel): " value </dev/tty
+    if ui_cancel_requested "$value"; then
+      printf 'Cancelled at input prompt; no operation committed.\n' >&2
+      return 20
+    fi
     printf '%s\n' "$value"
   fi
 }
@@ -412,19 +465,31 @@ runtime_menu(){
     printf '  4) Reset a setting to its default\n'
     printf '  5) Show all values, purposes and ranges\n'
     printf '  0) Back\n'
-    read -r -p 'Choose: ' choice </dev/tty || return 0
+    if ! ui_read_choice choice 'Choose: '; then
+      [ "${UI_SIGINT_CAUGHT:-0}" = 1 ] && continue
+      return 0
+    fi
     case "$choice" in
       1|2)
         if [ "$choice" = 1 ]; then key=worker_command_slots; else key=persistent_task_slots; fi
-        read -r -p 'New value (b=cancel): ' value </dev/tty || continue
+        if ! ui_read_choice value 'New value (b=cancel): '; then
+          [ "${UI_SIGINT_CAUGHT:-0}" = 1 ] && continue
+          return 0
+        fi
         if ui_cancel_requested "$value"; then continue; fi
         ui_menu_action runtime_apply set "$key" "$value"
         pause ;;
       3|4)
-        read -r -p 'Setting key (b=cancel): ' key </dev/tty || continue
+        if ! ui_read_choice key 'Setting key (b=cancel): '; then
+          [ "${UI_SIGINT_CAUGHT:-0}" = 1 ] && continue
+          return 0
+        fi
         if ui_cancel_requested "$key"; then continue; fi
         if [ "$choice" = 3 ]; then
-          read -r -p 'New integer value (b=cancel): ' value </dev/tty || continue
+          if ! ui_read_choice value 'New integer value (b=cancel): '; then
+            [ "${UI_SIGINT_CAUGHT:-0}" = 1 ] && continue
+            return 0
+          fi
           if ui_cancel_requested "$value"; then continue; fi
           ui_menu_action runtime_apply set "$key" "$value"
         else
@@ -606,12 +671,18 @@ profile_menu(){
     printf '  4) Clear server label\n'
     printf '  0) Back\n\n'
     local choice label
-    read -r -p 'Choose: ' choice </dev/tty || return 0
+    if ! ui_read_choice choice 'Choose: '; then
+      [ "${UI_SIGINT_CAUGHT:-0}" = 1 ] && continue
+      return 0
+    fi
     case "$choice" in
       1) ui_menu_action profile_apply environment_profile development; pause ;;
       2) ui_menu_action profile_apply environment_profile validation; pause ;;
       3)
-        read -r -p 'Server label (b=cancel, max 80 characters): ' label </dev/tty || continue
+        if ! ui_read_choice label 'Server label (b=cancel, max 80 characters): '; then
+          [ "${UI_SIGINT_CAUGHT:-0}" = 1 ] && continue
+          return 0
+        fi
         if ui_cancel_requested "$label"; then continue; fi
         ui_menu_action profile_apply server_label "$label"; pause ;;
       4) ui_menu_action profile_apply server_label ""; pause ;;
@@ -836,7 +907,10 @@ credential_menu(){
     printf '  %s4)%s Revoke MCP Gateway credential\n' "$YELLOW" "$RESET"
     printf '  0) Back\n\n'
     local choice principal action
-    read -r -p 'Choose: ' choice </dev/tty || return 0
+    if ! ui_read_choice choice 'Choose: '; then
+      [ "${UI_SIGINT_CAUGHT:-0}" = 1 ] && continue
+      return 0
+    fi
     case "$choice" in
       1|2|3|4)
         case "$choice" in
@@ -2357,6 +2431,7 @@ run_uninstall(){
 
 
 connection_menu(){
+  ui_enable_menu_interrupt
   [ -r /dev/tty ] || die "Interactive connection setup requires a terminal."
   while true; do
     header
@@ -2366,7 +2441,10 @@ connection_menu(){
     printf '  3) Existing TLS certificate (advanced)\n'
     printf '  0) Back\n\n'
     local choice
-    read -r -p 'Choose: ' choice </dev/tty || return 0
+    if ! ui_read_choice choice 'Choose: '; then
+      [ "${UI_SIGINT_CAUGHT:-0}" = 1 ] && continue
+      return 0
+    fi
     case "$choice" in
       1) ui_menu_action configure_cloudflare; pause; return ;;
       2) ui_menu_action configure_local; pause; return ;;
@@ -2380,6 +2458,7 @@ connection_menu(){
 
 
 first_run(){
+  ui_enable_menu_interrupt
   [ -r /dev/tty ] || die "First-run setup requires an interactive terminal."
   local choice attempted=0
   while true; do
@@ -2394,7 +2473,10 @@ first_run(){
     else
       printf '  0) Configure later - inspect the connection before retrying\n\n'
     fi
-    read -r -p 'Choose [1]: ' choice </dev/tty || return 20
+    if ! ui_read_choice choice 'Choose [1]: '; then
+      [ "${UI_SIGINT_CAUGHT:-0}" = 1 ] && continue
+      return 20
+    fi
     choice="${choice:-1}"
     case "$choice" in
       0)
@@ -2411,13 +2493,22 @@ first_run(){
       *) ui_notice warning 'Select 1, 2, 3 or 0. No setup action started.'; pause; continue ;;
     esac
     attempted=1
-    # Do not propagate the one-use credential to non-Cloudflare operations.
-    if [ "$choice" != 1 ] && [ "${AI_SERVER_AGENT_MCP_AUTH_FD:-}" = 3 ]; then exec 3<&-; fi
+    # First-run installer bearer FD 3 is genuinely one-use. A failed
+    # Cloudflare attempt can be retried interactively with a fresh hidden
+    # bearer prompt; never reuse an exhausted inherited descriptor.
+    if [ "$choice" != 1 ] && [ "${AI_SERVER_AGENT_MCP_AUTH_FD:-}" = 3 ]; then
+      exec 3<&-
+      unset AI_SERVER_AGENT_MCP_AUTH_FD
+    fi
     case "$choice" in
       1) ui_menu_action configure_cloudflare ;;
       2) ui_menu_action configure_local ;;
       3) ui_menu_action configure_manual_tls ;;
     esac
+    if [ "$choice" = 1 ] && [ "${AI_SERVER_AGENT_MCP_AUTH_FD:-}" = 3 ]; then
+      exec 3<&-
+      unset AI_SERVER_AGENT_MCP_AUTH_FD
+    fi
     if [ "$UI_LAST_ACTION_OK" = 1 ]; then break; fi
     ui_notice warning 'Connection setup was not verified. Review the error or recovery state, choose another connection option, or select 0 to defer.'
     pause
@@ -2429,6 +2520,7 @@ first_run(){
 }
 
 menu(){
+  ui_enable_menu_interrupt
   [ -r /dev/tty ] || die "The interactive menu requires a terminal. Use a subcommand for automation."
   while true; do
     header
@@ -2449,7 +2541,10 @@ menu(){
     printf '  %s9)%s Remove recorded Cloudflare resources\n' "$YELLOW" "$RESET"
     if [ "$UI_COMPACT" = 1 ]; then printf '  0) Exit\n'; else printf '\n  0) Exit\n\n'; fi
     local choice
-    read -r -p 'Choose: ' choice </dev/tty || return 0
+    if ! ui_read_choice choice 'Choose: '; then
+      [ "${UI_SIGINT_CAUGHT:-0}" = 1 ] && continue
+      return 0
+    fi
     case "$choice" in
       1) ui_menu_action status; pause ;;
       2) ui_menu_action chatgpt_setup; pause ;;
