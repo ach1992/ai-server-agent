@@ -59,7 +59,7 @@ func (s *Server) registerDebugTools() {
 		return s.callDebug(ctx, executor.Request{Action: "debug_adapter_status", Language: in.Language})
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-		Name: "debug_launch", Description: "Launch worker-only Go/Delve exec, Rust/LLDB-DAP prebuilt ELF, PHP/Xdebug-DBGp CLI, Python/debugpy script/module/unittest, or Node/js-debug JavaScript and precompiled TypeScript source-map node DAP or local HTML Browser pipe DAP with exact source file_version and trusted optional adapter. Rust, PHP, Python and Node require atomic executor-owned private cgroup-v2 descendant containment and pinned full adapter resources. PHP HTTP attach and JS extension-host are not yet supported. Browser mode is local .html only, no TCP inspector. No remote attach, root, custom adapter or runInTerminal. Debugging explicitly executes selected project code.", Annotations: annotations(false, true, false, true),
+		Name: "debug_launch", Description: "Launch worker-only DAP for Go, Rust ELF, PHP CLI, Python, Node/precompiled TypeScript or local HTML Browser with trusted optional adapters and exact file_version. Executes project code under Executor-owned cgroup-v2 containment where required. No root/remote attach, PHP HTTP/Shell/extension-host DAP, TCP inspector or runInTerminal.", Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugLaunchInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		return s.callDebug(ctx, executor.Request{Action: "debug_launch", Workspace: in.Workspace, DebugProgram: in.Program, FileVersion: in.FileVersion, DebugStopOnEntry: in.StopOnEntry, Language: in.Language, DebugMode: in.Mode})
 	})
@@ -69,7 +69,7 @@ func (s *Server) registerDebugTools() {
 		return s.callDebug(ctx, executor.Request{Action: "debug_action", DebugMethod: "breakpoints", Workspace: in.Workspace, SessionID: in.SessionID, Path: in.Path, FileVersion: in.FileVersion, DebugLines: in.Lines})
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-		Name: "debug_evaluate", Description: "Evaluate a user-approved expression in the stopped Go/Delve, Rust/LLDB-DAP, PHP/Xdebug-DBGp CLI, Python/debugpy or Node/js-debug target. This can execute code or cause side effects; do not treat as read-only or automatically retry after uncertainty.", Annotations: annotations(false, true, false, true),
+		Name: "debug_evaluate", Description: "Evaluate expression in stopped DAP target; may execute code or have side effects and requires user approval. Never auto-retry an uncertain outcome.", Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugEvaluateInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		return s.callDebug(ctx, executor.Request{Action: "debug_action", DebugMethod: "evaluate", Workspace: in.Workspace, SessionID: in.SessionID, DebugFrameID: in.FrameID, DebugExpression: in.Expression})
 	})
