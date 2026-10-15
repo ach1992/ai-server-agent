@@ -4,7 +4,7 @@
 
 This is the durable testing/acceptance model, **not** a historical release log. Official [GitHub Releases](https://github.com/ach1992/ai-server-agent/releases) establish the published release identity; [Issue #59](https://github.com/ach1992/ai-server-agent/issues/59) owns the latest observed installed-server/direct-client evidence and remaining end-to-end gates, while [Issue #99](https://github.com/ach1992/ai-server-agent/issues/99) owns client-visible typed/large-artifact outcomes. An earlier green CI or installed smoke does not by itself satisfy those outstanding criteria.
 
-## Accepted Environment Profile acceptance (not yet shipped)
+## Installed Environment Profile acceptance (availability is version-dependent)
 
 The two approved purpose profiles, Development and Validation ([Issue #143](https://github.com/ach1992/ai-server-agent/issues/143)), require a small focused acceptance suite when implemented:
 
@@ -15,7 +15,7 @@ The two approved purpose profiles, Development and Validation ([Issue #143](http
 - Authenticated `agent_environment` and MCP `initialize` instructions advertise accurate purpose; client-specific actual delivery of instructions is verified and documented rather than assumed. A direct client works without a Gateway.
 - Verify the feature on a fresh authorized installation, with configuration/management/service restart and rollback/error behavior appropriate to its implementation. No production or connected-occupied-host mutation without separate approval.
 
-Until these checks pass for an installed build, the roles are accepted requirements only, not delivered functionality.
+Source/CI coverage does not substitute for installed feature proof. Verify the exact installed build and Issue #143 for current profile-management and client evidence; older Stable releases may not include these commands.
 
 ## Direct MCP transfer acceptance
 
@@ -430,12 +430,12 @@ Measure representative workflow latency, remote/tool-call count, idle/active pro
 
 Optional code-server, managed Incus, Ctags, alternate terminal backends and generic provider/tool-manager frameworks are not Core-v1 acceptance requirements unless their contracts are explicitly reactivated from new evidence.
 
-### Shared-host first-install recovery target (Issue #137; NOT SHIPPED)
+### Shared-host first-install recovery target (Issue #137; verify the installed release)
 
 The authoritative acceptance cases are maintained only in
 [Issue #137](https://github.com/ach1992/ai-server-agent/issues/137).
-After source implementation, validate on an **authorized clean disposable
-Agent host** (hDE01 only after verifying it can be freshly provisioned):
+For each release where this source feature is included, validate on an **authorized clean disposable
+Agent host**, not by replacing an occupied service:
 two Git worktrees plus a valid non-Git workdir; correct worker CWD,
 shared private worker HOME/XDG across Command/Job/Terminal/LSP/DAP and
 root/workspace mismatch rejection;

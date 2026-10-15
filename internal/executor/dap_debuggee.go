@@ -75,14 +75,35 @@ func (d *dapState) pinDebuggeeProcess(body json.RawMessage) error {
 			}
 		}
 	}
-	if !foundParent || !foundUID || parent != d.adapterPID || uint32(uid) != d.workerUID {
+	if !foundParent || !foundUID || uint32(uid) != d.workerUID {
 		return errors.New("dap_debuggee_parent_or_uid_mismatch")
 	}
-	group, err := syscall.Getpgid(pid)
-	if err != nil || group != pid {
-		return errors.New("dap_debuggee_group_identity_mismatch")
-	}
 	workspaceExecutable := filepath.Join(d.workspace, d.program)
+	if d.adapter == "rust/lldb-dap" {
+		// Unlike Go's direct Delve child, LLDB may spawn via an auxiliary
+		// launcher. Only the exact root-owned containment plus binary inode
+		// and pinned original adapter can authorize the reported process.
+		if d.containment == nil || !d.containment.containsPID(pid) {
+			return errors.New("rust_dap_debuggee_not_root_contained")
+		}
+	} else if d.adapter == "python/debugpy" || d.adapter == "javascript/js-debug" || d.adapter == "php/xdebug" {
+		// Python and Node may use an intermediate launcher, so an OS parent
+		// relation to the adapter is not a safe or correct DAP contract.
+		// The stronger kernel proof is membership in this exact private
+		// root-owned cgroup plus a pinned trusted interpreter executable.
+		if d.containment == nil || !d.containment.containsPID(pid) || d.targetInterpreter == "" {
+			return errors.New("script_dap_debuggee_not_root_contained")
+		}
+		workspaceExecutable = d.targetInterpreter
+	} else {
+		if parent != d.adapterPID {
+			return errors.New("dap_debuggee_parent_or_uid_mismatch")
+		}
+		group, err := syscall.Getpgid(pid)
+		if err != nil || group != pid {
+			return errors.New("dap_debuggee_group_identity_mismatch")
+		}
+	}
 	targetInfo, err := os.Stat(fmt.Sprintf("/proc/%d/exe", pid))
 	if err != nil {
 		return fmt.Errorf("dap_debuggee_executable_unavailable: %w", err)

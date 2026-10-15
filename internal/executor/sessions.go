@@ -76,6 +76,7 @@ type stdioSession struct {
 	terminal                *tmuxTerminalState       // consumer-specific Control Mode state; broker owns its process
 	terminalRecordPersisted bool                     // guarded by entry.mu; PENDING or ACTIVE file owns capacity
 	dap                     *dapState                // DAP stream attaches to this same process identity and broker
+	dapStdout               *dapStdoutQueue          // bounded independent stdio transport; only selected DAP adapter
 	browser                 *browserStdioState       // managed Browser consumer; never a second process broker
 	browserLease            *browserSessionAdmission // release only after verified process cleanup, before broker deletion
 }
@@ -173,6 +174,26 @@ func (s *Server) workerStdioSession(req Request, kind, workspace, binary string,
 	return s.workerProcessSession(req, kind, workspace, binary, nil, args...)
 }
 
+// Python DAP must start inside the exact executor-owned private cgroup
+// atomically, before any trusted adapter startup code can spawn descendants.
+// No other broker consumer or caller may select a cgroup or execution mode.
+func (s *Server) workerContainedDAPSession(req Request, workspace, binary string, group *dapCgroup, args ...string) (string, error) {
+	if req.Root || req.Approval || group == nil || os.Geteuid() != 0 {
+		return "", errors.New("contained DAP requires an unprivileged request on root executor")
+	}
+	return s.startProcessSessionWithOptions(req, "dap", workspace, binary, nil, "", group, true, args...)
+}
+
+// JS adapters listen on a private Unix socket instead of stdio. The same
+// original process/session broker owns the verified private cgroup; this
+// launches no root debuggee and creates no additional process broker.
+func (s *Server) workerContainedSocketDAPSession(req Request, workspace, binary string, group *dapCgroup, args ...string) (string, error) {
+	if req.Root || req.Approval || group == nil || os.Geteuid() != 0 {
+		return "", errors.New("socket DAP requires root executor-owned worker containment")
+	}
+	return s.startProcessSessionWithOptions(req, "dap", workspace, binary, nil, "", group, false, args...)
+}
+
 func (s *Server) workerProcessSession(req Request, kind, workspace, binary string, terminal *tmuxTerminalState, args ...string) (string, error) {
 	if req.Root || req.Approval {
 		return "", errors.New("worker process cannot be privileged")
@@ -225,6 +246,16 @@ func (s *Server) startProcessSession(req Request, kind, workspace, binary string
 }
 
 func (s *Server) startProcessSessionWithID(req Request, kind, workspace, binary string, terminal *tmuxTerminalState, priorID string, args ...string) (id string, err error) {
+	return s.startProcessSessionWithOptions(req, kind, workspace, binary, terminal, priorID, nil, false, args...)
+}
+
+func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, binary string, terminal *tmuxTerminalState, priorID string, containment *dapCgroup, directDAP bool, args ...string) (id string, err error) {
+	if directDAP && (kind != "dap" || terminal != nil || priorID != "" || req.Root || req.Approval) {
+		return "", errors.New("private DAP stdio is available only to fresh worker-owned DAP sessions")
+	}
+	if containment != nil && (kind != "dap" || terminal != nil || priorID != "" || req.Root || req.Approval || os.Geteuid() != 0) {
+		return "", errors.New("DAP cgroup is only valid for worker-only fresh debug sessions")
+	}
 	if s.sessions == nil || req.PrincipalID == "" || req.PrincipalClass == "" || req.Root != (terminal != nil && terminal.root) || req.Approval != req.Root {
 		return "", errors.New("session requires authenticated worker authority")
 	}
@@ -373,6 +404,18 @@ func (s *Server) startProcessSessionWithID(req Request, kind, workspace, binary 
 		cmd.Env = append(cmd.Env, "TERM=xterm-256color")
 	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pdeathsig: syscall.SIGKILL}
+	if containment != nil {
+		if containment.path == "" || containment.verified {
+			return "", errors.New("DAP private cgroup not fresh")
+		}
+		fd, openErr := unix.Open(containment.path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY, 0)
+		if openErr != nil {
+			return "", fmt.Errorf("DAP cgroup fd unavailable: %w", openErr)
+		}
+		defer unix.Close(fd)
+		cmd.SysProcAttr.UseCgroupFD = true
+		cmd.SysProcAttr.CgroupFD = fd
+	}
 	cmd.WaitDelay = processGroupTerminateGrace
 	if os.Geteuid() == 0 {
 		if req.Root || rootControlledWorkerTmux {
@@ -392,12 +435,27 @@ func (s *Server) startProcessSessionWithID(req Request, kind, workspace, binary 
 		return "", errors.New("session stdin is not a pollable pipe")
 	}
 	entry.stdin = f
-	cmd.Stdout = sessionEventWriter{entry: entry, stream: "stdout"}
+	if directDAP {
+		entry.dapStdout = newDAPStdoutQueue()
+		cmd.Stdout = entry.dapStdout
+	} else {
+		cmd.Stdout = sessionEventWriter{entry: entry, stream: "stdout"}
+	}
 	cmd.Stderr = sessionEventWriter{entry: entry, stream: "stderr"}
 	if err := cmd.Start(); err != nil {
 		_ = stdin.Close()
 		s.finishActionAudit(req, "session_create", auditMode(req.Root), kind+"\x00"+cwd+"\x00"+binary, "developer_session", start, Response{Error: err.Error()})
 		return "", err
+	}
+	if containment != nil {
+		if membershipErr := containment.verifySpawnMembership(cmd.Process.Pid); membershipErr != nil {
+			_ = stdin.Close()
+			_, stopErr := terminateProcessGroup(cmd.Process.Pid)
+			_ = cmd.Wait()
+			failure := errors.Join(membershipErr, stopErr)
+			s.finishActionAudit(req, "session_create", "worker", kind+"\x00"+cwd+"\x00"+binary, "developer_session", start, Response{Error: failure.Error()})
+			return "", failure
+		}
 	}
 	// The process is not reaped until cmd.Wait; pin its PID now so a
 	// later process-group signal can never target an unrelated, recycled
@@ -446,6 +504,9 @@ func (e *stdioSession) wait() {
 	} else {
 		witnessErr = unix.Waitid(unix.P_PIDFD, int(pin.Fd()), nil, unix.WEXITED|unix.WNOWAIT, nil)
 	}
+	if e.dapStdout != nil {
+		e.dapStdout.adapterExited()
+	}
 	e.stopMu.Lock()
 	var cleanupErr error
 	if pid > 0 && pin != nil {
@@ -458,6 +519,9 @@ func (e *stdioSession) wait() {
 	d := e.dap
 	e.mu.Unlock()
 	if d != nil {
+		if d.phpProxy != nil {
+			d.phpProxy.shutdown()
+		}
 		d.mu.Lock()
 		cleanupErr = errors.Join(cleanupErr, d.stopPinnedDebuggee())
 		if d.adapterPin != nil {
@@ -470,6 +534,9 @@ func (e *stdioSession) wait() {
 	// os/exec reap the child. The direct-child fallback is no longer valid
 	// after this point; later retries must use pidfd-only group signalling.
 	err := e.cmd.Wait()
+	if e.dapStdout != nil {
+		e.dapStdout.finish()
+	}
 	e.mu.Lock()
 	e.exited = true
 	e.completed = time.Now()
@@ -596,9 +663,15 @@ func (b *stdioSessionBroker) removeAndStop(entry *stdioSession) error {
 	entry.mu.Lock()
 	entry.closed = true
 	if entry.dap != nil {
+		if entry.dap.phpProxy != nil {
+			entry.dap.phpProxy.shutdown()
+		}
 		entry.dap.mu.Lock()
 		if entry.dap.conn != nil {
 			_ = entry.dap.conn.Close()
+		}
+		if entry.dap.parentConn != nil {
+			_ = entry.dap.parentConn.Close()
 		}
 		entry.dap.mu.Unlock()
 	}
@@ -679,15 +752,37 @@ func (b *stdioSessionBroker) removeAndStop(entry *stdioSession) error {
 	// DAP's private socket is transport runtime state only, not a second
 	// process owner. Clean it only after pidfd-pinned broker cleanup succeeds.
 	if entry.dap != nil {
-		dir := entry.dap.socketDir
-		if dir != "" {
-			socket := filepath.Join(dir, "dap.sock")
-			if err := os.Remove(socket); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("dap_socket_cleanup_uncertain: %w", err)
+		if entry.dap.phpProxy != nil {
+			if err := entry.dap.phpProxy.removeAfterStop(); err != nil {
+				return fmt.Errorf("php_dap_proxy_cleanup_uncertain: %w", err)
 			}
-			if err := os.Remove(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
-				return fmt.Errorf("dap_runtime_cleanup_uncertain: %w", err)
+		} else {
+			dir := entry.dap.socketDir
+			if dir != "" {
+				socket := filepath.Join(dir, "dap.sock")
+				if err := os.Remove(socket); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return fmt.Errorf("dap_socket_cleanup_uncertain: %w", err)
+				}
+				if err := os.Remove(dir); err != nil && !errors.Is(err, os.ErrNotExist) {
+					return fmt.Errorf("dap_runtime_cleanup_uncertain: %w", err)
+				}
 			}
+		}
+	}
+	// Chromium can recreate its user-data directory while still running.
+	// Never remove a Browser DAP profile before the original adapter AND all
+	// descendants have been proven dead by this session's cgroup.kill.
+	// The root-owned generated profile is only cleanup state, not a second
+	// process authority; retain the broker ID on any unverified removal.
+	if entry.dap != nil && entry.dap.browserProfileDir != "" {
+		entry.dap.mu.Lock()
+		proven := entry.dap.containmentProven
+		entry.dap.mu.Unlock()
+		if !proven {
+			return errors.New("javascript_browser_profile_cleanup_before_verified_cgroup")
+		}
+		if err := removeBrowserDAPProfile(entry.dap.browserProfileDir); err != nil {
+			return fmt.Errorf("javascript_browser_profile_cleanup_uncertain: %w", err)
 		}
 	}
 	// Browser has one shared-profile lease. Do not remove the last broker

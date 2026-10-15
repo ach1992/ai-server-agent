@@ -7,30 +7,32 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-type CodeGoInput struct {
+type CodeInspectInput struct {
 	Workspace   string `json:"workspace" jsonschema:"Exact absolute resolved aiworker workspace/worktree directory"`
-	Path        string `json:"path" jsonschema:"Workspace-relative regular .go source path (never a symlink or .git file)"`
+	Path        string `json:"path" jsonschema:"Workspace-relative regular .go .ts .tsx .mts .cts .js .jsx .mjs or .cjs .py .pyi .sh .bash .htm .html .css .sql .pgsql .psql .mysql or .mariadb .rs or .php source path; no symlinks or .git files"`
+	Language    string `json:"language,omitempty" jsonschema:"Optional language go, javascript, typescript, python, shell, html, css, sql, rust or php; checked against path extension (never selects project commands)"`
 	FileVersion string `json:"file_version" jsonschema:"Required exact file_version returned by worker workspace_stat/read. Semantic results fail when source changes."`
+	SQLDialect  string `json:"sql_dialect,omitempty" jsonschema:"Required for SQL files: explicit postgres, mysql or mariadb (MariaDB uses MySQL syntax subset); no implicit connections or project dialect fallback"`
 	Line        int    `json:"line,omitempty" jsonschema:"Zero-based source line for definition/references"`
 	Character   int    `json:"character,omitempty" jsonschema:"Zero-based UTF-16 character index for definition/references"`
 }
 
-func (s *Server) registerGoCodeTools() {
+func (s *Server) registerCodeTools() {
 	tools := []struct{ suffix, description string }{
-		{"definition", "Resolve a Go symbol definition using actual gopls LSP and a version-pinned aiworker source read"},
-		{"references", "Retrieve bounded Go symbol references through gopls; output is an LSP JSON result, never a file mutation"},
-		{"symbols", "Retrieve bounded Go document symbols via gopls semantic analysis"},
-		{"diagnostics", "Request bounded Go document diagnostics via gopls; unsupported pull-diagnostics must fail explicitly"},
+		{"definition", "Resolve a source symbol definition using the trusted Go, JS/TS, Python, Shell, HTML/CSS, SQL, Rust or PHP LSP profile and exact aiworker file_version"},
+		{"references", "Retrieve bounded source references through trusted Go, JS/TS, Python, Shell, HTML/CSS, SQL, Rust or PHP LSP; output never mutates files"},
+		{"symbols", "Retrieve bounded Go, JavaScript/TypeScript, Python, Shell, HTML/CSS, SQL, Rust or PHP document symbols via real language semantics"},
+		{"diagnostics", "Retrieve bounded Go, JavaScript/TypeScript, Python, Shell, HTML/CSS, SQL, Rust or PHP LSP diagnostics, negotiated as push or pull"},
 	}
 	for _, tool := range tools {
 		method := tool.suffix
 		mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-			Name: "code_" + method, Description: tool.description + ". Requires optional root-owned /usr/bin/gopls or /usr/local/bin/gopls and a configured Go toolchain. Does not auto-install tooling. Results include exact file_version and a bounded JSON response; stale version is rejected.",
+			Name: "code_" + method, Description: tool.description + ". Supported now: Go with optional trusted gopls; JavaScript/TypeScript with optional pinned native TypeScript 7.0.2; Python with optional pinned native ty 0.0.87; Bash/POSIX Shell with optional pinned Bash Language Server 5.8.1 + ShellCheck 0.11.0; HTML/CSS with optional pinned VS Code language services 4.10.0; SQL with optional pinned SQLLens 0.5.0, explicit dialect and no plugin/database access; PHP with optional pinned Phpactor 2026.10.07.0 and no Composer project execution. No implicit installs, scripts or project commands. Requires exact file_version; rejects changed sources and unsupported adapter capabilities.",
 			Annotations: annotations(true, false, true, false),
-		}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, input CodeGoInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+		}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, input CodeInspectInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 			resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{
 				Action: "code_inspect", CodeMethod: method, Workspace: input.Workspace, Path: input.Path,
-				FileVersion: input.FileVersion, Line: input.Line, Character: input.Character,
+				FileVersion: input.FileVersion, Language: input.Language, SQLDialect: input.SQLDialect, Line: input.Line, Character: input.Character,
 			})
 			if err != nil {
 				return executorTransportErrorResult(err)

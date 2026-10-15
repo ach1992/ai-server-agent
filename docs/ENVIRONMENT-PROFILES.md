@@ -28,7 +28,7 @@ curl -fsSL "https://raw.githubusercontent.com/ach1992/ai-server-agent/${RELEASE_
   AI_SERVER_AGENT_SERVER_LABEL='QA Server' bash
 ```
 
-Replace `RELEASE_TAG` with the appropriate **published immutable Stable** tag when the profile feature ships. The existing `v0.1.12` release does **not** include profiles; this example is not an instruction to use its bootstrap for this feature. The verified release installer continues to validate the values. For direct source installation, pass the same settings to the privileged `install.sh` process.
+Replace `RELEASE_TAG` with a **published immutable Stable** tag that includes the feature; the older `v0.1.12` does **not** include profiles. Never substitute a mutable branch or unreleased candidate. The verified release installer continues to validate the values. For direct source installation, pass the same settings to the privileged `install.sh` process.
 
 The existing Connection Mode (local/public/Cloudflare) is an independent setup choice. Do not infer the Profile from the hostname or network address.
 
@@ -57,4 +57,4 @@ Some clients may not show or obey server-provided instructions; inspect the auth
 
 ## Feature delivery
 
-The feature is implemented in the current `main` source, but published Stable `v0.1.12` does **not** include it. The owning [Issue #143](https://github.com/ach1992/ai-server-agent/issues/143) remains open for installed and direct-client acceptance. Inspect the **actual installed release** and [GitHub Releases](https://github.com/ach1992/ai-server-agent/releases) before assuming these commands are available. The durable product-level decision is in the Owner-approved [Project Specification](PROJECT-SPEC.md#10-environment-purpose-profiles).
+The feature was implemented in source after immutable Stable `v0.1.12`; it becomes installable only through a subsequently published supporting release. The owning [Issue #143](https://github.com/ach1992/ai-server-agent/issues/143) separately tracks installed and client-side acceptance evidence. Inspect the **actual installed release** and [GitHub Releases](https://github.com/ach1992/ai-server-agent/releases) before assuming these commands are available. The durable product-level decision is in the Owner-approved [Project Specification](PROJECT-SPEC.md#10-environment-purpose-profiles).

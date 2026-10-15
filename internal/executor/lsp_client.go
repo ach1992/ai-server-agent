@@ -30,10 +30,19 @@ type lspWire struct {
 	cursor    uint64
 	input     []byte
 	nextID    int
+	// An LSP notification is asynchronous: retain only the latest bounded
+	// diagnostics for documents explicitly opened by this request. Never
+	// reuse diagnostics between principals, worktrees or adapter sessions.
+	opened                  map[string]int
+	published               map[string]json.RawMessage
+	staticConfiguration     map[string]any // fixed adapter-owned values, never project data
+	initialSyntheticVersion map[string]int // only Rust in-memory diagnostic replay; reject old reports
 }
 
 func newLSPWire(server *Server, owner Request, sessionID string) *lspWire {
-	return &lspWire{server: server, owner: owner, sessionID: sessionID}
+	return &lspWire{server: server, owner: owner, sessionID: sessionID,
+		opened: make(map[string]int), published: make(map[string]json.RawMessage),
+		initialSyntheticVersion: make(map[string]int)}
 }
 
 func (w *lspWire) send(v any) error {
@@ -122,6 +131,11 @@ func (w *lspWire) next(ctx context.Context) (lspPacket, error) {
 				return lspPacket{}, errors.New("lsp_invalid_jsonrpc_frame")
 			}
 			w.input = w.input[consumed:]
+			if packet.Method == "textDocument/publishDiagnostics" {
+				if err := w.recordDiagnostics(packet); err != nil {
+					return lspPacket{}, err
+				}
+			}
 			return packet, nil
 		}
 		state, err := w.server.sessions.read(w.owner, w.sessionID, w.cursor, maxStdioOutputBytes)
@@ -164,6 +178,11 @@ func (w *lspWire) call(ctx context.Context, method string, params any) (json.Raw
 	for {
 		packet, err := w.next(ctx)
 		if err != nil {
+			// A request may already have changed language-server state. Best
+			// effort LSP cancellation precedes broker teardown on deadline.
+			if ctx.Err() != nil {
+				_ = w.notify("$/cancelRequest", map[string]any{"id": id})
+			}
 			return nil, err
 		}
 		if packet.Method != "" && len(packet.ID) != 0 {
@@ -192,13 +211,22 @@ func (w *lspWire) replyToServer(packet lspPacket) error {
 	var result any
 	if packet.Method == "workspace/configuration" {
 		var params struct {
-			Items []json.RawMessage `json:"items"`
+			Items []struct {
+				Section string `json:"section"`
+			} `json:"items"`
 		}
-		if err := json.Unmarshal(packet.Params, &params); err != nil {
+		if err := json.Unmarshal(packet.Params, &params); err != nil ||
+			len(params.Items) > 32 {
 			return errors.New("lsp_invalid_configuration_request")
 		}
-		result = make([]any, len(params.Items))
-	} else if packet.Method != "window/workDoneProgress/create" && packet.Method != "client/registerCapability" {
+		values := make([]any, len(params.Items))
+		for i, item := range params.Items {
+			// Only a predeclared read-only adapter profile may supply a setting.
+			// Unknown/unrecognized requests never receive caller/project config.
+			values[i] = w.staticConfiguration[item.Section]
+		}
+		result = values
+	} else if packet.Method != "window/workDoneProgress/create" {
 		return w.send(map[string]any{
 			"jsonrpc": "2.0", "id": packet.ID,
 			"error": map[string]any{"code": -32601, "message": "Method not found"},
@@ -207,8 +235,213 @@ func (w *lspWire) replyToServer(packet lspPacket) error {
 	return w.send(map[string]any{"jsonrpc": "2.0", "id": packet.ID, "result": result})
 }
 
+// recordDiagnostics does not accept server-invented source versions or
+// unopened/out-of-scope document URIs. The caller still proves the worker
+// file_version after receiving the result, including for versionless push.
+func (w *lspWire) recordDiagnostics(packet lspPacket) error {
+	if len(packet.ID) != 0 || len(packet.Params) > 16<<10 {
+		return errors.New("lsp_invalid_diagnostics_notification")
+	}
+	var payload struct {
+		URI         string          `json:"uri"`
+		Version     *int            `json:"version"`
+		Diagnostics json.RawMessage `json:"diagnostics"`
+	}
+	if json.Unmarshal(packet.Params, &payload) != nil {
+		return errors.New("lsp_invalid_diagnostics_notification")
+	}
+	openedVersion, ok := w.opened[payload.URI]
+	if !ok {
+		return nil // Other files are not read authority or caller results.
+	}
+	if payload.Version != nil && *payload.Version != openedVersion {
+		if original, ok := w.initialSyntheticVersion[payload.URI]; ok && *payload.Version == original {
+			// Rust diagnostic-only sessions open an empty in-memory document
+			// and immediately replace it with the exact worker-read source.
+			// A queued pre-replacement report is never current evidence.
+			return nil
+		}
+		return errors.New("lsp_diagnostics_document_version_mismatch")
+	}
+	if _, synthetic := w.initialSyntheticVersion[payload.URI]; synthetic && payload.Version == nil {
+		return errors.New("lsp_rust_diagnostics_version_required")
+	}
+	if len(payload.Diagnostics) == 0 || len(payload.Diagnostics) > 16<<10 ||
+		payload.Diagnostics[0] != '[' || !json.Valid(payload.Diagnostics) {
+		return errors.New("lsp_invalid_diagnostics_items")
+	}
+	report, err := json.Marshal(map[string]any{"kind": "full", "items": payload.Diagnostics})
+	if err != nil || len(report) > 16<<10 {
+		return errors.New("lsp_diagnostics_result_too_large")
+	}
+	w.published[payload.URI] = report
+	return nil
+}
+
+// waitPublishedDiagnostics handles server-initiated requests while waiting.
+// A missing notification is a failure, never an invented clean result.
+func (w *lspWire) waitPublishedDiagnostics(ctx context.Context, uri string) (json.RawMessage, error) {
+	for {
+		if report, ok := w.published[uri]; ok {
+			return report, nil
+		}
+		packet, err := w.next(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if packet.Method != "" && len(packet.ID) != 0 {
+			if err := w.replyToServer(packet); err != nil {
+				return nil, err
+			}
+			continue
+		}
+		if packet.Method == "" {
+			return nil, errors.New("lsp_unexpected_diagnostics_response")
+		}
+	}
+}
+
+// Phpactor emits interim empty diagnostics before its parser finishes.
+// Wait the fixed, adapter-specific debounce period and return only a real
+// version-correlated notification; never fabricate an error-free result.
+func (w *lspWire) waitPublishedDiagnosticsSettled(ctx context.Context, uri string, window time.Duration) (json.RawMessage, error) {
+	if window <= 0 || window > 3*time.Second {
+		return nil, errors.New("lsp_invalid_diagnostic_settle_interval")
+	}
+	until := time.Now().Add(window)
+	for {
+		remaining := time.Until(until)
+		if remaining <= 0 {
+			if report, ok := w.published[uri]; ok {
+				return report, nil
+			}
+			return nil, errors.New("lsp_diagnostics_missing_after_settle")
+		}
+		if remaining > 200*time.Millisecond {
+			remaining = 200 * time.Millisecond
+		}
+		readCtx, cancel := context.WithTimeout(ctx, remaining)
+		packet, err := w.next(readCtx)
+		cancel()
+		if errors.Is(err, context.DeadlineExceeded) && ctx.Err() == nil {
+			continue
+		}
+		if err != nil {
+			return nil, err
+		}
+		if packet.Method != "" && len(packet.ID) != 0 {
+			if err := w.replyToServer(packet); err != nil {
+				return nil, err
+			}
+		} else if packet.Method == "" {
+			return nil, errors.New("lsp_unexpected_diagnostics_response")
+		}
+	}
+}
+
+// Use UTF-16 as the sole advertised position encoding until conversions
+// have substantive adapter fixtures; reject a server's incompatible choice.
+type lspServerCapabilities struct {
+	PositionEncoding       string          `json:"positionEncoding"`
+	DiagnosticProvider     json.RawMessage `json:"diagnosticProvider"`
+	DefinitionProvider     json.RawMessage `json:"definitionProvider"`
+	ReferencesProvider     json.RawMessage `json:"referencesProvider"`
+	DocumentSymbolProvider json.RawMessage `json:"documentSymbolProvider"`
+}
+
+func lspProviderEnabled(provider json.RawMessage) bool {
+	value := strings.TrimSpace(string(provider))
+	return value == "true" || strings.HasPrefix(value, "{")
+}
+
+func lspProviderValid(provider json.RawMessage) bool {
+	value := strings.TrimSpace(string(provider))
+	return value == "" || value == "null" || value == "false" || lspProviderEnabled(provider)
+}
+
+func (c lspServerCapabilities) supports(method string) bool {
+	switch method {
+	case "definition":
+		return lspProviderEnabled(c.DefinitionProvider)
+	case "references":
+		return lspProviderEnabled(c.ReferencesProvider)
+	case "symbols":
+		return lspProviderEnabled(c.DocumentSymbolProvider)
+	case "diagnostics":
+		return true // push-only servers do not declare diagnosticProvider.
+	default:
+		return false
+	}
+}
+
+func parseLSPServerCapabilities(raw json.RawMessage) (lspServerCapabilities, error) {
+	var reply struct {
+		Capabilities lspServerCapabilities `json:"capabilities"`
+	}
+	if err := json.Unmarshal(raw, &reply); err != nil {
+		return lspServerCapabilities{}, err
+	}
+	if reply.Capabilities.PositionEncoding != "" && reply.Capabilities.PositionEncoding != "utf-16" {
+		return lspServerCapabilities{}, errors.New("lsp_unsupported_position_encoding")
+	}
+	for _, provider := range []json.RawMessage{
+		reply.Capabilities.DiagnosticProvider, reply.Capabilities.DefinitionProvider,
+		reply.Capabilities.ReferencesProvider, reply.Capabilities.DocumentSymbolProvider,
+	} {
+		if !lspProviderValid(provider) {
+			return lspServerCapabilities{}, errors.New("lsp_invalid_capability_provider")
+		}
+	}
+	return reply.Capabilities, nil
+}
+
+func (c lspServerCapabilities) pullDiagnostics() bool {
+	return lspProviderEnabled(c.DiagnosticProvider)
+}
+
 func (w *lspWire) notify(method string, params any) error {
-	return w.send(map[string]any{"jsonrpc": "2.0", "method": method, "params": params})
+	if err := w.send(map[string]any{"jsonrpc": "2.0", "method": method, "params": params}); err != nil {
+		return err
+	}
+	if method == "textDocument/didOpen" {
+		var opened struct {
+			TextDocument struct {
+				URI     string `json:"uri"`
+				Version int    `json:"version"`
+			} `json:"textDocument"`
+		}
+		value, err := json.Marshal(params)
+		if err != nil || json.Unmarshal(value, &opened) != nil ||
+			opened.TextDocument.URI == "" || opened.TextDocument.Version <= 0 ||
+			len(w.opened) >= codeMaxTargetFiles+1 {
+			return errors.New("lsp_invalid_document_open")
+		}
+		w.opened[opened.TextDocument.URI] = opened.TextDocument.Version
+	}
+	return nil
+}
+
+// replaceSyntheticDiagnosticSource updates only the private language server's
+// in-memory document. It NEVER writes the user's workspace. The first open
+// uses a known-empty buffer, then exactly the worker-authorized source bytes
+// are applied as version 2. Some pinned adapters (Rust and PHP) require a
+// didChange notification for useful diagnostics even on the first request.
+func (w *lspWire) replaceSyntheticDiagnosticSource(uri, source string) error {
+	current, ok := w.opened[uri]
+	if !ok || current != 1 || len(source) > codeMaxDocumentBytes || !utf8.ValidString(source) {
+		return errors.New("rust_lsp_invalid_synthetic_change")
+	}
+	params := map[string]any{
+		"textDocument":   map[string]any{"uri": uri, "version": 2},
+		"contentChanges": []map[string]string{{"text": source}},
+	}
+	if err := w.send(map[string]any{"jsonrpc": "2.0", "method": "textDocument/didChange", "params": params}); err != nil {
+		return err
+	}
+	w.initialSyntheticVersion[uri] = current
+	w.opened[uri] = 2
+	delete(w.published, uri)
+	return nil
 }
 
 // workerGoDefinition is the first bounded, read-only consumer of the shared
@@ -266,4 +499,54 @@ func (s *Server) workerGoDefinition(ctx context.Context, req Request, goplsPath,
 		"textDocument": map[string]string{"uri": uri},
 		"position":     map[string]int{"line": line, "character": character},
 	})
+}
+
+// rust-analyzer 2026-10-12 may return false empty definition/references
+// until its explicit Rust crate graph has loaded. A valid Rust file can
+// receive no initial publishDiagnostics; instead use the immutable
+// adapter's own non-mutating status request as the bounded readiness gate.
+func (w *lspWire) waitRustWorkspaceReady(ctx context.Context) error {
+	lastState := "awaiting_status"
+	for {
+		raw, err := w.call(ctx, "rust-analyzer/analyzerStatus", map[string]any{})
+		if err != nil {
+			if ctx.Err() != nil {
+				return fmt.Errorf("rust_lsp_status_%s: %w", lastState, err)
+			}
+			return err
+		}
+		if err != nil {
+			return err
+		}
+		var status string
+		if err := json.Unmarshal(raw, &status); err != nil {
+			return errors.New("rust_lsp_invalid_workspace_status")
+		}
+		// The 2026-10-12 protocol response has a newline between this
+		// heading and its loaded-workspace line, not a space.
+		if rustWorkspaceStatusReady(status) {
+			return nil
+		}
+		if strings.Contains(status, "No workspaces") {
+			lastState = "no_workspaces"
+		} else if status == "" {
+			lastState = "empty"
+		} else {
+			lastState = "loading"
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("rust_lsp_status_%s: %w", lastState, ctx.Err())
+		case <-time.After(60 * time.Millisecond):
+		}
+	}
+}
+
+// Match only positively loaded workspaces, not an empty/transition reply.
+// The pinned 2026-10-12 analyzer uses a two-line "Workspaces: \nLoaded"
+// status; treating it as one line caused a hard semantic timeout.
+func rustWorkspaceStatusReady(status string) bool {
+	return (strings.Contains(status, "Workspaces:\nLoaded ") ||
+		strings.Contains(status, "Workspaces: Loaded ")) &&
+		!strings.Contains(status, "No workspaces")
 }

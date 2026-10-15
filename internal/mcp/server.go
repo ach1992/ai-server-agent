@@ -462,7 +462,7 @@ func (s *Server) registerTools() {
 	s.registerRepositoryEnvironmentTool()
 	s.registerWorkspaceFileTools()
 	s.registerTerminalTools()
-	s.registerGoCodeTools()
+	s.registerCodeTools()
 	s.registerDebugTools()
 	s.registerRepositoryTools()
 	s.registerWorkspaceSearchTool()

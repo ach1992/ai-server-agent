@@ -82,6 +82,11 @@ func workerTextSearch(op workspaceFileOperation) Response {
 		limit = defaultWorkspaceSearchLimit
 	}
 	args := []string{"--json", "--no-config", "--no-messages", "--no-follow", "--color=never"}
+	// Internal SQL schema navigation must scan hidden migration directories;
+	// ordinary caller-initiated text search keeps its previous behavior.
+	if op.SearchHidden {
+		args = append(args, "--hidden")
+	}
 	if op.Literal {
 		args = append(args, "--fixed-strings")
 	}

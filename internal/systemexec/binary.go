@@ -50,3 +50,38 @@ func First(paths ...string) string {
 	}
 	return ""
 }
+
+// TrustedStaticFile applies the same root-owned and no-symlinks path policy
+// to read-only resources that should NOT have an executable permission bit.
+// This includes language adapter archives and compiler standard-library
+// sources. Content integrity checks remain adapter-specific and mandatory.
+// should NOT be executable. Its entire path is still root-owned, non-writable,
+// symlink-free and readable.
+func TrustedStaticFile(path string) bool {
+	if path == "" || !filepath.IsAbs(path) || filepath.Clean(path) != path {
+		return false
+	}
+	current := string(filepath.Separator)
+	pieces := strings.Split(strings.TrimPrefix(path, current), current)
+	for i, part := range pieces {
+		if part == "" || part == "." || part == ".." {
+			return false
+		}
+		current = filepath.Join(current, part)
+		info, err := os.Lstat(current)
+		if err != nil || info.Mode()&os.ModeSymlink != 0 || info.Mode().Perm()&0022 != 0 {
+			return false
+		}
+		st, ok := info.Sys().(*syscall.Stat_t)
+		if !ok || st.Uid != 0 {
+			return false
+		}
+		if i == len(pieces)-1 {
+			return info.Mode().IsRegular() && info.Mode().Perm()&0004 != 0
+		}
+		if !info.IsDir() {
+			return false
+		}
+	}
+	return false
+}

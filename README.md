@@ -20,19 +20,19 @@ The Agent itself does **not** require a web server, database, Docker, a hosting 
 
 ## Install
 
-The currently documented authenticated bootstrap for the latest **published immutable Stable release** is:
+To install the latest **published immutable Stable release**, use the verified bootstrap anchored to previously published immutable tag `v0.1.12` (the anchor does **not** fix which Stable version will be installed):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.12/scripts/install-stable.sh | bash
 ```
 
-To install **exactly `v0.1.12`** instead of resolving the latest published Stable:
+To install the **older, specifically pinned `v0.1.12`** rather than the latest Stable, use:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.12/scripts/install-stable.sh | bash -s -- v0.1.12
 ```
 
-This bootstrap authenticates the selected release installer before privileged execution and installs verified release assets. **GitHub Releases is authoritative for the latest release**; the pinned bootstrap tag above is the currently documented trust anchor, not a claim that `main` is stable.
+This bootstrap authenticates the selected release installer before privileged execution and installs verified release assets. **GitHub Releases is authoritative for current Stable identity**; the pinned `v0.1.12` bootstrap is an immutable trust anchor, not a claim that `v0.1.12` or `main` is the latest Stable. Update the anchor only after verifying a newer published immutable tag.
 
 For an exact-version install, troubleshooting, advanced or source installations and supply-chain verification, use the [installation guide](docs/OPERATIONS.md#install-the-latest-stable-release).
 
@@ -65,8 +65,8 @@ For credentials, Cloudflare, local/private mode, manual TLS, safe uninstall, pur
 | Workspace and Git | Repository/worktree identity, versioned worker file/search/edit/transfer, normal Git CLI |
 | Long-running work | Persistent jobs with status and ranged output; optional interactive Terminal |
 | Browser and testing | Optional Playwright/Chromium, structured E2E steps, controlled Browser sessions |
-| Code intelligence | Go LSP and optional language-specific adapters when **integrated and installed** |
-| Debugging | Optional DAP sessions with adapter- and host-dependent readiness |
+| Code intelligence | Go/gopls plus optional, separately validated PHP, JS/TS, Python, Shell, Rust, HTML/CSS and PostgreSQL/MySQL/MariaDB SQL source analysis; not every method or runtime is available on every host |
+| Debugging | Go/Delve and optional contained PHP CLI, Rust prebuilt, Python, Node/precompiled TypeScript and local HTML Browser DAP; never imply PHP HTTP-service, Shell DAP, extension-host or remote attach support |
 | Environment | Authenticated Agent/environment identity, available tools, host footprint and warnings |
 
 Not every source-branch capability is in the current Stable release or ready on every OS/kernel/client. Use `agent_environment`, the applicable tool status and actual installed version rather than inferring availability from this table.
@@ -75,14 +75,14 @@ Read the [Tool Reference](docs/TOOL-REFERENCE.md) for tools, limits, examples, a
 
 ## Development and Validation server roles
 
-The current `main` source implements two **Environment Purpose Profiles** (not included in published Stable `v0.1.12`):
+The implementation includes two **Environment Purpose Profiles**, available only in installed releases/builds that actually include this feature (the earlier immutable `v0.1.12` did not):
 
 - **Development:** preferred for source/Git changes, builds, debugging and routine project development.
 - **Validation:** preferred for candidate installation, real E2E/integration tests, reproduction and acceptance evidence.
 
 The profiles label and guide compatible clients; **they are not access-control tiers or separate Agent binaries**. Both preserve the same MCP/root/worker tools. GitHub authentication and optional tool installation remain separate operator decisions.
 
-**Delivery status:** implemented on `main`, but **not shipped in Stable `v0.1.12`**. Use profile management commands only after installing a version that includes this feature; an existing installation does not gain them by merging source. Do not confuse these purposes with `local/public` connection modes. See [Profile setup, management, and client discovery](docs/ENVIRONMENT-PROFILES.md), the [Project Specification](docs/PROJECT-SPEC.md#10-environment-purpose-profiles), and [Issue #143](https://github.com/ach1992/ai-server-agent/issues/143) for installed/client acceptance.
+**Delivery status:** the feature was added after `v0.1.12`; consult [GitHub Releases](https://github.com/ach1992/ai-server-agent/releases) and your installed build before using profile commands. Source integration alone does not upgrade an installed Agent. Do not confuse these purposes with `local/public` connection modes. See [Profile setup, management, and client discovery](docs/ENVIRONMENT-PROFILES.md), the [Project Specification](docs/PROJECT-SPEC.md#10-environment-purpose-profiles), and [Issue #143](https://github.com/ach1992/ai-server-agent/issues/143) for installed/client acceptance.
 
 ## Security and resource use
 
@@ -95,7 +95,7 @@ Resource budgets, timeouts and concurrency are bounded to protect host reliabili
 - **[PROJECT-SPEC.md](docs/PROJECT-SPEC.md):** canonical purpose, scope, success criteria and durable principles
 - **[ARCHITECTURE.md](docs/ARCHITECTURE.md):** trust boundaries, host resources, runtime architecture, install/update contracts
 - **[DEVELOPER-RUNTIME.md](docs/DEVELOPER-RUNTIME.md):** detailed accepted capability design and future architecture
-- **[ENVIRONMENT-PROFILES.md](docs/ENVIRONMENT-PROFILES.md):** Development/Validation purpose, install options, management and client metadata (source-only until released)
+- **[ENVIRONMENT-PROFILES.md](docs/ENVIRONMENT-PROFILES.md):** Development/Validation purpose, install options, management and client metadata (requires an installed supporting release)
 - **[TESTING.md](docs/TESTING.md):** validation strategy and evidence expectations
 - **[OPERATIONS.md](docs/OPERATIONS.md):** full install, connectivity, management, updates and repair instructions
 - **[TOOL-REFERENCE.md](docs/TOOL-REFERENCE.md):** MCP tool and feature details

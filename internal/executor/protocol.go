@@ -42,8 +42,10 @@ type Request struct {
 	VerifyRemote     bool                `json:"verify_remote,omitempty"`
 	Disposable       bool                `json:"disposable,omitempty"`
 	CodeMethod       string              `json:"code_method,omitempty"`
+	SQLDialect       string              `json:"sql_dialect,omitempty"`
 	DebugMethod      string              `json:"debug_method,omitempty"`
 	DebugProgram     string              `json:"debug_program,omitempty"`
+	DebugMode        string              `json:"debug_mode,omitempty"`
 	DebugLines       []int               `json:"debug_lines,omitempty"`
 	DebugThreadID    int                 `json:"debug_thread_id,omitempty"`
 	DebugFrameID     int                 `json:"debug_frame_id,omitempty"`
@@ -60,6 +62,7 @@ type Request struct {
 	Globs            []string            `json:"globs,omitempty"`
 	SearchLimit      int                 `json:"search_limit,omitempty"`
 	Literal          bool                `json:"literal,omitempty"`
+	SearchHidden     bool                `json:"search_hidden,omitempty"`
 	WorkspaceEdits   []WorkspaceFileEdit `json:"workspace_edits,omitempty"`
 	TransferKey      string              `json:"transfer_key,omitempty"`
 	TransferOp       string              `json:"transfer_op,omitempty"`

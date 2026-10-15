@@ -27,6 +27,83 @@ func (s *Server) debugAction(ctx context.Context, req Request) Response {
 	}
 	switch req.Action {
 	case "debug_adapter_status":
+		if req.Language == "javascript" || req.Language == "typescript" {
+			_, _, trustErr := systemexec.JavaScriptDAP()
+			available := trustErr == nil
+			if s.javascriptDAPNode != "" && s.javascriptDAPCLI != "" {
+				available = true
+			}
+			modes := []string{"node"}
+			if req.Language == "javascript" {
+				_, browserErr := systemexec.JavaScriptBrowser()
+				if browserErr == nil || s.javascriptDAPBrowserBinary != "" {
+					modes = append(modes, "browser")
+				}
+			}
+			body, _ := json.Marshal(map[string]any{
+				"adapter": "javascript/js-debug", "installed": available,
+				"modes": modes, "attach_supported": false,
+				"precompiled_typescript_source_maps": req.Language == "typescript",
+				"privileged":                         false, "provisioning": "optional_root_owned_pinned_complete_js_debug",
+				"containment": "executor_owned_private_cgroup_v2_required",
+			})
+			state := "unavailable"
+			if available {
+				state = "installed_containment_unverified"
+			}
+			return Response{OK: true, Status: state, Output: string(body), OutputEncoding: "json", BytesSeen: int64(len(body)), BytesReturned: int64(len(body))}
+		}
+		if req.Language == "python" {
+			_, _, err := systemexec.PythonDebugpy()
+			available := err == nil
+			if s.pythonDebugpyBinary != "" && s.pythonDebugpyModules != "" {
+				available = true
+			}
+			payload := map[string]any{"adapter": "python/debugpy", "installed": available,
+				"modes": []string{"script", "module", "test"}, "attach_supported": false,
+				"privileged": false, "provisioning": "optional_root_owned_pinned_wheel_and_interpreter",
+				"containment": "root_owned_cgroup_v2_required_before_launch"}
+			b, _ := json.Marshal(payload)
+			status := "unavailable"
+			if available {
+				status = "installed_containment_unverified"
+			}
+			return Response{OK: true, Status: status, Output: string(b), OutputEncoding: "json", BytesReturned: int64(len(b)), BytesSeen: int64(len(b))}
+		}
+		if req.Language == "php" {
+			_, _, _, _, trustErr := systemexec.PHPDAP()
+			available := trustErr == nil || (s.phpDAPNodeBinary != "" && s.phpDAPCLIBinary != "" && s.phpDAPNativeBinary != "" && s.phpDAPXdebugModule != "")
+			payload, _ := json.Marshal(map[string]any{
+				"adapter": "php/xdebug", "installed": available,
+				"modes": []string{"cli"}, "attach_supported": false,
+				"http_request_mode": "not_yet_verified", "privileged": false,
+				"transport":   "single_verified_unix_dbgp_peer",
+				"containment": "executor_owned_private_cgroup_v2_required",
+			})
+			status := "unavailable"
+			if available {
+				status = "installed_containment_unverified"
+			}
+			return Response{OK: true, Status: status, Output: string(payload), OutputEncoding: "json", BytesSeen: int64(len(payload)), BytesReturned: int64(len(payload))}
+		}
+		if req.Language == "rust" {
+			_, trustErr := systemexec.RustLLDBDAP()
+			available := trustErr == nil || s.rustLLDBDAPBinary != ""
+			body, _ := json.Marshal(map[string]any{
+				"adapter": "rust/lldb-dap", "installed": available,
+				"modes": []string{"exec"}, "attach_supported": false,
+				"privileged": false, "provisioning": "optional_verified_LLDB19_native_distribution",
+				"containment": "executor_owned_private_cgroup_v2_required",
+			})
+			status := "unavailable"
+			if available {
+				status = "installed_containment_unverified"
+			}
+			return Response{OK: true, Status: status, Output: string(body), OutputEncoding: "json", BytesSeen: int64(len(body)), BytesReturned: int64(len(body))}
+		}
+		if req.Language != "" && req.Language != "go" {
+			return fileError("unsupported_debug_language", "validation", errors.New("debugger readiness supports go, rust, php, python, javascript and typescript only"))
+		}
 		_, err := s.debugBinary()
 		available := err == nil
 		detail := map[string]any{"adapter": "go/delve", "installed": available, "modes": []string{"exec"}, "attach_supported": false, "privileged": false, "provisioning": "optional_admin_owned_binary", "containment": "root_owned_cgroup_v2_required_before_launch"}
@@ -160,6 +237,21 @@ func peerIsWorkerDelve(conn *net.UnixConn, uid uint32, pid int) bool {
 }
 
 func (s *Server) debugLaunch(ctx context.Context, req Request) (response Response) {
+	if req.Language == "javascript" || req.Language == "typescript" {
+		return s.debugLaunchNode(ctx, req)
+	}
+	if req.Language == "python" {
+		return s.debugLaunchPython(ctx, req)
+	}
+	if req.Language == "rust" {
+		return s.debugLaunchRust(ctx, req)
+	}
+	if req.Language == "php" {
+		return s.debugLaunchPHP(ctx, req)
+	}
+	if (req.Language != "" && req.Language != "go") || (req.DebugMode != "" && req.DebugMode != "exec") {
+		return fileError("unsupported_debug_language_or_mode", "validation", errors.New("supported Go debug mode is exec; Python requires explicit trusted script/module/test mode"))
+	}
 	if req.Workspace == "" || req.DebugProgram == "" || req.FileVersion == "" {
 		return fileError("debug_identity_required", "validation", errors.New("workspace, executable and exact executable file_version are required"))
 	}
@@ -468,11 +560,28 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 			return fileError("debug_already_configured", "validation", errors.New("setBreakpoints belongs before configurationDone in this v1 adapter"))
 		}
 		relative, err := safeWorkspaceRelativeFile(req.Path)
-		if err != nil || filepath.Ext(relative) != ".go" || len(req.DebugLines) > 32 || req.FileVersion == "" {
-			return fileError("debug_invalid_breakpoints", "validation", errors.New("source .go file_version and <=32 breakpoint lines required"))
+		extension := ".go"
+		if d.adapter == "python/debugpy" {
+			extension = ".py"
+		}
+		if d.adapter == "rust/lldb-dap" {
+			extension = ".rs"
+		}
+		if d.adapter == "php/xdebug" {
+			extension = ".php"
+		}
+		sourceExt := filepath.Ext(relative)
+		validJS := d.adapter == "javascript/js-debug" && (sourceExt == ".js" || sourceExt == ".mjs" || sourceExt == ".cjs" || (d.sourceLanguage == "typescript" && (sourceExt == ".ts" || sourceExt == ".tsx")))
+		if err != nil || (d.adapter == "javascript/js-debug" && !validJS) ||
+			(d.adapter != "javascript/js-debug" && sourceExt != extension) || len(req.DebugLines) > 32 || req.FileVersion == "" {
+			return fileError("debug_invalid_breakpoints", "validation", errors.New("language-matching source file_version and <=32 breakpoint lines required"))
+		}
+		if d.adapter == "javascript/js-debug" && d.sourceLanguage == "typescript" &&
+			(sourceExt == ".ts" || sourceExt == ".tsx") && d.sourceVersions[relative] == "" {
+			return fileError("typescript_dap_unmapped_source", "validation", errors.New("TypeScript breakpoint source must be an original file in the pinned source map"))
 		}
 		if d.sourceVersions[relative] == "" && len(d.sourceVersions) >= 16 {
-			return fileError("debug_source_limit", "resource", errors.New("at most 16 Go source files may have breakpoints in one debug session"))
+			return fileError("debug_source_limit", "resource", errors.New("at most 16 source files may have breakpoints in one debug session"))
 		}
 		for _, line := range req.DebugLines {
 			if line < 1 || line > 1000000 {
@@ -500,12 +609,22 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 		if d.configured {
 			return fileError("debug_already_configured", "validation", errors.New("debug configuration already completed"))
 		}
+		// js-debug's Node child does not reliably emit a DAP "process"
+		// notification. Its safety proof is the original adapter pidfd,
+		// authenticated two AF_UNIX connections and the kernel-verified
+		// private cgroup. Require that proof before configurationDone
+		// resumes any user code; never mistake missing process-event
+		// metadata for permission to launch without containment.
+		if d.adapter == "javascript/js-debug" && !d.nodeContainmentReady() {
+			return fileError("javascript_dap_containment_unverified", "security",
+				errors.New("Node debugger has no live pinned adapter and private cgroup; configuration denied"))
+		}
 	case "continue", "pause", "next", "stepIn", "stepOut", "stackTrace", "exceptionInfo":
 		if !d.configured {
 			return fileError("debug_not_configured", "state", errors.New("complete breakpoints/configure first"))
 		}
-		if req.DebugThreadID < 1 {
-			return fileError("debug_thread_required", "validation", errors.New("valid thread_id is required"))
+		if req.DebugThreadID < 0 || (d.adapter != "javascript/js-debug" && req.DebugThreadID == 0) {
+			return fileError("debug_thread_required", "validation", errors.New("valid adapter-specific DAP thread_id is required"))
 		}
 		args = map[string]any{"threadId": req.DebugThreadID}
 		if method == "stackTrace" {
@@ -564,6 +683,41 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 		d.sourceVersions[breakpointStat.Path] = req.FileVersion
 	}
 	if method == "configure" {
+		// debugpy sends its real process event after configurationDone's
+		// response. Never expose control over a Python target until its
+		// pidfd, worker UID, trusted interpreter and dedicated cgroup
+		// membership have been verified by the common DAP event consumer.
+		if d.adapter == "php/xdebug" {
+			if d.phpProxy == nil {
+				return fileError("php_dap_missing_verified_proxy", "state", errors.New("PHP DBGp verifier absent; stop session"))
+			}
+			verifyCtx, verifyCancel := context.WithTimeout(ctx, 5*time.Second)
+			proofErr := d.phpProxy.await(verifyCtx)
+			verifyCancel()
+			if proofErr != nil {
+				d.mu.Lock()
+				d.uncertain, d.stage = true, "uncertain"
+				d.mu.Unlock()
+				return fileError("php_dap_unverified_debuggee_identity", "state", proofErr)
+			}
+		}
+		if d.adapter == "python/debugpy" {
+			deadline := time.Now().Add(3 * time.Second)
+			for {
+				pinErr := d.pinnedDebuggeeError()
+				if pinErr == nil {
+					break
+				}
+				if ctx.Err() != nil || time.Now().After(deadline) || pinErr.Error() != "dap_debuggee_identity_not_observed" {
+					d.mu.Lock()
+					d.uncertain = true
+					d.stage = "uncertain"
+					d.mu.Unlock()
+					return fileError("python_dap_debuggee_identity_unverified", "state", pinErr)
+				}
+				d.drain(ctx)
+			}
+		}
 		d.mu.Lock()
 		d.configured = true
 		if d.stage == "starting" {
