@@ -296,4 +296,31 @@ grep -Fq 'NON_TTY_LOCAL_CONFIG_SAVED' "$TMP/no-tty-local.out"
 grep -Fq 'NON_TTY_MANAGED_STATE_SAVED' "$TMP/no-tty-local.out"
 ! grep -Eq 'requires a terminal|No such device or address' "$TMP/no-tty-local.out"
 
-echo 'Operator menu TTY navigation/strict failure/Back/precommit/SIGINT read+confirm/protected commit/one-use FD3/non-TTY reinstall/no-color PASS'
+# All explicitly interactive entrypoints must reject a permissions-readable
+# /dev/tty when the process has no actual controlling terminal.
+cat > "$TMP/no-tty-entrypoints.sh" <<'SH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+export AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1
+source "$ASA_MANAGE_SOURCE"
+if ui_has_interactive_tty; then echo 'PHANTOM_CONTROLLING_TTY' >&2; exit 1; fi
+for entry in menu connection_menu first_run runtime_menu profile_menu credential_menu; do
+  if output="$("$entry" 2>&1)"; then
+    printf 'NON_TTY_ENTRYPOINT_ACCEPTED=%s\n' "$entry" >&2
+    exit 1
+  fi
+  case "$output" in
+    *requir*terminal*) ;;
+    *) printf 'NON_TTY_ENTRYPOINT_DIAGNOSTIC_MISSING=%s\n' "$entry" >&2; exit 1 ;;
+  esac
+done
+if confirm 'Noninteractive destructive default refusal?' no; then
+  echo 'NON_TTY_CONFIRMATION_APPROVED_UNEXPECTEDLY' >&2
+  exit 1
+fi
+echo 'NO_TTY_ENTRYPOINTS_AND_CONFIRMATION_REJECTED'
+SH
+ASA_MANAGE_SOURCE="$ROOT/manage.sh" bash "$TMP/no-tty-entrypoints.sh" > "$TMP/no-tty-entrypoints.out" 2>&1
+grep -Fq 'NO_TTY_ENTRYPOINTS_AND_CONFIRMATION_REJECTED' "$TMP/no-tty-entrypoints.out"
+
+echo 'Operator menu TTY navigation/strict failure/Back/precommit/SIGINT read+confirm/protected commit/one-use FD3/non-TTY entrypoints/reinstall/no-color PASS'

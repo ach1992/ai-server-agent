@@ -236,6 +236,8 @@ sudo ai-server-agent-manage runtime-set persistent_task_slots 8
 
 These controls do not change the fixed one-at-a-time root command limit or two persistent service slots. Invalid values are rejected before changes, and all accepted changes use the existing privileged lock, validated restart, health check and rollback path. `runtime-reset worker_command_slots` and `runtime-reset persistent_task_slots` restore defaults.
 
+Lowering `persistent_task_slots` does **not** stop already-running tasks. `runtime_list` may temporarily report more active tasks than the newly configured limit; new task admission stays blocked until active tasks fall below that limit. The two persistent service slots remain independently available subject to their own quota and filesystem safety reserve. Job-log and audit disk reservations continue to cover the historical active task exposure up to the hard limit of eight.
+
 Eight available slots is an **admission ceiling**, not a CPU/RAM guarantee. On small hosts (notably two-vCPU machines with limited RAM or exhausted swap), leave the defaults or raise gradually while watching real resource usage. Only use these commands after the installed Agent version supports them; the source implementation alone does not modify the running service.
 
 Privileged install/update/manage/uninstall/purge operations share a root-only lifecycle lock under `/run/lock/ai-server-agent`. A concurrent management operation fails before state mutation rather than racing another lifecycle operation.

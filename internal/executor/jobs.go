@@ -974,18 +974,29 @@ func persistentJobAdmissionResponse(jobsDir string, kinds ...string) *Response {
 }
 
 func persistentJobAdmissionResponseWithLimit(jobsDir string, taskLimit int, kind string) *Response {
+	return persistentJobAdmissionResponseWithReserveCheck(jobsDir, taskLimit, kind, jobStateHasReserve)
+}
+
+// Inject the filesystem check only in deterministic quota tests. Production
+// always inspects real free space; admission never assumes a spare disk.
+func persistentJobAdmissionResponseWithReserveCheck(jobsDir string, taskLimit int, kind string, reserveCheck func(string, int64) (bool, int64, error)) *Response {
 	if taskLimit < 1 || taskLimit > maxActivePersistentJobs {
 		taskLimit = 4
 	}
 	counts, err := activeAgentJobKindCounts(jobsDir)
-	active := counts.tasks + counts.services
 	if err != nil {
 		resp := jobStateError("job_state_unavailable", err)
 		return &resp
 	}
+	// After a supported 8 -> 1 task downscale, the existing transient units
+	// remain alive. Enforce *hard* per-kind bounds but never let previously
+	// admitted tasks consume the two independent service admission slots.
+	if counts.tasks > maxActivePersistentJobs || counts.services > maxActivePersistentServices {
+		resp := jobStateError("job_state_unavailable", errors.New("active persistent jobs exceed the hard per-kind bounds"))
+		return &resp
+	}
 	if (kind == "task" && counts.tasks >= taskLimit) ||
-		(kind == "service" && counts.services >= maxActivePersistentServices) ||
-		active >= taskLimit+maxActivePersistentServices {
+		(kind == "service" && counts.services >= maxActivePersistentServices) {
 		return &Response{
 			Error:      "persistent task/service execution capacity is busy",
 			ReasonCode: "resource_limit",
@@ -995,8 +1006,13 @@ func persistentJobAdmissionResponseWithLimit(jobsDir string, taskLimit int, kind
 			Status:     "busy",
 		}
 	}
-	reserve := jobStateSafetyReserveBytesFor(taskLimit)
-	ok, free, err := jobStateHasReserve(jobsDir, reserve)
+	if kind != "task" && kind != "service" {
+		resp := jobStateError("job_state_unavailable", errors.New("unrecognized persistent job kind"))
+		return &resp
+	}
+	// Keep space for all trusted active task logs after a downscale.
+	reserve := jobStateSafetyReserveBytesForActive(taskLimit, counts.tasks)
+	ok, free, err := reserveCheck(jobsDir, reserve)
 	if err != nil {
 		resp := jobStateError("job_state_unavailable", err)
 		return &resp
@@ -1012,6 +1028,12 @@ func persistentJobAdmissionResponseWithLimit(jobsDir string, taskLimit int, kind
 		}
 	}
 	return nil
+}
+
+// A new configured admission limit cannot shrink already-running task logs.
+// Validated inventory is required before calling this from live admission.
+func jobStateSafetyReserveBytesForActive(taskLimit, activeTasks int) int64 {
+	return jobStateSafetyReserveBytesFor(max(taskLimit, activeTasks))
 }
 
 func jobStateSafetyReserveBytesFor(taskLimit int) int64 {

@@ -271,12 +271,12 @@ header(){
 }
 
 pause(){
-  if [ -r /dev/tty ]; then read -r -p "Press Enter to continue... " _ </dev/tty || true; fi
+  if ui_has_interactive_tty; then read -r -p "Press Enter to continue... " _ </dev/tty || true; fi
 }
 
 confirm(){
   local prompt="$1" default="${2:-no}" ans=""
-  if [ ! -r /dev/tty ]; then
+  if ! ui_has_interactive_tty; then
     [ "$default" = "yes" ]
     return
   fi
@@ -443,7 +443,7 @@ runtime_show(){
 }
 
 runtime_menu(){
-  [ -r /dev/tty ] || die "Interactive runtime settings require a terminal."
+  ui_has_interactive_tty || die "Interactive runtime settings require a terminal."
   while true; do
     header
     ui_section 'Execution capacity'
@@ -662,7 +662,7 @@ profile_apply(){
 }
 
 profile_menu(){
-  [ -r /dev/tty ] || die "Interactive purpose management requires a terminal."
+  ui_has_interactive_tty || die "Interactive purpose management requires a terminal."
   while true; do
     header
     ui_section 'Current environment'
@@ -899,6 +899,7 @@ credential_revoke(){ (
 
 
 credential_menu(){
+  ui_has_interactive_tty || die "Interactive credential management requires a terminal."
   while true; do
     header
     ui_section 'Current MCP credentials'
@@ -996,7 +997,7 @@ load_cf_token(){
   elif [ -n "${AI_SERVER_AGENT_CLOUDFLARE_API_TOKEN:-}" ]; then
     CF_TOKEN="$AI_SERVER_AGENT_CLOUDFLARE_API_TOKEN"
   else
-    [ -r /dev/tty ] || die "Set AI_SERVER_AGENT_CLOUDFLARE_API_TOKEN_FILE for noninteractive Cloudflare setup."
+    ui_has_interactive_tty || die "Set AI_SERVER_AGENT_CLOUDFLARE_API_TOKEN_FILE for noninteractive Cloudflare setup."
     printf 'Cloudflare API token (input hidden; not stored): ' >/dev/tty
     read -r -s CF_TOKEN </dev/tty
     printf '\n' >/dev/tty
@@ -1576,7 +1577,7 @@ cf_public_ipv4(){
   local ip
   ip="${AI_SERVER_AGENT_PUBLIC_IPV4:-}"
   if [ -z "$ip" ]; then ip="$(curl -4fsS https://www.cloudflare.com/cdn-cgi/trace 2>/dev/null | sed -n 's/^ip=//p' | head -n1 || true)"; fi
-  if [[ ! "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && [ -r /dev/tty ]; then ip="$(prompt_value 'Public IPv4 address for this server')"; fi
+  if [[ ! "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] && ui_has_interactive_tty; then ip="$(prompt_value 'Public IPv4 address for this server')"; fi
   [[ "$ip" =~ ^([0-9]{1,3}\.){3}[0-9]{1,3}$ ]] || die "Could not determine a public IPv4 address. Set AI_SERVER_AGENT_PUBLIC_IPV4."
   printf '%s\n' "$ip"
 }
@@ -2096,7 +2097,7 @@ acquire_cloudflare_mcp_bearer(){
     fi
     exec 3<&-
   else
-    [ -r /dev/tty ] || die "Cloudflare setup requires the current MCP bearer. Run the manager in an interactive terminal or pass the one-use descriptor 3; no bearer plaintext is stored on disk."
+    ui_has_interactive_tty || die "Cloudflare setup requires the current MCP bearer. Run the manager in an interactive terminal or pass the one-use descriptor 3; no bearer plaintext is stored on disk."
     printf 'Current MCP bearer (input hidden, not stored): ' >/dev/tty
     IFS= read -r -s supplied </dev/tty || die "Could not read the MCP bearer from the terminal."
     printf '\n' >/dev/tty
@@ -2437,7 +2438,7 @@ run_uninstall(){
 
 connection_menu(){
   ui_enable_menu_interrupt
-  [ -r /dev/tty ] || die "Interactive connection setup requires a terminal."
+  ui_has_interactive_tty || die "Interactive connection setup requires a terminal."
   while true; do
     header
     ui_section 'Connection setup'
@@ -2464,7 +2465,7 @@ connection_menu(){
 
 first_run(){
   ui_enable_menu_interrupt
-  [ -r /dev/tty ] || die "First-run setup requires an interactive terminal."
+  ui_has_interactive_tty || die "First-run setup requires an interactive terminal."
   local choice attempted=0
   while true; do
     header
@@ -2526,7 +2527,7 @@ first_run(){
 
 menu(){
   ui_enable_menu_interrupt
-  [ -r /dev/tty ] || die "The interactive menu requires a terminal. Use a subcommand for automation."
+  ui_has_interactive_tty || die "The interactive menu requires a terminal. Use a subcommand for automation."
   while true; do
     header
     ui_section 'Connection and status'
