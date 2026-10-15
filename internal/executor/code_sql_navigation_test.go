@@ -271,6 +271,27 @@ func TestSQLSourceNavigationWorkerCrossFileVersionsAndHistory(t *testing.T) {
 		targets[0].FileVersion != version("migrations/008_add_column.sql") {
 		t.Fatalf("wrong last active column declaration: %+v (%v)", resolved, err)
 	}
+	if err := os.WriteFile(filepath.Join(workspace, "migrations/009_index.sql"),
+		[]byte("CREATE UNIQUE INDEX idx_accounts_id ON accounts (id);\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	owner.CodeMethod = "references"
+	indexed := s.codeInspect(ctx, owner)
+	if !indexed.OK {
+		t.Fatalf("offline index column reference failed: %+v", indexed)
+	}
+	if err := json.Unmarshal([]byte(indexed.Output), &targets); err != nil {
+		t.Fatalf("invalid SQL index reference payload: %v", err)
+	}
+	indexFound := false
+	for _, target := range targets {
+		if target.URI == "migrations/009_index.sql" {
+			indexFound = target.FileVersion == version(target.URI)
+		}
+	}
+	if !indexFound {
+		t.Fatalf("index column was not linked as a versioned cross-file reference: %+v", indexed)
+	}
 }
 
 func TestSQLSourceNavigationLimitsAndDuplicateDeclarations(t *testing.T) {

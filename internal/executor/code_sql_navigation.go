@@ -175,6 +175,8 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 					occ.declaration = true
 					result = append(result, occ)
 				}
+			} else if table, _, ok := sqlNavIndexTarget(statement, dialect); ok {
+				result = append(result, table)
 			}
 		case "ALTER", "DROP":
 			if statement[at].keyword() == "TABLE" || statement[at].keyword() == "VIEW" {
@@ -246,7 +248,7 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 			appendName(at, false, false)
 		}
 		if withColumns {
-			result = append(result, sqlNavColumns(statement)...)
+			result = append(result, sqlNavColumns(statement, dialect)...)
 		}
 		for i := 1; i+1 < len(statement); i++ {
 			keyword := statement[i].keyword()

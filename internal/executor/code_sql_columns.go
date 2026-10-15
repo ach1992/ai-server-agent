@@ -69,7 +69,7 @@ func sqlNavColumnList(table sqlNavOccurrence, tokens []sqlDDLToken, at int, decl
 	return nil // incomplete definitions must never create locations
 }
 
-func sqlNavColumns(statement []sqlDDLToken) []sqlNavOccurrence {
+func sqlNavColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurrence {
 	if len(statement) < 4 {
 		return nil
 	}
@@ -79,6 +79,9 @@ func sqlNavColumns(statement []sqlDDLToken) []sqlNavOccurrence {
 	var at int
 	switch operation {
 	case "CREATE":
+		if indexTable, at, ok := sqlNavIndexTarget(statement, dialect); ok {
+			return sqlNavColumnList(indexTable, statement, at, false)
+		}
 		at = 1
 		if at+1 < len(statement) && statement[at].keyword() == "OR" && statement[at+1].keyword() == "REPLACE" {
 			at += 2
