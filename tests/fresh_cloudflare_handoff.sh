@@ -115,8 +115,26 @@ test "$(sudo sha256sum /etc/ai-server-agent/mcp-credentials.json | cut -d' ' -f1
 # The purpose and label survive the installer regeneration, without relying
 # on compatibility machinery for earlier Agent generations.
 stage='second noninteractive new-baseline installer'
+reinstall_rc=0
 sudo env AI_SERVER_AGENT_BINARY="$BINARY" AI_SERVER_AGENT_NONINTERACTIVE=1 \
-  AI_SERVER_AGENT_SETUP_MODE=local bash "$ROOT/install.sh" >"$output" 2>&1
+  AI_SERVER_AGENT_SETUP_MODE=local bash "$ROOT/install.sh" >"$output" 2>&1 || reinstall_rc=$?
+if [ "$reinstall_rc" -ne 0 ]; then
+  # A faulty installer may include credentials in its private output. Print
+  # only a bounded, redacted error category; never dump the raw file.
+  printf 'fresh Cloudflare handoff: local reinstall failed (exit %s)\n' "$reinstall_rc" >&2
+  while IFS= read -r diagnostic; do
+    case "$diagnostic" in
+      *'[ai-server-agent] ERROR:'*|*'[ai-server-agent] WARNING:'*|sudo:\ *|systemctl:\ *)
+        case "${diagnostic,,}" in
+          *bearer*|*authorization*|*token*|*secret*|*password*|*private*key*)
+            printf 'fresh Cloudflare handoff: sensitive error details withheld\n' >&2 ;;
+          *)
+            printf '%s\n' "$diagnostic" | LC_ALL=C tr -d '\000-\010\013-\037\177' | sed -E 's/[[:xdigit:]]{64}/[redacted-digest]/g' >&2 ;;
+        esac ;;
+    esac
+  done < <(tail -n 35 "$output")
+  exit "$reinstall_rc"
+fi
 stage='post-second-install manifest/credential/service verification'
 sudo jq -e '.environment_profile=="validation" and .server_label=="QA Agent Host"' /etc/ai-server-agent/config.json >/dev/null
 sudo jq -e '.environment_profile=="validation" and .server_label=="QA Agent Host"' /var/lib/ai-server-agent/AI_ENVIRONMENT.json >/dev/null
