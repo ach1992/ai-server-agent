@@ -14,10 +14,10 @@ type DebugAdapterStatusInput struct {
 }
 type DebugLaunchInput struct {
 	Workspace   string `json:"workspace" jsonschema:"Exact absolute worker workspace/worktree directory"`
-	Program     string `json:"program" jsonschema:"Workspace-relative prebuilt Go/Rust executable, PHP .php source, Python .py or Node .js/.mjs/.cjs; TypeScript requires compiled .js plus adjacent .js.map"`
+	Program     string `json:"program" jsonschema:"Workspace-relative Go/Rust executable, PHP .php, Python .py, Node .js/.mjs/.cjs or JavaScript Browser .html; TypeScript requires precompiled .js/.js.map"`
 	FileVersion string `json:"file_version" jsonschema:"Exact program/source version from workspace_stat; stale versions are rejected"`
 	Language    string `json:"language,omitempty" jsonschema:"Optional debugger language: go (default), rust, php, python, javascript or precompiled typescript"`
-	Mode        string `json:"mode,omitempty" jsonschema:"Go/Rust exec (default); PHP cli; Python script/module/test; JavaScript/TypeScript precompiled node; unsupported modes rejected"`
+	Mode        string `json:"mode,omitempty" jsonschema:"Go/Rust exec (default); PHP cli; Python script/module/test; JavaScript/TypeScript precompiled node; JavaScript local HTML browser with pinned Chromium pipe; no extension/remote attach"`
 	StopOnEntry bool   `json:"stop_on_entry,omitempty" jsonschema:"Pause the selected Go/Rust/PHP/Python/Node program at its entrypoint"`
 }
 type DebugOwnerInput struct {
@@ -55,11 +55,11 @@ type DebugEvaluateInput struct {
 
 func (s *Server) registerDebugTools() {
 
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "debug_adapter_status", Description: "Discover optional trusted Go/Delve, Rust/LLDB-DAP, PHP/Xdebug-DBGp CLI, Python/debugpy or Node/js-debug readiness without launching or installing tools; no remote/root attach.", Annotations: annotations(true, false, true, false)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugAdapterStatusInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "debug_adapter_status", Description: "Discover optional trusted Go/Delve, Rust/LLDB-DAP, PHP/Xdebug-DBGp CLI, Python/debugpy or Node/js-debug Node and locally pinned Browser pipe readiness without launching or installing tools; no remote/root attach.", Annotations: annotations(true, false, true, false)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugAdapterStatusInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		return s.callDebug(ctx, executor.Request{Action: "debug_adapter_status", Language: in.Language})
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-		Name: "debug_launch", Description: "Launch worker-only Go/Delve exec, Rust/LLDB-DAP prebuilt ELF, PHP/Xdebug-DBGp CLI, Python/debugpy script/module/unittest, or Node/js-debug JavaScript and precompiled TypeScript source-map node DAP with exact source file_version and trusted optional adapter. Rust, PHP, Python and Node require atomic executor-owned private cgroup-v2 descendant containment and pinned full adapter resources. PHP HTTP attach is not yet supported. No remote attach, root, custom adapter or runInTerminal. Debugging explicitly executes selected project code.", Annotations: annotations(false, true, false, true),
+		Name: "debug_launch", Description: "Launch worker-only Go/Delve exec, Rust/LLDB-DAP prebuilt ELF, PHP/Xdebug-DBGp CLI, Python/debugpy script/module/unittest, or Node/js-debug JavaScript and precompiled TypeScript source-map node DAP or local HTML Browser pipe DAP with exact source file_version and trusted optional adapter. Rust, PHP, Python and Node require atomic executor-owned private cgroup-v2 descendant containment and pinned full adapter resources. PHP HTTP attach and JS extension-host are not yet supported. Browser mode is local .html only, no TCP inspector. No remote attach, root, custom adapter or runInTerminal. Debugging explicitly executes selected project code.", Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugLaunchInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		return s.callDebug(ctx, executor.Request{Action: "debug_launch", Workspace: in.Workspace, DebugProgram: in.Program, FileVersion: in.FileVersion, DebugStopOnEntry: in.StopOnEntry, Language: in.Language, DebugMode: in.Mode})
 	})

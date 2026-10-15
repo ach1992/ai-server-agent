@@ -10,6 +10,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ach1992/ai-server-agent/internal/systemexec"
 )
 
 func buildNodeProofWorkspaceHelper(t *testing.T) string {
@@ -202,20 +204,31 @@ func TestJavaScriptDAPRejectsUntrustedModesAndSourcesBeforeSpawning(t *testing.T
 	}
 }
 
-func TestNodeDAPAdapterStatusPreservesUnsupportedBrowserModes(t *testing.T) {
+func TestNodeDAPStatusRequiresPinnedBrowserRuntime(t *testing.T) {
 	s, owner, _ := testStdioBroker(t)
 	owner.Action = "debug_adapter_status"
 	owner.Language = "javascript"
 	result := s.debugAction(context.Background(), owner)
 	if !result.OK || !strings.Contains(result.Output, `"adapter":"javascript/js-debug"`) ||
-		!strings.Contains(result.Output, `"modes":["node"]`) ||
 		!strings.Contains(result.Output, `"attach_supported":false`) ||
-		strings.Contains(result.Output, "browser") ||
 		strings.Contains(result.Output, "extension") {
-		t.Fatalf("Node DAP fabricated unverified mode: %+v", result)
+		t.Fatalf("Node DAP fabricated unverified attach/extension: %+v", result)
+	}
+	_, browserErr := systemexec.JavaScriptBrowser()
+	mode := `"modes":["node"]`
+	if browserErr == nil {
+		mode = `"modes":["node","browser"]`
+	}
+	if !strings.Contains(result.Output, mode) {
+		t.Fatalf("Browser readiness not tied to exact pinned Chromium artifact: %+v", result)
 	}
 	if result.Status == "ready" {
 		t.Fatalf("adapter provenance conflated with actual installed cgroup readiness: %+v", result)
+	}
+	owner.Language = "typescript"
+	tsResult := s.debugAction(context.Background(), owner)
+	if !tsResult.OK || !strings.Contains(tsResult.Output, `"modes":["node"]`) {
+		t.Fatalf("unproven browser TypeScript source mapping promised: %+v", tsResult)
 	}
 }
 
@@ -306,6 +319,137 @@ func TestNodeDAPTrustedTypedStartDebuggingRejectsArbitraryReverse(t *testing.T) 
 				}
 			case <-time.After(2 * time.Second):
 				t.Fatal("reverse DAP handler hung")
+			}
+		})
+	}
+}
+
+func TestJavaScriptBrowserDAPLocalOnlyAndNoUncontainedLaunch(t *testing.T) {
+	s, owner, workspace := testStdioBroker(t)
+	owner.Action, owner.Language, owner.DebugMode = "debug_launch", "javascript", "browser"
+	owner.DebugProgram, owner.FileVersion = "local.html", "v1:expected"
+	for _, name := range []string{"../outside.html", "/etc/passwd", "remote.js", "local.ts", "x.php"} {
+		owner.DebugProgram = name
+		r := s.debugAction(t.Context(), owner)
+		if r.OK || r.ErrorCode != "javascript_dap_invalid_program" || r.SessionID != "" {
+			t.Fatalf("external/non-HTML Browser debug admitted: %+v", r)
+		}
+	}
+	owner.DebugProgram = "local.html"
+	owner.Language = "typescript"
+	if r := s.debugAction(t.Context(), owner); r.OK || r.ErrorCode != "typescript_browser_source_map_unverified" {
+		t.Fatalf("unverified browser TypeScript debug allowed: %+v", r)
+	}
+	owner.Language = "javascript"
+	owner.DebugMode = "extension"
+	if r := s.debugAction(t.Context(), owner); r.OK || r.ErrorCode != "javascript_dap_unsupported_mode" {
+		t.Fatalf("unreviewed extension host launched: %+v", r)
+	}
+	if os.Geteuid() == 0 {
+		t.Skip("worker cgroup denial requires unprivileged test")
+	}
+	requireWorkerLandlockV2(t)
+	owner.DebugMode = "browser"
+	s.workspaceHelperBinary = buildNodeProofWorkspaceHelper(t)
+	source := filepath.Join(workspace, "local.html")
+	if err := os.WriteFile(source, []byte("<!doctype html><script src=local.js></script>"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	v := s.workerWorkspaceFile(t.Context(), Request{Action: "workspace_stat", Workspace: workspace, Path: "local.html"})
+	if !v.OK {
+		t.Fatalf("worker HTML version identity unavailable: %+v", v)
+	}
+	owner.FileVersion = v.FileVersion
+	denied := s.debugAction(t.Context(), owner)
+	if denied.OK || denied.ErrorCode != "dap_containment_unavailable" || denied.SessionID != "" {
+		t.Fatalf("uncontained Browser/Chromium debug admitted: %+v", denied)
+	}
+	if err := os.WriteFile(source, []byte("<!doctype html><h1>changed</h1>"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	stale := s.debugAction(t.Context(), owner)
+	if stale.OK || stale.ErrorCode != "debug_program_changed" {
+		t.Fatalf("stale Browser HTML accepted: %+v", stale)
+	}
+	s.sessions.mu.Lock()
+	count := len(s.sessions.sessions)
+	s.sessions.mu.Unlock()
+	if count != 0 {
+		t.Fatalf("invalid Browser launch left %d sessions", count)
+	}
+}
+
+func TestJavaScriptBrowserDAPProfileIdentityNotUserDeletable(t *testing.T) {
+	outsider := t.TempDir()
+	if err := removeBrowserDAPProfile(outsider); err == nil {
+		t.Fatalf("browser cleanup accepted arbitrary selected directory")
+	}
+	if _, err := os.Stat(outsider); err != nil {
+		t.Fatalf("Browser cleanup deleted a user directory: %v", err)
+	}
+	if os.Geteuid() != 0 {
+		if _, _, err := createBrowserDAPProfile(uint32(os.Getuid()), uint32(os.Getgid())); err == nil {
+			t.Fatal("unprivileged runtime created root-owned Browser profile")
+		}
+	}
+}
+
+func TestJavaScriptBrowserDAPTypedUppercaseChildReverseNoEscape(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		args  map[string]any
+		valid bool
+	}{
+		{"valid_browser_uppercase", map[string]any{"request": "launch", "configuration": map[string]any{"type": "pwa-chrome", "__pendingTargetId": "9FFA7743642C2F40E6F77F4A4E89E83C"}}, true},
+		{"browser_remote_attach", map[string]any{"request": "attach", "configuration": map[string]any{"type": "pwa-chrome", "__pendingTargetId": "9FFA7743642C2F40E6F77F4A4E89E83C"}}, false},
+		{"untrusted_browser_url", map[string]any{"request": "launch", "configuration": map[string]any{"type": "pwa-chrome", "__pendingTargetId": "9FFA7743642C2F40E6F77F4A4E89E83C", "url": "https://remote"}}, false},
+		{"untrusted_browser_port", map[string]any{"request": "launch", "configuration": map[string]any{"type": "pwa-chrome", "__pendingTargetId": "9FFA7743642C2F40E6F77F4A4E89E83C", "port": 9222}}, false},
+		{"untrusted_browser_executable", map[string]any{"request": "launch", "configuration": map[string]any{"type": "pwa-chrome", "__pendingTargetId": "9FFA7743642C2F40E6F77F4A4E89E83C", "runtimeExecutable": "/bin/sh"}}, false},
+		{"node_target_in_browser_mode", map[string]any{"request": "launch", "configuration": map[string]any{"type": "pwa-node", "__pendingTargetId": "9FFA7743642C2F40E6F77F4A4E89E83C"}}, false},
+		{"bad_browser_token", map[string]any{"request": "launch", "configuration": map[string]any{"type": "pwa-chrome", "__pendingTargetId": "x$()"}}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, provider := net.Pipe()
+			defer client.Close()
+			defer provider.Close()
+			d := &dapState{conn: client, adapter: "javascript/js-debug", browserMode: true}
+			done := make(chan error, 1)
+			go func() {
+				err := dapFrame(provider, map[string]any{"seq": 1, "type": "request", "command": "startDebugging", "arguments": tc.args})
+				if err != nil {
+					done <- err
+					return
+				}
+				if tc.valid {
+					_ = provider.SetReadDeadline(time.Now().Add(time.Second))
+					packet, e := dapFixtureRead(bufio.NewReader(provider))
+					if e != nil {
+						done <- e
+						return
+					}
+					if packet.Type != "response" || packet.RequestSeq != 1 || !packet.Success {
+						done <- os.ErrInvalid
+						return
+					}
+				}
+				done <- nil
+			}()
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+			token, err := d.receiveTypedNodeChild(ctx)
+			if tc.valid && (err != nil || token != "9FFA7743642C2F40E6F77F4A4E89E83C") {
+				t.Fatalf("typed pinned browser request wrongly rejected: %s %v", token, err)
+			}
+			if !tc.valid && err == nil {
+				t.Fatalf("untrusted browser command admitted: %+v", tc.args)
+			}
+			select {
+			case e := <-done:
+				if e != nil {
+					t.Fatal(e)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("browser reverse fixture did not settle")
 			}
 		})
 	}

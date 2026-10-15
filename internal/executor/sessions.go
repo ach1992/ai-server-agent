@@ -662,6 +662,11 @@ func (b *stdioSessionBroker) removeAndStop(entry *stdioSession) error {
 	entry.stopMu.Lock()
 	entry.mu.Lock()
 	entry.closed = true
+	if entry.dap != nil && entry.dap.browserProfileDir != "" {
+		if err := removeBrowserDAPProfile(entry.dap.browserProfileDir); err != nil {
+			return fmt.Errorf("javascript_browser_profile_cleanup_uncertain: %w", err)
+		}
+	}
 	if entry.dap != nil {
 		if entry.dap.phpProxy != nil {
 			entry.dap.phpProxy.shutdown()

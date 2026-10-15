@@ -33,9 +33,16 @@ func (s *Server) debugAction(ctx context.Context, req Request) Response {
 			if s.javascriptDAPNode != "" && s.javascriptDAPCLI != "" {
 				available = true
 			}
+			modes := []string{"node"}
+			if req.Language == "javascript" {
+				_, browserErr := systemexec.JavaScriptBrowser()
+				if browserErr == nil || s.javascriptDAPBrowserBinary != "" {
+					modes = append(modes, "browser")
+				}
+			}
 			body, _ := json.Marshal(map[string]any{
 				"adapter": "javascript/js-debug", "installed": available,
-				"modes": []string{"node"}, "attach_supported": false,
+				"modes": modes, "attach_supported": false,
 				"precompiled_typescript_source_maps": req.Language == "typescript",
 				"privileged":                         false, "provisioning": "optional_root_owned_pinned_complete_js_debug",
 				"containment": "executor_owned_private_cgroup_v2_required",

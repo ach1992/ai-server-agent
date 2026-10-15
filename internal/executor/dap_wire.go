@@ -35,6 +35,8 @@ type dapState struct {
 	workspace           string
 	adapter             string
 	sourceLanguage      string // Node JS or TypeScript precompiled source-map profile
+	browserMode         bool   // local file-only pwa-chrome mode; same original js-debug adapter
+	browserProfileDir   string // generated root-owned disposable profile parent, broker-cleaned after cgroup
 	program             string
 	targetInterpreter   string // only the already verified optional Python runtime
 	adapterPID          int

@@ -73,6 +73,7 @@ type Server struct {
 	pythonDebugpyModules              string                                                    // test-only unprivileged verified wheel fixture
 	javascriptDAPNode                 string                                                    // test-only JS adapter Node fixture
 	javascriptDAPCLI                  string                                                    // test-only JS adapter entrypoint fixture
+	javascriptDAPBrowserBinary        string                                                    // test-only pinned local Chromium fixture
 	rustLLDBDAPBinary                 string                                                    // test-only known LLDB-DAP executable fixture
 	phpDAPNodeBinary                  string                                                    // test-only trusted Node fixture
 	phpDAPCLIBinary                   string                                                    // test-only verified PHP adapter entrypoint

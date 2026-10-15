@@ -20,12 +20,21 @@ import (
 // UID, principal, exact workspace and one cgroup; there is no second broker,
 // user-chosen attach endpoint or adapter-supplied process execution command.
 //
-// Browser/extension modes remain separate acceptance gates. Precompiled
-// TypeScript uses the same Node process with a pinned adjacent source map;
+// Browser local-file mode has a distinct pinned Chromium and isolated profile.
+// Extension-host launch/remote browser attach remain explicitly unsupported.
+// Precompiled TypeScript uses the same Node process with a pinned adjacent source map;
 // this profile never compiles or executes a project build script.
 func (s *Server) debugLaunchNode(ctx context.Context, req Request) (response Response) {
-	if req.DebugMode != "" && req.DebugMode != "node" {
-		return fileError("javascript_dap_unsupported_mode", "validation", errors.New("only the explicit Node launch mode is currently supported"))
+	mode := req.DebugMode
+	if mode == "" {
+		mode = "node"
+	}
+	browserMode := mode == "browser"
+	if mode != "node" && !browserMode {
+		return fileError("javascript_dap_unsupported_mode", "validation", errors.New("only explicit local Node or file-only Browser launch modes are supported; no extension/attach"))
+	}
+	if browserMode && req.Language != "javascript" {
+		return fileError("typescript_browser_source_map_unverified", "validation", errors.New("TypeScript browser mappings require separate provenance verification; supported Browser profile is JavaScript local HTML only"))
 	}
 	if req.Workspace == "" || req.DebugProgram == "" || req.FileVersion == "" {
 		return fileError("debug_identity_required", "validation", errors.New("workspace, Node source and exact source file_version required"))
@@ -35,8 +44,12 @@ func (s *Server) debugLaunchNode(ctx context.Context, req Request) (response Res
 		return fileError("invalid_workspace", "validation", errors.New("exact resolved workspace required"))
 	}
 	relative, err := safeWorkspaceRelativeFile(req.DebugProgram)
-	if err != nil || !validNodeDebugSource(relative) {
-		return fileError("javascript_dap_invalid_program", "validation", errors.New("Node requires workspace-relative regular .js/.mjs/.cjs file"))
+	validSource := validNodeDebugSource(relative)
+	if browserMode {
+		validSource = filepath.Ext(relative) == ".html"
+	}
+	if err != nil || !validSource {
+		return fileError("javascript_dap_invalid_program", "validation", errors.New("Node requires .js/.mjs/.cjs or local Browser requires .html in the exact workspace"))
 	}
 	program := filepath.Join(workspace, relative)
 	info, err := os.Lstat(program)
@@ -56,7 +69,7 @@ func (s *Server) debugLaunchNode(ctx context.Context, req Request) (response Res
 	versions := map[string]string{relative: req.FileVersion}
 	// Pin the actual source-map graph, never a merely adjacent file that
 	// could refer to foreign source paths, stale JS or remote sources.
-	if req.Language == "typescript" {
+	if req.Language == "typescript" && !browserMode {
 		versions, err = s.inspectPrecompiledTypeScriptMap(ctx, req, relative, req.FileVersion)
 		if err != nil {
 			return fileError("typescript_dap_source_map_untrusted", "validation", err)
@@ -75,7 +88,17 @@ func (s *Server) debugLaunchNode(ctx context.Context, req Request) (response Res
 			return fileError("javascript_dap_unavailable", "dependency", errors.New("trusted pinned Microsoft js-debug 1.140.0 and Node 24.18.1 are unavailable"))
 		}
 	}
-	auditObject := workspace + "\x00" + relative + "\x00" + req.Language + "/node"
+	browserBinary := ""
+	if browserMode {
+		browserBinary = s.javascriptDAPBrowserBinary // test-only fixture
+		if browserBinary == "" {
+			browserBinary, err = systemexec.JavaScriptBrowser()
+			if err != nil {
+				return fileError("javascript_browser_unavailable", "dependency", err)
+			}
+		}
+	}
+	auditObject := workspace + "\x00" + relative + "\x00" + req.Language + "/" + mode
 	if blocked := s.beginActionAudit(req, "debug_launch", "worker", auditObject, "developer_debugger"); blocked != nil {
 		return *blocked
 	}
@@ -100,6 +123,22 @@ func (s *Server) debugLaunchNode(ctx context.Context, req Request) (response Res
 			}
 		}
 	}()
+	browserProfileParent, browserProfile := "", ""
+	if browserMode {
+		browserProfileParent, browserProfile, err = createBrowserDAPProfile(s.workerUID, s.workerGID)
+		if err != nil {
+			return fileError("javascript_browser_profile_unavailable", "resource", err)
+		}
+		defer func() {
+			if !assigned {
+				if e := removeBrowserDAPProfile(browserProfileParent); e != nil {
+					response.OK = false
+					response.ErrorCode, response.ErrorClass = "javascript_browser_profile_cleanup_uncertain", "state"
+					response.Error = e.Error()
+				}
+			}
+		}()
+	}
 	// Node itself must create the socket; this randomized dedicated directory
 	// is worker-owned but has no public/remote binding. Peer credentials are
 	// always checked against the pidfd-pinned original adapter before use.
@@ -178,11 +217,16 @@ func (s *Server) debugLaunchNode(ctx context.Context, req Request) (response Res
 		e.stopMu.Unlock()
 		return fileError("javascript_dap_pidfd_unavailable", "state", dupErr)
 	}
+	targetExecutable := node
+	if browserMode {
+		targetExecutable = browserBinary
+	}
 	d := &dapState{
 		conn: rootConn, workspace: workspace, adapter: "javascript/js-debug", sourceLanguage: req.Language,
 		adapterPID: e.pid, adapterPin: os.NewFile(uintptr(dup), "js-dap-original-adapter-pidfd"),
-		workerUID: s.workerUID, program: relative, targetInterpreter: node,
-		sourceVersion: req.FileVersion, sourceVersions: versions, stage: "starting", containment: group, socketDir: dir,
+		workerUID: s.workerUID, program: relative, targetInterpreter: targetExecutable,
+		sourceVersion: req.FileVersion, sourceVersions: versions, stage: "starting", containment: group,
+		socketDir: dir, browserMode: browserMode, browserProfileDir: browserProfileParent,
 	}
 	e.dap = d
 	e.mu.Unlock()
@@ -192,19 +236,33 @@ func (s *Server) debugLaunchNode(ctx context.Context, req Request) (response Res
 	removeDir = false // the original broker owns private socket removal
 	protocolCtx, cancelProtocol := context.WithTimeout(ctx, 17*time.Second)
 	defer cancelProtocol()
+	adapterType := "pwa-node"
+	if browserMode {
+		adapterType = "pwa-chrome"
+	}
 	_, err = d.call(protocolCtx, "initialize", map[string]any{
-		"adapterID": "pwa-node", "clientID": "ai-server-agent", "linesStartAt1": true,
+		"adapterID": adapterType, "clientID": "ai-server-agent", "linesStartAt1": true,
 		"columnsStartAt1": true, "pathFormat": "path", "supportsVariableType": true,
 		"supportsRunInTerminalRequest": false,
 	})
 	if err != nil {
 		return fileError("javascript_dap_initialize_failed", "runtime", err)
 	}
-	_, err = d.callDeferredLaunch(protocolCtx, map[string]any{
+	launch := map[string]any{
 		"request": "launch", "type": "pwa-node", "name": "Agent Node", "program": program,
 		"cwd": workspace, "runtimeExecutable": node, "console": "internalConsole",
 		"autoAttachChildProcesses": false, "sourceMaps": true, "stopOnEntry": req.DebugStopOnEntry,
-	})
+	}
+	if browserMode {
+		launch = map[string]any{
+			"request": "launch", "type": "pwa-chrome", "name": "Agent isolated Browser",
+			"file": program, "cwd": workspace, "runtimeExecutable": browserBinary,
+			"runtimeArgs": []string{"--headless=new", "--disable-dev-shm-usage"},
+			"port":        0, "webRoot": workspace, "userDataDir": browserProfile,
+			"cleanUp": "wholeBrowser", "sourceMaps": true,
+		}
+	}
+	_, err = d.callDeferredLaunch(protocolCtx, launch)
 	if err != nil {
 		return fileError("javascript_dap_parent_launch_failed", "runtime", err)
 	}
@@ -234,7 +292,7 @@ func (s *Server) debugLaunchNode(ctx context.Context, req Request) (response Res
 	d.stage = "starting"
 	d.mu.Unlock()
 	_, err = d.call(protocolCtx, "initialize", map[string]any{
-		"adapterID": "pwa-node", "clientID": "ai-server-agent", "linesStartAt1": true,
+		"adapterID": adapterType, "clientID": "ai-server-agent", "linesStartAt1": true,
 		"columnsStartAt1": true, "pathFormat": "path", "supportsVariableType": true,
 		"supportsRunInTerminalRequest": false,
 	})
@@ -242,7 +300,7 @@ func (s *Server) debugLaunchNode(ctx context.Context, req Request) (response Res
 		return fileError("javascript_dap_child_initialize_failed", "runtime", err)
 	}
 	_, err = d.callDeferredLaunch(protocolCtx, map[string]any{
-		"request": "launch", "type": "pwa-node", "name": "Agent Node target", "__pendingTargetId": targetID,
+		"request": "launch", "type": adapterType, "name": "Agent local JavaScript target", "__pendingTargetId": targetID,
 	})
 	if err != nil {
 		return fileError("javascript_dap_child_launch_failed", "runtime", err)
@@ -264,6 +322,9 @@ func (s *Server) debugLaunchNode(ctx context.Context, req Request) (response Res
 	}
 	cleanup = false
 	body := `{"adapter":"javascript/js-debug","mode":"node","configuration_required":true,"additional_targets":false,"language":"javascript"}`
+	if browserMode {
+		body = `{"adapter":"javascript/js-debug","mode":"browser","local_html_only":true,"remote_attach":false,"chromium_pipe_only":true,"configuration_required":true,"additional_targets":false,"language":"javascript"}`
+	}
 	if req.Language == "typescript" {
 		body = `{"adapter":"javascript/js-debug","mode":"node","configuration_required":true,"additional_targets":false,"language":"typescript","precompiled_source_map":true}`
 	}
@@ -407,13 +468,21 @@ func (d *dapState) receiveTypedNodeChild(ctx context.Context) (string, error) {
 				return "", errors.New("node_dap_malformed_or_extra_reverse_payload")
 			}
 			token := request.Arguments.Configuration.PendingID
-			if request.Arguments.Request != "launch" || request.Arguments.Configuration.Type != "pwa-node" ||
+			wanted := "pwa-node"
+			if d.browserMode {
+				wanted = "pwa-chrome"
+			}
+			if request.Arguments.Request != "launch" || request.Arguments.Configuration.Type != wanted ||
 				len(token) < 16 || len(token) > 128 {
 				return "", errors.New("node_dap_reverse_outside_single_local_target")
 			}
 			for _, ch := range token {
-				if !(ch >= '0' && ch <= '9') && !(ch >= 'a' && ch <= 'f') {
-					return "", errors.New("node_dap_nonopaque_target_token")
+				isHex := ch >= '0' && ch <= '9' || ch >= 'a' && ch <= 'f'
+				if d.browserMode {
+					isHex = isHex || ch >= 'A' && ch <= 'F'
+				}
+				if !isHex {
+					return "", errors.New("javascript_dap_nonopaque_target_token")
 				}
 			}
 			d.seq++
