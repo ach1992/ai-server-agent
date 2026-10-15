@@ -152,7 +152,7 @@ func sqlNavColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurrence {
 					continue // ADD CONSTRAINT without COLUMN
 				}
 				switch statement[j].keyword() {
-				case "CONSTRAINT", "PRIMARY", "FOREIGN", "UNIQUE", "KEY", "INDEX", "CHECK":
+				case "CONSTRAINT", "PRIMARY", "FOREIGN", "UNIQUE", "KEY", "INDEX", "FULLTEXT", "SPATIAL", "VECTOR", "CHECK":
 					continue
 				}
 				if item, valid := sqlNavColumn(table, statement[j], true, false); valid {
@@ -196,6 +196,9 @@ func sqlNavColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurrence {
 				}
 			}
 		}
+	}
+	if operation == "ALTER" {
+		result = append(result, sqlNavAlterIndexColumns(statement, dialect, table, at)...)
 	}
 	if operation == "CREATE" || operation == "ALTER" {
 		for i := at; i+2 < len(statement); i++ {

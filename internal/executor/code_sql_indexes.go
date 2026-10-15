@@ -108,3 +108,64 @@ func sqlNavIndexTarget(statement []sqlDDLToken, dialect string) (sqlNavOccurrenc
 	}
 	return table, i, true
 }
+
+// ALTER TABLE ADD [UNIQUE|FULLTEXT|SPATIAL] INDEX|KEY is a real MySQL and
+// MariaDB migration form, distinct from PostgreSQL CREATE INDEX. Only simple
+// indexed columns are source references; table/column declarations and
+// unsupported expressions are never synthesized from index details.
+func sqlNavAlterIndexColumns(statement []sqlDDLToken, dialect string, table sqlNavOccurrence, start int) []sqlNavOccurrence {
+	if dialect != "mysql" && dialect != "mariadb" {
+		return nil
+	}
+	var result []sqlNavOccurrence
+	depth := 0
+	for i := start; i < len(statement); i++ {
+		switch statement[i].text {
+		case "(":
+			depth++
+		case ")":
+			depth--
+		}
+		if depth != 0 || statement[i].keyword() != "ADD" {
+			continue
+		}
+		j := i + 1
+		if j >= len(statement) {
+			continue
+		}
+		if statement[j].keyword() == "UNIQUE" || statement[j].keyword() == "FULLTEXT" || statement[j].keyword() == "SPATIAL" {
+			j++
+		}
+		if j >= len(statement) || (statement[j].keyword() != "INDEX" && statement[j].keyword() != "KEY") {
+			continue
+		}
+		j++
+		if j+2 < len(statement) && statement[j].keyword() == "IF" &&
+			statement[j+1].keyword() == "NOT" && statement[j+2].keyword() == "EXISTS" {
+			if dialect != "mariadb" {
+				continue
+			}
+			j += 3
+		}
+		if j >= len(statement) {
+			continue
+		}
+		if statement[j].text != "(" {
+			_, next, ok := sqlNavName(statement, j)
+			if !ok {
+				continue
+			}
+			j = next
+		}
+		if j+1 < len(statement) && statement[j].keyword() == "USING" {
+			if !sqlNavIndexMethod(statement[j+1].keyword(), dialect, false) {
+				continue
+			}
+			j += 2
+		}
+		if j < len(statement) && statement[j].text == "(" {
+			result = append(result, sqlNavColumnList(table, statement, j, false)...)
+		}
+	}
+	return result
+}

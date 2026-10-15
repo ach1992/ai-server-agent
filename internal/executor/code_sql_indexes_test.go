@@ -63,3 +63,32 @@ func TestSQLIndexSourceGraphConservativeReferences(t *testing.T) {
 		}
 	}
 }
+
+func TestSQLAlterIndexSourceReferences(t *testing.T) {
+	for _, tc := range []struct {
+		name, sql, dialect, table string
+		columns                   []string
+	}{
+		{"mysql_add_index", "ALTER TABLE accounts ADD INDEX id_ix (id);", "mysql", "accounts", []string{"accounts.id"}},
+		{"mysql_multikey", "ALTER TABLE accounts ADD UNIQUE KEY u1 (id), ADD FULLTEXT INDEX f1 (text_value);", "mysql", "accounts", []string{"accounts.id", "accounts.text_value"}},
+		{"mariadb_spatial_key", "ALTER TABLE geom ADD SPATIAL INDEX geo_ix (g);", "mariadb", "geom", []string{"geom.g"}},
+		{"mariadb_add_index", "ALTER TABLE accounts ADD INDEX IF NOT EXISTS idx (id);", "mariadb", "accounts", []string{"accounts.id"}},
+		{"mysql_unnamed_index", "ALTER TABLE accounts ADD INDEX (id);", "mysql", "accounts", []string{"accounts.id"}},
+		{"postgres_unsupported_alter_index", "ALTER TABLE accounts ADD INDEX idx (id);", "postgres", "accounts", nil},
+		{"mariadb_vector_not_a_column", "ALTER TABLE accounts ADD VECTOR INDEX idx (v);", "mariadb", "accounts", nil},
+		{"mysql_bad_if_not_exists", "ALTER TABLE accounts ADD INDEX IF NOT EXISTS idx (id);", "mysql", "accounts", nil},
+		{"mysql_expression_not_a_column", "ALTER TABLE accounts ADD INDEX idx ((id + 1));", "mysql", "accounts", nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			all, ok := sqlNavAllOccurrences(tc.sql, tc.dialect)
+			if !ok || len(all) != 1+len(tc.columns) || all[0].name != tc.table || all[0].declaration {
+				t.Fatalf("ALTER TABLE index produced wrong table symbols: %+v (valid=%t)", all, ok)
+			}
+			for i, want := range tc.columns {
+				if !all[i+1].isColumn || all[i+1].name != want || all[i+1].declaration {
+					t.Fatalf("ALTER TABLE index column %d: %+v want %s", i, all[i+1], want)
+				}
+			}
+		})
+	}
+}

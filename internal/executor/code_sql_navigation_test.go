@@ -292,6 +292,27 @@ func TestSQLSourceNavigationWorkerCrossFileVersionsAndHistory(t *testing.T) {
 	if !indexFound {
 		t.Fatalf("index column was not linked as a versioned cross-file reference: %+v", indexed)
 	}
+	if err := os.WriteFile(filepath.Join(workspace, "migrations/010_alter_index.sql"),
+		[]byte("ALTER TABLE accounts ADD UNIQUE KEY idx_id (id);\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	owner.SQLDialect = "mysql"
+	indexed = s.codeInspect(ctx, owner)
+	if !indexed.OK {
+		t.Fatalf("MySQL ALTER TABLE index column lookup failed: %+v", indexed)
+	}
+	if err := json.Unmarshal([]byte(indexed.Output), &targets); err != nil {
+		t.Fatalf("invalid MySQL ALTER TABLE index result: %v", err)
+	}
+	foundAlterIndex := false
+	for _, target := range targets {
+		if target.URI == "migrations/010_alter_index.sql" {
+			foundAlterIndex = target.FileVersion == version(target.URI)
+		}
+	}
+	if !foundAlterIndex {
+		t.Fatalf("MySQL indexed column reference missing or unversioned: %+v", indexed)
+	}
 }
 
 func TestSQLSourceNavigationLimitsAndDuplicateDeclarations(t *testing.T) {
