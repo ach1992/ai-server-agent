@@ -38,7 +38,7 @@ type WorktreeRemoveInput struct {
 func (s *Server) registerRepositoryTools() {
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "repository_discover",
-		Description: "Discover bounded Git repository/worktree identities under the configured workspace without trusting directory names. Returns canonical Git identity, remotes, HEAD/branch, dirty/conflict state and linked worktrees. Optional remote_identity filters local results only; this tool does not fetch or contact remotes.",
+		Description: "Discover Git repositories and worktrees with state under the workspace. remote_identity filters local results only; no network fetch.",
 		Annotations: annotations(true, false, true, false),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input RepositoryDiscoverInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{
@@ -53,7 +53,7 @@ func (s *Server) registerRepositoryTools() {
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "repository_inspect",
-		Description: "Inspect one Git repository/worktree inside the configured workspace and return exact remote/ref/HEAD/dirty/conflict/worktree identity. With verify_remote=true it checks either the explicitly supplied remote/remote_branch or the current upstream with git ls-remote, allowing an ordinary CLI push to be reconciled to the exact local HEAD without mutating local refs or prompting for credentials.",
+		Description: "Inspect Git HEAD, remotes, worktrees and dirty/conflict state in one workspace. verify_remote=true checks upstream or chosen remote/branch with git ls-remote; no local ref changes.",
 		Annotations: annotations(true, false, true, true),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input RepositoryInspectInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{
@@ -71,7 +71,7 @@ func (s *Server) registerRepositoryTools() {
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "worktree_create",
-		Description: "Create or idempotently reconcile an isolated task worktree inside the configured workspace from an exact expected commit. Refuses stale start refs, branch reuse in another worktree, path conflicts, or ambiguous state. Repository hooks and external fsmonitor integration are disabled, and repositories that require checkout filters are refused for this structured path; the tool never fetches, pushes, force-updates, merges, or deletes branches.",
+		Description: "Create/reconcile isolated Git worktree from exact expected commit. Rejects stale refs, branch conflicts, dirty paths and unsupported checkout filters. No fetch/push/merge/branch deletion.",
 		Annotations: annotations(false, false, true, false),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input WorktreeCreateInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{
@@ -90,7 +90,7 @@ func (s *Server) registerRepositoryTools() {
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "worktree_remove",
-		Description: "Remove only a clean linked task worktree after exact-HEAD verification. The main worktree and local branch are never deleted, force removal is never used, dirty/conflicted/in-progress state fails safe, and external remote durability is required unless disposable=true is explicitly supplied.",
+		Description: "Remove clean linked worktree at exact HEAD, never main or local branch. Needs remote durability unless disposable=true; dirty/uncertain state fails closed.",
 		Annotations: annotations(false, true, true, true),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input WorktreeRemoveInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{

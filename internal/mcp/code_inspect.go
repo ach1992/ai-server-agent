@@ -27,7 +27,7 @@ func (s *Server) registerCodeTools() {
 	for _, tool := range tools {
 		method := tool.suffix
 		mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-			Name: "code_" + method, Description: tool.description + ". Supported now: Go with optional trusted gopls; JavaScript/TypeScript with optional pinned native TypeScript 7.0.2; Python with optional pinned native ty 0.0.87; Bash/POSIX Shell with optional pinned Bash Language Server 5.8.1 + ShellCheck 0.11.0; HTML/CSS with optional pinned VS Code language services 4.10.0; SQL with optional pinned SQLLens 0.5.0, explicit dialect and no plugin/database access; PHP with optional pinned Phpactor 2026.10.07.0 and no Composer project execution. No implicit installs, scripts or project commands. Requires exact file_version; rejects changed sources and unsupported adapter capabilities.",
+			Name: "code_" + method, Description: tool.description + ". Optional pinned local adapters; method support varies by language. SQL requires explicit dialect and never opens a database. Requires exact file_version; no implicit installs or project scripts; unsupported methods fail closed.",
 			Annotations: annotations(true, false, true, false),
 		}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, input CodeInspectInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 			resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{

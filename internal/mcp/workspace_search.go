@@ -24,7 +24,7 @@ type WorkspaceSearchInput struct {
 func (s *Server) registerWorkspaceSearchTool() {
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "workspace_search",
-		Description: "Run bounded read-only source search in one explicit workspace. Use mode=text for worker-authority ripgrep regex/literal matches (requires Landlock and trusted rg), or mode=structural for ast-grep syntax-tree shapes. Results include zero-based file/range identity and bounded matched text/captures. This tool never applies rewrites, never follows source symlinks, never loads repository ast-grep configuration, and never creates a code index. For advanced text searches use rg/git grep through run_command; use LSP for symbol/type/reference semantics.",
+		Description: "Read-only aiworker source search: mode=text (rg) or mode=structural (ast-grep). Returns bounded source matches; never applies rewrites. Use rg/git grep via run_command for advanced text and LSP for symbols/types. No source symlinks or project ast-grep config.",
 		Annotations: annotations(true, false, true, false),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input WorkspaceSearchInput) (*mcpsdk.CallToolResult, executor.WorkspaceSearchResult, error) {
 		action := "workspace_search"

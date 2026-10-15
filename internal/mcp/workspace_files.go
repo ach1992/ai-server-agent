@@ -54,7 +54,7 @@ type WorkspaceTransferInput struct {
 func (s *Server) registerWorkspaceFileTools() {
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "workspace_transfer",
-		Description: "Client-neutral staged binary/UTF-8 ingress as aiworker: begin requires stable material-bound transfer_key, total raw bytes, whole SHA256 and exclusive must_not_exist/file_version destination precondition; chunk sends <=256 KiB decoded base64 with exact offset and chunk SHA256. commit performs a bounded, durably checkpointed preparation window (at most 4 MiB per call) and may return status=preparing with prepared_bytes; repeat commit with the SAME handle until status=committed, without recopying completed windows. status shows received/next_offset, prepared_bytes, expiry or terminal receipt, and reconciles recoverable publication/cleanup; an existing-file version race can end in status=conflicted (NOT committed) with commit returning file_changed after verified rollback; abort cleans uncommitted state. Expired state is swept independently by the Executor while it runs; retained staging bytes count against quota until physically released. No root authority, direct attachment ingestion, unlimited text visibility or Gateway dependency. If the outcome is unknown, query status before retrying.",
+		Description: "Stage binary/UTF-8 file transfers as aiworker. begin: stable transfer_key, size, SHA256, must_not_exist/file_version; chunk: <=256 KiB base64 at exact offset with SHA256. commit: <=4 MiB preparation per call; repeat the SAME handle while status=preparing. status reconciles unknown outcomes, expiry and version conflicts; abort drops uncommitted data. Staging counts against quota. If an outcome is unknown, check status before retrying. No root access.",
 		Annotations: annotations(false, true, false, false),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input WorkspaceTransferInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{
@@ -69,7 +69,7 @@ func (s *Server) registerWorkspaceFileTools() {
 		return s.responseResult(resp)
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-		Name: "workspace_stat", Description: "Inspect the size and file_version of a readable regular file in one explicit aiworker workspace without reading or returning any file bytes. Uses the same worker-only symlink-safe Landlock/openat2 path as workspace_read; status=metadata_only and output_encoding=none do NOT mean the file content was delivered. Use workspace_read with a small explicit limit and matching file_version for selected content.",
+		Name: "workspace_stat", Description: "Inspect aiworker file size and file_version without reading content. Metadata only; use workspace_read for selected bytes. No symlinks.",
 		Annotations: annotations(true, false, true, false),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input WorkspaceStatInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "workspace_stat", Workspace: input.Workspace, Path: input.Path, FileVersion: input.FileVersion})
@@ -79,7 +79,7 @@ func (s *Server) registerWorkspaceFileTools() {
 		return s.responseResult(resp)
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-		Name: "workspace_apply_edits", Description: "Apply up to 12 bounded aiworker source-file edits in one explicit workspace after preflighting EVERY path, expected version and exact replacement context. Each file commits atomically but the batch is NOT an all-or-nothing transaction: structured result reports exact applied, failed and unattempted paths, including possible unknown completion. No Git staging/commit, code execution or implicit rollback.",
+		Name: "workspace_apply_edits", Description: "Apply up to 12 aiworker file edits with expected file_version and exact context. Each file is atomic; batch is NOT an all-or-nothing transaction. Inspect applied/failed/unattempted paths and unknown outcomes. No Git commit or automatic rollback.",
 		Annotations: annotations(false, true, false, false),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input WorkspaceApplyEditsInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "workspace_apply_edits", Workspace: input.Workspace, WorkspaceEdits: input.Edits})
@@ -89,7 +89,7 @@ func (s *Server) registerWorkspaceFileTools() {
 		return s.responseResult(resp)
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-		Name: "workspace_read", Description: "Read a bounded raw-byte range from a regular source file inside one explicit workspace as aiworker, not root. For unknown/large files use workspace_stat first, then select a small explicit limit with matching file_version; the default zero limit reads up to 1 MiB and may exceed an AI client model-context budget. No symlinks, traversal or implicit Git administrative reads; returns a file_version for optimistic edits. Does not execute project code.",
+		Name: "workspace_read", Description: "Read bounded bytes from an aiworker workspace, not root; returns file_version. For unknown/large files use workspace_stat and explicit limit; default 1 MiB may overwhelm context. No source symlinks or Git administrative reads.",
 		Annotations: annotations(true, false, true, false),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input WorkspaceReadInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "workspace_read", Workspace: input.Workspace, Path: input.Path, Offset: input.Offset, Limit: input.Limit, FileVersion: input.FileVersion})
@@ -99,7 +99,7 @@ func (s *Server) registerWorkspaceFileTools() {
 		return s.responseResult(resp)
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-		Name: "workspace_write", Description: "Create or atomically replace one bounded regular source file using aiworker authority and descriptor-relative path confinement. Requires must_not_exist for create or exact file_version for replace; does not auto-stage/commit. Does not follow symlinks, overwrite concurrent changes silently, or run project code. Multi-file transaction semantics are not claimed.",
+		Name: "workspace_write", Description: "Create or replace one regular aiworker source file with must_not_exist or exact file_version. No symlinks, implicit Git commit or silent overwrite.",
 		Annotations: annotations(false, true, false, false),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input WorkspaceWriteInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "workspace_write", Workspace: input.Workspace, Path: input.Path, Content: input.Content, FileVersion: input.FileVersion, MustNotExist: input.MustNotExist})
