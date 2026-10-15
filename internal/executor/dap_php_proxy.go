@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"encoding/xml"
 	"errors"
@@ -240,9 +241,35 @@ func phpDBGpReadInit(conn *net.UnixConn) ([]byte, string, string, error) {
 		Language string   `xml:"language,attr"`
 		Protocol string   `xml:"protocol_version,attr"`
 	}
-	if err := xml.Unmarshal(content[:n], &init); err != nil || init.XMLName.Local != "init" ||
+	// Pinned Xdebug 3.4 emits a real DBGp init with
+	// <?xml version="1.0" encoding="iso-8859-1"?>. xml.Unmarshal
+	// silently accepts our UTF-8 mock frames but refuses that real prolog.
+	// Decode only the pinned, bounded Latin-1 variant, never arbitrary
+	// declared encodings or external fetches; retain the raw original
+	// frame for forwarding to the adapter without rewriting bytes.
+	decoder := xml.NewDecoder(bytes.NewReader(content[:n]))
+	decoder.CharsetReader = func(label string, input io.Reader) (io.Reader, error) {
+		if !strings.EqualFold(label, "iso-8859-1") {
+			return nil, errors.New("unsupported DBGp XML charset")
+		}
+		raw, err := io.ReadAll(io.LimitReader(input, phpDBGpInitMaxBytes+1))
+		if err != nil || len(raw) > phpDBGpInitMaxBytes {
+			return nil, errors.New("DBGp XML charset input over budget")
+		}
+		var unicode strings.Builder
+		unicode.Grow(len(raw) * 2)
+		for _, b := range raw {
+			unicode.WriteRune(rune(b))
+		}
+		return strings.NewReader(unicode.String()), nil
+	}
+	if err := decoder.Decode(&init); err != nil || init.XMLName.Local != "init" ||
 		init.XMLName.Space != "urn:debugger_protocol_v1" || init.Language != "PHP" || init.Protocol != "1.0" {
 		return nil, "", "", errors.New("untrusted DBGp init identity")
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); !errors.Is(err, io.EOF) {
+		return nil, "", "", errors.New("unexpected trailing DBGp XML content")
 	}
 	frame := make([]byte, 0, len(header)+1+len(content))
 	frame = append(frame, header...)

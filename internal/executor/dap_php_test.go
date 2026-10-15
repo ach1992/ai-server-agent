@@ -97,6 +97,35 @@ func TestPHPDBGpInitOneFrameBoundedAndIdentity(t *testing.T) {
 	}
 }
 
+// The official Xdebug 3.4 client declares ISO-8859-1, not UTF-8, and
+// may send non-ASCII source filenames. Provenance checks must accept those
+// real source bytes while rejecting undeclared/unsupported transformations.
+func TestPHPDBGpActualXdebugISO88591Init(t *testing.T) {
+	for _, tc := range []struct {
+		name, charset string
+		valid         bool
+	}{
+		{"real_xdebug_latin1", "iso-8859-1", true},
+		{"untrusted_charset", "windows-1252", false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			// Deliberately insert Latin-1 E9; this is invalid UTF-8.
+			xml := append([]byte("<?xml version=\"1.0\" encoding=\""+tc.charset+"\"?>\n<init xmlns=\"urn:debugger_protocol_v1\" xmlns:xdebug=\"https://xdebug.org/dbgp/xdebug\" fileuri=\"file:///opt/caf"), 0xe9)
+			xml = append(xml, []byte(".php\" language=\"PHP\" protocol_version=\"1.0\" appid=\"47\" />")...)
+			wire := append([]byte(strconv.Itoa(len(xml))+"\x00"), xml...)
+			wire = append(wire, 0)
+			peer := phpDBGpFixtureConn(t, wire)
+			got, id, uri, err := phpDBGpReadInit(peer)
+			if (err == nil) != tc.valid {
+				t.Fatalf("DBGp charset %q unexpected result: %v", tc.charset, err)
+			}
+			if tc.valid && (id != "47" || uri != "file:///opt/café.php" || string(got) != string(wire)) {
+				t.Fatalf("real Xdebug bounded Latin-1 init bytes/provenance changed: id=%s uri=%q", id, uri)
+			}
+		})
+	}
+}
+
 func TestPHPDBGpVerifierRejectsUncontainedPeerWithoutForward(t *testing.T) {
 	peer := phpDBGpFixtureConn(t, phpDBGpTestInitFrame(strconv.Itoa(os.Getpid()), "file:///test.php"))
 	p := &phpDBGpProxy{workerUID: uint32(os.Getuid()), phpBinary: "/usr/bin/php8.4", program: "/test.php"}
