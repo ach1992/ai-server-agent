@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"strings"
 	"time"
+	"unicode"
+	"unicode/utf8"
 
 	"github.com/ach1992/ai-server-agent/internal/audit"
 )
@@ -59,6 +61,46 @@ func auditMode(root bool) string {
 	return "worker"
 }
 
+// Only bounded workspace-relative target names are surfaced for structured
+// worker write intent. Raw command bodies, root paths, and file content remain
+// fingerprint-only. Names themselves may be sensitive; audit storage is protected.
+func auditWorkspaceTargetPaths(req Request, action string) ([]string, int) {
+	if req.Root || req.Action != action {
+		return nil, 0
+	}
+	var candidates []string
+	switch action {
+	case "workspace_write":
+		candidates = []string{req.Path}
+	case "workspace_apply_edits":
+		for _, edit := range req.WorkspaceEdits {
+			candidates = append(candidates, edit.Path)
+		}
+	case "workspace_transfer":
+		if req.TransferOp != "commit" {
+			return nil, 0
+		}
+		candidates = []string{req.Path}
+	default:
+		return nil, 0
+	}
+	const maxAuditTargetPathBytes = 256
+	paths := make([]string, 0, min(len(candidates), maxWorkspaceBatchFiles))
+	omitted := 0
+	for _, candidate := range candidates {
+		clean, err := safeWorkspaceRelativeFile(candidate)
+		if err != nil || !utf8.ValidString(clean) || len(clean) > maxAuditTargetPathBytes || strings.IndexFunc(clean, unicode.IsControl) >= 0 || len(paths) >= maxWorkspaceBatchFiles {
+			omitted++
+			continue
+		}
+		paths = append(paths, clean)
+	}
+	if len(paths) == 0 {
+		return nil, omitted
+	}
+	return paths, omitted
+}
+
 func (s *Server) beginActionAudit(req Request, action, mode, command, policyCategory string) *Response {
 	if s.audit == nil {
 		return nil
@@ -82,6 +124,7 @@ func (s *Server) beginActionAudit(req Request, action, mode, command, policyCate
 		PrincipalClass: req.PrincipalClass,
 		PrincipalName:  req.PrincipalName,
 	}
+	entry.TargetPaths, entry.TargetPathsOmitted = auditWorkspaceTargetPaths(req, action)
 	if s.auditWriteHook != nil {
 		if err := s.auditWriteHook("start"); err != nil {
 			resp := auditUnavailableResponse(err)
@@ -125,6 +168,7 @@ func (s *Server) finishActionAudit(req Request, action, mode, command, policyCat
 		PrincipalClass: req.PrincipalClass,
 		PrincipalName:  req.PrincipalName,
 	}
+	entry.TargetPaths, entry.TargetPathsOmitted = auditWorkspaceTargetPaths(req, action)
 	if s.auditBeforeCompletionHook != nil {
 		s.auditBeforeCompletionHook()
 	}
