@@ -95,8 +95,8 @@ capacity(){
 start_job(){
   local request
   request="$(jq -cn --arg workspace "$fixture" --arg kind "$1" \
-    --arg label "ci118_$1" --arg operation_id "ci118-$1-$2-stable" \
-    '{workspace:$workspace,kind:$kind,command:"sleep 180","label":$label,operation_id:$operation_id}')"
+    --arg job_label "ci118_$1" --arg operation_id "ci118-$1-$2-stable" \
+    '{workspace:$workspace,kind:$kind,command:"sleep 180","label":$job_label,operation_id:$operation_id}')"
   mcp_call start_job "$request"
 }
 begin_transfer(){
