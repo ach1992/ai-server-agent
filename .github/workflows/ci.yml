@@ -856,6 +856,11 @@ jobs:
           test "$code" != 000
           test "$code" != 401
 
+          # #156: observe repeated genuine repository_environment Go probes
+          # through the installed exact-candidate Agent and root Executor.
+          # This runner is disposable, and the inherited CI bearer never logs.
+          printf '%s\n' "$legacy" | bash tests/installed_go_environment.sh
+
           # Credential operations and update/uninstall must share the same
           # root lifecycle lock, including direct library invocation.
           lock_ready="$(mktemp)"
