@@ -6,33 +6,46 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 bash -n "$BOOTSTRAP"
-# The public one-liner is versionless but source-immutable. It MUST pin a
-# full published commit, never a mutable branch or a moving release asset.
-documented_bootstrap_sha="$(sed -nE 's#^curl -fsSL https://raw\.githubusercontent\.com/ach1992/ai-server-agent/([0-9a-f]{40})/scripts/install-stable\.sh \| bash$#\1#p' "$ROOT/README.md")"
-[ -n "$documented_bootstrap_sha" ] || { echo 'README is missing the immutable-SHA versionless stable bootstrap command' >&2; exit 1; }
-[ "$(printf '%s\n' "$documented_bootstrap_sha" | wc -l)" -eq 1 ] || { echo 'README has multiple latest-stable bootstrap commands' >&2; exit 1; }
-pinned_source="https://raw.githubusercontent.com/ach1992/ai-server-agent/$documented_bootstrap_sha/scripts/install-stable.sh"
-grep -qF "curl -fsSL $pinned_source | bash -s -- vMAJOR.MINOR.PATCH" "$ROOT/README.md" || {
-  echo 'README is missing the explicit-version install form for the same pinned bootstrap' >&2
-  exit 1
-}
-operations_bootstrap_sha="$(sed -nE 's#^curl -fsSL https://raw\.githubusercontent\.com/ach1992/ai-server-agent/([0-9a-f]{40})/scripts/install-stable\.sh \| bash$#\1#p' "$ROOT/docs/OPERATIONS.md")"
-if [ "$operations_bootstrap_sha" != "$documented_bootstrap_sha" ]; then
-  echo 'Operations versionless bootstrap command disagrees with README' >&2
-  exit 1
-fi
-grep -qF "curl -fsSL $pinned_source | bash -s -- vMAJOR.MINOR.PATCH" "$ROOT/docs/OPERATIONS.md" || {
-  echo 'Operations is missing the matching explicit-version form' >&2
-  exit 1
-}
-if grep -Eq 'https://raw\.githubusercontent\.com/ach1992/ai-server-agent/(main|refs/heads/[^/]+)/scripts/install-stable\.sh' "$ROOT/README.md" "$ROOT/docs/OPERATIONS.md"; then
-  echo 'Documented bootstrap may not load source from a mutable branch' >&2
-  exit 1
-fi
-if grep -qF 'curl -fsSL https://github.com/ach1992/ai-server-agent/releases/latest/download/install.sh | sudo bash' "$ROOT/README.md" "$ROOT/docs/OPERATIONS.md"; then
-  echo 'Documentation restored an unauthenticated release-installer-to-root path' >&2
-  exit 1
-fi
+# The public bootstrap URL is permanent but its source on main is mutable.
+# The selected release, verified installer and root staging remain immutable.
+bootstrap_url='https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh'
+default_command="curl -fsSL $bootstrap_url | bash"
+version_regex='^curl -fsSL https://raw\.githubusercontent\.com/ach1992/ai-server-agent/main/scripts/install-stable\.sh \| bash -s -- v[0-9]+\.[0-9]+\.[0-9]+$'
+readme_version=''
+for doc in "$ROOT/README.md" "$ROOT/docs/OPERATIONS.md"; do
+  count="$(grep -Fxc "$default_command" "$doc" || true)"
+  [ "$count" -eq 1 ] || {
+    echo "$doc must document exactly one permanent version-free main-branch bootstrap command" >&2
+    exit 1
+  }
+  if ! grep -Eq "$version_regex" "$doc"; then
+    echo "$doc must document one real specific-version example from the same bootstrap URL" >&2
+    exit 1
+  fi
+  sample="$(sed -nE 's#^curl -fsSL https://raw\.githubusercontent\.com/ach1992/ai-server-agent/main/scripts/install-stable\.sh \| bash -s -- (v[0-9]+\.[0-9]+\.[0-9]+)$#\1#p' "$doc")"
+  [ "$(printf '%s\n' "$sample" | wc -l)" -eq 1 ] || {
+    echo "$doc must contain exactly one specific-version example" >&2
+    exit 1
+  }
+  if [ -z "$readme_version" ]; then
+    readme_version="$sample"
+  elif [ "$readme_version" != "$sample" ]; then
+    echo 'README and Operations specific-version examples disagree' >&2
+    exit 1
+  fi
+  if grep -Eq '^curl -fsSL https://raw\.githubusercontent\.com/ach1992/ai-server-agent/([0-9a-f]{40}|v[0-9]+\.[0-9]+\.[0-9]+)/scripts/install-stable\.sh' "$doc"; then
+    echo "$doc must not revert to a versioned/commit-pinned public bootstrap URL" >&2
+    exit 1
+  fi
+  if grep -Eq '^curl -fsSL .* \| sudo bash' "$doc"; then
+    echo "$doc must not directly elevate the mutable bootstrap" >&2
+    exit 1
+  fi
+  if grep -qF 'curl -fsSL https://github.com/ach1992/ai-server-agent/releases/latest/download/install.sh | sudo bash' "$doc"; then
+    echo "$doc restored unauthenticated release-installer-to-root execution" >&2
+    exit 1
+  fi
+done
 
 make_fixture(){
   local immutable="${1:-true}" wrong_digest="${2:-false}" bad_url="${3:-false}"

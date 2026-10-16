@@ -20,19 +20,19 @@ The Agent itself does **not** require a web server, database, Docker, a hosting 
 
 ## Install
 
-To install the **latest published immutable Stable** without maintaining a version in this command:
+To install the **latest published Stable**, use this permanent, version-free command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/6468d48b4ff5f1f82ad446531dff9951e86a0e3c/scripts/install-stable.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | bash
 ```
 
-To install a **specific published immutable Stable** instead, replace `vMAJOR.MINOR.PATCH` with the exact release tag you want:
+To install a **specific Stable release**, for example `v0.1.14`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/6468d48b4ff5f1f82ad446531dff9951e86a0e3c/scripts/install-stable.sh | bash -s -- vMAJOR.MINOR.PATCH
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | bash -s -- v0.1.14
 ```
 
-The long hexadecimal URL segment is an **immutable, published source-commit pin for the bootstrap**, not the Agent version selected for installation. The default command always resolves the latest published Stable from GitHub Releases; the explicit tag selects a particular immutable Stable. The bootstrap checks the chosen release installer SHA-256 **before privileged execution**. Do not swap the pinned source URL for a mutable `main` URL or execute `releases/latest/download/install.sh` directly as root. The bootstrap pin remains fixed across normal Stable releases; change it only for a separately verified bootstrap security/compatibility update.
+The **command URL stays the same** for future releases. It loads the small bootstrap from the repository's maintained `main` branch; that source is **mutable** and must remain protected and reviewed, unlike a SHA-pinned bootstrap. By default the bootstrap asks GitHub Releases for the latest published immutable Stable, or checks the explicit release tag when supplied. It authenticates the selected release installer digest **before** starting the privileged installation. Run the bootstrap with `bash`, **not `sudo bash`**; it requests elevated privileges only for the verified install stage. Never pipe the raw latest-release installer directly into root.
 
 For an exact-version install, troubleshooting, advanced or source installations and supply-chain verification, use the [installation guide](docs/OPERATIONS.md#install-the-latest-stable-release).
 
