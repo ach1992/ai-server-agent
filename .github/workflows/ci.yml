@@ -962,6 +962,19 @@ jobs:
           fi
           sudo systemctl is-active --quiet ai-server-agent.service
           sudo systemctl is-active --quiet ai-server-agent-executor.service
+          # #143: the runner is freshly installed and disposable. Rotate its
+          # one-time local bearer inside a private PTY transcript, never into
+          # Actions logs, environment variables, or a committed fixture.
+          profile_credential_log="$(mktemp)"
+          chmod 0600 "$profile_credential_log"
+          trap 'rm -f -- "$profile_credential_log"; unset profile_bearer' EXIT
+          script -qefc "sudo ai-server-agent-manage credential-rotate direct-default" "$profile_credential_log" >/dev/null
+          profile_bearer="$(grep -oE 'Authorization: Bearer [0-9a-f]{64}' "$profile_credential_log" | tail -n1 | cut -d' ' -f3)"
+          [[ "$profile_bearer" =~ ^[0-9a-f]{64}$ ]]
+          printf '%s\n' "$profile_bearer" | bash tests/installed_environment_profiles.sh
+          unset profile_bearer
+          rm -f -- "$profile_credential_log"
+          trap - EXIT
           sudo env AI_SERVER_AGENT_YES=1 bash uninstall.sh --purge
           id aiworker >/dev/null
           getent group aiworker >/dev/null
