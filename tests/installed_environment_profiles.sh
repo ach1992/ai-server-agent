@@ -130,8 +130,23 @@ if sudo env AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1 \
   fail 'Injected service restart failure falsely succeeded'
 fi
 test -f "$scratch/restart-failed" || fail 'Failure injector never exercised real restart'
-grep -Fq 'previous configuration and Agent health were restored' "$scratch/injected-failure" ||
+if ! grep -Fq 'previous configuration and Agent health were restored' "$scratch/injected-failure"; then
+  # Only emit bounded, static management status lines, never the private
+  # credential or the complete process environment.
+  grep -E 'Purpose update failed|Environment update failed|Another lifecycle operation|^\\[ai-server-agent\\] (ERROR|WARNING)' \\
+    "$scratch/injected-failure" | head -n 10 >&2 || true
+  if [ "$(sudo sha256sum /etc/ai-server-agent/config.json | awk '{print $1}')" = "$before" ]; then
+    echo 'PROFILE_ROLLBACK_DIAGNOSTIC config_restored=yes' >&2
+  else
+    echo 'PROFILE_ROLLBACK_DIAGNOSTIC config_restored=no' >&2
+  fi
+  if sudo systemctl is-active --quiet ai-server-agent.service; then
+    echo 'PROFILE_ROLLBACK_DIAGNOSTIC agent_active=yes' >&2
+  else
+    echo 'PROFILE_ROLLBACK_DIAGNOSTIC agent_active=no' >&2
+  fi
   fail 'Manager rollback was not verified'
+fi
 [ "$(sudo sha256sum /etc/ai-server-agent/config.json | awk '{print $1}')" = "$before" ] ||
   fail 'Failed activation changed old configuration'
 test -z "$(sudo find /etc/ai-server-agent -maxdepth 1 -name '.profile-old.*' -print)" ||
