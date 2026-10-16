@@ -68,14 +68,33 @@ installation_error_recovery(){
 }
 trap 'installation_error_recovery "$LINENO"' ERR
 
-log(){ printf '[ai-server-agent] %s\n' "$*"; }
-warn(){ printf '[ai-server-agent] WARNING: %s\n' "$*" >&2; }
+# The installer is a standalone authenticated release asset. Keep its
+# terminal presentation self-contained rather than sourcing a mutable helper.
+installer_message(){
+  local kind="$1" message color=""; shift
+  message="$(printf '%s' "$*" | LC_ALL=C tr -d '\000-\037\177')"
+  if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then
+    case "$kind" in
+      INFO) color=$'\033[36m' ;;
+      SUCCESS) color=$'\033[32m' ;;
+      WARNING) color=$'\033[33m' ;;
+      ERROR) color=$'\033[31m' ;;
+    esac
+    printf '%s%s:%s %s\n' "$color" "$kind" $'\033[0m' "$message"
+  elif [ "$kind" = INFO ]; then
+    printf '[ai-server-agent] %s\n' "$message"
+  else
+    printf '[ai-server-agent] %s: %s\n' "$kind" "$message"
+  fi
+}
+log(){ installer_message INFO "$*"; }
+warn(){ installer_message WARNING "$*" >&2; }
 die(){
   if [ "$MCP_MIGRATION_SWITCHED" -eq 1 ] && [ "$MCP_MIGRATION_RECOVERING" -eq 0 ]; then
     MCP_MIGRATION_RECOVERING=1
     rollback_legacy_mcp_migration "$*"
   fi
-  printf '[ai-server-agent] ERROR: %s\n' "$*" >&2
+  installer_message ERROR "$*" >&2
   exit 1
 }
 need_root(){ [ "$(id -u)" -eq 0 ] || die "Run this installer as root (for example: sudo bash install.sh)."; }
@@ -202,16 +221,23 @@ apt-get install -y -qq ca-certificates curl git jq openssl tar xz-utils >/dev/nu
 if [ "$FRESH_INSTALL" -eq 1 ]; then
   ENVIRONMENT_PROFILE="${AI_SERVER_AGENT_ENVIRONMENT_PROFILE:-development}"
   SERVER_LABEL="${AI_SERVER_AGENT_SERVER_LABEL:-}"
-  if [ "$NONINTERACTIVE" != "1" ] && [ -r /dev/tty ] && [ -z "${AI_SERVER_AGENT_ENVIRONMENT_PROFILE+x}" ]; then
-    printf '\nSelect this server\x27s primary purpose (all Agent tools remain available):\n' >/dev/tty
-    printf '  1) Development — Git/source, builds, debugging and project work\n' >/dev/tty
-    printf '  2) Validation  — candidate installs, integration/E2E, diagnostics and acceptance tests\n' >/dev/tty
-    read -r -p 'Choose [1]: ' profile_choice </dev/tty
-    case "${profile_choice:-1}" in
-      1) ENVIRONMENT_PROFILE=development ;;
-      2) ENVIRONMENT_PROFILE=validation ;;
-      *) die "Invalid environment purpose. Choose Development (1) or Validation (2)." ;;
-    esac
+  if [ "$NONINTERACTIVE" != "1" ] && [ -t 0 ] && [ -r /dev/tty ] && [ -z "${AI_SERVER_AGENT_ENVIRONMENT_PROFILE+x}" ]; then
+    while true; do
+      printf '\nSERVER PURPOSE\n' >/dev/tty
+      printf '  Both choices provide the same authorized Agent tools.\n' >/dev/tty
+      printf '  1) Development - source, builds and debugging\n' >/dev/tty
+      printf '  2) Validation  - integration, diagnostics and acceptance\n' >/dev/tty
+      printf '  b) Cancel installation\n' >/dev/tty
+      if ! IFS= read -r -p 'Choose [1]: ' profile_choice </dev/tty; then
+        die 'Purpose selection interrupted. No Agent service setup was started; minimal prerequisite packages may have been installed.'
+      fi
+      case "${profile_choice:-1}" in
+        1) ENVIRONMENT_PROFILE=development; break ;;
+        2) ENVIRONMENT_PROFILE=validation; break ;;
+        b|B) warn 'Installation cancelled before Agent service setup. Minimal prerequisite packages may have been installed.'; exit 20 ;;
+        *) printf 'WARNING: Choose 1, 2, or b to cancel.\n' >/dev/tty ;;
+      esac
+    done
   fi
 else
   if [ -n "${AI_SERVER_AGENT_ENVIRONMENT_PROFILE+x}" ] || [ -n "${AI_SERVER_AGENT_SERVER_LABEL+x}" ]; then
@@ -791,7 +817,7 @@ if [ "$NONINTERACTIVE" = "1" ]; then
     manual) "$MANAGE_BIN" configure-manual-tls ;;
     *) die "AI_SERVER_AGENT_SETUP_MODE must be local, cloudflare, manual, keep, or empty" ;;
   esac
-elif [ "$FRESH_INSTALL" -eq 1 ] && [ -r /dev/tty ] && [ -z "${AI_SERVER_AGENT_BIND_MODE+x}" ]; then
+elif [ "$FRESH_INSTALL" -eq 1 ] && [ -t 0 ] && [ -r /dev/tty ] && [ -z "${AI_SERVER_AGENT_BIND_MODE+x}" ]; then
   if ! manage_connection_setup first-run; then
     SETUP_INCOMPLETE=1
     warn "Core installation succeeded, but connection setup was not completed. The Agent remains installed and healthy in its last verified mode."
@@ -799,7 +825,7 @@ elif [ "$FRESH_INSTALL" -eq 1 ] && [ -r /dev/tty ] && [ -z "${AI_SERVER_AGENT_BI
   fi
 fi
 
-if [ "$MCP_CREDENTIAL_ORIGIN" = fresh ] && [ "$NONINTERACTIVE" != "1" ] && [ -r /dev/tty ]; then
+if [ "$MCP_CREDENTIAL_ORIGIN" = fresh ] && [ "$NONINTERACTIVE" != "1" ] && [ -t 0 ] && [ -r /dev/tty ]; then
   printf '\nA new direct/default MCP credential was issued. It is not stored in recoverable plaintext.\n' >/dev/tty
   reveal_new=n
   read -r -p 'Reveal the new Authorization value once in this terminal? [y/N] ' reveal_new </dev/tty || true
@@ -814,7 +840,7 @@ MCP_ACTIVATION_TOKEN=""
 if [ "$SETUP_INCOMPLETE" -eq 1 ]; then
   cat <<EOF_SUMMARY
 
-AI Server Agent core installed successfully; connection setup is incomplete.
+WARNING: AI Server Agent core installed successfully; connection setup is incomplete.
 
   Service:       ai-server-agent.service
   Executor:      ai-server-agent-executor.service
@@ -829,7 +855,7 @@ EOF_SUMMARY
 else
   cat <<EOF_SUMMARY
 
-AI Server Agent installed successfully.
+SUCCESS: AI Server Agent installed successfully.
 
   Service:       ai-server-agent.service
   Executor:      ai-server-agent-executor.service
@@ -843,12 +869,12 @@ updates, repair, Cloudflare cleanup, safe uninstall, or purge.
 EOF_SUMMARY
 fi
 
-if [ "$NONINTERACTIVE" != "1" ] && [ -r /dev/tty ]; then
+if [ "$NONINTERACTIVE" != "1" ] && [ -t 0 ] && [ -r /dev/tty ]; then
   echo
   "$MANAGE_BIN" status
   echo
   if [ "$SETUP_INCOMPLETE" -eq 1 ]; then
-    echo "Next: run 'sudo ai-server-agent-manage' and choose Configure or change domain / connection."
+    echo "Next: run 'sudo ai-server-agent-manage' and choose Connection / TLS setup."
   else
     echo "Next: run 'sudo ai-server-agent-manage' any time. Choose ChatGPT Setup when you are ready to connect."
   fi

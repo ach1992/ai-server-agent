@@ -183,4 +183,5 @@ grep -Fq 'persistent_task_slots=4 tasks' <(runtime_show) || fail 'task default n
 
 ASA_PROFILE_TEST_BINARY="$RUNTIME_BINARY" bash "$ROOT/tests/environment_profiles.sh"
 bash "$ROOT/tests/operator_menu.sh"
+bash "$ROOT/tests/operator_presentation.sh"
 echo 'Runtime settings management PASS'
