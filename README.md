@@ -69,7 +69,9 @@ For credentials, Cloudflare, local/private mode, manual TLS, safe uninstall, pur
 | Debugging | Go/Delve and optional contained PHP CLI, Rust prebuilt, Python, Node/precompiled TypeScript and local HTML Browser DAP; never imply PHP HTTP-service, Shell DAP, extension-host or remote attach support |
 | Environment | Authenticated Agent/environment identity, available tools, host footprint and warnings |
 
-Not every source-branch capability is in the current Stable release or ready on every OS/kernel/client. Use `agent_environment`, the applicable tool status and actual installed version rather than inferring availability from this table.
+The approved language scope covers **Go; PHP; JavaScript/TypeScript; Python; Bash/POSIX Shell; Rust; HTML/CSS; and PostgreSQL/MySQL/MariaDB SQL**. The first optional LSP/DAP slice was completed in [#140](https://github.com/ach1992/ai-server-agent/issues/140); the accepted advanced modes and adapter/client acceptance remain in [#149](https://github.com/ach1992/ai-server-agent/issues/149). An optional adapter missing from a host is a provisioning/readiness gap, not cancellation of that language's accepted scope.
+
+Not every integrated feature or optional adapter is ready on every OS/kernel/client. Use `agent_environment`, the applicable tool status and actual installed version rather than inferring availability from this table.
 
 Read the [Tool Reference](docs/TOOL-REFERENCE.md) for tools, limits, examples, and important caveats. [Developer Runtime](docs/DEVELOPER-RUNTIME.md) documents the accepted future composition and unresolved delivery gates.
 

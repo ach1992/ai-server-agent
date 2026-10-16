@@ -16,7 +16,7 @@ Support for another commercial AI client is claimed only after its current proto
 
 ## MCP capability surface
 
-The immutable `v0.1.13` server exposes **59 distinct MCP tools**, verified by an authenticated Go SDK `tools/list` test; the table below groups related tools and is not a row-by-row count. `main` defines the catalog in `internal/mcp/`; clients see the inventory of their **installed** Agent build after tool refresh. The published Stable and `main` can differ after new code merges; compare the installed build with the current release and refresh the MCP client catalog when necessary. These grouped entries describe the current source capability surface, not a guarantee that each optional tool works on every server/client:
+Immutable Stable `v0.1.13` introduced **59 distinct MCP tools**, retained in `v0.1.14`, as verified with authenticated Go SDK `tools/list`; the table below groups related tools and is not a row-by-row count. `main` defines the catalog in `internal/mcp/`; clients see the inventory and tool descriptions of their **installed or cached** Agent catalog. After upgrading an Agent, a connected client may retain stale tool descriptions even while the Agent binary and tool names are current. Compare an authenticated fresh `tools/list` result with what the actual client exposes; refresh the existing client/plugin tool discovery where supported before assuming a server defect, and avoid restarting an occupied Agent merely to fix client metadata. The published Stable and `main` may diverge after later merges. These grouped entries are not a guarantee that each optional tool works on every host/client:
 
 | Tool | Purpose |
 | --- | --- |

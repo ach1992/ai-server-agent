@@ -1,6 +1,6 @@
 # Operator CLI surface inventory and presentation contract
 
-This document covers the **source CLI**, not a promise that the currently installed Stable has been updated. Issue [#147](https://github.com/ach1992/ai-server-agent/issues/147) owns interactive acceptance. The installer, management entrypoint and standalone lifecycle helpers must remain usable in plain non-TTY automation with no required TUI dependency.
+This document covers the **implemented operator CLI presentation contract**. Its unified interface first shipped in immutable Stable `v0.1.14`; **shipping and two-host safe PTY smoke do not close** first-install, protected-interruption and failure/recovery acceptance owned by [#147](https://github.com/ach1992/ai-server-agent/issues/147). Always verify the actual installed version. The installer, management entrypoint and standalone lifecycle helpers remain usable in plain non-TTY automation with no required TUI dependency.
 
 ## Surface inventory (source of actual strings is the named function)
 

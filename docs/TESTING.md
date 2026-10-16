@@ -15,7 +15,7 @@ The two approved purpose profiles, Development and Validation ([Issue #143](http
 - Authenticated `agent_environment` and MCP `initialize` instructions advertise accurate purpose; client-specific actual delivery of instructions is verified and documented rather than assumed. A direct client works without a Gateway.
 - Verify the feature on a fresh authorized installation, with configuration/management/service restart and rollback/error behavior appropriate to its implementation. No production or connected-occupied-host mutation without separate approval.
 
-Source/CI coverage does not substitute for installed feature proof. Verify the exact installed build and Issue #143 for current profile-management and client evidence; older Stable releases may not include these commands.
+Source/CI coverage does not substitute for installed feature proof. Verify the exact installed build and Issue #143 for current profile-management and client evidence; older Stable releases may not include these commands. For an upgraded real MCP client, distinguish **fresh server `tools/list`** from potentially cached client-facing tool descriptions and schemas; retry supported client discovery/refresh before diagnosing the server binary. Do not use an Agent restart or speculative client UI work as a substitute for identifying that boundary.
 
 ## Direct MCP transfer acceptance
 
