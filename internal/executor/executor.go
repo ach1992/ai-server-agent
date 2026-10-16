@@ -67,6 +67,7 @@ type Server struct {
 	phpBinary                         string                                                    // test-only recognized system PHP fixture
 	phpActorPHAR                      string                                                    // test-only pinned Phpactor artifact fixture
 	environmentGoSystemPath           string                                                    // test-only Go discovery path; empty uses fixed safeCommandPath
+	environmentProbeRemoveAll         func(string) error                                        // test-only cleanup fault injection; nil uses os.RemoveAll
 	codeTargetSnapshotHook            func()                                                    // test-only interleaving: alter target after LSP overlay snapshot
 	dlvBinary                         string                                                    // test-only Delve DAP fixture; production uses admin-owned binary
 	pythonDebugpyBinary               string                                                    // test-only recognized Python interpreter fixture
