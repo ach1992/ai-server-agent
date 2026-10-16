@@ -177,6 +177,9 @@ for kind in cloudflare bearer; do
   fi
   [ "$hidden_rc" -eq 20 ] || { echo "Hidden prompt $kind cancellation returned $hidden_rc instead of 20" >&2; exit 1; }
   grep -Fq 'cancelled before' "$TMP/hidden-$kind.out"
+  if [ "$kind" = cloudflare ]; then
+    grep -Fq 'Cloudflare API token (input hidden; not stored) (b=cancel):' "$TMP/hidden-$kind.out"
+  fi
   ! grep -Eq 'UNSAFE_|Authorization: Bearer|token format' "$TMP/hidden-$kind.out"
 done
 

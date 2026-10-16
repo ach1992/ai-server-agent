@@ -1092,7 +1092,7 @@ load_cf_token(){
     CF_TOKEN="$AI_SERVER_AGENT_CLOUDFLARE_API_TOKEN"
   else
     ui_has_interactive_tty || die "Set AI_SERVER_AGENT_CLOUDFLARE_API_TOKEN_FILE for noninteractive Cloudflare setup."
-    printf 'Cloudflare API token (input hidden; b=cancel): ' >/dev/tty
+    printf 'Cloudflare API token (input hidden; not stored) (b=cancel): ' >/dev/tty
     read -r -s CF_TOKEN </dev/tty || { CF_TOKEN=""; return 20; }
     printf '\n' >/dev/tty
     if ui_cancel_requested "$CF_TOKEN"; then
