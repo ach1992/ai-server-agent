@@ -43,11 +43,11 @@ check_profile(){
   local role="$1" label="$2" manifest
   sudo systemctl is-active --quiet ai-server-agent.service || fail 'Agent service inactive'
   sudo systemctl is-active --quiet ai-server-agent-executor.service || fail 'Executor service inactive'
-  sudo jq -e --arg role "$role" --arg label "$label" --arg id "$expected_instance" \
-    '.environment_profile==$role and (.server_label // "")==$label and .instance_id==$id' \
+  sudo jq -e --arg role "$role" --arg server_label "$label" --arg id "$expected_instance" \
+    '.environment_profile==$role and (.server_label // "")==$server_label and .instance_id==$id' \
     /etc/ai-server-agent/config.json >/dev/null || fail 'Installed config role/label/identity changed'
-  sudo jq -e --arg role "$role" --arg label "$label" --arg id "$expected_instance" \
-    '.environment_profile==$role and (.server_label // "")==$label and .instance_id==$id' \
+  sudo jq -e --arg role "$role" --arg server_label "$label" --arg id "$expected_instance" \
+    '.environment_profile==$role and (.server_label // "")==$server_label and .instance_id==$id' \
     /var/lib/ai-server-agent/AI_ENVIRONMENT.json >/dev/null || fail 'Effective manifest stale'
   sudo ai-server-agent-manage profile-show > "$scratch/profile-show"
   grep -Fq "Profile: $role" "$scratch/profile-show" || fail 'Installed profile-show disagrees'
@@ -56,18 +56,18 @@ check_profile(){
   fi
 
   mcp_request '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"ci-installed-purpose-client","version":"1"}}}' "$scratch/initialize"
-  jq -e --arg role "$role" --arg label "$label" '
+  jq -e --arg role "$role" --arg server_label "$label" '
     .result.serverInfo.name=="ai-server-agent" and
     (.result.instructions | contains("Environment purpose: " + $role)) and
     (.result.instructions | contains("guidance; it is not an authorization")) and
-    (if $label=="" then true else (.result.instructions | contains("Server label: " + $label)) end)
+    (if $server_label=="" then true else (.result.instructions | contains("Server label: " + $server_label)) end)
   ' "$scratch/initialize" >/dev/null || fail 'Real MCP initialization contradicts effective role'
 
   mcp_request '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agent_environment","arguments":{}}}' "$scratch/environment"
   manifest="$(jq -er '.result.content[0].text' "$scratch/environment")" ||
     fail 'Direct MCP environment text was missing'
-  jq -e --arg role "$role" --arg label "$label" --arg id "$expected_instance" '
-    .environment_profile==$role and (.server_label // "")==$label and
+  jq -e --arg role "$role" --arg server_label "$label" --arg id "$expected_instance" '
+    .environment_profile==$role and (.server_label // "")==$server_label and
     .instance_id==$id and .workspace_dir=="/srv/ai-workspace"
   ' <<< "$manifest" >/dev/null || fail 'Direct MCP environment did not reflect installed state'
 
