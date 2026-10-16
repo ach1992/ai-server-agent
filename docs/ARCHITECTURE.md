@@ -69,7 +69,7 @@ The Agent must not require OpenAI credentials for core operation. Provider-speci
 
 ### Environment purpose versus connection and authority
 
-**Implemented in immutable Stable `v0.1.13`:** An Agent instance can declare `development` or `validation` as its **Environment Purpose Profile**, plus an optional non-secret server label. Installed-client acceptance remains separate (Issue #143). Both profiles reuse the same binary, processes, MCP tool inventory, root/worker execution boundaries, bearer principals, and optional adapter installation mechanisms.
+**Implemented in immutable Stable `v0.1.13`:** An Agent instance can declare `development` or `validation` as its **Environment Purpose Profile**, plus an optional non-secret server label. Initial installed-client acceptance is recorded in completed Issue #143; new client/host claims still require direct verification. Both profiles reuse the same binary, processes, MCP tool inventory, root/worker execution boundaries, bearer principals, and optional adapter installation mechanisms.
 
 A profile is guidance for choosing the correct host: Development for routine source/Git/build/debug work; Validation for candidate installation, reproduction, E2E and acceptance evidence. It must not grant, revoke, or conceal capabilities, change Root approval behavior, install/remove GitHub credentials, or silently enforce server-side policies. It is independent from local/public/Cloudflare connectivity mode and the authenticated principal identity. Selected purpose should be discoverable through authenticated `agent_environment` data and concise MCP server instructions, subject to actual AI-client support for instruction presentation.
 

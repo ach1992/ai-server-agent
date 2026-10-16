@@ -486,7 +486,7 @@ A mature CLI/tool should move into Layer 1 only when evidence shows that a dedic
 
 Do not promote capabilities merely because they are powerful, modern, or available.
 
-## 19. Language-neutral extensions and phased fresh-install delivery (Issues #140 and #149)
+## 19. Language-neutral adapter extensions and fresh-install acceptance
 
 **Already agreed language coverage:** Go; PHP; JavaScript/TypeScript; Python; Bash/POSIX Shell; Rust; HTML/CSS; and SQL for PostgreSQL/MySQL/MariaDB. Do not reopen this product scope or conflate an unprovisioned optional adapter with a cancelled language. The first tested subset is delivered under completed #140; [#149](https://github.com/ach1992/ai-server-agent/issues/149) owns the agreed advanced/debugger/SQL follow-up and real adapter/arm64/client acceptance, including explicit Owner decisions where a safe debugger mode proves infeasible. No automatic installation of all adapters is implied.
 

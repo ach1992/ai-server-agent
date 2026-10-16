@@ -12,7 +12,7 @@ You can connect a compatible client directly; **MCP Gateway is optional** and is
 - Linux `amd64`/`x86_64` or `arm64`/`aarch64`
 - A dedicated development or validation host whose owner authorizes AI-controlled operations
 
-Optional features such as browser automation and additional language debuggers may require separately installed tools. The Agent itself does not require Docker, a web server, a database, or control of ports 80/443. For Debian 11, arrange appropriate extended security maintenance or prefer Debian 12+.
+Optional features such as browser automation and additional language debuggers may require separately installed tools. The Agent itself does not require Docker, a web server, a database, Node.js, Python, PHP, or control of ports 80/443. For Debian 11, arrange appropriate extended security maintenance or prefer Debian 12+.
 
 ## Install
 
@@ -67,7 +67,7 @@ Features, language adapters, and file/image presentation can vary with the **ins
 
 ## Development or Validation server
 
-An installed Agent can be labeled **Development** or **Validation** to help an AI client select the right host. These are descriptive roles, **not** different permission tiers or separate binaries. Both retain the same authorized tools. See [Environment profiles](docs/ENVIRONMENT-PROFILES.md) for setup and management.
+In supported installed versions, an Agent can be labeled **Development** or **Validation** to help an AI client select the right host. These are descriptive roles, **not** different permission tiers or separate binaries. Both retain the same authorized tools. See [Environment profiles](docs/ENVIRONMENT-PROFILES.md) for setup and management.
 
 ## Security
 
