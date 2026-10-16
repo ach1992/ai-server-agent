@@ -109,7 +109,11 @@ func sqlDDLTokens(source, dialect string) ([]sqlDDLToken, bool) {
 	if len(source) > codeMaxDocumentBytes {
 		return nil, false
 	}
-	forward, ok := sqlDDLGooseForwardSQL(source, dialect)
+	forward, ok := sqlDDLDBMateForwardSQL(source, dialect)
+	if !ok {
+		return nil, false
+	}
+	forward, ok = sqlDDLGooseForwardSQL(forward, dialect)
 	if !ok {
 		return nil, false
 	}
