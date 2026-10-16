@@ -170,3 +170,111 @@ func TestSQLDBMateMarkerInPostgresCopyDataFailsClosed(t *testing.T) {
 		t.Fatalf("COPY data masquerading as dbmate directive was trusted: valid=%t %+v", valid, items)
 	}
 }
+
+// R1 REQUIRED-001: noncanonical marker spelling must not silently degrade a
+// dbmate migration into plain SQL. Otherwise Down DDL fabricates schema truth.
+func TestSQLDBMateMalformedNearMarkersFailClosedAcrossDialects(t *testing.T) {
+	migrations := []struct {
+		name, up, down string
+	}{
+		{"no_space_after_comment", "--migrate:up", "--migrate:down"},
+		{"space_before_colon", "-- migrate :up", "-- migrate :down"},
+		{"mixed_case", "--MIGRATE:up", "--MIGRATE:down"},
+		{"tab_after_colon", "--\tmigrate:\tup", "--\tmigrate:\tdown"},
+		{"valid_up_bad_down", "-- migrate:up", "--migrate:down"},
+		{"bad_up_valid_down", "--migrate:up", "-- migrate:down"},
+		{"spaces_before_colon", "-- migrate \t:up", "-- migrate :down"},
+	}
+	for _, dialect := range []string{"postgres", "mysql", "mariadb"} {
+		for _, item := range migrations {
+			t.Run(dialect+"_"+item.name, func(t *testing.T) {
+				source := item.up + "\nCREATE TABLE accounts (id INT);\n" +
+					item.down + "\nDROP TABLE accounts;\nCREATE TABLE phantom_rollback (id INT);\n"
+				if output, ok := sqlDDLDBMateForwardSQL(source, dialect); ok {
+					t.Fatalf("malformed dbmate marker bypassed fail-closed mode: %q", output)
+				}
+				if occurrences, valid := sqlNavOccurrences(source, dialect); valid || len(occurrences) != 0 {
+					t.Fatalf("malformed markers fabricated navigation: valid=%t %+v", valid, occurrences)
+				}
+				if symbols := sqlDDLSymbols(source, dialect); len(symbols) != 0 {
+					t.Fatalf("malformed markers fabricated DDL outline: %+v", symbols)
+				}
+			})
+		}
+	}
+}
+
+func TestSQLDBMateMalformedMarkerMixedWithGooseFailsClosed(t *testing.T) {
+	sources := []string{
+		"-- +goose Up\nCREATE TABLE goose_table (id INT);\n" +
+			"--migrate:up\nCREATE TABLE phantom (id INT);\n" +
+			"-- +goose Down\nDROP TABLE goose_table;\n" +
+			"--migrate:down\nDROP TABLE phantom;\n",
+		"--migrate:up\nCREATE TABLE phantom (id INT);\n" +
+			"-- +goose Up\nCREATE TABLE goose_table (id INT);\n" +
+			"-- +goose Down\nDROP TABLE goose_table;\n" +
+			"--migrate:down\nDROP TABLE phantom;\n",
+	}
+	for _, dialect := range []string{"postgres", "mysql", "mariadb"} {
+		for i, source := range sources {
+			if forward, valid := sqlDDLDBMateForwardSQL(source, dialect); valid {
+				t.Errorf("%s mixed runners[%d] accepted: %q", dialect, i, forward)
+			}
+			if occ, valid := sqlNavOccurrences(source, dialect); valid || len(occ) != 0 {
+				t.Errorf("%s mixed runners[%d] navigation leak: valid=%t %+v", dialect, i, valid, occ)
+			}
+			if symbols := sqlDDLSymbols(source, dialect); len(symbols) != 0 {
+				t.Errorf("%s mixed runners[%d] DDL leak: %+v", dialect, i, symbols)
+			}
+		}
+	}
+}
+
+// R1 REQUIRED-002: the CLI DELIMITER mode changes MySQL statement boundaries;
+// a CREATE TABLE nested in a routine body is not a top-level declaration.
+func TestSQLDBMateMySQLDelimiterProcedureFailsClosedAcrossConsumers(t *testing.T) {
+	source := "-- migrate:up\n" +
+		"DELIMITER $$\nCREATE PROCEDURE migrate_accounts()\n" +
+		"BEGIN\n SELECT 1;\n CREATE TABLE phantom (id INT);\nEND$$\n" +
+		"DELIMITER ;\n" +
+		"-- migrate:down\nDROP PROCEDURE migrate_accounts;\n"
+	plain := "DELIMITER $$\nCREATE PROCEDURE migrate_accounts()\n" +
+		"BEGIN\n SELECT 1;\n CREATE TABLE phantom (id INT);\nEND$$\nDELIMITER ;\n"
+	for _, dialect := range []string{"mysql", "mariadb"} {
+		for _, item := range []struct{ name, source string }{
+			{"dbmate_procedure", source},
+			{"plain_procedure", plain},
+		} {
+			t.Run(dialect+"_"+item.name, func(t *testing.T) {
+				if tokens, valid := sqlDDLTokens(item.source, dialect); valid || len(tokens) != 0 {
+					t.Fatalf("DELIMITER mode must be rejected by shared lexer: valid=%t tokens=%+v", valid, tokens)
+				}
+				if symbols := sqlDDLSymbols(item.source, dialect); len(symbols) != 0 {
+					t.Fatalf("procedure body invented a CREATE TABLE outline: %+v", symbols)
+				}
+				if occ, valid := sqlNavOccurrences(item.source, dialect); valid || len(occ) != 0 {
+					t.Fatalf("DELIMITER mode invented a source graph: valid=%t %+v", valid, occ)
+				}
+			})
+		}
+	}
+}
+
+// Horizontal tabs in the documented whitespace positions remain legitimate
+// dbmate directives; malformed-near-marker rejection is not a broad ban on
+// valid alternate whitespace.
+func TestSQLDBMateValidCommentTabWhitespacePreserved(t *testing.T) {
+	source := "--\tmigrate:up\nCREATE TABLE accounts (id INT);\n" +
+		"--\tmigrate:down\nDROP TABLE accounts;\n"
+	for _, dialect := range []string{"postgres", "mysql", "mariadb"} {
+		occurrences, ok := sqlNavOccurrences(source, dialect)
+		if !ok || len(occurrences) != 1 || !occurrences[0].declaration ||
+			occurrences[0].name != "accounts" {
+			t.Errorf("%s legal tab separator rejected: ok=%t occurrences=%+v", dialect, ok, occurrences)
+		}
+		if symbols := sqlDDLSymbols(source, dialect); len(symbols) != 1 ||
+			symbols[0].Name != "accounts" {
+			t.Errorf("%s legal tab separator lost DDL outline: %+v", dialect, symbols)
+		}
+	}
+}

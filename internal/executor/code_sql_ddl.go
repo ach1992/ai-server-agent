@@ -109,6 +109,13 @@ func sqlDDLTokens(source, dialect string) ([]sqlDDLToken, bool) {
 	if len(source) > codeMaxDocumentBytes {
 		return nil, false
 	}
+	// A MySQL/MariaDB DELIMITER command replaces semicolon statement
+	// boundaries (often inside stored routines). Do not parse its body as
+	// independent top-level DDL. Both outlines and navigation share this
+	// fail-closed guard before forward-only migration normalization.
+	if (dialect == "mysql" || dialect == "mariadb") && sqlNavMySQLDelimiter.MatchString(source) {
+		return nil, false
+	}
 	forward, ok := sqlDDLDBMateForwardSQL(source, dialect)
 	if !ok {
 		return nil, false

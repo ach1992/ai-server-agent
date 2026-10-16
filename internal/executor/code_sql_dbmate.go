@@ -17,12 +17,12 @@ import (
 const sqlDBMateAnnotationLimit = 64
 
 var (
-	sqlDBMatePossible  = regexp.MustCompile("(?i)^[ \\t]*--[ \\t]+migrate:")
+	sqlDBMatePossible  = regexp.MustCompile("(?i)^[ \\t]*--[ \\t]*migrate[ \\t]*:")
 	sqlDBMateDirective = regexp.MustCompile("^--[ \\t]+migrate:(up|down)(?:[ \\t]+transaction:(true|false))?[ \\t]*\\r?\\n?$")
 )
 
 func sqlDDLDBMateForwardSQL(source, dialect string) (string, bool) {
-	if !strings.Contains(strings.ToLower(source), "migrate:") {
+	if !strings.Contains(strings.ToLower(source), "migrate") {
 		return source, true
 	}
 	var out strings.Builder
