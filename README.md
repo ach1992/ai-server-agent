@@ -1,52 +1,46 @@
 # AI Server Agent
 
-**AI Server Agent** gives an authorized AI client a practical Linux development and testing environment through a lightweight, bearer-authenticated MCP control plane. It exposes real shell, file, job, Git/worktree, Browser, code-inspection, and debugging capabilities without turning the server into a heavyweight IDE or hosting panel.
+AI Server Agent connects an authorized AI client to a real Linux development or testing server through **MCP**. It lets the client inspect and edit projects, run commands and tests, debug applications, work with Git repositories, and investigate the server and its services.
 
-Ordinary engineering work uses the unprivileged `aiworker` account. Privileged host actions are available through a separate root executor with approval and self-preservation safeguards. This is a **root-capable** dedicated-server product, not a sandbox for untrusted tenants.
+Regular project work runs as the unprivileged `aiworker` account. Explicitly authorized host administration can use the separate **root-capable** executor. This is intended for a server you control, **not** as a sandbox for mutually untrusted users.
 
-Direct MCP access is a first-class standalone mode; MCP Gateway is an **optional future integration**, not a runtime dependency. ChatGPT is the first documented/validated AI client, but the core is deliberately client/vendor neutral.
+You can connect a compatible client directly; **MCP Gateway is optional** and is not required. ChatGPT has a dedicated setup guide.
 
-For the agreed product vision, boundaries, and non-goals, see **[Project Specification](docs/PROJECT-SPEC.md)**. Current implementation is not the same as future accepted work.
+## Requirements
 
-## Supported hosts
+- Ubuntu 22.04+ or Debian 11+ with `systemd`
+- Linux `amd64`/`x86_64` or `arm64`/`aarch64`
+- A dedicated development or validation host whose owner authorizes AI-controlled operations
 
-- Ubuntu **22.04+** or Debian **11+**, with `systemd`
-- Linux **amd64/x86_64** or **arm64/aarch64**
-- A dedicated server the owner authorizes for AI-controlled development or validation
-
-Debian 11 has limited upstream security maintenance; prefer Debian 12+ unless an appropriate extended-support arrangement is in place.
-
-The Agent itself does **not** require a web server, database, Docker, a hosting panel, Node.js, Python, PHP, or a permanent claim on ports 80/443. Optional capabilities may require separately installed tools. See [platform and dependency details](docs/OPERATIONS.md#platform-support).
+Optional features such as browser automation and additional language debuggers may require separately installed tools. The Agent itself does not require Docker, a web server, a database, or control of ports 80/443. For Debian 11, arrange appropriate extended security maintenance or prefer Debian 12+.
 
 ## Install
 
-To install the **latest published Stable**, use this permanent, version-free command:
+Install the **latest published Stable**:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | bash
 ```
 
-To install a **specific Stable release**, for example `v0.1.14`:
+To install a specific published Stable version (example):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | bash -s -- v0.1.14
 ```
 
-The **command URL stays the same** for future releases. It loads the small bootstrap from the repository's maintained `main` branch; that source is **mutable** and must remain protected and reviewed, unlike a SHA-pinned bootstrap. By default the bootstrap asks GitHub Releases for the latest published immutable Stable, or checks the explicit release tag when supplied. If `jq` is missing, the bootstrap may first use `sudo apt-get` on supported Debian/Ubuntu systems to install `jq` and CA certificates from configured system repositories. **That prerequisite step can run before release verification.** The downloaded release `install.sh` is SHA-256-verified **before its separate privileged execution**, and its protected root-stage copy is rechecked. Run the bootstrap with `bash`, **not `sudo bash`**. Never pipe the raw latest-release installer directly into root.
+The short bootstrap URL intentionally uses the project's **reviewed, mutable `main` branch**; the installed version comes from an **immutable Stable Release**. The release installer is SHA-256-verified before its privileged execution and verified again in protected root staging. On supported systems, the bootstrap may run `sudo apt-get` to install missing `jq` and CA-certificate prerequisites *before* release verification. Review the bootstrap before running it. **Run it as shown, not through `sudo bash`.**
 
-For an exact-version install, troubleshooting, advanced or source installations and supply-chain verification, use the [installation guide](docs/OPERATIONS.md#install-the-latest-stable-release).
+After installing, choose public HTTPS with guided Cloudflare, local/private operation, your own TLS certificate, or **configure later**. Deferring public connectivity does not make the core installation fail.
 
-A successful core installation is separate from public connection setup. The first-run wizard provides Cloudflare-hostname HTTPS, local/private, existing certificate/TLS, or configure later. The core can remain healthy when public connection configuration is deferred.
+## Manage and connect
 
-## Configure and use
-
-Open the server management menu:
+Open the interactive management console:
 
 ```bash
 sudo ai-server-agent-manage
 ```
 
-Common commands:
+Useful commands:
 
 ```bash
 sudo ai-server-agent-manage status
@@ -55,57 +49,32 @@ sudo ai-server-agent-manage update
 sudo ai-server-agent-manage repair
 ```
 
-For credentials, Cloudflare, local/private mode, manual TLS, safe uninstall, purge and configurable runtime budgets, see [Operations](docs/OPERATIONS.md#management-commands). To connect ChatGPT, see [Connect ChatGPT](docs/CONNECT_CHATGPT.md). Other clients must be validated against their actual MCP/transport and tool-presentation support.
+Use the [ChatGPT connection guide](docs/CONNECT_CHATGPT.md) to set up a custom MCP connection. The [operator guide](docs/OPERATIONS.md) covers authentication, connection modes, safe updates, service management, and uninstalling.
 
-## Main capabilities
+## What you can do
 
-| Area | What the Agent provides |
+| Capability | Examples |
 | --- | --- |
-| Host execution | Worker/root commands, privileged file operations, service/process diagnostics |
-| Workspace and Git | Repository/worktree identity, versioned worker file/search/edit/transfer, normal Git CLI |
-| Long-running work | Persistent jobs with status and ranged output; optional interactive Terminal |
-| Browser and testing | Optional Playwright/Chromium, structured E2E steps, controlled Browser sessions |
-| Code intelligence | Go/gopls plus optional, separately validated PHP, JS/TS, Python, Shell, Rust, HTML/CSS and PostgreSQL/MySQL/MariaDB SQL source analysis; not every method or runtime is available on every host |
-| Debugging | Go/Delve and optional contained PHP CLI, Rust prebuilt, Python, Node/precompiled TypeScript and local HTML Browser DAP; never imply PHP HTTP-service, Shell DAP, extension-host or remote attach support |
-| Environment | Authenticated Agent/environment identity, available tools, host footprint and warnings |
+| Server operations | Run worker commands, request authorized root operations, inspect files and services |
+| Projects and Git | Discover repositories/worktrees, search and edit source safely, use Git CLI |
+| Longer tasks | Run persistent jobs, inspect bounded output, use interactive terminal sessions |
+| Testing and browsers | Run tests and Playwright-backed browser automation when provisioned |
+| Code intelligence | Use Go/gopls and optional language-aware analysis when compatible tools are installed |
+| Debugging | Use Go/Delve and supported optional debuggers; check actual adapter readiness |
+| File transfer | Transfer and inspect files in bounded, integrity-aware chunks |
 
-The approved language scope covers **Go; PHP; JavaScript/TypeScript; Python; Bash/POSIX Shell; Rust; HTML/CSS; and PostgreSQL/MySQL/MariaDB SQL**. The first optional LSP/DAP slice was completed in [#140](https://github.com/ach1992/ai-server-agent/issues/140); the accepted advanced modes and adapter/client acceptance remain in [#149](https://github.com/ach1992/ai-server-agent/issues/149). An optional adapter missing from a host is a provisioning/readiness gap, not cancellation of that language's accepted scope.
+Features, language adapters, and file/image presentation can vary with the **installed Agent version**, host tools, and AI client. The authenticated `agent_environment` result and tool status report the available capabilities. See the [MCP tool reference](docs/TOOL-REFERENCE.md) for exact operations and limitations.
 
-Not every integrated feature or optional adapter is ready on every OS/kernel/client. Use `agent_environment`, the applicable tool status and actual installed version rather than inferring availability from this table.
+## Development or Validation server
 
-Read the [Tool Reference](docs/TOOL-REFERENCE.md) for tools, limits, examples, and important caveats. [Developer Runtime](docs/DEVELOPER-RUNTIME.md) documents the accepted future composition and unresolved delivery gates.
+An installed Agent can be labeled **Development** or **Validation** to help an AI client select the right host. These are descriptive roles, **not** different permission tiers or separate binaries. Both retain the same authorized tools. See [Environment profiles](docs/ENVIRONMENT-PROFILES.md) for setup and management.
 
-## Development and Validation server roles
+## Security
 
-Immutable Stable `v0.1.13` introduced two **Environment Purpose Profiles** (verify the installed version):
+Treat a root-authorized connection as access to the underlying server. The Agent uses bearer authentication, approval and protected execution boundaries, but it does not make arbitrary root shell commands harmless. Keep credentials private and use dedicated hosts and appropriate operator controls. [Security policy](SECURITY.md).
 
-- **Development:** preferred for source/Git changes, builds, debugging and routine project development.
-- **Validation:** preferred for candidate installation, real E2E/integration tests, reproduction and acceptance evidence.
+## More information
 
-The profiles label and guide compatible clients; **they are not access-control tiers or separate Agent binaries**. Both preserve the same MCP/root/worker tools. GitHub authentication and optional tool installation remain separate operator decisions.
+Find the [latest published release](https://github.com/ach1992/ai-server-agent/releases), [installation and troubleshooting guide](docs/OPERATIONS.md), [ChatGPT setup guide](docs/CONNECT_CHATGPT.md), and [tool reference](docs/TOOL-REFERENCE.md).
 
-Use a supporting installed release (`v0.1.13` or later); publishing new source does not upgrade an existing Agent. Purpose profiles are independent of `local/public` connection modes. See [Profile setup, management, and client discovery](docs/ENVIRONMENT-PROFILES.md), the [Project Specification](docs/PROJECT-SPEC.md#10-environment-purpose-profiles), and [Issue #143](https://github.com/ach1992/ai-server-agent/issues/143) for installed/client acceptance.
-
-## Security and resource use
-
-An authenticated principal with root-shell authority is effectively root-capable. Tool annotations and AI instructions do not constrain what authorized shell commands can do. Authentication, protected control-plane resources, approval, verified dependencies, bounded outputs and truthful failure reporting remain important; broad usable capabilities are deliberately preserved.
-
-Resource budgets, timeouts and concurrency are bounded to protect host reliability. Some are configurable without source changes; other fixed implementation limits and remaining tests are tracked in [Issue #118](https://github.com/ach1992/ai-server-agent/issues/118). See [Operations](docs/OPERATIONS.md#security-model).
-
-## Project documentation
-
-- **[PROJECT-SPEC.md](docs/PROJECT-SPEC.md):** canonical purpose, scope, success criteria and durable principles
-- **[ARCHITECTURE.md](docs/ARCHITECTURE.md):** trust boundaries, host resources, runtime architecture, install/update contracts
-- **[DEVELOPER-RUNTIME.md](docs/DEVELOPER-RUNTIME.md):** detailed accepted capability design and future architecture
-- **[ENVIRONMENT-PROFILES.md](docs/ENVIRONMENT-PROFILES.md):** Development/Validation purpose, install options, management and client metadata (requires an installed supporting release)
-- **[TESTING.md](docs/TESTING.md):** validation strategy and evidence expectations
-- **[OPERATIONS.md](docs/OPERATIONS.md):** full install, connectivity, management, updates and repair instructions
-- **[TOOL-REFERENCE.md](docs/TOOL-REFERENCE.md):** MCP tool and feature details
-- **[CONNECT_CHATGPT.md](docs/CONNECT_CHATGPT.md):** current client-specific connection help
-- **[AGENTS.md](AGENTS.md):** engineering/contributor instructions
-
-GitHub [Issues](https://github.com/ach1992/ai-server-agent/issues), [Pull Requests](https://github.com/ach1992/ai-server-agent/pulls), [Actions](https://github.com/ach1992/ai-server-agent/actions), and [Releases](https://github.com/ach1992/ai-server-agent/releases) own live work, reviews, CI, and published-delivery status. Historical installed validation and remaining client limitations are tracked primarily in [Issue #59](https://github.com/ach1992/ai-server-agent/issues/59), not in this README.
-
-## License
-
-See [LICENSE](LICENSE).
+Licensed under [MIT](LICENSE).

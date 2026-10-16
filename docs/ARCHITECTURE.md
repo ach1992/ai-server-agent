@@ -73,7 +73,7 @@ The Agent must not require OpenAI credentials for core operation. Provider-speci
 
 A profile is guidance for choosing the correct host: Development for routine source/Git/build/debug work; Validation for candidate installation, reproduction, E2E and acceptance evidence. It must not grant, revoke, or conceal capabilities, change Root approval behavior, install/remove GitHub credentials, or silently enforce server-side policies. It is independent from local/public/Cloudflare connectivity mode and the authenticated principal identity. Selected purpose should be discoverable through authenticated `agent_environment` data and concise MCP server instructions, subject to actual AI-client support for instruction presentation.
 
-The existing Agent configuration persists the selection and management commands update it without a new daemon, profile-specific installer or permission engine. Validate actual installed-client visibility before declaring Issue #143 complete. [Issue #143](https://github.com/ach1992/ai-server-agent/issues/143) owns candidate and installed/client acceptance.
+The existing Agent configuration persists the selection and management commands update it without a new daemon, profile-specific installer or permission engine. Issue #143 is completed source/installed acceptance history, not an active implementation gate. Future client or clean-host compatibility must be verified against the installed build and the owning end-to-end/fresh-install acceptance Issues.
 
 ### Root command environment
 
@@ -276,28 +276,21 @@ Stable and source channels are distinct.
 
 ### Stable bootstrap and first install
 
-The release `install.sh` cannot authenticate itself before it executes, so it is deliberately **not** the stable trust root. Initial stable installation begins with `scripts/install-stable.sh` loaded from a Git tag already bound to a published immutable GitHub Release. The README stable-install command names the immutable release tag used as the bootstrap source; this architecture document intentionally does not pin that current release number.
+Initial Stable installation begins with the **permanent, version-free URL** `https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh`. This deliberately reads reviewed **mutable `main`** source, not an immutable tagged bootstrap. Protecting and reviewing `main` is therefore a real supply-chain boundary: the bootstrap itself is not authenticated by an immutable release digest. Changes to it must continue to install the currently published Stable (including explicit-version selections) before any new Stable is published.
 
-GitHub immutable releases lock their associated tag against movement/deletion while the release exists, and a deleted immutable release does not permit reuse of the same tag name. The bootstrap source therefore does not depend on preservation of a feature branch or a particular merge strategy.
+The bootstrap starts as the invoking user (`curl ... | bash`, **not** `sudo bash`). If required OS prerequisites such as `jq`/CA certificates are missing on supported Debian/Ubuntu hosts, it may run `sudo apt-get update/install` **before** the release installer is authenticated. Do not describe the entire bootstrap as free of privileged operations before release verification; the following digest gate applies to the **downloaded release `install.sh`**, not to OS package prerequisites or the mutable bootstrap source.
 
-The immutable-tag bootstrap runs before release `install.sh` bytes receive root execution. It:
+For the selected explicit tag or GitHub's latest release, the bootstrap:
 
-1. resolves an explicit stable tag or GitHub's latest release metadata;
-2. requires the release to be non-draft, non-prerelease and immutable;
-3. requires exactly one uploaded `install.sh` asset at the exact tag-scoped release URL;
-4. requires the GitHub release asset `sha256:` digest;
-5. downloads that release installer without privileged execution and verifies its bytes against the digest;
-6. crosses the privilege boundary through a fixed bootstrap helper that copies the candidate into a root-owned `0700` staging directory;
-7. recomputes the same expected release-asset digest on the root-controlled copy and fails closed on any mismatch;
-8. executes only that re-verified root-controlled copy.
+1. verifies that the selected release is published, non-draft, non-prerelease and immutable;
+2. requires one exact tag-scoped uploaded `install.sh` asset and its GitHub release-asset `sha256:` digest;
+3. downloads that installer without elevated execution and checks its SHA-256 against the release digest;
+4. crosses the privilege boundary using a fixed helper to copy the verified candidate into root-owned `0700` staging;
+5. independently checks the root-controlled copy against the same expected digest and executes **only** that copy.
 
-The original invoking-user-writable pathname is therefore never trusted for root execution after the privilege boundary. Replacing that pathname between the unprivileged hash and `sudo` can at most cause the privileged re-verification to fail; it cannot make different bytes pass into the installer execution path.
+Once authenticated, the release-scoped installer pins the selected release version/ref, rejects `AI_SERVER_AGENT_BINARY` overrides, and verifies release archives against `SHA256SUMS`. The root staging check prevents a user-writable candidate being replaced between initial hashing and privileged execution. The immutable release and its tag are the **installation target**, distinct from the intentionally mutable bootstrap source.
 
-The release-scoped `install.sh` is generated with its version/ref pinned to the release tag. Once authenticated by the bootstrap, it rejects `AI_SERVER_AGENT_BINARY` overrides, downloads the release archive plus `SHA256SUMS`, and continues only after archive checksum verification.
-
-A direct `releases/.../install.sh | sudo bash` command is intentionally not a supported stable trust path because it would execute the asset before authenticating that same asset. A mutable branch is likewise not an acceptable stable bootstrap source.
-
-Stable release architectures are enumerated in `scripts/release-arches.txt`; the current target publishes both amd64 and arm64 archives under the same checksum manifest.
+Do **not** pipe `releases/.../install.sh` into `sudo bash`, execute `main/install.sh` as root, or use mutable `main` binaries as the Stable installation target. Official commands and operator instructions are in [Operations](OPERATIONS.md#install-the-latest-stable-release). Stable release architectures are declared in `scripts/release-arches.txt` (amd64 and arm64).
 
 ### Stable update
 
@@ -353,9 +346,9 @@ The target is deliberately value-first:
 
 Core target capabilities include repository/worktree identity, safe worker editing, text + ast-grep structural search, LSP, persistent worker/root PTY, DAP and Playwright-backed browser/E2E validation.
 
-**Multi-language extension direction (Issue #140; implementation/release status is owned by its live Issue/PR):** Keep the existing public `code_*`/`debug_*` families and executor-owned #66 session substrate. LSP/DAP must expose shared protocol/lifecycle/authorization/worker-file contracts; thin bounded language/adapter profiles own actual supported capabilities, trusted transitive launch/toolchain readiness, target-process ownership, and unavoidable language-specific launch/attach differences. DAP must not terminate a separately service-owned target when a debug session detaches; read-only LSP must reject unsolicited writes. Do not make optional language runtimes core dependencies or introduce another broker, universal plugin framework, language-specific file writer or Agent-side database.
+**Multi-language extension direction (first optional slice delivered; advanced acceptance in #149):** Keep the existing public `code_*`/`debug_*` families and executor-owned #66 session substrate. LSP/DAP must expose shared protocol/lifecycle/authorization/worker-file contracts; thin bounded language/adapter profiles own actual supported capabilities, trusted transitive launch/toolchain readiness, target-process ownership, and unavoidable language-specific launch/attach differences. DAP must not terminate a separately service-owned target when a debug session detaches; read-only LSP must reject unsolicited writes. Do not make optional language runtimes core dependencies or introduce another broker, universal plugin framework, language-specific file writer or Agent-side database.
 
-**Next-candidate installation boundary:** Its acceptance is on a new, empty, authorized Linux host. Legacy install-script, config, runtime-state, job-claim, terminal-handle, profile or mixed-version upgrade migration is not a requirement, and must not add compatibility complexity. This does not alter published Stable update/provenance guarantees, authorize deletion of an existing installation, weaken first-install security, or waive reconnect/restart recovery within the new baseline. **That new baseline must be evolved responsibly for its future users; skipping legacy installed-state migration does not forbid future, evidence-driven upgrade support.** #137 Shared Runtime retains its own acceptance and integration ownership; current PR/head state belongs to its live GitHub Issue/PR, not this durable architecture document. The historical #140 documentation-first Owner gate was satisfied and its separate source-development authorization was granted; consult the live #140 Issue/PR for subsequent integration and release gates.
+**Next-candidate installation boundary:** Its acceptance is on a new, empty, authorized Linux host. Legacy install-script, config, runtime-state, job-claim, terminal-handle, profile or mixed-version upgrade migration is not a requirement, and must not add compatibility complexity. This does not alter published Stable update/provenance guarantees, authorize deletion of an existing installation, weaken first-install security, or waive reconnect/restart recovery within the new baseline. **That new baseline must be evolved responsibly for its future users; skipping legacy installed-state migration does not forbid future, evidence-driven upgrade support.** #137 Shared Runtime retains its own acceptance and integration ownership; current PR/head state belongs to its live GitHub Issue/PR, not this durable architecture document. The first multi-language Stable slice is delivered; any remaining advanced-mode, platform and real-client acceptance remains owned by #149 and the relevant live delivery Issues.
 
 This architecture document remains authoritative for overall host/process/trust/lifecycle boundaries. `docs/DEVELOPER-RUNTIME.md` owns the detailed development-capability composition and Layer-1/Layer-2/deferred boundary.
 

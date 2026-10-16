@@ -1,6 +1,6 @@
 # AI Server Agent — Project Specification
 
-**Status:** Owner-approved product definition (2026-10-14)
+**Status:** Owner-approved durable product definition
 **Authority:** This is the canonical product-level specification. See [Architecture](ARCHITECTURE.md) for technical boundaries and [Developer Runtime](DEVELOPER-RUNTIME.md) for capability design.
 
 ## 1. Product Definition
@@ -94,7 +94,7 @@ A profile is **descriptive guidance, not an access-control tier, binary variant,
 
 The selected purpose and a non-secret optional server label should be discoverable through authenticated environment metadata and concise MCP instructions where clients support them. An operator can change a profile without reinstalling. A client may choose another use of a host when explicitly authorized; instructions alone do not enforce policy.
 
-This is an **accepted durable product requirement**. Source integration, installed-client acceptance and current release delivery are tracked through [Issue #143](https://github.com/ach1992/ai-server-agent/issues/143) and GitHub Releases, rather than maintained as live status in this specification.
+This is a **durable product requirement**, independent of whether a particular installation or client has already passed acceptance. GitHub Issues/PRs and Releases own the implementation, validation and delivery evidence; this specification does not maintain a running status ledger.
 
 ## 11. Non-Goals
 

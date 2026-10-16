@@ -382,7 +382,7 @@ These may be revisited from real usage without changing the fundamental architec
 
 ## 14. Capability-complete, policy-gated
 
-**Environment purpose is not a capability or security profile:** The proposed `development` and `validation` roles help an AI choose the right authorized host, but both have the same core tool and worker/root capability surface. Their hints are independent of GitHub credential provisioning, installed language adapters, chosen workspace, connection method, and actual permission/approval checks. The `agent_environment` manifest and MCP instructions should expose this purpose once implemented ([Issue #143](https://github.com/ach1992/ai-server-agent/issues/143)); do not create duplicate tool catalogs or per-role process/security engines. The operational role can be changed after installation, and an explicit authorized task may override the preference.
+**Environment purpose is not a capability or security profile:** The implemented `development` and `validation` labels help an AI choose the right authorized host, but both have the same core tool and worker/root capability surface. Their hints are independent of GitHub credential provisioning, installed language adapters, chosen workspace, connection method, and actual permission/approval checks. The authenticated `agent_environment` manifest and MCP instructions expose the selected purpose where the installed client supports them; do not create duplicate tool catalogs or per-role process/security engines. The operational role can be changed after installation, and an explicit authorized task may override the preference.
 
 Technical capability and project/action authorization remain separate.
 
@@ -468,24 +468,11 @@ execution remain in #137; existing program end-to-end acceptance remains
 under #59, Terminal substrate under #60/#66, Browser base under #63,
 runtime settings under #118, and typed attachment rendering under #99.
 
-## 17. Implementation sequencing
+## 17. Implementation and delivery boundaries
 
-Phase A documentation is integrated and the owner execution-boundary gate was accepted on 2026-10-07. Runtime work now follows the current dependency contracts and value-first sequencing in Issue #52 rather than waiting on another Phase A gate.
+The core Developer Runtime capabilities have been implemented in coherent slices. Future capability extensions should reuse the existing repository/workspace, broker, PTY, LSP/DAP, Browser and resource mechanisms rather than repeat the initial implementation plan. Sequence new work by a concrete consumer need, its security/compatibility boundary and the smallest representative real test.
 
-Activate bounded dependency-aware slices rather than everything at once:
-
-- repository/worktree identity/lifecycle;
-- worker-safe workspace editing and text/structural search;
-- shared stateful session substrate;
-- PTY and LSP;
-- DAP;
-- Browser/Playwright;
-- lightweight environment/toolchain discovery;
-- final integrated acceptance.
-
-Optional/deferred work is not a blocker.
-
-**Issue #140 documentation-first and source-authoring gates were satisfied:** On 2026-10-15, the Owner approved **phased Stable delivery** (Issue #140 Rev5). Ship tested optional language profiles and verified worker-owned DAP modes; retain safe unsupported responses while deferring PHP HTTP-service debugging, Shell/extension-host DAP, advanced SQL and broader optional adapter acceptance to #149. Independent review, release security and occupied-host deployment gates remain separate. Keep #137 Shared Runtime independent: do not bundle #140 changes into another workstream's frozen or independently reviewed candidate. Reconcile the **current** Issue/PR/target identity before implementation or integration.
+Completed documentation/design gates and past PR sequences are **not** current prerequisites. Advanced PHP HTTP, Shell/extension-host debugging, SQL analysis and optional adapter acceptance are tracked by #149; shared-host fresh-install verification by #137; full E2E and client delivery by #59/#99. Merged source, published Stable, installed host and actual client-visible capability require separate evidence.
 
 ## 18. Promotion rule for future capabilities
 
@@ -540,36 +527,11 @@ Do not promote capabilities merely because they are powerful, modern, or availab
 
 **Clean-install baseline for the next release candidate.** The *new candidate* is designed and accepted as a **first-ever installation on an authorized empty supported Linux host**. Once released, that candidate becomes a **new forward-compatibility baseline**: future versions must decide schema evolution and upgrade guarantees for actual new-baseline users when warranted. No speculative migration framework or support for earlier installed releases is needed today, but fresh-install permission is not a permanent exemption from disciplined future upgrades. Preserve bounded state identity, reconnect and lifecycle contracts within the new build. There is no obligation to migrate or preserve prior Agent install scripts, old config layouts, legacy job/operation claims, historical browser profiles, previous terminal handles, or mixed-version in-place upgrade compatibility; do not manufacture compatibility wrappers or migration tests for those absent users. This does **not** authorize wiping an occupied host, changing the running Stable, weakening signed-release/install verification, or dropping recovery *within the newly installed build* after chat disconnect, Agent/Executor restart or proven persistent runtime ownership. Public MCP tool names, output meanings and independent external clients remain valuable product contracts; any intentional breaking client-facing change must be explicitly reviewed rather than smuggled in as "no legacy install migration." Current shipped Stable install/update behavior remains documented separately and unchanged by this design decision.
 
-**Proof-oriented delivery sequence (the original documentation-first gate was satisfied; integration and delivery remain separately gated):**
+**Forward acceptance for an extended language/debugging capability:**
 
-1. **Historical decision already completed:** The Owner approved the Issue #140 documentation/design gate and separately authorized its source work after PR #141 was integrated. For further implementation or acceptance, reconcile the live #140 Issue/PR with this architecture and #52/#137/#59/#99; obtain new Owner approval only when materially changing the accepted scope, authority or delivery contract. Do not change another workstream's frozen or independently reviewed candidate to implement #140.
-2. On an independently isolated implementation branch **after that approval**, prove a *small* language-neutral LSP/DAP mechanism against real Go and at least one behaviorally different adapter each: push/pull diagnostics, delayed DAP launch response, source versions, cancellation, private transport and verified process cleanup. Verify DAP reverse-launch requirements and a separately service-owned PHP HTTP attach/detach topology before freezing common launch/cleanup assumptions. Compare existing small wire code against focused maintained Go protocol libraries; adopt only if measurably simpler to maintain.
-3. **First Stable slice #140:** prove positive real semantic/diagnostic responses for advertised optional languages and actual debugger protocol/cleanup for each supported worker-owned DAP mode (PHP CLI, Node/precompiled TypeScript, Python, Rust prebuilt and local HTML Browser). Missing runtimes and unsupported Shell DAP, JavaScript extension-host and PHP HTTP-service attach fail closed. PostgreSQL/MySQL/MariaDB SQL remains offline and bounded; no fabricated DB schema or implicit query execution. **Follow-up #149:** verified PHP HTTP Job/Service-owned request attach/detach, Shell DAP decision, extension-host DAP, deeper migration semantics and extended optional runtime/arm64/client acceptance.
-4. Run concurrent, independent worktrees with different languages; check missing-tool degradation, retained process/evidence bounds, negative permissions, crash/soak/recovery and actual connected-client behavior. Required exact-HEAD CI/Security, author-separated HIGH_ASSURANCE for material process/security changes, Owner-gated integration/release/deployment, and #59/#99 program acceptance remain independent obligations.
+1. Validate a narrow representative real adapter against the existing shared LSP/DAP protocols, worker/workspace identity, cancellation, private transport, bounded results and verified process cleanup. Respect async diagnostics and delayed DAP launch responses rather than assuming one request order fits all adapters.
+2. For service-owned debugging (such as PHP HTTP), prove exact target/request provenance, safe detach that does not stop an independently owned service, and containment of only debugger-owned resources. If reverse-launch, Shell DAP or extension-host debugging cannot be proven safe, report it as unsupported pending a separate product decision.
+3. Exercise independent project worktrees, missing adapters, drift, startup/crash/soak, permission denials and resource pressure on disposable supported hosts. Keep source, published release, installed-host and actual connected-client evidence distinct.
+4. Apply exact-candidate CI/Security, proportional independent review for material process/security changes, and the appropriate integration/release/installed acceptance gates. #149 owns advanced capability implementation, while #59/#99 own cross-capability delivery.
 
 **What is deliberately excluded:** a public plugin API/marketplace, universal language runner, unconditional managed provisioning, second state broker, per-project Agent/database/UID, broad rewrite of working tools, and a guarantee that any future adapter can integrate without a small compatibility handler. Each new abstraction must demonstrate a real repeated failure or measurable integration/maintenance improvement.
-
-## 20. Authoritative work items
-
-- #52 — Developer Runtime program and sequencing;
-- #53 — Phase A canonical architecture/docs;
-- #54 — repository/worktree lifecycle;
-- #55 — safe worker workspace operations;
-- #56 — LSP;
-- #57 — DAP;
-- #59 — integrated acceptance;
-- #60 — PTY / tmux Control Mode;
-- #61 — completed technology research and final owner reconciliation;
-- #62 — structural search / ast-grep;
-- #63 — Browser / Playwright;
-- #64 — environment/toolchain discovery;
-- #65 — optional evidence-triggered Incus;
-- #66 — internal stateful-session substrate;
-- #99 — AI-facing bounded data delivery and typed-artifact acceptance;
-- #118 — operator-managed runtime budgets, effective configuration and resource acceptance;
-- #137 — separate first-install Shared Runtime; its current PR and acceptance state live in GitHub;
-- #140 — phased Stable slice: tested optional multi-language LSP and worker-owned DAP modes;
-- #149 — deferred PHP HTTP-service, Shell/extension-host DAP, advanced SQL and broader optional runtime/client acceptance after the initial Stable;
-- #143 — descriptive Development/Validation host-purpose profiles, with implementation/client acceptance distinct from project authorization and tool availability.
-
-This integrated architecture is the durable capability reference; use Issues for active work/dependencies. Do not reconstruct these decisions from chat history.

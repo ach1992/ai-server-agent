@@ -6,7 +6,7 @@ This is the durable testing/acceptance model, **not** a historical release log. 
 
 ## Installed Environment Profile acceptance (availability is version-dependent)
 
-The two approved purpose profiles, Development and Validation ([Issue #143](https://github.com/ach1992/ai-server-agent/issues/143)), require a small focused acceptance suite when implemented:
+The implemented Development and Validation purpose profiles (original source/installed acceptance: completed [#143](https://github.com/ach1992/ai-server-agent/issues/143)) have a reproducible focused verification contract:
 
 - Fresh interactive installation clearly explains and records the chosen purpose; noninteractive install uses an explicit safe default or configured purpose.
 - A post-install operator can inspect and switch the non-secret purpose/label without reinstalling; invalid or contradictory values fail clearly and preserve the previous effective configuration.
@@ -15,7 +15,7 @@ The two approved purpose profiles, Development and Validation ([Issue #143](http
 - Authenticated `agent_environment` and MCP `initialize` instructions advertise accurate purpose; client-specific actual delivery of instructions is verified and documented rather than assumed. A direct client works without a Gateway.
 - Verify the feature on a fresh authorized installation, with configuration/management/service restart and rollback/error behavior appropriate to its implementation. No production or connected-occupied-host mutation without separate approval.
 
-Source/CI coverage does not substitute for installed feature proof. Verify the exact installed build and Issue #143 for current profile-management and client evidence; older Stable releases may not include these commands. For an upgraded real MCP client, distinguish **fresh server `tools/list`** from potentially cached client-facing tool descriptions and schemas; retry supported client discovery/refresh before diagnosing the server binary. Do not use an Agent restart or speculative client UI work as a substitute for identifying that boundary.
+Source/CI coverage does not substitute for installed feature proof. Consult the installed release and completed #143 for past evidence; #137/#59 own remaining clean first-install and cross-client program acceptance. Older Stable releases may not include these commands. For an upgraded real MCP client, distinguish **fresh server `tools/list`** from potentially cached client-facing tool descriptions and schemas; retry supported client discovery/refresh before diagnosing the server binary. Do not use an Agent restart or speculative client UI work as a substitute for identifying that boundary.
 
 ## Direct MCP transfer acceptance
 
@@ -23,9 +23,17 @@ Run `TestDirectMCPTransferSourceAcceptance` for the normal unprivileged official
 
 The exact commands, acceptance criteria and honest limitations are maintained once in [WORKSPACE-TRANSFER-ACCEPTANCE.md](WORKSPACE-TRANSFER-ACCEPTANCE.md). The runnable consumer is [`examples/workspace-transfer-client`](../examples/workspace-transfer-client). `-short` omits the expensive real-process suite. Neither mode requires root, service restart or Stable publication. Both modes use disposable same-UID test state; **neither** proves the protected live root/worker split, connected ChatGPT UI attachment presentation or Stable deployment. These remain separately gated under #99/#59.
 
+## Operator console / first-run UX acceptance
+
+The stable manager/installer UX is documented for operators in [Operations](OPERATIONS.md#interactive-console-navigation-and-safe-cancellation). Test actual behavior rather than maintaining a second inventory of UI source functions or error strings:
+
+- Run `tests/operator_menu.sh` and `tests/operator_presentation.sh` for real pseudo-TTY menu navigation, contextual installed identity, readable narrow terminals, `NO_COLOR`/non-TTY semantics, invalid input recovery, nested Back/Cancel and sensitive output sanitization.
+- Verify first-run installer/profile/connection paths, protected precommit cancellation and default-No destructive confirmation without changes. Read-only Ctrl+C should return safely where supported; protected lifecycle/Cloudflare changes must not abandon transaction state or claim an unverified rollback.
+- Distinguish hermetic PTY and mocked failure behavior from installed first-run validation on a fresh authorized disposable host. #147 owns any remaining installed operator-console failure/interruption acceptance.
+
 ## 1. Supported platform policy and validation matrix
 
-The stable platform policy validated by current `main` is:
+The stable platform policy validated by current `main` is:The stable platform policy validated by current `main` is:
 
 - Ubuntu 22.04 or newer
 - Debian 11 or newer
