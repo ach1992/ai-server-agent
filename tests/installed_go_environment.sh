@@ -62,8 +62,10 @@ sudo -u aiworker git -C "$fixture" -c user.name='CI Acceptance' \
 
 # Count existing probe dirs without touching them; an installed Agent must not
 # recreate a deleted Go telemetry HOME after returning its MCP response.
+# Historical installations also used a nested /var/tmp/e temp root. Cover
+# both default and one-level nested temp roots without scanning worktrees.
 find_probes(){
-  find /tmp /var/tmp -mindepth 1 -maxdepth 1 -type d \
+  find /tmp /var/tmp -mindepth 1 -maxdepth 2 -type d \
     -name 'ai-server-agent-env-probe-*' -print 2>/dev/null | LC_ALL=C sort
 }
 find_probes > "$scratch/before"
