@@ -42,7 +42,7 @@ sudo ai-server-agent-manage profile-label 'QA Server'
 sudo ai-server-agent-manage profile-label-clear
 ```
 
-The interactive `sudo ai-server-agent-manage` menu also includes **Environment purpose / server label**.
+The interactive `sudo ai-server-agent-manage` menu also includes **Server purpose / label**.
 
 Changes are validated and root-lock serialized, then restart the **Agent service only** (the root Executor is not intentionally restarted); an active MCP connection may have to reconnect. Health and the effective environment manifest are checked. A failed activation restores the previous configuration when possible; unverified rollback retains protected recovery state and blocks further profile/runtime setting changes until reconciled. No Agent reinstall or source rebuild is required.
 
