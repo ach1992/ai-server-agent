@@ -26,14 +26,17 @@ if [ ! -e /usr/local/bin/go ] && [ ! -L /usr/local/bin/go ] &&
   [ -x "$ci_go" ] || { echo 'CI Go executable missing' >&2; exit 1; }
   sudo install -m 0755 -o root -g root "$ci_go" /usr/local/bin/go
 fi
+go_available=false
 for candidate in /usr/local/bin/go /usr/bin/go; do
   if [ -e "$candidate" ] || [ -L "$candidate" ]; then
     test -f "$candidate" && test ! -L "$candidate"
     test "$(stat -c '%u:%a' "$candidate")" = '0:755'
     "$candidate" version | grep -Eq '^go version go'
+    go_available=true
     break
   fi
 done
+[ "$go_available" = true ] || { echo 'no trusted Go executable available for installed probe' >&2; exit 1; }
 
 fixture="$(sudo mktemp -d /srv/ai-workspace/ci-installed-go-probe.XXXXXXXX)"
 scratch="$(mktemp -d)"
@@ -98,6 +101,7 @@ for attempt in 1 2 3 4 5 6; do
     (.result.isError != true) and
     ([.result.structuredContent.tools[]? |
       select(.executable == "go" and
+        .source == "system_path" and
         ((.version // "") | startswith("go version go")))] | length) > 0
   ' "$response" >/dev/null || {
     echo 'installed MCP repository_environment did not return a genuine Go version' >&2
