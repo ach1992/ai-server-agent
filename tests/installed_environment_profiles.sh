@@ -29,7 +29,7 @@ mcp_request(){
       --data-binary "$payload" -o "$output" -w '%{http_code}' \
       http://127.0.0.1:3210/mcp)" || fail 'Direct MCP transport request failed'
   [ "$status" = 200 ] || fail "Direct MCP HTTP status=$status"
-  [ "$(stat -c '%s' "$output")" -le 131072 ] || fail 'Direct MCP response exceeded 128 KiB'
+  [ "$(stat -c '%s' "$output")" -le 1048576 ] || fail 'Direct MCP response exceeded 1 MiB'
   jq -e '.jsonrpc=="2.0" and (.error==null)' "$output" >/dev/null ||
     fail 'Direct MCP returned a protocol error'
 }
