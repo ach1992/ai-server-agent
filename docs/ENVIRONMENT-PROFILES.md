@@ -18,17 +18,16 @@ For **noninteractive first installation**, the installer accepts:
 - `AI_SERVER_AGENT_ENVIRONMENT_PROFILE=development|validation` (default: `development`)
 - `AI_SERVER_AGENT_SERVER_LABEL` (optional, printable, at most 80 characters and 256 UTF-8 bytes; no surrounding whitespace)
 
-For a release **that includes this feature**, put environment variables on the **`bash` side** of the verified Stable bootstrap pipe (not only on `curl`). The bootstrap passes only these three non-secret inputs through `sudo` to the integrity-verified installer; it does not forward arbitrary environment variables:
+For a release **that includes this feature**, put environment variables on the **`bash` side** of the permanent Stable bootstrap pipe (not only on `curl`). The bootstrap passes only these three non-secret inputs through `sudo` to the integrity-verified release installer; it does not forward arbitrary environment variables:
 
 ```bash
-RELEASE_TAG='v0.1.13' # or a newer published immutable Stable
-curl -fsSL "https://raw.githubusercontent.com/ach1992/ai-server-agent/${RELEASE_TAG}/scripts/install-stable.sh" | \
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | \
   AI_SERVER_AGENT_NONINTERACTIVE=1 \
   AI_SERVER_AGENT_ENVIRONMENT_PROFILE=validation \
   AI_SERVER_AGENT_SERVER_LABEL='QA Server' bash
 ```
 
-Use a **published immutable Stable** tag with profile support (`v0.1.13` or later); older `v0.1.12` has no profiles. Never substitute a mutable branch or unreleased candidate. The verified release installer continues to validate the values. For direct source installation, pass the same settings to the privileged `install.sh` process.
+The short, fixed bootstrap URL intentionally reads **reviewed mutable `main` source**; the **installation target** is the latest published **immutable Stable**, with the release installer verified before privileged execution. Never run mutable `main/install.sh` as root or install an unreleased binary as though it were Stable. Profiles require Stable `v0.1.13` or later (the current published `v0.1.14` supports them); an explicit release can also be chosen by passing its tag as a `bash` argument to the same bootstrap URL. For direct source installation, pass the same settings to the privileged `install.sh` process.
 
 The existing Connection Mode (local/public/Cloudflare) is an independent setup choice. Do not infer the Profile from the hostname or network address.
 
