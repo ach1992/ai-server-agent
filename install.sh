@@ -97,6 +97,14 @@ die(){
   installer_message ERROR "$*" >&2
   exit 1
 }
+# A one-line bootstrap commonly pipes the script into Bash. stdin is not a
+# TTY there, but stdout/stderr and /dev/tty still provide a real operator UI.
+# In unattended CI, readable /dev/tty permissions alone must not prompt.
+installer_has_interactive_tty(){
+  [ -r /dev/tty ] || return 1
+  { [ -t 0 ] || [ -t 1 ] || [ -t 2 ]; } || return 1
+  ( : </dev/tty ) 2>/dev/null
+}
 need_root(){ [ "$(id -u)" -eq 0 ] || die "Run this installer as root (for example: sudo bash install.sh)."; }
 UBUNTU_MIN_VERSION=22.04
 DEBIAN_MIN_VERSION=11
@@ -221,7 +229,7 @@ apt-get install -y -qq ca-certificates curl git jq openssl tar xz-utils >/dev/nu
 if [ "$FRESH_INSTALL" -eq 1 ]; then
   ENVIRONMENT_PROFILE="${AI_SERVER_AGENT_ENVIRONMENT_PROFILE:-development}"
   SERVER_LABEL="${AI_SERVER_AGENT_SERVER_LABEL:-}"
-  if [ "$NONINTERACTIVE" != "1" ] && [ -t 0 ] && [ -r /dev/tty ] && [ -z "${AI_SERVER_AGENT_ENVIRONMENT_PROFILE+x}" ]; then
+  if [ "$NONINTERACTIVE" != "1" ] && installer_has_interactive_tty && [ -z "${AI_SERVER_AGENT_ENVIRONMENT_PROFILE+x}" ]; then
     while true; do
       printf '\nSERVER PURPOSE\n' >/dev/tty
       printf '  Both choices provide the same authorized Agent tools.\n' >/dev/tty
@@ -817,7 +825,7 @@ if [ "$NONINTERACTIVE" = "1" ]; then
     manual) "$MANAGE_BIN" configure-manual-tls ;;
     *) die "AI_SERVER_AGENT_SETUP_MODE must be local, cloudflare, manual, keep, or empty" ;;
   esac
-elif [ "$FRESH_INSTALL" -eq 1 ] && [ -t 0 ] && [ -r /dev/tty ] && [ -z "${AI_SERVER_AGENT_BIND_MODE+x}" ]; then
+elif [ "$FRESH_INSTALL" -eq 1 ] && installer_has_interactive_tty && [ -z "${AI_SERVER_AGENT_BIND_MODE+x}" ]; then
   if ! manage_connection_setup first-run; then
     SETUP_INCOMPLETE=1
     warn "Core installation succeeded, but connection setup was not completed. The Agent remains installed and healthy in its last verified mode."
@@ -825,7 +833,7 @@ elif [ "$FRESH_INSTALL" -eq 1 ] && [ -t 0 ] && [ -r /dev/tty ] && [ -z "${AI_SER
   fi
 fi
 
-if [ "$MCP_CREDENTIAL_ORIGIN" = fresh ] && [ "$NONINTERACTIVE" != "1" ] && [ -t 0 ] && [ -r /dev/tty ]; then
+if [ "$MCP_CREDENTIAL_ORIGIN" = fresh ] && [ "$NONINTERACTIVE" != "1" ] && installer_has_interactive_tty; then
   printf '\nA new direct/default MCP credential was issued. It is not stored in recoverable plaintext.\n' >/dev/tty
   reveal_new=n
   read -r -p 'Reveal the new Authorization value once in this terminal? [y/N] ' reveal_new </dev/tty || true
@@ -869,7 +877,7 @@ updates, repair, Cloudflare cleanup, safe uninstall, or purge.
 EOF_SUMMARY
 fi
 
-if [ "$NONINTERACTIVE" != "1" ] && [ -t 0 ] && [ -r /dev/tty ]; then
+if [ "$NONINTERACTIVE" != "1" ] && installer_has_interactive_tty; then
   echo
   "$MANAGE_BIN" status
   echo

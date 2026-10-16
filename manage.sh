@@ -60,10 +60,15 @@ ui_width(){
   printf '%s\n' "$width"
 }
 
+# Text from config/provider/user input is data, never terminal formatting.
+ui_strip_controls(){
+  printf '%s' "$1" | LC_ALL=C tr '\000-\037\177' ' '
+}
 ui_wrap(){
   local indent="$1" text="$2" width="${3:-}" line word
   local -a words=()
   [ -n "$width" ] || width="$(ui_width)"
+  text="$(ui_strip_controls "$text")"
   read -r -a words <<<"$text"
   line="$indent"
   if [ "${#words[@]}" -eq 0 ]; then
@@ -106,7 +111,7 @@ log(){
       fi
     done < <(ui_wrap '      ' "$*")
   else
-    printf '[ai-server-agent] %s\n' "$*"
+    printf '[ai-server-agent] %s\n' "$(ui_strip_controls "$*")"
   fi
 }
 warn(){
@@ -115,7 +120,7 @@ warn(){
     ui_wrap '  ' "$*" >&2
     printf '\n' >&2
   else
-    printf '[ai-server-agent] WARNING: %s\n' "$*" >&2
+    printf '[ai-server-agent] WARNING: %s\n' "$(ui_strip_controls "$*")" >&2
   fi
 }
 die(){
@@ -124,7 +129,7 @@ die(){
     ui_wrap '  ' "$*" >&2
     printf '\n' >&2
   else
-    printf '[ai-server-agent] ERROR: %s\n' "$*" >&2
+    printf '[ai-server-agent] ERROR: %s\n' "$(ui_strip_controls "$*")" >&2
   fi
   exit 1
 }
@@ -167,7 +172,7 @@ ui_safe_value(){
   local value
   # Remove terminal controls rather than executing user-controlled escapes.
   # Bash substring slicing is character-aware on UTF-8 shells.
-  value="$(printf '%s' "$1" | LC_ALL=C tr -d '\000-\037\177')"
+  value="$(ui_strip_controls "$1")"
   if [ "${#value}" -gt 180 ]; then value="${value:0:177}..."; fi
   printf '%s' "$value"
 }
@@ -323,6 +328,7 @@ pause(){
 
 confirm(){
   local prompt="$1" default="${2:-no}" ans=""
+  prompt="$(ui_strip_controls "$prompt")"
   if ! ui_has_interactive_tty; then
     [ "$default" = "yes" ]
     return
@@ -342,11 +348,18 @@ confirm(){
   fi
 }
 
-# /dev/tty can be permission-readable without a controlling terminal
-# (notably inside sudo / CI). Noninteractive management must never prompt.
-ui_has_interactive_tty(){ [ -t 0 ] && [ -r /dev/tty ]; }
+# /dev/tty may have readable mode bits without a controlling terminal.
+# Accept piped installers that still have a live terminal on stdout/stderr;
+# never prompt when all three standard descriptors are non-TTY.
+ui_has_interactive_tty(){
+  [ -r /dev/tty ] || return 1
+  { [ -t 0 ] || [ -t 1 ] || [ -t 2 ]; } || return 1
+  ( : </dev/tty ) 2>/dev/null
+}
 prompt_value(){
   local prompt="$1" default="${2:-}" value
+  prompt="$(ui_strip_controls "$prompt")"
+  default="$(ui_strip_controls "$default")"
   ui_has_interactive_tty || die "Interactive input requires a terminal. Use the documented AI_SERVER_AGENT_* variables for automation."
   if [ -n "$default" ]; then
     read -r -p "$prompt [$default] (b=cancel): " value </dev/tty

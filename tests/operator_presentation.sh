@@ -111,6 +111,26 @@ printf '0\n' | ASA_SOURCE="$ROOT/manage.sh" ASA_TMP="$TMP" ASA_LABEL_WITH_CONTRO
 ! LC_ALL=C grep -q $'\033' "$TMP/control-label.out"
 grep -Fq 'QA Console' "$TMP/control-label.out"
 
+# A curl-piped installer keeps a controlling TTY on stdout/stderr but not
+# stdin. Both installer and manager must still find the real /dev/tty without
+# mistaking /dev/tty mode bits for an actual terminal in unattended CI.
+cat > "$TMP/tty-from-pipe.sh" <<'PTY_FIXTURE'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+[ ! -t 0 ] || { echo 'EXPECTED_STDIN_PIPE'; exit 11; }
+export AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1
+source "$ASA_SOURCE"
+ui_has_interactive_tty || { echo 'MANAGER_MISSED_TTY'; exit 12; }
+source "$ASA_TMP/only-installer-tty.sh"
+installer_has_interactive_tty || { echo 'INSTALLER_MISSED_TTY'; exit 13; }
+printf 'PIPE_WITH_CONTROLLING_TTY_PASS\n'
+PTY_FIXTURE
+sed -n '/^installer_has_interactive_tty(){/,/^}/p' "$ROOT/install.sh" > "$TMP/only-installer-tty.sh"
+chmod 700 "$TMP/tty-from-pipe.sh"
+ASA_SOURCE="$ROOT/manage.sh" ASA_TMP="$TMP" NO_COLOR=1 TERM=dumb \
+  script -q -e -c "printf 'stdin bytes' | bash '$TMP/tty-from-pipe.sh'" /dev/null < /dev/null > "$TMP/piped-tty.out" 2>&1
+grep -Fq 'PIPE_WITH_CONTROLLING_TTY_PASS' "$TMP/piped-tty.out"
+
 # A No at the actual pre-commit confirmation must leave both config and
 # service state untouched (unlike a callback mocked to return false).
 printf '3210\nn\n' | ASA_SOURCE="$ROOT/manage.sh" ASA_TMP="$TMP" NO_COLOR=1 TERM=dumb \
@@ -187,6 +207,18 @@ LC_ALL=C grep -Fq "$(printf '\033[31m')" "$TMP/install-color.out"
 help_text="$(AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=0 COLUMNS=100 NO_COLOR=1 bash "$ROOT/manage.sh" help)"
 grep -Fq 'Usage: sudo ai-server-agent-manage' <<< "$help_text"
 grep -Fq 'Connection and lifecycle' <<< "$help_text"
+
+# A provider-supplied control byte must never reach either TTY or
+# redirected log output, including warnings and failures.
+ASA_SOURCE="$ROOT/manage.sh" bash -c '
+  export AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1 NO_COLOR=1
+  source "$ASA_SOURCE"
+  log $'"'"'ordinary info\033[31m hostile'"'"'
+  warn $'"'"'provider warning\033]0;injected\007'"'"'
+  if (die $'"'"'failure\033[2J concealed'"'"') 2> /dev/null; then exit 21; fi
+' > "$TMP/redirect-controls.out" 2>&1
+! LC_ALL=C grep -q $'\033' "$TMP/redirect-controls.out"
+grep -Fq '[ai-server-agent] WARNING:' "$TMP/redirect-controls.out"
 
 # Control-sequence stripping must not corrupt printable UTF-8 labels.
 ASA_SOURCE="$ROOT/manage.sh" bash -c '

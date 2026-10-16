@@ -42,6 +42,6 @@ This intentionally includes internal formatting/serialization calls, which must 
 
 1. Static source inventory and a diff audit for every operator-facing route, including installer/update/uninstall/error and uncommon recovery branches.
 2. PTY menu tests for main/child flow, 24-row and narrow width, no-color, typed input, invalid choice, safe Back/No, error -> menu recovery, SIGINT read-only versus protected change.
-3. Safe simulated installer/connection/credential/capacity workflows with no host/config/Cloudflare mutation; exercise prompts at precommit boundaries.
+3. Safe simulated installer/connection/credential/capacity workflows with no host/config/Cloudflare mutation; exercise prompts at precommit boundaries, including piped-input installers with a real controlling PTY and rejecting readable-but-absent `/dev/tty` in unattended runs. All dynamic operator messages, header fields and prompts strip terminal control bytes without requiring non-ASCII text to be dropped.
 4. `bash -n`, `shellcheck` where available, the relevant repository's deterministic tests and required exact-head CI/Security for a stable PR candidate.
 5. Record any remaining true installed-terminal visual acceptance as **unverified** until an authorized fresh/isolated installation actually exercises it. No occupied host upgrade or new Stable release follows automatically from source tests.
