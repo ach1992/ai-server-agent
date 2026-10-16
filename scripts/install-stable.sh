@@ -14,6 +14,9 @@ DEBIAN_MIN_VERSION=11
 version_ge(){ /usr/bin/dpkg --compare-versions "$1" ge "$2"; }
 
 require_supported_prerequisite_host(){
+  # /etc/os-release defines VERSION; keep those fields local so they cannot
+  # replace the caller's selected Stable release VERSION when jq is absent.
+  local ID VERSION_ID VERSION
   [ -r /etc/os-release ] || die "jq is required and /etc/os-release is unavailable for prerequisite installation."
   # shellcheck disable=SC1091
   . /etc/os-release

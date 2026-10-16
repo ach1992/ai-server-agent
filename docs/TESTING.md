@@ -210,9 +210,9 @@ A synthetic runtime fixture verifies that `browser_status` requires the desired 
 
 Initial Stable installation separates the **mutable, reviewed `main` bootstrap source** from the immutable release installer it authenticates. Both documented one-line commands fetch `scripts/install-stable.sh` from the same permanent `main` URL with no commit or version in the URL. The default resolves GitHub's latest published immutable Stable; `bash -s -- vX.Y.Z` selects a specific published immutable tag. The mutable bootstrap does **not** have the independent provenance of an immutable pin, so branch protection/review is a separate supply-chain control. The release installer must still be authenticated before privileged execution, with fail-closed staging and SHA-256 verification retained. Since `main` is immediately public, a bootstrap change must work with the latest **already published** Stable before it merges, not only with a future unshipped release.
 
-`tests/stable_bootstrap.sh` guards the documented permanent `main` bootstrap URL and explicit-version example and uses a deterministic mocked GitHub HTTP surface plus a fake `sudo` boundary to verify that the bootstrap:
+`tests/stable_bootstrap.sh` guards the documented permanent `main` bootstrap URL and explicit-version example and uses deterministic mocked GitHub HTTP and `sudo`/APT boundaries (no real package changes) to verify that the bootstrap:
 
-- accepts a valid latest immutable release and an explicit valid stable tag;
+- accepts a valid latest immutable release and an explicit valid stable tag, both with `jq` already installed and after its simulated absence/prerequisite provisioning on supported Debian and Ubuntu hosts;
 - requires exactly the expected tag-scoped `install.sh` asset representation;
 - rejects a mutable release before downloading or executing the release installer;
 - rejects an unexpected asset URL before installer download/execution;

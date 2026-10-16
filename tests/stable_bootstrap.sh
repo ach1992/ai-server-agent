@@ -54,6 +54,10 @@ make_fixture(){
   EXEC_MARKER="$FIXTURE/executed"
   ENV_MARKER="$FIXTURE/installer-environment"
   DOWNLOAD_MARKER="$FIXTURE/downloaded"
+  RELEASE_REQUEST_MARKER="$FIXTURE/release-request"
+  PREREQ_MARKER="$FIXTURE/prerequisite-actions"
+  EVENT_MARKER="$FIXTURE/observed-events"
+  NO_JQ_BIN="$FIXTURE/no-jq-bin"
   SUDO_MARKER="$FIXTURE/sudo-called"
   ATTACK_MARKER="$FIXTURE/attacker-executed"
   PATH_ATTACK_MARKER="$FIXTURE/privileged-path-command-executed"
@@ -103,11 +107,14 @@ while [ "$#" -gt 0 ]; do
 done
 case "$url" in
   https://api.github.com/repos/ach1992/ai-server-agent/releases/latest|https://api.github.com/repos/ach1992/ai-server-agent/releases/tags/v0.1.2)
+    printf '%s\n' "$url" >> "$RELEASE_REQUEST_MARKER"
+    printf 'release-metadata\n' >> "$EVENT_MARKER"
     printf '{"tag_name":"v0.1.2","draft":false,"prerelease":false,"immutable":%s,"assets":[{"name":"install.sh","state":"uploaded","digest":"%s","browser_download_url":"%s"}]}\n' "$IMMUTABLE" "$INSTALLER_DIGEST" "$INSTALLER_URL"
     ;;
   https://github.com/ach1992/ai-server-agent/releases/download/v0.1.2/install.sh)
     [ -n "$out" ] || exit 92
     cp "$FIXTURE_INSTALLER" "$out"
+    printf 'release-installer-download\n' >> "$EVENT_MARKER"
     printf 'downloaded\n' > "$DOWNLOAD_MARKER"
     ;;
   *) echo "unexpected curl URL: $url" >&2; exit 91 ;;
@@ -116,8 +123,28 @@ CURL
   cat > "$FIXTURE/bin/sudo" <<'SUDO'
 #!/usr/bin/env bash
 set -Eeuo pipefail
+# This fake sudo never launches apt-get. It verifies supported-host
+# prerequisite argument ordering and exposes jq only after mock install.
+if [ "$1" = /usr/bin/env ]; then
+  [ "$2" = DEBIAN_FRONTEND=noninteractive ] && [ "$3" = /usr/bin/apt-get ] || exit 94
+  if [ "$4" = update ] && [ "$5" = -qq ] && [ "$#" -eq 5 ]; then
+    printf 'apt-update\n' >> "$PREREQ_MARKER"
+    printf 'apt-update\n' >> "$EVENT_MARKER"
+    exit 0
+  fi
+  if [ "$4" = install ] && [ "$5" = -y ] && [ "$6" = -qq ] &&
+     [ "$7" = ca-certificates ] && [ "$8" = jq ] && [ "$#" -eq 8 ]; then
+    printf 'apt-install-jq\n' >> "$PREREQ_MARKER"
+    printf 'apt-install-jq\n' >> "$EVENT_MARKER"
+    ln -s /usr/bin/jq "$NO_JQ_BIN/jq"
+    exit 0
+  fi
+  echo 'unexpected prerequisite apt-get command' >&2
+  exit 94
+fi
 printf 'sudo-called\n' > "$SUDO_MARKER"
 [ "$1" = /bin/bash ] && [ "$2" = --noprofile ] && [ "$3" = --norc ] && [ "$4" = -s ] && [ "$5" = -- ] || exit 93
+printf 'privileged-release-stage\n' >> "$EVENT_MARKER"
 source_installer="$6"
 if [ "${RACE_SOURCE_REPLACEMENT:-false}" = true ]; then
   rm -f -- "$source_installer"
@@ -130,7 +157,7 @@ unset AI_SERVER_AGENT_ENVIRONMENT_PROFILE AI_SERVER_AGENT_SERVER_LABEL AI_SERVER
 exec "$@"
 SUDO
   chmod +x "$FIXTURE/bin/curl" "$FIXTURE/bin/sudo"
-  export FIXTURE_INSTALLER="$FIXTURE/install.sh" EXEC_MARKER ENV_MARKER DOWNLOAD_MARKER SUDO_MARKER ATTACK_MARKER PATH_ATTACK_MARKER MALICIOUS_INSTALLER INSTALLER_DIGEST INSTALLER_URL IMMUTABLE
+  export FIXTURE_INSTALLER="$FIXTURE/install.sh" EXEC_MARKER ENV_MARKER DOWNLOAD_MARKER RELEASE_REQUEST_MARKER PREREQ_MARKER EVENT_MARKER NO_JQ_BIN SUDO_MARKER ATTACK_MARKER PATH_ATTACK_MARKER MALICIOUS_INSTALLER INSTALLER_DIGEST INSTALLER_URL IMMUTABLE
   export POISON_BIN="$FIXTURE/poison-bin"
   export RACE_SOURCE_REPLACEMENT=false
   export PATH="$FIXTURE/bin:/usr/bin:/bin"
@@ -220,5 +247,100 @@ grep -qF 'asset URL does not match the exact release tag' "$FIXTURE/out"
 test ! -e "$DOWNLOAD_MARKER"
 test ! -e "$SUDO_MARKER"
 test ! -e "$EXEC_MARKER"
+
+# Regression matrix: bootstrap with jq present/absent, latest/pinned release,
+# and controlled Ubuntu/Debian os-release content. The missing-jq path is
+# isolated: PATH excludes jq until fake sudo handles the exact APT request;
+# no host packages, release assets or Agent services are ever changed.
+for fixture_distro in debian ubuntu; do
+  for fixture_jq in present missing; do
+    for fixture_select in latest explicit; do
+      make_fixture true false false
+      OS_RELEASE_FIXTURE="$FIXTURE/os-release"
+      case "$fixture_distro" in
+        debian)
+          printf 'ID=debian\nVERSION_ID="13"\nVERSION="13 (trixie)"\n' > "$OS_RELEASE_FIXTURE"
+          ;;
+        ubuntu)
+          printf 'ID=ubuntu\nVERSION_ID="24.04"\nVERSION="24.04.3 LTS (Noble Numbat)"\n' > "$OS_RELEASE_FIXTURE"
+          ;;
+      esac
+      export OS_RELEASE_FIXTURE
+
+      # This test-only copy swaps the OS-release *input*, not the production
+      # bootstrap implementation or its trust/privilege control flow.
+      sed 's#^  \. /etc/os-release$#  . "$OS_RELEASE_FIXTURE"#' "$BOOTSTRAP" > "$FIXTURE/bootstrap-os-fixture.sh"
+      grep -qF '  . "$OS_RELEASE_FIXTURE"' "$FIXTURE/bootstrap-os-fixture.sh"
+      if grep -qF '  . /etc/os-release' "$FIXTURE/bootstrap-os-fixture.sh"; then
+        echo 'OS-release fixture substitution failed closed' >&2
+        exit 1
+      fi
+
+      test_path="$PATH"
+      if [ "$fixture_jq" = missing ]; then
+        mkdir -p "$NO_JQ_BIN"
+        for tool in bash sha256sum mktemp awk chmod cp rm ln; do
+          ln -s "$(command -v "$tool")" "$NO_JQ_BIN/$tool"
+        done
+        ln -s "$FIXTURE/bin/curl" "$NO_JQ_BIN/curl"
+        ln -s "$FIXTURE/bin/sudo" "$NO_JQ_BIN/sudo"
+        test_path="$NO_JQ_BIN"
+        if PATH="$test_path" /bin/bash -c 'command -v jq >/dev/null 2>&1'; then
+          echo 'Missing-jq fixture unexpectedly exposes jq before mocked provisioning' >&2
+          exit 1
+        fi
+      fi
+
+      case "$fixture_select" in
+        latest)
+          expected_release_url='https://api.github.com/repos/ach1992/ai-server-agent/releases/latest'
+          PATH="$test_path" /bin/bash "$FIXTURE/bootstrap-os-fixture.sh" > "$FIXTURE/out"
+          ;;
+        explicit)
+          expected_release_url='https://api.github.com/repos/ach1992/ai-server-agent/releases/tags/v0.1.2'
+          PATH="$test_path" /bin/bash "$FIXTURE/bootstrap-os-fixture.sh" v0.1.2 > "$FIXTURE/out"
+          ;;
+      esac
+
+      if [ "$(wc -l < "$RELEASE_REQUEST_MARKER")" -ne 1 ] ||
+         ! grep -Fxq "$expected_release_url" "$RELEASE_REQUEST_MARKER"; then
+        echo "Wrong Stable release endpoint after $fixture_distro/$fixture_jq/$fixture_select" >&2
+        exit 1
+      fi
+      grep -qF 'Verified immutable stable installer v0.1.2 before privileged staging.' "$FIXTURE/out"
+      grep -qF 'Privileged staging re-verified the authenticated installer bytes.' "$FIXTURE/out"
+      test -s "$DOWNLOAD_MARKER"
+      test -s "$SUDO_MARKER"
+      test -s "$EXEC_MARKER"
+      test ! -e "$ATTACK_MARKER"
+      test ! -e "$PATH_ATTACK_MARKER"
+
+      # Privileged APT may precede verification when jq is absent, but the
+      # release-installer root stage must always follow authenticated bytes.
+      if [ "$fixture_jq" = missing ]; then
+        expected_events=$'apt-update\napt-install-jq\nrelease-metadata\nrelease-installer-download\nprivileged-release-stage'
+      else
+        expected_events=$'release-metadata\nrelease-installer-download\nprivileged-release-stage'
+      fi
+      if [ "$(cat "$EVENT_MARKER")" != "$expected_events" ]; then
+        echo "Unexpected privilege/verification order: $fixture_distro/$fixture_jq/$fixture_select" >&2
+        exit 1
+      fi
+
+      if [ "$fixture_jq" = missing ]; then
+        if [ "$(wc -l < "$PREREQ_MARKER")" -ne 2 ] ||
+           [ "$(sed -n '1p' "$PREREQ_MARKER")" != apt-update ] ||
+           [ "$(sed -n '2p' "$PREREQ_MARKER")" != apt-install-jq ] ||
+           [ ! -L "$NO_JQ_BIN/jq" ]; then
+          echo "Incorrect jq prerequisite provisioning: $fixture_distro/$fixture_select" >&2
+          exit 1
+        fi
+      elif [ -e "$PREREQ_MARKER" ]; then
+        echo "Unexpected sudo/apt before verified installer: $fixture_distro/$fixture_select" >&2
+        exit 1
+      fi
+    done
+  done
+done
 
 echo 'stable bootstrap trust tests passed'

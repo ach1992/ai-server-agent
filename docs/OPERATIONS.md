@@ -34,19 +34,20 @@ To install a **specific published Stable**, for example `v0.1.14`:
 curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | bash -s -- v0.1.14
 ```
 
-The default resolves GitHub's newest published non-draft, non-prerelease, immutable release; the optional tag selects the named release and fails closed if it is not immutable. The bootstrap invokes `sudo` only after verifying the release installer and rechecks the staged bytes on the privileged side. **Do not use `curl ... | sudo bash`** for this initial bootstrap, and do not execute a moving release asset as root. If stronger bootstrap-source provenance is required, operators can independently review or pin the source, but the normal one-line install command deliberately uses the permanent `main` URL. The installed manager already supports version-free Stable updates via `sudo ai-server-agent-manage update`.
+The default resolves GitHub's newest published non-draft, non-prerelease, immutable release; the optional tag selects the named release and fails closed if it is not immutable. When `jq` is missing, the bootstrap may first invoke `sudo apt-get update` and `sudo apt-get install ca-certificates jq` for supported Ubuntu/Debian hosts using configured APT repositories, **before** fetching or verifying release metadata. This privileged **OS prerequisite** operation is distinct from privileged execution of release `install.sh`: the latter occurs only **after** SHA-256 verification, followed by digest re-verification in protected root staging. **Do not use `curl ... | sudo bash`** for this initial bootstrap, and do not execute a moving release asset as root. If stronger bootstrap-source provenance is required, operators can independently review or pin the source, but the normal one-line install command deliberately uses the permanent `main` URL. The installed manager already supports version-free Stable updates via `sudo ai-server-agent-manage update`.
 
 Do **not** use `releases/latest/download/install.sh | sudo bash` as the stable trust path: that executes release-supplied code as root before the same asset can be authenticated.
 
 Although its public **source** comes from reviewed `main`, the Stable bootstrap does **not** install Agent binaries or release assets from `main` or fall back to a source build. It:
 
-1. resolves the requested release or GitHub's latest release metadata;
-2. requires a published, non-draft, non-prerelease, immutable release;
-3. requires exactly one uploaded `install.sh` asset at the exact tag-scoped release URL;
-4. requires the GitHub release asset `sha256:` digest;
-5. downloads `install.sh` without root execution and verifies its bytes against that digest;
-6. crosses the privilege boundary only after that unprivileged verification succeeds;
-7. copies the candidate into a root-controlled staging directory, re-verifies the same authenticated digest on the protected copy, and executes only that protected copy.
+1. checks required bootstrap tools; if `jq` is absent, on supported Debian/Ubuntu hosts only, validates the host and installs the OS prerequisite using privileged APT (before release authentication);
+2. resolves the requested release or GitHub's latest release metadata;
+3. requires a published, non-draft, non-prerelease, immutable release;
+4. requires exactly one uploaded `install.sh` asset at the exact tag-scoped release URL;
+5. requires the GitHub release asset `sha256:` digest;
+6. downloads `install.sh` without root execution and verifies its bytes against that digest;
+7. enters the separate privileged **release-installer staging** path only after verifying downloaded installer bytes (the optional OS prerequisite privilege operation precedes this);
+8. copies the candidate into a root-controlled staging directory, re-verifies the same authenticated digest on the protected copy, and executes only that protected copy.
 
 ### Fresh-install baseline and upgrade compatibility
 
