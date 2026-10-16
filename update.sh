@@ -185,4 +185,4 @@ sleep 1
 systemctl is-active --quiet ai-server-agent-executor.service
 systemctl is-active --quiet ai-server-agent.service
 
-cli_success "Agent update completed on the '$CHANNEL' channel; Agent and Executor services are active."
+cli_success "AI Server Agent update completed on the '$CHANNEL' channel. Agent and Executor services are active."

@@ -1092,9 +1092,14 @@ load_cf_token(){
     CF_TOKEN="$AI_SERVER_AGENT_CLOUDFLARE_API_TOKEN"
   else
     ui_has_interactive_tty || die "Set AI_SERVER_AGENT_CLOUDFLARE_API_TOKEN_FILE for noninteractive Cloudflare setup."
-    printf 'Cloudflare API token (input hidden; not stored): ' >/dev/tty
-    read -r -s CF_TOKEN </dev/tty
+    printf 'Cloudflare API token (input hidden; b=cancel): ' >/dev/tty
+    read -r -s CF_TOKEN </dev/tty || { CF_TOKEN=""; return 20; }
     printf '\n' >/dev/tty
+    if ui_cancel_requested "$CF_TOKEN"; then
+      CF_TOKEN=""
+      ui_notice info 'Cloudflare token input cancelled before any remote change.'
+      return 20
+    fi
   fi
   [ -n "$CF_TOKEN" ] || die "Cloudflare API token is empty."
 }
@@ -2192,9 +2197,14 @@ acquire_cloudflare_mcp_bearer(){
     exec 3<&-
   else
     ui_has_interactive_tty || die "Cloudflare setup requires the current MCP bearer. Run the manager in an interactive terminal or pass the one-use descriptor 3; no bearer plaintext is stored on disk."
-    printf 'Current MCP bearer (input hidden, not stored): ' >/dev/tty
-    IFS= read -r -s supplied </dev/tty || die "Could not read the MCP bearer from the terminal."
+    printf 'Current MCP bearer (input hidden; b=cancel): ' >/dev/tty
+    IFS= read -r -s supplied </dev/tty || return 20
     printf '\n' >/dev/tty
+    if ui_cancel_requested "$supplied"; then
+      supplied=""
+      ui_notice info 'MCP bearer input cancelled before Cloudflare changes.'
+      return 20
+    fi
   fi
   token="${supplied#Authorization: }"
   token="${token#Bearer }"

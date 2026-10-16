@@ -154,6 +154,32 @@ grep -Fq 'TEST_CLOUDFLARE_READ_ONLY_GUIDANCE' "$TMP/cloudflare-no.out"
 grep -Fq 'Cancelled before Cloudflare changes.' "$TMP/cloudflare-no.out"
 ! grep -Fq 'UNSAFE_CLOUDFLARE_WRITE' "$TMP/cloudflare-no.out"
 
+# Secret-bearing Cloudflare/MCP prompts offer a real safe Back control,
+# without remote API writes, credential verification, or persisted secrets.
+cat > "$TMP/hidden-prompt.sh" <<'HIDDEN_FIXTURE'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+export AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1
+source "$ASA_SOURCE"
+unset AI_SERVER_AGENT_CLOUDFLARE_API_TOKEN_FILE AI_SERVER_AGENT_CLOUDFLARE_API_TOKEN AI_SERVER_AGENT_MCP_AUTH_FD
+case "$1" in
+  cloudflare) load_cf_token ;;
+  bearer) acquire_cloudflare_mcp_bearer ;;
+esac
+HIDDEN_FIXTURE
+chmod 700 "$TMP/hidden-prompt.sh"
+for kind in cloudflare bearer; do
+  if printf 'b\n' | ASA_SOURCE="$ROOT/manage.sh" NO_COLOR=1 TERM=dumb \
+    script -q -e -c "bash '$TMP/hidden-prompt.sh' $kind" /dev/null > "$TMP/hidden-$kind.out" 2>&1; then
+    hidden_rc=0
+  else
+    hidden_rc=$?
+  fi
+  [ "$hidden_rc" -eq 20 ] || { echo "Hidden prompt $kind cancellation returned $hidden_rc instead of 20" >&2; exit 1; }
+  grep -Fq 'cancelled before' "$TMP/hidden-$kind.out"
+  ! grep -Eq 'UNSAFE_|Authorization: Bearer|token format' "$TMP/hidden-$kind.out"
+done
+
 # A valid temporary certificate is inspected, but pressing No must not
 # stage/copy private TLS material or restart the service.
 openssl req -x509 -newkey rsa:2048 -nodes -keyout "$TMP/tls.key" -out "$TMP/tls.crt" \
