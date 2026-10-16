@@ -501,6 +501,8 @@ Do not promote capabilities merely because they are powerful, modern, or availab
 
 ## 19. Language-neutral extensions and phased fresh-install delivery (Issues #140 and #149)
 
+**Already agreed language coverage:** Go; PHP; JavaScript/TypeScript; Python; Bash/POSIX Shell; Rust; HTML/CSS; and SQL for PostgreSQL/MySQL/MariaDB. Do not reopen this product scope or conflate an unprovisioned optional adapter with a cancelled language. The first tested subset is delivered under completed #140; [#149](https://github.com/ach1992/ai-server-agent/issues/149) owns the agreed advanced/debugger/SQL follow-up and real adapter/arm64/client acceptance, including explicit Owner decisions where a safe debugger mode proves infeasible. No automatic installation of all adapters is implied.
+
 **Design/delivery distinction:** The Owner selected protocol-first adapters and phased delivery. #140 owns the first independently reviewed Stable slice; #149 owns advanced modes and further adapter/client acceptance. A source candidate, PR checks, merged code, optional adapter readiness, installed MCP client and published Stable are separate facts. GitHub PRs, Issues and Releases own current status.
 
 **Extension test:** For an adapter that already implements LSP/DAP, adding a language should normally be a bounded integration of a trusted tool, its narrow profile, and conformance fixtures. It must not require a new MCP family, file writer, process/session registry or security model. Genuine language-specific runtime differences may require a small typed launch/transport handler. Do not promise that every third-party adapter behaves identically.

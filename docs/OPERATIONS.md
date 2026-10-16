@@ -20,37 +20,40 @@ AI Server Agent does not require nginx, Apache, Caddy, Docker, PHP, a database, 
 
 ## Install the latest stable release
 
-Stable installation starts with a small bootstrap loaded from an **immutable published release tag**, separate from the release `install.sh` asset it authenticates. The currently documented verified bootstrap trust anchor is the immutable [`v0.1.12` release](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.12), not the mutable `main` branch. This anchor can resolve a newer *published* immutable Stable; it is not a declaration that `v0.1.12` remains the latest release. GitHub Releases, rather than this page, remain authoritative if a newer version is published.
+Stable installation uses the maintained `scripts/install-stable.sh` bootstrap from the repository's `main` branch. The **public command never changes when a new Stable is published**: it contains no release tag or commit SHA. The bootstrap source is mutable and therefore trusted as reviewed, protected project source; unlike a pinned commit, its bytes are not immutable. The actual privileged installer is still selected from **published immutable GitHub Releases** and SHA-256-checked before execution.
 
-To install the **latest immutable Stable** identified by the GitHub Releases API using that pinned bootstrap:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.12/scripts/install-stable.sh | bash
-```
-
-To install the **older immutable `v0.1.12`** explicitly instead of following the latest release:
+To install the **latest published immutable Stable**:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.12/scripts/install-stable.sh | bash -s -- v0.1.12
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | bash
 ```
 
-The bootstrap authenticates the release-scoped installer digest **before** privileged execution. The first command resolves GitHub's current latest immutable release; the second requires the named release. On the next release, update the documented bootstrap trust anchor only after its tag is immutable and its bootstrap has been verified.
+To install a **specific published Stable**, for example `v0.1.14`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | bash -s -- v0.1.14
+```
+
+The default resolves GitHub's newest published non-draft, non-prerelease, immutable release; the optional tag selects the named release and fails closed if it is not immutable. When `jq` is missing, the bootstrap may first invoke `sudo apt-get update` and `sudo apt-get install ca-certificates jq` for supported Ubuntu/Debian hosts using configured APT repositories, **before** fetching or verifying release metadata. This privileged **OS prerequisite** operation is distinct from privileged execution of release `install.sh`: the latter occurs only **after** SHA-256 verification, followed by digest re-verification in protected root staging. **Do not use `curl ... | sudo bash`** for this initial bootstrap, and do not execute a moving release asset as root. If stronger bootstrap-source provenance is required, operators can independently review or pin the source, but the normal one-line install command deliberately uses the permanent `main` URL. The installed manager already supports version-free Stable updates via `sudo ai-server-agent-manage update`.
 
 Do **not** use `releases/latest/download/install.sh | sudo bash` as the stable trust path: that executes release-supplied code as root before the same asset can be authenticated.
 
-The stable bootstrap does **not** fall back to `main`. It:
+Although its public **source** comes from reviewed `main`, the Stable bootstrap does **not** install Agent binaries or release assets from `main` or fall back to a source build. It:
 
-1. resolves the requested release or GitHub's latest release metadata;
-2. requires a published, non-draft, non-prerelease, immutable release;
-3. requires exactly one uploaded `install.sh` asset at the exact tag-scoped release URL;
-4. requires the GitHub release asset `sha256:` digest;
-5. downloads `install.sh` without root execution and verifies its bytes against that digest;
-6. crosses the privilege boundary only after that unprivileged verification succeeds;
-7. copies the candidate into a root-controlled staging directory, re-verifies the same authenticated digest on the protected copy, and executes only that protected copy.
+1. checks required bootstrap tools; if `jq` is absent, on supported Debian/Ubuntu hosts only, validates the host and installs the OS prerequisite using privileged APT (before release authentication);
+2. resolves the requested release or GitHub's latest release metadata;
+3. requires a published, non-draft, non-prerelease, immutable release;
+4. requires exactly one uploaded `install.sh` asset at the exact tag-scoped release URL;
+5. requires the GitHub release asset `sha256:` digest;
+6. downloads `install.sh` without root execution and verifies its bytes against that digest;
+7. enters the separate privileged **release-installer staging** path only after verifying downloaded installer bytes (the optional OS prerequisite privilege operation precedes this);
+8. copies the candidate into a root-controlled staging directory, re-verifies the same authenticated digest on the protected copy, and executes only that protected copy.
 
 ### Fresh-install baseline and upgrade compatibility
 
-The first multi-language Stable slice of Issue #140 is accepted against **first-ever installation on an empty supported host**. Passing that fresh-install test does **not** prove a state-preserving in-place upgrade from the older `v0.1.12` installation or validate migration of its credentials, active jobs, Browser profiles and terminals. Do not assume an occupied older Agent host can safely auto-update to the new baseline without a separately verified backup/recovery and upgrade procedure. This limitation concerns old-to-new installed state, **not** ordinary backward-compatible MCP tool names or the Agent's required restart/reconnect/cleanup guarantees within the new baseline. Later upgrades from the new baseline need their own compatibility proof.
+Issue #140's first optional multi-language slice was published starting in immutable Stable `v0.1.13`; `v0.1.14` retains it. Source and isolated-installer tests are **not** evidence that every optional language adapter is installed or that a fresh, occupied-host-independent installation has completed the full direct-client acceptance in [#137](https://github.com/ach1992/ai-server-agent/issues/137), [#143](https://github.com/ach1992/ai-server-agent/issues/143) and [#59](https://github.com/ach1992/ai-server-agent/issues/59). These remaining clean-install and extended-recovery tests are separate from publication and ordinary installed smoke.
+
+Do **not** infer state-preserving migration of a historical `v0.1.12` installation, including credentials, active jobs, Browser profiles or terminals, from a new-baseline clean-install test. Before updating an occupied older host, separately verify backup/recovery and the applicable update procedure. This does not remove backward-compatible MCP names or the Agent's required restart/reconnect/cleanup guarantees within the new baseline. Subsequent baseline upgrades require evidence appropriate to their actual changes.
 
 Optional language-server/debugger runtimes are **not** core dependencies or automatically installed. Missing complete, administrator-controlled and version-verified adapter resources return explicit unavailable/dependency errors. For supported language methods/modes and deferred functionality, see [Tool Reference](TOOL-REFERENCE.md#optional-multi-language-code-and-debugger-readiness) and [Issue #149](https://github.com/ach1992/ai-server-agent/issues/149). Real DAP launches execute selected workspace code; use an authorized test host, not an assumed read-only inspection.
 
@@ -316,8 +319,8 @@ Key boundaries:
 - persistent job files use no-follow/exclusive creation and checked reads under root-controlled state containers;
 - worker-writable workspace/state must not implicitly influence root execution;
 - Cloudflare destructive recovery requires ownership plus current representation proof;
-- stable install/update/release identity must remain immutable and must not drift to `main`;
-- release installer bytes must be authenticated before privileged execution through a bootstrap source anchored to an immutable release tag;
+- Stable installation **target** and release identity must remain immutable; do not treat the `main` bootstrap source as the selected release or fall back to `main` binaries;
+- the reviewed mutable `main` bootstrap is an initial source-trust boundary; the selected release must be immutable and the release installer bytes must be authenticated before privileged execution;
 - optional browser binaries are root-owned and browser profile/session data is isolated under Agent state;
 - secrets such as an issued Agent bearer and Cloudflare token must never be persisted in repository content, issue comments, screenshots, chat transcripts or ordinary shell history; the installed MCP credential store contains verifier digests and non-secret principal metadata only.
 
@@ -329,7 +332,7 @@ Stable release publication is manual and exact-SHA based. The release workflow r
 
 Immediately before publication, the operator must separately verify repository controls that the workflow credential cannot authoritatively prove, including release immutability and release-tag protection/no-bypass conditions. Automation must not treat an omitted Rulesets `bypass_actors` field as proof that no bypass exists.
 
-The release workflow then creates the previously absent tag at the exact validated SHA, publishes with `--verify-tag`, and performs post-publication immutable-release/tag/attestation checks. Once that release is immutable, its associated tag is the durable source identity for the stable bootstrap path.
+The release workflow then creates the previously absent tag at the exact validated SHA, publishes with `--verify-tag`, and performs post-publication immutable-release/tag/attestation checks. Once that release is immutable, its tag is the durable identity of the verified release artifacts; the permanent public bootstrap source remains the separately reviewed `main/scripts/install-stable.sh` path.
 
 Documentation-only commits do not imply a release. The release workflow is manually dispatched with an explicit tag and exact validated `main` SHA.
 

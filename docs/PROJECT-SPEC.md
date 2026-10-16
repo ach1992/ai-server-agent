@@ -94,7 +94,7 @@ A profile is **descriptive guidance, not an access-control tier, binary variant,
 
 The selected purpose and a non-secret optional server label should be discoverable through authenticated environment metadata and concise MCP instructions where clients support them. An operator can change a profile without reinstalling. A client may choose another use of a host when explicitly authorized; instructions alone do not enforce policy.
 
-This is an **accepted product requirement**, not a claim that the current published release already implements profile selection. Track implementation and installed-client validation through [Issue #143](https://github.com/ach1992/ai-server-agent/issues/143).
+This is an **accepted durable product requirement**. Source integration, installed-client acceptance and current release delivery are tracked through [Issue #143](https://github.com/ach1992/ai-server-agent/issues/143) and GitHub Releases, rather than maintained as live status in this specification.
 
 ## 11. Non-Goals
 

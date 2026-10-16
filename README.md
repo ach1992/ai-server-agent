@@ -20,19 +20,19 @@ The Agent itself does **not** require a web server, database, Docker, a hosting 
 
 ## Install
 
-To install the latest **published immutable Stable release**, use the verified bootstrap anchored to previously published immutable tag `v0.1.12` (the anchor does **not** fix which Stable version will be installed):
+To install the **latest published Stable**, use this permanent, version-free command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.12/scripts/install-stable.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | bash
 ```
 
-To install the **older, specifically pinned `v0.1.12`** rather than the latest Stable, use:
+To install a **specific Stable release**, for example `v0.1.14`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.12/scripts/install-stable.sh | bash -s -- v0.1.12
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | bash -s -- v0.1.14
 ```
 
-This bootstrap authenticates the selected release installer before privileged execution and installs verified release assets. **GitHub Releases is authoritative for current Stable identity**; the pinned `v0.1.12` bootstrap is an immutable trust anchor, not a claim that `v0.1.12` or `main` is the latest Stable. Update the anchor only after verifying a newer published immutable tag.
+The **command URL stays the same** for future releases. It loads the small bootstrap from the repository's maintained `main` branch; that source is **mutable** and must remain protected and reviewed, unlike a SHA-pinned bootstrap. By default the bootstrap asks GitHub Releases for the latest published immutable Stable, or checks the explicit release tag when supplied. If `jq` is missing, the bootstrap may first use `sudo apt-get` on supported Debian/Ubuntu systems to install `jq` and CA certificates from configured system repositories. **That prerequisite step can run before release verification.** The downloaded release `install.sh` is SHA-256-verified **before its separate privileged execution**, and its protected root-stage copy is rechecked. Run the bootstrap with `bash`, **not `sudo bash`**. Never pipe the raw latest-release installer directly into root.
 
 For an exact-version install, troubleshooting, advanced or source installations and supply-chain verification, use the [installation guide](docs/OPERATIONS.md#install-the-latest-stable-release).
 
@@ -69,7 +69,9 @@ For credentials, Cloudflare, local/private mode, manual TLS, safe uninstall, pur
 | Debugging | Go/Delve and optional contained PHP CLI, Rust prebuilt, Python, Node/precompiled TypeScript and local HTML Browser DAP; never imply PHP HTTP-service, Shell DAP, extension-host or remote attach support |
 | Environment | Authenticated Agent/environment identity, available tools, host footprint and warnings |
 
-Not every source-branch capability is in the current Stable release or ready on every OS/kernel/client. Use `agent_environment`, the applicable tool status and actual installed version rather than inferring availability from this table.
+The approved language scope covers **Go; PHP; JavaScript/TypeScript; Python; Bash/POSIX Shell; Rust; HTML/CSS; and PostgreSQL/MySQL/MariaDB SQL**. The first optional LSP/DAP slice was completed in [#140](https://github.com/ach1992/ai-server-agent/issues/140); the accepted advanced modes and adapter/client acceptance remain in [#149](https://github.com/ach1992/ai-server-agent/issues/149). An optional adapter missing from a host is a provisioning/readiness gap, not cancellation of that language's accepted scope.
+
+Not every integrated feature or optional adapter is ready on every OS/kernel/client. Use `agent_environment`, the applicable tool status and actual installed version rather than inferring availability from this table.
 
 Read the [Tool Reference](docs/TOOL-REFERENCE.md) for tools, limits, examples, and important caveats. [Developer Runtime](docs/DEVELOPER-RUNTIME.md) documents the accepted future composition and unresolved delivery gates.
 
