@@ -29,11 +29,12 @@ The stable manager/installer UX is documented for operators in [Operations](OPER
 
 - Run `tests/operator_menu.sh` and `tests/operator_presentation.sh` for real pseudo-TTY menu navigation, contextual installed identity, readable narrow terminals, `NO_COLOR`/non-TTY semantics, invalid input recovery, nested Back/Cancel and sensitive output sanitization.
 - Verify first-run installer/profile/connection paths, protected precommit cancellation and default-No destructive confirmation without changes. Read-only Ctrl+C should return safely where supported; protected lifecycle/Cloudflare changes must not abandon transaction state or claim an unverified rollback.
+- Cover the meaningful operator-visible paths beyond the main menu: credential issue/revoke/one-time bearer reveal, runtime/profile adjustment, update/repair/uninstall, and diagnostic/rollback outcomes. Check both piped-installer input **with a real controlling PTY** and fully unattended input **without an available `/dev/tty`**, including 80x24/narrow display, UTF-8 retention, safe control-character escaping and secret-safe output. Preserve the distinction between reproducible simulated tests and separately authorized installed/Cloudflare acceptance.
 - Distinguish hermetic PTY and mocked failure behavior from installed first-run validation on a fresh authorized disposable host. #147 owns any remaining installed operator-console failure/interruption acceptance.
 
 ## 1. Supported platform policy and validation matrix
 
-The stable platform policy validated by current `main` is:The stable platform policy validated by current `main` is:
+The supported platform policy validated by current source is:
 
 - Ubuntu 22.04 or newer
 - Debian 11 or newer
