@@ -10,7 +10,7 @@ concurrency:
 permissions:
   contents: read
 env:
-  RELEASE_VERSION: v0.1.13
+  RELEASE_VERSION: v0.1.14
 jobs:
   change-scope:
     name: CI change scope
