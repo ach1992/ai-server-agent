@@ -608,7 +608,7 @@ func (b *environmentLimitedBuffer) String() string {
 	return b.buf.String()
 }
 
-func (s *Server) environmentToolVersion(parent context.Context, path, executable string) (string, error) {
+func (s *Server) environmentToolVersion(parent context.Context, path, executable string) (version string, err error) {
 	args := environmentVersionArgs(executable)
 	if args == nil {
 		return "", errors.New("no bounded version probe is defined")
@@ -619,10 +619,15 @@ func (s *Server) environmentToolVersion(parent context.Context, path, executable
 	if err != nil {
 		return "", err
 	}
-	defer os.RemoveAll(probeHome)
-	if err := os.Chown(probeHome, int(s.workerUID), int(s.workerGID)); err != nil {
-		return "", err
-	}
+	defer func() {
+		if cleanupErr := os.RemoveAll(probeHome); cleanupErr != nil {
+			err = errors.Join(err, fmt.Errorf("cleaning disposable environment probe HOME: %w", cleanupErr))
+		}
+	}()
+	// Keep this HOME root-owned and non-traversable while preparing all
+	// filesystem inputs. Chowning it to the worker before writing mode would
+	// allow an untrusted same-UID process to race a root-owned WriteFile via
+	// a symlink under the now worker-writable HOME.
 	if err := os.Chmod(probeHome, 0700); err != nil {
 		return "", err
 	}
@@ -634,10 +639,32 @@ func (s *Server) environmentToolVersion(parent context.Context, path, executable
 	if err := os.MkdirAll(configDir, 0700); err != nil {
 		return "", err
 	}
-	if err := os.Chown(cacheDir, int(s.workerUID), int(s.workerGID)); err != nil {
-		return "", err
+	workerItems := []string{cacheDir, configDir}
+	if executable == "go" {
+		// Go's telemetry writer may outlive a synchronous 'go version' probe
+		// and recreate its disposable HOME after cleanup. GOTELEMETRY=off is
+		// insufficient; store the 'go telemetry off' mode inside this private
+		// HOME, never in the worker's real Go configuration.
+		goDir := filepath.Join(configDir, "go")
+		telemetryDir := filepath.Join(goDir, "telemetry")
+		if err := os.MkdirAll(telemetryDir, 0700); err != nil {
+			return "", err
+		}
+		modeFile := filepath.Join(telemetryDir, "mode")
+		if err := os.WriteFile(modeFile, []byte("off "+time.Now().UTC().Format(time.DateOnly)), 0600); err != nil {
+			return "", err
+		}
+		workerItems = append(workerItems, goDir, telemetryDir, modeFile)
 	}
-	if err := os.Chown(configDir, int(s.workerUID), int(s.workerGID)); err != nil {
+	// Transfer ownership of the complete private tree while the worker
+	// still cannot traverse its top-level HOME. Expose it last, just before
+	// the version subprocess runs with the worker credential.
+	for _, item := range workerItems {
+		if err := os.Chown(item, int(s.workerUID), int(s.workerGID)); err != nil {
+			return "", err
+		}
+	}
+	if err := os.Chown(probeHome, int(s.workerUID), int(s.workerGID)); err != nil {
 		return "", err
 	}
 

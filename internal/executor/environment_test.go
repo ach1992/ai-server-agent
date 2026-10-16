@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/ach1992/ai-server-agent/internal/config"
 )
@@ -466,5 +467,152 @@ func TestRepositoryEnvironmentDoesNotExposeOpaqueRequirementValue(t *testing.T) 
 	joined := strings.Join([]string{summary.SelectionReason, strings.Join(summary.Warnings, "\n"), tool.Requirements[0].Value}, "\n")
 	if strings.Contains(joined, "secret") || strings.Contains(joined, "token=hidden") {
 		t.Fatalf("opaque requirement leaked sensitive-looking source value: %s", joined)
+	}
+}
+
+// A real Go version probe must not leave telemetry writers able to recreate
+// the disposable probe HOME after the synchronous command returns. This is
+// intentionally exercised with the installed Go binary rather than a fake
+// process that never starts Go telemetry.
+func TestEnvironmentToolVersionGoRealProcessDoesNotLeakTempProbe(t *testing.T) {
+	goBinary, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("Go is unavailable for the real-process telemetry regression")
+	}
+	s, _ := environmentTestServer(t)
+	probeRoot := t.TempDir()
+	t.Setenv("TMPDIR", probeRoot)
+	for i := 0; i < 18; i++ {
+		version, err := s.environmentToolVersion(context.Background(), goBinary, "go")
+		if err != nil {
+			t.Fatalf("real Go version probe %d: %v", i, err)
+		}
+		if !strings.HasPrefix(version, "go version go") {
+			t.Fatalf("unexpected Go version response %d: %q", i, version)
+		}
+	}
+	// A Go telemetry flush may outlive go version; detect files/directories
+	// recreated after the ordinary RemoveAll has already returned.
+	time.Sleep(150 * time.Millisecond)
+	entries, err := os.ReadDir(probeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "ai-server-agent-env-probe-") {
+			t.Fatalf("real Go probe left a telemetry HOME after completion: %s", entry.Name())
+		}
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	for i := 0; i < 5; i++ {
+		if _, err := s.environmentToolVersion(ctx, goBinary, "go"); err == nil {
+			t.Fatalf("cancelled version probe %d unexpectedly succeeded", i)
+		}
+	}
+	entries, err = os.ReadDir(probeRoot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, entry := range entries {
+		if strings.HasPrefix(entry.Name(), "ai-server-agent-env-probe-") {
+			t.Fatalf("cancelled probe left a disposable HOME: %s", entry.Name())
+		}
+	}
+}
+
+// The disposable Go telemetry mode must be visible to the worker subprocess,
+// without mutating the invoking user's actual HOME or Go telemetry mode.
+func TestEnvironmentToolVersionGoProbeModeIsScoped(t *testing.T) {
+	s, root := environmentTestServer(t)
+	probeRoot := t.TempDir()
+	t.Setenv("TMPDIR", probeRoot)
+	outsideConfig := filepath.Join(root, "real-config")
+	t.Setenv("XDG_CONFIG_HOME", outsideConfig)
+	fakeGo := filepath.Join(root, "fake-go")
+	script := "#!/bin/sh\n" +
+		"test -r \"$XDG_CONFIG_HOME/go/telemetry/mode\" || exit 82\n" +
+		"grep -Eq '^off [0-9]{4}-[0-9]{2}-[0-9]{2}$' \"$XDG_CONFIG_HOME/go/telemetry/mode\" || exit 83\n" +
+		"printf 'go version go1.27.1 linux/amd64\\n'\n"
+	if err := os.WriteFile(fakeGo, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	version, err := s.environmentToolVersion(context.Background(), fakeGo, "go")
+	if err != nil || version != "go version go1.27.1 linux/amd64" {
+		t.Fatalf("disposable worker mode was unavailable to the probe: version=%q err=%v", version, err)
+	}
+	if _, err := os.Stat(filepath.Join(outsideConfig, "go", "telemetry", "mode")); !os.IsNotExist(err) {
+		t.Fatalf("Go telemetry mode escaped isolated probe HOME: %v", err)
+	}
+	entries, err := os.ReadDir(probeRoot)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("fake Go left a probe HOME: entries=%v err=%v", entries, err)
+	}
+}
+
+func TestEnvironmentToolVersionInFlightCancellationCleansProbe(t *testing.T) {
+	s, root := environmentTestServer(t)
+	probeRoot := t.TempDir()
+	t.Setenv("TMPDIR", probeRoot)
+	slowGo := filepath.Join(root, "slow-go")
+	if err := os.WriteFile(slowGo, []byte("#!/bin/sh\\n/bin/sleep 10\\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	time.AfterFunc(60*time.Millisecond, cancel)
+	start := time.Now()
+	if _, err := s.environmentToolVersion(ctx, slowGo, "go"); err == nil {
+		t.Fatal("in-flight cancelled probe unexpectedly completed")
+	}
+	if time.Since(start) > environmentProbeTimeout+time.Second {
+		t.Fatal("cancelled version probe exceeded its execution budget")
+	}
+	entries, err := os.ReadDir(probeRoot)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("cancelled version probe left a disposable HOME: entries=%v err=%v", entries, err)
+	}
+}
+
+// Root-running Executors must stage the temporary mode file and directories
+// so the separately credentialed worker can read them. This is an isolated
+// root-gated test: it never changes real Go configuration or running services.
+func TestEnvironmentToolVersionGoRootDelegatesTelemetryFreeProbe(t *testing.T) {
+	if os.Geteuid() != 0 {
+		t.Skip("separate root-to-worker credential regression requires root")
+	}
+	goBinary, err := exec.LookPath("go")
+	if err != nil {
+		t.Skip("Go binary not installed")
+	}
+	probeRoot, err := os.MkdirTemp("", "asa156-worker-credential-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() {
+		if err := os.RemoveAll(probeRoot); err != nil {
+			t.Errorf("cleanup root worker probe fixture: %v", err)
+		}
+	})
+	// /tmp is traversable; the synthetic worker must also traverse this
+	// parent to reach the per-call HOME, which is individually chmod 0700.
+	if err := os.Chmod(probeRoot, 0755); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := environmentTestServer(t)
+	t.Setenv("TMPDIR", probeRoot)
+	s.workerUID = 65534 // system unprivileged uid on supported Linux hosts
+	s.workerGID = 65534
+	for i := 0; i < 4; i++ {
+		version, err := s.environmentToolVersion(context.Background(), goBinary, "go")
+		if err != nil || !strings.HasPrefix(version, "go version go") {
+			t.Fatalf("root-to-worker Go probe %d failed: version=%q err=%v", i, version, err)
+		}
+	}
+	time.Sleep(75 * time.Millisecond)
+	entries, err := os.ReadDir(probeRoot)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("root-to-worker Go probe left artifacts: %v err=%v", entries, err)
 	}
 }
