@@ -20,19 +20,19 @@ The Agent itself does **not** require a web server, database, Docker, a hosting 
 
 ## Install
 
-To install the latest **published immutable Stable release**, use the verified bootstrap anchored to previously published immutable tag `v0.1.12` (the anchor does **not** fix which Stable version will be installed):
+To install the **latest published immutable Stable** without maintaining a version in this command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.12/scripts/install-stable.sh | bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/6468d48b4ff5f1f82ad446531dff9951e86a0e3c/scripts/install-stable.sh | bash
 ```
 
-To install the **older, specifically pinned `v0.1.12`** rather than the latest Stable, use:
+To install a **specific published immutable Stable** instead, replace `vMAJOR.MINOR.PATCH` with the exact release tag you want:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.12/scripts/install-stable.sh | bash -s -- v0.1.12
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/6468d48b4ff5f1f82ad446531dff9951e86a0e3c/scripts/install-stable.sh | bash -s -- vMAJOR.MINOR.PATCH
 ```
 
-This bootstrap authenticates the selected release installer before privileged execution and installs verified release assets. **GitHub Releases is authoritative for current Stable identity**; the pinned `v0.1.12` bootstrap is an immutable trust anchor, not a claim that `v0.1.12` or `main` is the latest Stable. Update the anchor only after verifying a newer published immutable tag.
+The long hexadecimal URL segment is an **immutable, published source-commit pin for the bootstrap**, not the Agent version selected for installation. The default command always resolves the latest published Stable from GitHub Releases; the explicit tag selects a particular immutable Stable. The bootstrap checks the chosen release installer SHA-256 **before privileged execution**. Do not swap the pinned source URL for a mutable `main` URL or execute `releases/latest/download/install.sh` directly as root. The bootstrap pin remains fixed across normal Stable releases; change it only for a separately verified bootstrap security/compatibility update.
 
 For an exact-version install, troubleshooting, advanced or source installations and supply-chain verification, use the [installation guide](docs/OPERATIONS.md#install-the-latest-stable-release).
 

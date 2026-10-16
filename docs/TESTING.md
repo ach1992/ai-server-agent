@@ -208,9 +208,9 @@ A synthetic runtime fixture verifies that `browser_status` requires the desired 
 
 ### Stable bootstrap
 
-Initial stable installation deliberately separates the bootstrap trust root from the release installer it authenticates. The supported one-line command loads `scripts/install-stable.sh` from the immutable Git tag named by the current README stable-install command, not from a mutable branch, a transient feature commit, or the release asset that is about to be verified. That immutable-release tag is the durable source identity for the bootstrap after publication.
+Initial stable installation deliberately separates the bootstrap trust root from the release installer it authenticates. The supported versionless one-line command loads `scripts/install-stable.sh` from a **commit SHA fixed to an already-published immutable Stable**, not from a mutable branch, unverified transient feature commit, or the release asset being authenticated. The source pin remains the same across ordinary Stable releases, while GitHub Releases resolves the installed version dynamically; a pinned-tag argument opts into a specific published immutable version. Do not change this SHA for cosmetic release bookkeeping; a replacement pin requires separate immutable-publication and bootstrap-content verification.
 
-`tests/stable_bootstrap.sh` guards the documented immutable-tag source and uses a deterministic mocked GitHub HTTP surface plus a fake `sudo` boundary to verify that the bootstrap:
+`tests/stable_bootstrap.sh` guards the documented immutable-commit source and uses a deterministic mocked GitHub HTTP surface plus a fake `sudo` boundary to verify that the bootstrap:
 
 - accepts a valid latest immutable release and an explicit valid stable tag;
 - requires exactly the expected tag-scoped `install.sh` asset representation;

@@ -27,7 +27,7 @@ A new Master must recover the current task from **live GitHub Issues/PRs, exact-
 - Cloudflare automation is hostname-scoped and must not mutate whole-zone SSL mode.
 - Never persist Cloudflare API tokens or other user secrets in repository files, logs, managed state, or test fixtures.
 - Stable install/update paths must resolve to immutable published releases and must never silently fall back to `main`.
-- Initial stable installation must authenticate release `install.sh` bytes before privileged execution. The supported one-line path loads `scripts/install-stable.sh` from a published immutable release tag; do not restore a direct `releases/.../install.sh | sudo bash` path or a mutable branch bootstrap.
+- Initial stable installation must authenticate release `install.sh` bytes before privileged execution. The supported versionless one-line path loads `scripts/install-stable.sh` from a **fixed immutable commit SHA verified against a published Stable** (or an equivalently verified immutable published release tag). The pin is bootstrap source identity, not the target Agent version; never switch to a mutable branch bootstrap or a direct `releases/.../install.sh | sudo bash` path.
 - Keep external GitHub Actions references pinned to verified full-length commit SHAs; a nearby version comment may document the intended upstream major. Verify a replacement SHA belongs to the expected upstream action repository before updating it.
 
 ## Privileged lifecycle

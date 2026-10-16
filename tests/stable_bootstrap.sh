@@ -6,12 +6,31 @@ TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
 bash -n "$BOOTSTRAP"
-documented_bootstrap_ref="$(sed -nE 's#^curl -fsSL https://raw\.githubusercontent\.com/ach1992/ai-server-agent/(v[0-9]+\.[0-9]+\.[0-9]+)/scripts/install-stable\.sh \| bash$#\1#p' "$ROOT/README.md")"
-[ -n "$documented_bootstrap_ref" ] || { echo 'README is missing the immutable-tag stable bootstrap command' >&2; exit 1; }
-[ "$(printf '%s\n' "$documented_bootstrap_ref" | wc -l)" -eq 1 ] || { echo 'README has multiple latest-stable bootstrap commands' >&2; exit 1; }
-grep -qF "https://raw.githubusercontent.com/ach1992/ai-server-agent/$documented_bootstrap_ref/scripts/install-stable.sh | bash -s -- $documented_bootstrap_ref" "$ROOT/README.md"
-if grep -qF 'curl -fsSL https://github.com/ach1992/ai-server-agent/releases/latest/download/install.sh | sudo bash' "$ROOT/README.md"; then
-  echo 'README restored an unauthenticated release-installer-to-root path' >&2
+# The public one-liner is versionless but source-immutable. It MUST pin a
+# full published commit, never a mutable branch or a moving release asset.
+documented_bootstrap_sha="$(sed -nE 's#^curl -fsSL https://raw\.githubusercontent\.com/ach1992/ai-server-agent/([0-9a-f]{40})/scripts/install-stable\.sh \| bash$#\1#p' "$ROOT/README.md")"
+[ -n "$documented_bootstrap_sha" ] || { echo 'README is missing the immutable-SHA versionless stable bootstrap command' >&2; exit 1; }
+[ "$(printf '%s\n' "$documented_bootstrap_sha" | wc -l)" -eq 1 ] || { echo 'README has multiple latest-stable bootstrap commands' >&2; exit 1; }
+pinned_source="https://raw.githubusercontent.com/ach1992/ai-server-agent/$documented_bootstrap_sha/scripts/install-stable.sh"
+grep -qF "curl -fsSL $pinned_source | bash -s -- vMAJOR.MINOR.PATCH" "$ROOT/README.md" || {
+  echo 'README is missing the explicit-version install form for the same pinned bootstrap' >&2
+  exit 1
+}
+operations_bootstrap_sha="$(sed -nE 's#^curl -fsSL https://raw\.githubusercontent\.com/ach1992/ai-server-agent/([0-9a-f]{40})/scripts/install-stable\.sh \| bash$#\1#p' "$ROOT/docs/OPERATIONS.md")"
+if [ "$operations_bootstrap_sha" != "$documented_bootstrap_sha" ]; then
+  echo 'Operations versionless bootstrap command disagrees with README' >&2
+  exit 1
+fi
+grep -qF "curl -fsSL $pinned_source | bash -s -- vMAJOR.MINOR.PATCH" "$ROOT/docs/OPERATIONS.md" || {
+  echo 'Operations is missing the matching explicit-version form' >&2
+  exit 1
+}
+if grep -Eq 'https://raw\.githubusercontent\.com/ach1992/ai-server-agent/(main|refs/heads/[^/]+)/scripts/install-stable\.sh' "$ROOT/README.md" "$ROOT/docs/OPERATIONS.md"; then
+  echo 'Documented bootstrap may not load source from a mutable branch' >&2
+  exit 1
+fi
+if grep -qF 'curl -fsSL https://github.com/ach1992/ai-server-agent/releases/latest/download/install.sh | sudo bash' "$ROOT/README.md" "$ROOT/docs/OPERATIONS.md"; then
+  echo 'Documentation restored an unauthenticated release-installer-to-root path' >&2
   exit 1
 fi
 

@@ -20,21 +20,21 @@ AI Server Agent does not require nginx, Apache, Caddy, Docker, PHP, a database, 
 
 ## Install the latest stable release
 
-Stable installation starts with a small bootstrap loaded from an **immutable published release tag**, separate from the release `install.sh` asset it authenticates. The currently documented verified bootstrap trust anchor is the immutable [`v0.1.12` release](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.12), not the mutable `main` branch. This anchor can resolve a newer *published* immutable Stable; it is not a declaration that `v0.1.12` remains the latest release. GitHub Releases, rather than this page, remain authoritative if a newer version is published.
+Stable installation starts with a small bootstrap loaded from a **pinned immutable Git commit in an already-published Stable**, separately from the release `install.sh` it authenticates. The source commit `6468d48b4ff5f1f82ad446531dff9951e86a0e3c` has been verified against immutable Stable `v0.1.14`; it is a bootstrap **trust anchor**, not a target installation version. Keep this pin across ordinary Stable releases; change it only after independently verifying a replacement immutable published source commit and its bootstrap.
 
-To install the **latest immutable Stable** identified by the GitHub Releases API using that pinned bootstrap:
-
-```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.12/scripts/install-stable.sh | bash
-```
-
-To install the **older immutable `v0.1.12`** explicitly instead of following the latest release:
+To install the **latest immutable Stable** identified by the GitHub Releases API, with no release version in the command:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/v0.1.12/scripts/install-stable.sh | bash -s -- v0.1.12
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/6468d48b4ff5f1f82ad446531dff9951e86a0e3c/scripts/install-stable.sh | bash
 ```
 
-The bootstrap authenticates the release-scoped installer digest **before** privileged execution. The first command resolves GitHub's current latest immutable release; the second requires the named release. On the next release, update the documented bootstrap trust anchor only after its tag is immutable and its bootstrap has been verified.
+For a **specific immutable Stable**, substitute its exact tag for `vMAJOR.MINOR.PATCH`:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/6468d48b4ff5f1f82ad446531dff9951e86a0e3c/scripts/install-stable.sh | bash -s -- vMAJOR.MINOR.PATCH
+```
+
+The default command resolves GitHub's newest published immutable Stable and the explicit form chooses the named Stable. In both cases the bootstrap verifies the release-scoped installer digest **before** privileged execution. The installed manager already has a versionless Stable update command, `sudo ai-server-agent-manage update`; updates use the same published immutable-release checks and do not use this raw bootstrap URL.
 
 Do **not** use `releases/latest/download/install.sh | sudo bash` as the stable trust path: that executes release-supplied code as root before the same asset can be authenticated.
 
