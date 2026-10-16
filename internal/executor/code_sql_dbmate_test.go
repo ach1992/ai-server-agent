@@ -361,3 +361,145 @@ func TestSQLMySQLCompoundGuardPreservesPlainDDLAndQuotedKeywords(t *testing.T) {
 		t.Fatalf("PostgreSQL function-body isolation regressed: %+v", symbols)
 	}
 }
+
+// R3 independent review REQUIRED-004: MySQL/MariaDB executable comments are
+// grammar, not disposable trivia. A routine header hidden in one can turn
+// the following CREATE TABLE into a procedure body, not a top-level table.
+func TestSQLMySQLExecutableCommentsRejectPhantomForwardSchema(t *testing.T) {
+	header := "/*!50003 CREATE PROCEDURE prepare_accounts() */\n"
+	body := "CREATE TABLE phantom (id INT);\n"
+	cases := []struct {
+		name, dialect, source string
+	}{
+		{"mysql_versioned", "mysql", header + body},
+		{"mariadb_mysql_style", "mariadb", header + body},
+		{"mysql_unversioned", "mysql", "/*! CREATE PROCEDURE prepare_accounts() */\n" + body},
+		{"mariadb_unversioned", "mariadb", "/*! CREATE PROCEDURE prepare_accounts() */\n" + body},
+		{"mariadb_native", "mariadb", "/*M! CREATE PROCEDURE prepare_accounts() */\n" + body},
+		{"mariadb_native_versioned", "mariadb", "/*M!100100 CREATE PROCEDURE prepare_accounts() */\n" + body},
+		{"mariadb_native_version_range", "mariadb", "/*M!50701 CREATE PROCEDURE prepare_accounts() */\n" + body},
+		{"mysql_conditional_fragment", "mysql", "CREATE /*!80000 PROCEDURE */ prepare_accounts()\n" + body},
+		{"mysql_dbmate", "mysql", "-- migrate:up\n" + header + body +
+			"-- migrate:down\nDROP PROCEDURE prepare_accounts;\n"},
+		{"mariadb_dbmate", "mariadb", "-- migrate:up\n/*M! CREATE PROCEDURE prepare_accounts() */\n" + body +
+			"-- migrate:down\nDROP PROCEDURE prepare_accounts;\n"},
+		{"mysql_goose", "mysql", "-- +goose Up\n" + header + body +
+			"-- +goose Down\nDROP PROCEDURE prepare_accounts;\n"},
+		{"mariadb_goose", "mariadb", "-- +goose Up\n/*M! CREATE PROCEDURE prepare_accounts() */\n" + body +
+			"-- +goose Down\nDROP PROCEDURE prepare_accounts;\n"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if tokens, ok := sqlDDLTokens(tc.source, tc.dialect); ok || len(tokens) != 0 {
+				t.Fatalf("executable-comment routine header was trusted: ok=%t tokens=%+v", ok, tokens)
+			}
+			if symbols := sqlDDLSymbols(tc.source, tc.dialect); len(symbols) != 0 {
+				t.Fatalf("phantom routine-body DDL reached outline: %+v", symbols)
+			}
+			occ, valid := sqlNavOccurrences(tc.source, tc.dialect)
+			if valid || len(occ) != 0 {
+				t.Fatalf("phantom routine-body DDL reached navigation: valid=%t %+v", valid, occ)
+			}
+			offset := strings.Index(tc.source, "CREATE TABLE phantom")
+			if offset < 0 {
+				t.Fatal("invalid test fixture: missing phantom body")
+			}
+			prefix := tc.source[:offset]
+			line := strings.Count(prefix, "\n")
+			lastLine := strings.LastIndexByte(prefix, '\n')
+			column := len(prefix) - lastLine - 1 + len("CREATE TABLE ")
+			if _, found := sqlNavSelected(tc.source, tc.dialect, line, column); found {
+				t.Fatal("phantom table is cursor-selectable as a source declaration")
+			}
+			// Cross-file navigation may only resolve genuine forward
+			// declarations. A rejected source cannot enter migration history.
+			var found []sqlNavFound
+			for _, item := range occ {
+				if item.declaration && item.name == "phantom" {
+					found = append(found, sqlNavFound{
+						sqlNavOccurrence: item,
+						sqlNavLocation: sqlNavLocation{
+							URI:   "db/migrations/202610160001_prepare.sql",
+							Range: item.span, FileVersion: "sha:fixture",
+						},
+					})
+				}
+			}
+			if loc, err := sqlNavResolveOrderedDefinition(found, nil, "queries/read.sql"); err == nil {
+				t.Fatalf("phantom routine body resolved as cross-file schema: %+v", loc)
+			}
+		})
+	}
+}
+
+func TestSQLMySQLExecutableCommentGuardPreservesRollbackAndOrdinaryComments(t *testing.T) {
+	ordinary := "/* ordinary CREATE PROCEDURE fake() */\r\n" +
+		"-- /*!50003 CREATE PROCEDURE ignored() */\r\n" +
+		"# /*M! CREATE PROCEDURE ignored() */\r\n" +
+		"SELECT /*+ MAX_EXECUTION_TIME(1000) */ 1;\r\n" +
+		"CREATE TABLE accounts (note VARCHAR(128) DEFAULT '/*!50003 CREATE PROCEDURE fake() */', " +
+		"`/*M!identifier*/` INT);\r\n" +
+		"ALTER TABLE accounts ADD COLUMN active BOOLEAN;\r\n"
+	rollback := "/*!50003 CREATE PROCEDURE rollback_only() */\n" +
+		"CREATE TABLE phantom (id INT);\n"
+	mariaRollback := "/*M!100100 CREATE PROCEDURE rollback_only() */\n" +
+		"CREATE TABLE phantom (id INT);\n"
+	for _, dialect := range []string{"mysql", "mariadb"} {
+		for _, tc := range []struct{ name, source string }{
+			{"ordinary", ordinary},
+			{"dbmate_forward", "-- migrate:up\n" + ordinary + "-- migrate:down\nDROP TABLE accounts;\n"},
+			{"goose_forward", "-- +goose Up\n" + ordinary + "-- +goose Down\nDROP TABLE accounts;\n"},
+			{"dbmate_rollback", "-- migrate:up\nCREATE TABLE accounts (id INT);\n" +
+				"-- migrate:down\n" + rollback},
+			{"goose_rollback", "-- +goose Up\nCREATE TABLE accounts (id INT);\n" +
+				"-- +goose Down\n" + rollback},
+			{"dbmate_repeated", "-- migrate:up\nCREATE TABLE accounts (id INT);\n" +
+				"-- migrate:down\n" + rollback +
+				"-- migrate:up\nALTER TABLE accounts ADD COLUMN active BOOLEAN;\n" +
+				"-- migrate:down\nDROP TABLE accounts;\n"},
+			{"goose_maria_rollback", "-- +goose Up\nCREATE TABLE accounts (id INT);\n" +
+				"-- +goose Down\n" + mariaRollback},
+		} {
+			t.Run(dialect+"_"+tc.name, func(t *testing.T) {
+				tokens, ok := sqlDDLTokens(tc.source, dialect)
+				if !ok || len(tokens) == 0 {
+					t.Fatalf("safe forward SQL rejected: valid=%t tokens=%+v", ok, tokens)
+				}
+				symbols := sqlDDLSymbols(tc.source, dialect)
+				if len(symbols) == 0 || symbols[0].Name != "accounts" {
+					t.Fatalf("legitimate forward table not found: %+v", symbols)
+				}
+				occ, valid := sqlNavOccurrences(tc.source, dialect)
+				if !valid || len(occ) == 0 || !occ[0].declaration || occ[0].name != "accounts" {
+					t.Fatalf("legitimate forward navigation lost: valid=%t %+v", valid, occ)
+				}
+				start := strings.Index(tc.source, "CREATE TABLE accounts")
+				if start < 0 {
+					t.Fatal("invalid fixture: missing legitimate table")
+				}
+				prefix := tc.source[:start]
+				line := strings.Count(prefix, "\n")
+				character := len(prefix) - strings.LastIndexByte(prefix, '\n') - 1
+				if symbols[0].Range.Start.Line != line || symbols[0].Range.Start.Character != character ||
+					occ[0].span.Start.Line != line || occ[0].span.Start.Character != character+len("CREATE TABLE ") {
+					t.Fatalf("forward source offset changed: symbol=%+v nav=%+v expected line=%d char=%d",
+						symbols[0].Range, occ[0].span, line, character)
+				}
+			})
+		}
+	}
+	// MariaDB-only executable comments are ordinary comments in MySQL.
+	mysqlOrdinary := "/*M!100100 CREATE PROCEDURE ignored() */\nCREATE TABLE accounts (id INT);\n"
+	if got := sqlDDLSymbols(mysqlOrdinary, "mysql"); len(got) != 1 ||
+		got[0].Name != "accounts" || got[0].Range.Start.Line != 1 {
+		t.Fatalf("MariaDB-only comment incorrectly rejected for MySQL: %+v", got)
+	}
+	// Executable MySQL comments are ordinary comments to PostgreSQL.
+	postgres := "/*!50003 CREATE PROCEDURE ignored() */\r\n" +
+		"/*M!100100 CREATE PROCEDURE ignored() */\r\n" +
+		"CREATE TABLE accounts (id INT);\r\n"
+	got := sqlDDLSymbols(postgres, "postgres")
+	if len(got) != 1 || got[0].Name != "accounts" || got[0].Range.Start.Line != 2 {
+		t.Fatalf("PostgreSQL comment/offset handling regressed: %+v", got)
+	}
+}

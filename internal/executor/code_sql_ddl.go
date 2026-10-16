@@ -124,7 +124,10 @@ func sqlDDLTokens(source, dialect string) ([]sqlDDLToken, bool) {
 	if !ok {
 		return nil, false
 	}
-	tokens, ok := sqlDDLTokensRaw(forward, dialect)
+	// Only forward SQL can define schema. Earlier migration-directive checks
+	// deliberately use raw tokenization, so rollback-only executable comments
+	// must not invalidate an otherwise valid forward source.
+	tokens, ok := sqlDDLTokenize(forward, dialect, true)
 	if !ok {
 		return nil, false
 	}
@@ -180,6 +183,14 @@ func sqlDDLMySQLUnsupportedCompound(tokens []sqlDDLToken) bool {
 }
 
 func sqlDDLTokensRaw(source, dialect string) ([]sqlDDLToken, bool) {
+	return sqlDDLTokenize(source, dialect, false)
+}
+
+// MySQL/MariaDB executable comments carry conditional SQL that can change
+// statement grammar. Their effect cannot be inferred without server context.
+// Reject them only in the already-normalized forward SQL, while keeping the
+// same quote/comment scanner for migration-directive recognition.
+func sqlDDLTokenize(source, dialect string, rejectExecutableComments bool) ([]sqlDDLToken, bool) {
 	if len(source) > codeMaxDocumentBytes {
 		return nil, false
 	}
@@ -220,6 +231,11 @@ func sqlDDLTokensRaw(source, dialect string) ([]sqlDDLToken, bool) {
 			advance(end)
 			continue
 		case source[i] == '/' && i+1 < len(source) && source[i+1] == '*':
+			if rejectExecutableComments && mysql &&
+				(strings.HasPrefix(source[i:], "/*!") ||
+					(dialect == "mariadb" && strings.HasPrefix(source[i:], "/*M!"))) {
+				return nil, false
+			}
 			depth, end := 1, i+2
 			for end < len(source) && depth > 0 {
 				if end+1 < len(source) && source[end:end+2] == "/*" && !mysql {
