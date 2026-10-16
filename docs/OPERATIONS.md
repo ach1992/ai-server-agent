@@ -4,7 +4,7 @@
 
 ## Platform support
 
-The stable supported-platform policy (including published immutable [`v0.1.12`](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.12) and later compatible source/releases) is:
+The supported Stable platform policy is:
 
 - **Ubuntu 22.04 or newer**
 - **Debian 11 or newer** (Debian 11 application compatibility is retained, but upstream Debian LTS ended on 2026-08-31; use Debian 12+ for an officially security-maintained base unless you have an ELTS arrangement)
@@ -13,8 +13,6 @@ The stable supported-platform policy (including published immutable [`v0.1.12`](
 - a dedicated development/test server where you are comfortable granting an AI-controlled MCP endpoint the documented capabilities
 
 OS support is minimum-version based, while CI keeps explicit compatibility cases for current Ubuntu/Debian releases and native lifecycle coverage on both supported CPU architectures. Stable release architectures are declared in `scripts/release-arches.txt`; installer architecture aliases are normalized at the install boundary so adding a future architecture does not require rewriting release publication logic.
-
-`v0.1.7` is the first stable release with this expanded platform matrix.
 
 AI Server Agent does not require nginx, Apache, Caddy, Docker, PHP, a database, Node.js, Python, `cloudflared`, or a hosting panel as core dependencies, and it does not need to take over ports 80/443.
 
