@@ -194,25 +194,57 @@ for attempt in $(seq 1 30); do
 done
 capacity 1 0 0
 
-# Real transfer quota and session admission; abort must restore capacity.
+# Prove BOTH transfer dimensions independently. Error codes alone are
+# ambiguous: production uses one transfer_quota_exceeded code for session and
+# cumulative reservation pressure, so the other limit must have spare capacity.
 set_runtime transfer_staging_mib 16
-set_runtime transfer_active_sessions 1
-begin_transfer ci118-first-transfer-key-1 quota-one.bin 9437184
-check_ok 'First nine-megabyte transfer reservation'
-first_id="$(jq -er '.result.structuredContent.transfer_id' "$scratch/response")"
-[[ "$first_id" =~ ^[A-Za-z0-9_-]+$ ]] || fail 'Bad transfer ID'
-transfer_ids+=("$first_id:quota-one.bin")
-begin_transfer ci118-second-transfer-key-2 quota-two.bin 9437184
+set_runtime transfer_active_sessions 2
+begin_transfer ci118-quota-first-key-1 quota-one.bin 9437184
+check_ok 'First 9 MiB reservation'
+quota_first="$(jq -er '.result.structuredContent.transfer_id' "$scratch/response")"
+transfer_ids+=("$quota_first:quota-one.bin")
+
+# Positive control: with the 9 MiB reservation still active, a distinct 1 MiB
+# reservation succeeds. Thus the installed two-session setting is effective
+# and there are at least two available admission slots.
+begin_transfer ci118-quota-control-1 quota-control.bin 1048576
+check_ok 'Second session must work below cumulative 16 MiB'
+quota_control="$(jq -er '.result.structuredContent.transfer_id' "$scratch/response")"
+transfer_ids+=("$quota_control:quota-control.bin")
+abort_transfer "$quota_control" quota-control.bin
+
+# Only ONE session is now active (limit=2): the second distinct 9 MiB request
+# must be refused because 9+9 > 16 MiB, not due to session exhaustion.
+begin_transfer ci118-quota-second-1 quota-two.bin 9437184
 jq -e '.result.isError==true and .result.structuredContent.error_code=="transfer_quota_exceeded"' "$scratch/response" >/dev/null ||
-  fail 'Transfer sessions bypassed quota'
-abort_transfer "$first_id" quota-one.bin
-begin_transfer ci118-second-transfer-key-2 quota-two.bin 9437184
-check_ok 'Abort did not free quota'
-second_id="$(jq -er '.result.structuredContent.transfer_id' "$scratch/response")"
-transfer_ids+=("$second_id:quota-two.bin")
-abort_transfer "$second_id" quota-two.bin
-sudo test ! -e "$fixture/quota-one.bin" && sudo test ! -e "$fixture/quota-two.bin" ||
-  fail 'Aborted data was published'
+  fail 'Installed cumulative 16 MiB staging quota was not enforced'
+abort_transfer "$quota_first" quota-one.bin
+begin_transfer ci118-quota-second-1 quota-two.bin 9437184
+check_ok 'Aborting first reservation did not reclaim staging bytes'
+quota_second="$(jq -er '.result.structuredContent.transfer_id' "$scratch/response")"
+transfer_ids+=("$quota_second:quota-two.bin")
+abort_transfer "$quota_second" quota-two.bin
+
+# Conversely, the one-session bound is verified with TWO 1 MiB requests:
+# their total 2 MiB reservation is safely below the configured 16 MiB quota.
+set_runtime transfer_active_sessions 1
+begin_transfer ci118-session-first-1 session-one.bin 1048576
+check_ok 'First small transfer below staging quota'
+session_first="$(jq -er '.result.structuredContent.transfer_id' "$scratch/response")"
+transfer_ids+=("$session_first:session-one.bin")
+begin_transfer ci118-session-second-1 session-two.bin 1048576
+jq -e '.result.isError==true and .result.structuredContent.error_code=="transfer_quota_exceeded"' "$scratch/response" >/dev/null ||
+  fail 'Installed one-session limit was not enforced'
+abort_transfer "$session_first" session-one.bin
+begin_transfer ci118-session-second-1 session-two.bin 1048576
+check_ok 'Aborting the first session did not restore session admission'
+session_second="$(jq -er '.result.structuredContent.transfer_id' "$scratch/response")"
+transfer_ids+=("$session_second:session-two.bin")
+abort_transfer "$session_second" session-two.bin
+
+for path in quota-one.bin quota-control.bin quota-two.bin session-one.bin session-two.bin; do
+  sudo test ! -e "$fixture/$path" || fail "Aborted transfer published $path"
+done
 
 # Real timing verifies configured-versus-effective command timeout.
 set_runtime command_timeout_seconds 10
@@ -262,4 +294,4 @@ sudo systemctl is-active --quiet ai-server-agent-executor.service || fail 'Execu
 mcp_call runtime_list '{}'
 check_ok 'Authenticated client unavailable after rollback'
 sudo cmp -s /tmp/ai-server-agent /usr/local/bin/ai-server-agent || fail 'Installed binary changed'
-printf 'INSTALLED_RUNTIME_CONFIG_ACCEPTANCE_PASS worker_slots=8 task_slots=8_to_1 old_tasks=preserved services=independent transfer_quota=bounded abort=recovered timeout=set_reset rollback=verified authenticated_client=yes\n'
+printf 'INSTALLED_RUNTIME_CONFIG_ACCEPTANCE_PASS worker_slots=8 task_slots=8_to_1 old_tasks=preserved services=independent transfer_staging_bytes=bounded transfer_sessions=bounded abort=recovered timeout=set_reset rollback=verified authenticated_client=yes\n'
