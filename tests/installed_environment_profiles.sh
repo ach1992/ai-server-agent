@@ -108,6 +108,12 @@ check_profile development 'Disposable CI'
 sudo ai-server-agent-manage profile-set validation >/dev/null
 check_profile validation 'Disposable CI'
 
+# Fresh install, credential rotation and several rapid profile switches can
+# consume systemd's normal five-starts-per-ten-seconds budget. Allow that
+# protection window to expire before fault injection, rather than resetting
+# service counters or weakening the installed unit's start limit.
+sleep 11
+
 # Fail exactly the first Agent restart: the real manager must restore the
 # previous config, re-activate its service, and clear the verified rollback.
 before="$(sudo sha256sum /etc/ai-server-agent/config.json | awk '{print $1}')"
