@@ -2,6 +2,8 @@ package executor
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -556,7 +558,12 @@ func TestEnvironmentToolVersionInFlightCancellationCleansProbe(t *testing.T) {
 	probeRoot := t.TempDir()
 	t.Setenv("TMPDIR", probeRoot)
 	slowGo := filepath.Join(root, "slow-go")
-	if err := os.WriteFile(slowGo, []byte("#!/bin/sh\\n/bin/sleep 10\\n"), 0755); err != nil {
+	started := filepath.Join(root, "slow-go-started")
+	script := "#!/bin/sh\nprintf 'started\\n' > '" + started + "'\nexec /bin/sleep 10\n"
+	if err := os.WriteFile(slowGo, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(slowGo, 0755); err != nil {
 		t.Fatal(err)
 	}
 	ctx, cancel := context.WithCancel(context.Background())
@@ -569,9 +576,171 @@ func TestEnvironmentToolVersionInFlightCancellationCleansProbe(t *testing.T) {
 	if time.Since(start) > environmentProbeTimeout+time.Second {
 		t.Fatal("cancelled version probe exceeded its execution budget")
 	}
+	if _, err := os.Stat(started); err != nil {
+		t.Fatalf("cancellation test did not actually launch the slow subprocess: %v", err)
+	}
 	entries, err := os.ReadDir(probeRoot)
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("cancelled version probe left a disposable HOME: entries=%v err=%v", entries, err)
+	}
+}
+
+// Simulate an OS cleanup error *after* safely removing the fixture. Only a
+// fixed reason code may cross the repository_environment response boundary.
+func TestRepositoryEnvironmentReportsProbeCleanupFailureWithoutLeak(t *testing.T) {
+	s, root := environmentTestServer(t)
+	repo, _ := initEnvironmentFixture(t, root, map[string]string{
+		"Makefile": "test:\n\t@echo test\n",
+	})
+	probeRoot := t.TempDir()
+	t.Setenv("TMPDIR", probeRoot)
+	cleanupErr := errors.New("private_cleanup_token=/secret/should_not_escape")
+	s.environmentProbeRemoveAll = func(dir string) error {
+		if err := os.RemoveAll(dir); err != nil {
+			return err
+		}
+		return cleanupErr
+	}
+
+	response := s.repositoryEnvironmentContext(context.Background(), Request{Path: repo})
+	if !response.OK {
+		t.Fatalf("environment discovery unexpectedly failed: %s", response.ReasonCode)
+	}
+	var summary RepositoryEnvironmentSummary
+	if err := json.Unmarshal([]byte(response.Output), &summary); err != nil {
+		t.Fatal(err)
+	}
+	tool, found := environmentToolByExecutable(summary, "make")
+	if !found || tool.Source != "system_path" || tool.Compatibility != "unknown" ||
+		tool.Reason != "version_probe_cleanup_failed" {
+		t.Fatalf("cleanup-only failure not machine-readable in public summary: %+v", tool)
+	}
+	if strings.Contains(response.Output, "private_cleanup_token") ||
+		strings.Contains(response.Output, "/secret/") {
+		t.Fatal("sensitive cleanup error details escaped the response")
+	}
+	entries, err := os.ReadDir(probeRoot)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("injected cleanup test left temporary directories: entries=%v err=%v", entries, err)
+	}
+
+	// The underlying cleanup error must remain available to internal callers.
+	makeBinary, err := exec.LookPath("make")
+	if err != nil {
+		t.Fatal(err)
+	}
+	version, probeErr := s.environmentToolVersion(context.Background(), makeBinary, "make")
+	var cleanupFailure *environmentProbeCleanupError
+	if !errors.As(probeErr, &cleanupFailure) ||
+		!errors.Is(probeErr, cleanupErr) ||
+		cleanupFailure.probeErr != nil ||
+		!strings.Contains(version, "GNU Make") {
+		t.Fatalf("cleanup-only error wrapping lost the original outcome: version=%q err=%v", version, probeErr)
+	}
+}
+
+// A canceled probe and failed cleanup are two separate, preserved errors.
+// The public tool reason must signal BOTH without including raw error strings.
+func TestRepositoryEnvironmentReportsCanceledProbeAndCleanupFailure(t *testing.T) {
+	s, root := environmentTestServer(t)
+	probeRoot := t.TempDir()
+	t.Setenv("TMPDIR", probeRoot)
+	cleanupErr := errors.New("private_cleanup_token=/secret/not_for_api")
+	s.environmentProbeRemoveAll = func(dir string) error {
+		if err := os.RemoveAll(dir); err != nil {
+			return err
+		}
+		return cleanupErr
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	makeBinary, err := exec.LookPath("make")
+	if err != nil {
+		t.Fatal(err)
+	}
+	_, resultErr := s.environmentToolVersion(ctx, makeBinary, "make")
+	var combined *environmentProbeCleanupError
+	if !errors.As(resultErr, &combined) ||
+		!errors.Is(resultErr, context.Canceled) ||
+		!errors.Is(resultErr, cleanupErr) ||
+		combined.probeErr == nil {
+		t.Fatalf("combined failure lost cancellation or cleanup cause: %v", resultErr)
+	}
+	builder := &environmentBuilder{
+		server: s,
+		root:   root,
+		tools: map[string]*EnvironmentTool{
+			"make": {Name: "Make", Executable: "make", Required: true},
+		},
+		mechanisms: map[string]*EnvironmentMechanism{},
+	}
+	builder.probeTools(ctx)
+	tool := builder.tools["make"]
+	if tool.Source != "system_path" || tool.Compatibility != "unknown" ||
+		tool.Reason != "version_probe_and_cleanup_failed" {
+		t.Fatalf("combined failure not machine-readable at tool boundary: %+v", tool)
+	}
+	publicData, err := json.Marshal(RepositoryEnvironmentSummary{Tools: []EnvironmentTool{*tool}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(publicData), "private_cleanup_token") ||
+		strings.Contains(string(publicData), "/secret/") {
+		t.Fatal("combined failure leaked sensitive error details")
+	}
+	entries, err := os.ReadDir(probeRoot)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("combined failure left temporary directories: entries=%v err=%v", entries, err)
+	}
+
+	// Also exercise cancellation AFTER process launch, so a prematurely
+	// failing shebang or permission error cannot masquerade as cancellation.
+	slowMake := filepath.Join(root, "slow-make")
+	started := filepath.Join(root, "slow-make-started")
+	script := "#!/bin/sh\nprintf 'started\\n' > '" + started + "'\nexec /bin/sleep 10\n"
+	if err := os.WriteFile(slowMake, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(slowMake, 0755); err != nil {
+		t.Fatal(err)
+	}
+	liveCtx, stop := context.WithCancel(context.Background())
+	defer stop()
+	timer := time.AfterFunc(60*time.Millisecond, stop)
+	_, liveErr := s.environmentToolVersion(liveCtx, slowMake, "make")
+	timer.Stop()
+	if _, err := os.Stat(started); err != nil {
+		t.Fatalf("combined failure did not start its worker subprocess: %v", err)
+	}
+	var liveFailure *environmentProbeCleanupError
+	if !errors.As(liveErr, &liveFailure) || !errors.Is(liveErr, cleanupErr) ||
+		liveCtx.Err() != context.Canceled || liveFailure.probeErr == nil ||
+		environmentVersionProbeReason(liveErr) != "version_probe_and_cleanup_failed" {
+		t.Fatalf("in-flight cancellation lost combined cleanup error classification: %v", liveErr)
+	}
+	entries, err = os.ReadDir(probeRoot)
+	if err != nil || len(entries) != 0 {
+		t.Fatalf("in-flight combined error left a probe HOME: %v err=%v", entries, err)
+	}
+}
+
+func TestRepositoryEnvironmentKeepsOrdinaryVersionFailureReason(t *testing.T) {
+	s, root := environmentTestServer(t)
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	builder := &environmentBuilder{
+		server: s,
+		root:   root,
+		tools: map[string]*EnvironmentTool{
+			"make": {Name: "Make", Executable: "make", Required: true},
+		},
+	}
+	builder.probeTools(ctx)
+	tool := builder.tools["make"]
+	if tool.Source != "system_path" || tool.Compatibility != "unknown" ||
+		tool.Reason != "version_probe_failed" {
+		t.Fatalf("ordinary probe failure reason changed: %+v", tool)
 	}
 }
 
@@ -580,10 +749,16 @@ func TestEnvironmentToolVersionInFlightCancellationCleansProbe(t *testing.T) {
 // root-gated test: it never changes real Go configuration or running services.
 func TestEnvironmentToolVersionGoRootDelegatesTelemetryFreeProbe(t *testing.T) {
 	if os.Geteuid() != 0 {
+		if os.Getenv("ASA_ENV_ROOT_PROBE_REQUIRED") == "1" {
+			t.Fatal("root-to-worker Go acceptance requires effective UID 0; SKIP is not allowed")
+		}
 		t.Skip("separate root-to-worker credential regression requires root")
 	}
 	goBinary, err := exec.LookPath("go")
 	if err != nil {
+		if os.Getenv("ASA_ENV_ROOT_PROBE_REQUIRED") == "1" {
+			t.Fatalf("real Go binary required for root-to-worker acceptance: %v", err)
+		}
 		t.Skip("Go binary not installed")
 	}
 	probeRoot, err := os.MkdirTemp("", "asa156-worker-credential-")
@@ -604,7 +779,23 @@ func TestEnvironmentToolVersionGoRootDelegatesTelemetryFreeProbe(t *testing.T) {
 	t.Setenv("TMPDIR", probeRoot)
 	s.workerUID = 65534 // system unprivileged uid on supported Linux hosts
 	s.workerGID = 65534
-	for i := 0; i < 4; i++ {
+	const realGoRuns = 4
+	// Explicitly prove that the version subprocess, not just the root test
+	// harness, executes with the configured unprivileged worker identity.
+	workerUIDScript := filepath.Join(probeRoot, "verify-worker-uid.sh")
+	if err := os.WriteFile(workerUIDScript, []byte("#!/bin/sh\n/usr/bin/id -u\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// Root test runners may use umask 077. Make this isolated worker
+	// fixture explicitly executable after writing it.
+	if err := os.Chmod(workerUIDScript, 0755); err != nil {
+		t.Fatal(err)
+	}
+	childUID, err := s.environmentToolVersion(context.Background(), workerUIDScript, "go")
+	if err != nil || childUID != "65534" {
+		t.Fatalf("root-to-worker credential subprocess did not execute as 65534: uid=%q err=%v", childUID, err)
+	}
+	for i := 0; i < realGoRuns; i++ {
 		version, err := s.environmentToolVersion(context.Background(), goBinary, "go")
 		if err != nil || !strings.HasPrefix(version, "go version go") {
 			t.Fatalf("root-to-worker Go probe %d failed: version=%q err=%v", i, version, err)
@@ -612,7 +803,8 @@ func TestEnvironmentToolVersionGoRootDelegatesTelemetryFreeProbe(t *testing.T) {
 	}
 	time.Sleep(75 * time.Millisecond)
 	entries, err := os.ReadDir(probeRoot)
-	if err != nil || len(entries) != 0 {
+	if err != nil || len(entries) != 1 || entries[0].Name() != "verify-worker-uid.sh" {
 		t.Fatalf("root-to-worker Go probe left artifacts: %v err=%v", entries, err)
 	}
+	t.Logf("ROOT_GO_PROBE_ACCEPTANCE=PASS effective_uid=%d child_uid=%s real_go_probes=%d", os.Geteuid(), childUID, realGoRuns)
 }

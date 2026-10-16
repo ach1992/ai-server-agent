@@ -113,6 +113,10 @@ jobs:
           sudo bash tests/root_trust_boundary.sh
       - name: Root executor to worker workspace delegation (isolated fixture)
         run: sudo env PATH="$PATH" ASA_WORKSPACE_ROOT_ACCEPTANCE=1 ASA_WORKSPACE_TEST_BINARY=/tmp/ai-server-agent go test ./internal/executor -run '^TestWorkerWorkspaceRootDelegation$' -count=1
+      - name: Real Go probe telemetry cleanup under root-to-worker credentials (isolated fixture)
+        run: |
+          set -Eeuo pipefail
+          sudo env PATH="$PATH" ASA_ENV_ROOT_PROBE_REQUIRED=1 go test ./internal/executor -run '^TestEnvironmentToolVersionGoRootDelegatesTelemetryFreeProbe$' -count=1 -v
       - name: Cleanup test installation
         if: always()
         run: sudo env AI_SERVER_AGENT_YES=1 bash uninstall.sh --purge || true
