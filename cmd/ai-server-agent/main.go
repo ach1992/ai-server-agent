@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/ach1992/ai-server-agent/internal/config"
+	"github.com/ach1992/ai-server-agent/internal/credential"
 	"github.com/ach1992/ai-server-agent/internal/executor"
 	mcpserver "github.com/ach1992/ai-server-agent/internal/mcp"
 )
@@ -26,7 +27,7 @@ func main() {
 	flag.Parse()
 	args := flag.Args()
 	if len(args) == 0 {
-		fatal("usage: ai-server-agent [serve|executor|print-config|validate-config|runtime-settings]")
+		fatal("usage: ai-server-agent [serve|executor|print-config|validate-config|validate-credential-store|runtime-settings]")
 	}
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
@@ -58,6 +59,25 @@ func main() {
 		fmt.Printf("%+v\n", cfg)
 	case "validate-config":
 		fmt.Println("config valid")
+	case "validate-credential-store":
+		// Read-only binary-specific preflight; an optional explicit path
+		// validates a staged, root-owned replacement before committing it.
+		if len(args) > 2 {
+			fatal("validate-credential-store accepts at most one candidate store path")
+		}
+		path := cfg.CredentialStoreFile
+		if len(args) == 2 {
+			if path == "" {
+				fatal("cannot override an absent named credential source")
+			}
+			path = args[1]
+		}
+		if path != "" {
+			if _, err := credential.Load(path); err != nil {
+				fatal("MCP credential store is incompatible with the target Agent: " + err.Error())
+			}
+		}
+		fmt.Println("MCP credential source valid")
 	case "runtime-settings":
 		settings := cfg.EffectiveRuntime()
 		values := make(map[string]int)

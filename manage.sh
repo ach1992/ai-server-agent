@@ -989,6 +989,62 @@ credential_revoke(){ (
 ) }
 
 
+# Explicit opt-in for rollback to an older named-credential release that does
+# not recognize direct/secondary. Never delete direct/default or silently
+# activate a retired Gateway bearer. This is intentionally NOT an installer
+# migration: the operator must first verify a known, working direct bearer.
+credential_prepare_rollback(){ (
+  acquire_management_lock
+  need_cmd jq
+  ui_has_interactive_tty || die "Credential rollback preparation requires an interactive terminal and explicit confirmation."
+  validate_credential_store_file
+  if ! "$RUNTIME_BINARY" -config "$CONFIG_FILE" validate-credential-store >/dev/null; then
+    die "The installed Agent could not validate its credential store. Recover the existing installation before attempting rollback."
+  fi
+  jq -e '
+    [.credentials[] | select(.principal.id=="direct-default" and
+      .principal.class=="direct" and .principal.name=="direct/default" and
+      .enabled==true and (.revoked_at // "")=="")] | length == 1
+  ' "$CREDENTIAL_STORE" >/dev/null || die "Direct/default must be active before preparing a rollback. Rotate direct-default with the installed manager and verify its connection first."
+  if jq -e '[.credentials[] | select(.principal.id!="direct-default")] | length == 0' "$CREDENTIAL_STORE" >/dev/null; then
+    log "Only direct/default is stored. No optional credential removal is needed."
+    return 0
+  fi
+  warn "Rollback preparation removes ALL non-default credential records. Secondary clients immediately lose access; a retired Gateway record cannot be reactivated by the older binary. This operation preserves direct/default, but cannot prove that you still possess its bearer. Test your direct/default connection before continuing."
+  if ! confirm "Permanently remove optional MCP credentials and restart the Agent?" no; then
+    ui_notice info "Cancelled; credentials unchanged."
+    return 20
+  fi
+  local candidate backup restore
+  candidate="$(mktemp "$CONFIG_DIR/.mcp-rollback-candidate.XXXXXX")"
+  backup="$(mktemp "$CONTROL_DIR/.mcp-rollback-backup.XXXXXX")"
+  cp -a "$CREDENTIAL_STORE" "$backup"
+  if ! jq '.credentials = [.credentials[] | select(.principal.id=="direct-default")]' "$CREDENTIAL_STORE" > "$candidate"; then
+    rm -f -- "$candidate" "$backup"
+    die "Could not construct the protected rollback credential candidate."
+  fi
+  chown root:"$AGENT_USER" "$candidate"; chmod 0640 "$candidate"
+  if ! "$RUNTIME_BINARY" -config "$CONFIG_FILE" validate-credential-store "$candidate" >/dev/null; then
+    rm -f -- "$candidate" "$backup"
+    die "The staged rollback credential store was rejected; installed credentials remain unchanged."
+  fi
+  mv -f "$candidate" "$CREDENTIAL_STORE"
+  if ! credential_restart_and_wait; then
+    restore="$(mktemp "$CONFIG_DIR/.mcp-rollback-restore.XXXXXX")"
+    cp -a "$backup" "$restore"
+    chown root:"$AGENT_USER" "$restore"; chmod 0640 "$restore"
+    mv -f "$restore" "$CREDENTIAL_STORE"
+    if ! credential_restart_and_wait; then
+      die "Rollback credential cleanup failed; the prior store was restored on disk but service recovery is unverified. Protected backup remains at $backup; reconcile before further changes."
+    fi
+    rm -f -- "$backup"
+    die "Rollback credential cleanup failed; the previous credential store and Agent health were restored."
+  fi
+  rm -f -- "$backup"
+  ui_notice success "Optional credentials removed. Direct/default verifier is unchanged. Confirm direct-client connectivity before installing an older compatible release."
+) }
+
+
 credential_menu(){
   ui_has_interactive_tty || die "Interactive credential management requires a terminal."
   while true; do
@@ -2731,6 +2787,7 @@ manage_usage(){
   ui_wrap '  ' 'profile-set development|validation, profile-label <label>, profile-label-clear'
   ui_wrap '  ' 'runtime-set <key> <integer>, runtime-reset <key>'
   ui_wrap '  ' 'credential-rotate direct-default|direct-secondary, credential-revoke direct-default|direct-secondary'
+  ui_wrap '  ' 'credential-prepare-rollback (explicitly remove optional credentials before a compatible older release)'
   ui_section 'Connection and lifecycle'
   ui_wrap '  ' 'configure-cloudflare, configure-local, configure-manual-tls, cloudflare-cleanup'
   ui_wrap '  ' 'update, repair, uninstall, purge'
@@ -2760,6 +2817,7 @@ case "${1:-menu}" in
   credentials|credential-status) credential_status ;;
   credential-rotate) [ "$#" -eq 2 ] || die "Usage: ai-server-agent-manage credential-rotate direct-default|direct-secondary"; credential_issue "$2" ;;
   credential-revoke) [ "$#" -eq 2 ] || die "Usage: ai-server-agent-manage credential-revoke direct-default|direct-secondary"; credential_revoke "$2" ;;
+  credential-prepare-rollback) [ "$#" -eq 1 ] || die "Usage: ai-server-agent-manage credential-prepare-rollback"; credential_prepare_rollback ;;
   setup|configure) connection_menu ;;
   configure-cloudflare) configure_cloudflare ;;
   configure-local) configure_local ;;

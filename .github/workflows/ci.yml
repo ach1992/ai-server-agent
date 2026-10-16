@@ -219,6 +219,9 @@ jobs:
 
       - name: Validate authenticated credential activation response
         run: bash tests/credential_activation_response.sh
+      - name: Historical binary credential compatibility and updater safety
+        if: ${{ needs.change-scope.outputs.root_trust_security_changed != 'false' }}
+        run: bash tests/credential_version_compatibility.sh
       - name: GitHub Actions immutable pinning contract
         run: |
           bad=0
@@ -956,6 +959,9 @@ jobs:
           sudo env AI_SERVER_AGENT_YES=1 bash uninstall.sh --purge
           sudo test ! -e /etc/ai-server-agent
           rm -f /tmp/legacy-agent-config.json
+      - name: Real named-credential upgrade and rollback compatibility
+        if: ${{ needs.change-scope.outputs.root_trust_security_changed != 'false' }}
+        run: ASA_DISPOSABLE_CREDENTIAL_ACCEPTANCE=1 bash tests/credential_installed_rollback.sh
       - name: First-run deferral is not an installation failure
         if: ${{ needs.change-scope.outputs.root_trust_security_changed != 'false' }}
         run: |

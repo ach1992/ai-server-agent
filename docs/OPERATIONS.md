@@ -201,6 +201,43 @@ Use `sudo ai-server-agent-manage credential-status` for non-secret state, `crede
 
 Existing installations migrate the current bearer into `direct/default` without forced rotation. Migration activates and verifies the verifier-backed store before the legacy plaintext token/header file is removed; on failed activation the previous known-good legacy configuration is restored for recovery.
 
+### Credential compatibility when upgrading or rolling back
+
+Before replacing an installed binary, the installer asks the **target** Agent to
+validate the current named credential store. Older binaries without that
+read-only command must prove they understand named credentials and pass a
+narrow, fail-closed legacy-schema check. An incompatible store aborts **before**
+the executable, credential store, config or active services are replaced.
+Do not work around this by copying binaries manually.
+
+If an older store has `direct/default` revoked and only the retired
+`mcp-gateway` identity enabled, the new Agent will deliberately refuse it:
+the retired bearer cannot authenticate. On the still-working old installation,
+explicitly issue/rotate `direct-default`, save the one-time bearer securely,
+and verify that the direct connection works **before** retrying the upgrade.
+No credentials are silently generated during upgrade.
+
+To return to an older version that does not recognize `direct/secondary`, first
+verify that your existing `direct/default` bearer works and run:
+
+```bash
+sudo ai-server-agent-manage credential-prepare-rollback
+```
+
+This is an interactive, explicitly confirmed **destructive credential
+operation**, not part of automatic update: it removes all optional credential
+records (including revoked `direct/secondary` and any retired Gateway record)
+while preserving the active `direct/default` verifier, and restarts/health-
+checks the current Agent with recovery on failure. Secondary clients lose
+access immediately. The removed records cannot be recovered from retained
+plaintext; issue fresh secondary credentials after returning to a compatible
+newer version. Only after this cleanup should an operator retry a rollback,
+which independently checks compatibility before switching the binary.
+
+A raw rollback of an `enabled=true` retired Gateway record could reactivate
+its bearer; a raw rollback with even a revoked `direct/secondary` record could
+prevent the older Agent from starting. Both cases are intentionally blocked.
+
 ## Management commands
 
 Interactive management:
