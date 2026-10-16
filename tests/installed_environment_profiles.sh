@@ -133,8 +133,7 @@ test -f "$scratch/restart-failed" || fail 'Failure injector never exercised real
 if ! grep -Fq 'previous configuration and Agent health were restored' "$scratch/injected-failure"; then
   # Only emit bounded, static management status lines, never the private
   # credential or the complete process environment.
-  grep -E 'Purpose update failed|Environment update failed|Another lifecycle operation|^\\[ai-server-agent\\] (ERROR|WARNING)' \\
-    "$scratch/injected-failure" | head -n 10 >&2 || true
+  grep -F -e 'Purpose update failed' -e 'Environment update failed' -e 'Another lifecycle operation' -e 'ERROR:' -e 'WARNING:' "$scratch/injected-failure" | head -n 10 >&2 || true
   if [ "$(sudo sha256sum /etc/ai-server-agent/config.json | awk '{print $1}')" = "$before" ]; then
     echo 'PROFILE_ROLLBACK_DIAGNOSTIC config_restored=yes' >&2
   else
