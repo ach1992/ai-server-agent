@@ -55,22 +55,38 @@ ui_width(){
     width="$(tput cols 2>/dev/null || true)"
   fi
   [[ "$width" =~ ^[0-9]+$ ]] || width=96
-  [ "$width" -lt 60 ] && width=60
+  [ "$width" -lt 40 ] && width=40
   [ "$width" -gt 100 ] && width=100
   printf '%s\n' "$width"
 }
 
+# Text from config/provider/user input is data, never terminal formatting.
+ui_strip_controls(){
+  printf '%s' "$1" | LC_ALL=C tr '\000-\037\177' ' '
+}
 ui_wrap(){
   local indent="$1" text="$2" width="${3:-}" line word
   local -a words=()
   [ -n "$width" ] || width="$(ui_width)"
+  text="$(ui_strip_controls "$text")"
   read -r -a words <<<"$text"
   line="$indent"
   if [ "${#words[@]}" -eq 0 ]; then
     printf '%s\n' "$indent"
     return 0
   fi
+  local available=$((width - ${#indent}))
+  [ "$available" -gt 0 ] || available=1
   for word in "${words[@]}"; do
+    # A long URL/path/identifier must not overrun a narrow console.
+    while [ "${#word}" -gt "$available" ]; do
+      if [ "${#line}" -gt "${#indent}" ]; then
+        printf '%s\n' "$line"
+        line="$indent"
+      fi
+      printf '%s%s\n' "$indent" "${word:0:available}"
+      word="${word:available}"
+    done
     if [ "${#line}" -gt "${#indent}" ] && [ $((${#line} + 1 + ${#word})) -gt "$width" ]; then
       printf '%s\n' "$line"
       line="$indent$word"
@@ -83,14 +99,28 @@ ui_wrap(){
   printf '%s\n' "$line"
 }
 
-log(){ printf '[ai-server-agent] %s\n' "$*"; }
+log(){
+  if [ -t 1 ]; then
+    local line first=1
+    while IFS= read -r line; do
+      if [ "$first" = 1 ]; then
+        printf '%sINFO%s  %s\n' "${CYAN:-}" "${RESET:-}" "${line:6}"
+        first=0
+      else
+        printf '%s\n' "$line"
+      fi
+    done < <(ui_wrap '      ' "$*")
+  else
+    printf '[ai-server-agent] %s\n' "$(ui_strip_controls "$*")"
+  fi
+}
 warn(){
   if [ -t 2 ]; then
     printf '\n%s%sWARNING%s\n' "${YELLOW:-}" "${BOLD:-}" "${RESET:-}" >&2
     ui_wrap '  ' "$*" >&2
     printf '\n' >&2
   else
-    printf '[ai-server-agent] WARNING: %s\n' "$*" >&2
+    printf '[ai-server-agent] WARNING: %s\n' "$(ui_strip_controls "$*")" >&2
   fi
 }
 die(){
@@ -99,7 +129,7 @@ die(){
     ui_wrap '  ' "$*" >&2
     printf '\n' >&2
   else
-    printf '[ai-server-agent] ERROR: %s\n' "$*" >&2
+    printf '[ai-server-agent] ERROR: %s\n' "$(ui_strip_controls "$*")" >&2
   fi
   exit 1
 }
@@ -139,11 +169,12 @@ fi
 
 # Clear only interactive terminals; never print untrusted control sequences.
 ui_safe_value(){
-  local width limit
-  width="$(ui_width)"
-  limit=$((width - 18))
-  # Remove controls, not valid UTF-8 bytes from a printable server label.
-  printf '%s' "$1" | LC_ALL=C tr -d '\000-\037\177' | cut -c "1-$limit"
+  local value
+  # Remove terminal controls rather than executing user-controlled escapes.
+  # Bash substring slicing is character-aware on UTF-8 shells.
+  value="$(ui_strip_controls "$1")"
+  if [ "${#value}" -gt 180 ]; then value="${value:0:177}..."; fi
+  printf '%s' "$value"
 }
 ui_height(){
   local lines="${LINES:-}"
@@ -156,13 +187,30 @@ ui_height(){
 }
 ui_section(){
   if [ "${UI_COMPACT:-0}" = 1 ]; then
-    printf '%s%s%s\n' "$BOLD" "$1" "$RESET"
+    printf '%s%s%s%s\n' "$CYAN" "$BOLD" "$1" "$RESET"
   else
-    printf '\n%s%s%s\n' "$BOLD" "$1" "$RESET"
+    printf '\n%s%s%s%s\n' "$CYAN" "$BOLD" "$1" "$RESET"
   fi
 }
 ui_detail(){
-  printf '  %-12s %s\n' "$1" "$(ui_safe_value "$2")"
+  ui_wrap "  $(printf '%-12s' "$1") " "$(ui_safe_value "$2")"
+}
+# The same numbering, spacing and severity meanings on every menu.
+ui_option(){
+  local number="$1" label="$2" intent="${3:-normal}" color="$CYAN" line first=1
+  case "$intent" in
+    destructive) color="$RED" ;;
+    caution) color="$YELLOW" ;;
+    navigation) color="$DIM" ;;
+  esac
+  while IFS= read -r line; do
+    if [ "$first" = 1 ]; then
+      printf '  %s%2s)%s %s\n' "$color" "$number" "$RESET" "${line#      }"
+      first=0
+    else
+      printf '%s\n' "$line"
+    fi
+  done < <(ui_wrap '      ' "$label")
 }
 ui_notice(){
   local kind="$1" message="$2" color="$CYAN"
@@ -171,7 +219,7 @@ ui_notice(){
     warning) color="$YELLOW" ;;
     error) color="$RED" ;;
   esac
-  printf '\n%s%s:%s\n' "$color" "${kind^^}" "$RESET"
+  printf '\n%s%s%s:%s\n' "$color" "$BOLD" "${kind^^}" "$RESET"
   ui_wrap '  ' "$message"
   printf '\n'
 }
@@ -189,7 +237,7 @@ ui_read_choice(){
     return 0
   fi
   if [ "${UI_SIGINT_CAUGHT:-0}" = 1 ]; then
-    ui_notice warning 'Input cancelled (Ctrl+C); no operation started.'
+    ui_notice info 'Input cancelled (Ctrl+C); no operation started.'
     return 130
   fi
   return 1
@@ -220,10 +268,10 @@ ui_menu_action(){
   if [ "$had_errexit" = 1 ]; then set -e; fi
   case "$rc" in
     0) UI_LAST_ACTION_OK=1 ;;
-    20) ui_notice warning 'Operation deferred/cancelled (exit 20). Inspect preceding output and current state; no rollback or unchanged-state claim is implied.' ;;
+    20) ui_notice info 'Operation deferred/cancelled (exit 20). Check the result above; if a change had started, verify its final state before retrying.' ;;
     130)
       if [ "$protected" = 0 ] && [ "${UI_SIGINT_CAUGHT:-0}" = 1 ]; then
-        ui_notice warning 'Read-only operation interrupted (Ctrl+C); returned to the menu.'
+        ui_notice info 'Read-only operation interrupted (Ctrl+C); returned to the menu.'
       else
         ui_notice error 'Action ended unexpectedly (exit 130). Inspect the operation result and any affected state before retrying.'
       fi ;;
@@ -239,8 +287,8 @@ header(){
   local width identity channel version ref label profile connection host port
   width="$(ui_width)"
   UI_COMPACT=0
-  [ "$(ui_height)" -lt 29 ] && UI_COMPACT=1
-  if [ -t 1 ] && [ "${TERM:-dumb}" != dumb ]; then printf '\033[H\033[2J'; fi
+  if [ "$(ui_height)" -lt 29 ] || [ "$width" -lt 55 ]; then UI_COMPACT=1; fi
+  if [ -t 1 ] && [ -z "${NO_COLOR:-}" ] && [ "${TERM:-dumb}" != dumb ]; then printf '\033[H\033[2J'; fi
   identity="$(installed_identity)"
   IFS='|' read -r channel version ref <<<"$identity"
   case "$channel" in
@@ -257,7 +305,11 @@ header(){
   elif [ "$(current_mode)" = public ]; then
     connection="Public listener, port $port (check TLS/domain)"
   else
-    connection="Local/private: 127.0.0.1:$port (tunnel or SSH)"
+    if [ "$UI_COMPACT" = 1 ]; then
+      connection="Local: 127.0.0.1:$port"
+    else
+      connection="Local/private: 127.0.0.1:$port (tunnel or SSH)"
+    fi
   fi
   printf '%sAI Server Agent%s  %sManagement console%s\n' "$BOLD" "$RESET" "$DIM" "$RESET"
   printf '%*s\n' "$width" '' | tr ' ' '-'
@@ -276,6 +328,7 @@ pause(){
 
 confirm(){
   local prompt="$1" default="${2:-no}" ans=""
+  prompt="$(ui_strip_controls "$prompt")"
   if ! ui_has_interactive_tty; then
     [ "$default" = "yes" ]
     return
@@ -295,11 +348,18 @@ confirm(){
   fi
 }
 
-# /dev/tty can be permission-readable without a controlling terminal
-# (notably inside sudo / CI). Noninteractive management must never prompt.
-ui_has_interactive_tty(){ [ -t 0 ] && [ -r /dev/tty ]; }
+# /dev/tty may have readable mode bits without a controlling terminal.
+# Accept piped installers that still have a live terminal on stdout/stderr;
+# never prompt when all three standard descriptors are non-TTY.
+ui_has_interactive_tty(){
+  [ -r /dev/tty ] || return 1
+  { [ -t 0 ] || [ -t 1 ] || [ -t 2 ]; } || return 1
+  ( : </dev/tty ) 2>/dev/null
+}
 prompt_value(){
   local prompt="$1" default="${2:-}" value
+  prompt="$(ui_strip_controls "$prompt")"
+  default="$(ui_strip_controls "$default")"
   ui_has_interactive_tty || die "Interactive input requires a terminal. Use the documented AI_SERVER_AGENT_* variables for automation."
   if [ -n "$default" ]; then
     read -r -p "$prompt [$default] (b=cancel): " value </dev/tty
@@ -462,12 +522,12 @@ runtime_menu(){
     ui_wrap '  ' 'Settings: worker_command_slots (0=auto, 1..8); persistent_task_slots (1..8).'
     ui_wrap '  ' 'These limits are independent. Raise gradually on hosts with sufficient CPU and memory.'
     ui_section 'Change settings'
-    printf '  1) Parallel worker command slots (0=auto, 1..8)\n'
-    printf '  2) Simultaneous persistent task jobs (1..8)\n'
-    printf '  3) Change another runtime setting (advanced)\n'
-    printf '  4) Reset a setting to its default\n'
-    printf '  5) Show all values, purposes and ranges\n'
-    printf '  0) Back\n'
+    ui_option 1 'Worker command slots (0=auto, 1..8)'
+    ui_option 2 'Persistent task slots (1..8)'
+    ui_option 3 'Other runtime setting (advanced)'
+    ui_option 4 'Reset a runtime setting' caution
+    ui_option 5 'Show all settings and ranges'
+    ui_option 0 'Back' navigation
     if ! ui_read_choice choice 'Choose: '; then
       [ "${UI_SIGINT_CAUGHT:-0}" = 1 ] && continue
       return 0
@@ -480,7 +540,11 @@ runtime_menu(){
           return 0
         fi
         if ui_cancel_requested "$value"; then continue; fi
-        ui_menu_action runtime_apply set "$key" "$value"
+        if confirm "Apply $key=$value? The Agent and Executor services will restart and local health will be checked." no; then
+          ui_menu_action runtime_apply set "$key" "$value"
+        else
+          ui_notice info 'Cancelled; runtime settings unchanged.'
+        fi
         pause ;;
       3|4)
         if ! ui_read_choice key 'Setting key (b=cancel): '; then
@@ -494,9 +558,17 @@ runtime_menu(){
             return 0
           fi
           if ui_cancel_requested "$value"; then continue; fi
-          ui_menu_action runtime_apply set "$key" "$value"
+          if confirm "Apply $key=$value? Agent and Executor services will restart." no; then
+            ui_menu_action runtime_apply set "$key" "$value"
+          else
+            ui_notice info 'Cancelled; runtime settings unchanged.'
+          fi
         else
-          ui_menu_action runtime_apply reset "$key"
+          if confirm "Reset $key to its default? Agent and Executor services will restart." no; then
+            ui_menu_action runtime_apply reset "$key"
+          else
+            ui_notice info 'Cancelled; runtime settings unchanged.'
+          fi
         fi
         pause ;;
       5) ui_menu_action runtime_show; pause ;;
@@ -668,27 +740,45 @@ profile_menu(){
     ui_section 'Current environment'
     ui_menu_action profile_show
     ui_section 'Change server purpose / label'
-    printf '  1) Development (build and debug)\n'
-    printf '  2) Validation (test and accept)\n'
-    printf '  3) Set server label\n'
-    printf '  4) Clear server label\n'
-    printf '  0) Back\n\n'
+    ui_option 1 'Development - build and debug'
+    ui_option 2 'Validation - test and accept'
+    ui_option 3 'Set server label'
+    ui_option 4 'Clear server label' caution
+    ui_option 0 'Back' navigation
     local choice label
     if ! ui_read_choice choice 'Choose: '; then
       [ "${UI_SIGINT_CAUGHT:-0}" = 1 ] && continue
       return 0
     fi
     case "$choice" in
-      1) ui_menu_action profile_apply environment_profile development; pause ;;
-      2) ui_menu_action profile_apply environment_profile validation; pause ;;
+      1|2)
+        local new_profile=development
+        [ "$choice" = 1 ] || new_profile=validation
+        if confirm "Set purpose to $new_profile? The Agent service will restart; authorized tools stay unchanged." no; then
+          ui_menu_action profile_apply environment_profile "$new_profile"
+        else
+          ui_notice info 'Cancelled; environment purpose unchanged.'
+        fi
+        pause ;;
       3)
         if ! ui_read_choice label 'Server label (b=cancel, max 80 characters): '; then
           [ "${UI_SIGINT_CAUGHT:-0}" = 1 ] && continue
           return 0
         fi
         if ui_cancel_requested "$label"; then continue; fi
-        ui_menu_action profile_apply server_label "$label"; pause ;;
-      4) ui_menu_action profile_apply server_label ""; pause ;;
+        if confirm "Set server label? The Agent service will restart." no; then
+          ui_menu_action profile_apply server_label "$label"
+        else
+          ui_notice info 'Cancelled; server label unchanged.'
+        fi
+        pause ;;
+      4)
+        if confirm "Clear the server label? The Agent service will restart." no; then
+          ui_menu_action profile_apply server_label ""
+        else
+          ui_notice info 'Cancelled; server label unchanged.'
+        fi
+        pause ;;
       0|b|B) return ;;
       *) ui_notice warning 'Select a number, or 0 to go back.'; pause ;;
     esac
@@ -718,19 +808,20 @@ status(){
   else curl -fsS "http://127.0.0.1:$port/healthz" >/dev/null 2>&1 && health=ok || true
   fi
   if [ "$mode" = "public" ] && [ -n "$host" ]; then endpoint="https://$host/mcp"; else endpoint="http://127.0.0.1:$port/mcp"; fi
-  printf '%sStatus%s\n' "$BOLD" "$RESET"
-  printf '  Version:       %s (%s)\n' "$version" "$channel"
-  [ -n "$ref" ] && printf '  Ref:           %s\n' "$ref"
-  printf '  Agent:         %s\n' "$(ui_state_value "$service")"
-  printf '  Executor:      %s\n' "$(ui_state_value "$executor")"
-  printf '  Local health:  %s\n' "$(ui_state_value "$health")"
-  printf '  Mode:          %s\n' "$mode"
-  printf '  Purpose:       %s\n' "$(config_get environment_profile)"
-  [ -n "$(config_get server_label)" ] && printf '  Server label:  %s\n' "$(config_get server_label)"
-  printf '  Port:          %s\n' "$port"
-  [ -n "$provider" ] && printf '  Setup:         %s\n' "$provider"
-  [ -n "$host" ] && printf '  Domain:        %s\n' "$host"
-  printf '  MCP endpoint:  %s\n' "$endpoint"
+  ui_section 'Service status'
+  ui_detail 'Version' "$version ($channel)"
+  [ -n "$ref" ] && ui_detail 'Ref' "$ref"
+  printf '  %-12s %s\n' 'Agent' "$(ui_state_value "$service")"
+  printf '  %-12s %s\n' 'Executor' "$(ui_state_value "$executor")"
+  printf '  %-12s %s\n' 'Local health' "$(ui_state_value "$health")"
+  ui_section 'Connection and purpose'
+  ui_detail 'Mode' "$mode"
+  ui_detail 'Purpose' "$(config_get environment_profile)"
+  [ -n "$(config_get server_label)" ] && ui_detail 'Server label' "$(config_get server_label)"
+  ui_detail 'Port' "$port"
+  [ -n "$provider" ] && ui_detail 'Provider' "$provider"
+  [ -n "$host" ] && ui_detail 'Domain' "$host"
+  ui_detail 'MCP endpoint' "$endpoint"
 }
 
 random_mcp_token(){ od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; printf '\n'; }
@@ -894,7 +985,7 @@ credential_revoke(){ (
     die "Credential revocation activation could not be verified; the previous credential store was restored and service health was reverified."
   fi
   rm -f "$backup"
-  printf '%sCredential revoked:%s %s\n' "$GREEN" "$RESET" "$principal"
+  ui_notice success "Credential revoked: $principal. Affected clients must use another active credential."
 ) }
 
 
@@ -905,11 +996,11 @@ credential_menu(){
     ui_section 'Current MCP credentials'
     ui_menu_action credential_status
     ui_section 'Manage credentials'
-    printf '  1) Issue / rotate direct/default credential\n'
-    printf '  2) Issue / rotate MCP Gateway credential\n'
-    printf '  %s3)%s Revoke direct/default credential\n' "$YELLOW" "$RESET"
-    printf '  %s4)%s Revoke MCP Gateway credential\n' "$YELLOW" "$RESET"
-    printf '  0) Back\n\n'
+    ui_option 1 'Issue/rotate direct credential' caution
+    ui_option 2 'Issue/rotate Gateway credential' caution
+    ui_option 3 'Revoke direct credential' destructive
+    ui_option 4 'Revoke Gateway credential' destructive
+    ui_option 0 'Back' navigation
     local choice principal action
     if ! ui_read_choice choice 'Choose: '; then
       [ "${UI_SIGINT_CAUGHT:-0}" = 1 ] && continue
@@ -923,10 +1014,16 @@ credential_menu(){
           3) principal=direct-default; action=credential_revoke ;;
           4) principal=mcp-gateway; action=credential_revoke ;;
         esac
-        if confirm "Confirm $action for $principal? Clients using changed credentials must reconnect." no; then
+        local effect
+        if [ "$action" = credential_revoke ]; then
+          effect="Revoke $principal? Existing connections using this credential will stop authenticating."
+        else
+          effect="Issue/rotate $principal? The previous credential will stop working and affected clients must reconnect."
+        fi
+        if confirm "$effect" no; then
           ui_menu_action "$action" "$principal"
         else
-          ui_notice warning 'Cancelled; credentials unchanged.'
+          ui_notice info 'Cancelled; credentials unchanged.'
         fi
         pause ;;
       0|b|B) return ;;
@@ -941,25 +1038,22 @@ reveal_auth(){
 
 chatgpt_setup(){
   local mode port host endpoint
-  mode="$(current_mode)"; port="$(current_port)"; host="$(managed_get '.hostname')"
-  printf '%sChatGPT setup%s\n\n' "$BOLD" "$RESET"
+  mode="$(current_mode)"; port="$(current_port)"; host="$(ui_safe_value "$(managed_get '.hostname')")"
+  ui_section 'MCP client connection'
   if [ "$mode" = "public" ] && [ -n "$host" ]; then
     endpoint="https://$host/mcp"
-    printf '%sServer-side setup is complete.%s\n' "$GREEN" "$RESET"
-    printf 'MCP URL: %s%s%s\n\n' "$BOLD" "$endpoint" "$RESET"
-    printf 'In ChatGPT Business on web:\n'
-    printf '  1. Open ChatGPT Plugins and use the current Add custom MCP server flow.\n'
-    printf '  2. If this flow is unavailable, check workspace permissions or the current official\n'
-    printf '     client instructions; legacy Apps controls may differ.\n'
-    printf '  3. Enter the MCP URL above, and configure bearer authentication in the trusted connection UI.\n'
-    printf '  4. Use a current direct/default Authorization value only when the client requests it.\n'
-    printf '  5. Refresh/discover tools, then test agent_environment and run_command.\n\n'
-    printf 'Existing bearer plaintext is not stored for re-display.\n'
-    printf 'To issue a fresh value, run: sudo ai-server-agent-manage credential-rotate direct-default\n'
+    ui_notice info 'A public endpoint is configured. Verify service health and authenticated MCP initialize before treating client setup as complete.'
+    ui_detail 'MCP URL' "$endpoint"
+    ui_section 'Client setup'
+    ui_wrap '  ' '1. Open your AI client MCP/connector settings. The exact labels and permissions depend on the client and workspace.'
+    ui_wrap '  ' '2. Add a custom MCP endpoint using the URL above, with bearer authentication only in the trusted client credential UI.'
+    ui_wrap '  ' '3. If the client requests it, use an active direct/default Authorization credential. Do not paste a bearer into chat.'
+    ui_wrap '  ' '4. Refresh tools and verify agent_environment and a safe run_command. If access is denied, inspect client permissions and Agent credentials.'
+    ui_wrap '  ' 'Existing bearer plaintext cannot be re-displayed. Rotate it locally with: sudo ai-server-agent-manage credential-rotate direct-default'
   else
-    printf 'The Agent is loopback-only at http://127.0.0.1:%s/mcp.\n' "$port"
-    printf 'ChatGPT cannot connect directly to a local/private MCP endpoint. Use Secure MCP Tunnel,\n'
-    printf 'or choose the Cloudflare domain setup from this menu.\n'
+    ui_detail 'Private MCP' "http://127.0.0.1:$port/mcp"
+    ui_notice info 'The Agent is local/private. A remote client needs an authorized private tunnel or a correctly configured public HTTPS endpoint.'
+    ui_wrap '  ' 'Use Connection / TLS setup from the management menu when public access is required.'
   fi
 }
 
@@ -998,9 +1092,14 @@ load_cf_token(){
     CF_TOKEN="$AI_SERVER_AGENT_CLOUDFLARE_API_TOKEN"
   else
     ui_has_interactive_tty || die "Set AI_SERVER_AGENT_CLOUDFLARE_API_TOKEN_FILE for noninteractive Cloudflare setup."
-    printf 'Cloudflare API token (input hidden; not stored): ' >/dev/tty
-    read -r -s CF_TOKEN </dev/tty
+    printf 'Cloudflare API token (input hidden; not stored) (b=cancel): ' >/dev/tty
+    read -r -s CF_TOKEN </dev/tty || { CF_TOKEN=""; return 20; }
     printf '\n' >/dev/tty
+    if ui_cancel_requested "$CF_TOKEN"; then
+      CF_TOKEN=""
+      ui_notice info 'Cloudflare token input cancelled before any remote change.'
+      return 20
+    fi
   fi
   [ -n "$CF_TOKEN" ] || die "Cloudflare API token is empty."
 }
@@ -2098,9 +2197,14 @@ acquire_cloudflare_mcp_bearer(){
     exec 3<&-
   else
     ui_has_interactive_tty || die "Cloudflare setup requires the current MCP bearer. Run the manager in an interactive terminal or pass the one-use descriptor 3; no bearer plaintext is stored on disk."
-    printf 'Current MCP bearer (input hidden, not stored): ' >/dev/tty
-    IFS= read -r -s supplied </dev/tty || die "Could not read the MCP bearer from the terminal."
+    printf 'Current MCP bearer (input hidden; b=cancel): ' >/dev/tty
+    IFS= read -r -s supplied </dev/tty || return 20
     printf '\n' >/dev/tty
+    if ui_cancel_requested "$supplied"; then
+      supplied=""
+      ui_notice info 'MCP bearer input cancelled before Cloudflare changes.'
+      return 20
+    fi
   fi
   token="${supplied#Authorization: }"
   token="${token#Bearer }"
@@ -2273,6 +2377,11 @@ configure_cloudflare(){ (
     owned_origin_ruleset="$old_origin_ruleset"; owned_origin_rule="$old_origin_rule"; owned_ssl_ruleset="$old_ssl_ruleset"; owned_ssl_rule="$old_ssl_rule"
   fi
   ip="$(cf_public_ipv4)"; log "Origin IPv4: $ip"
+  if ui_has_interactive_tty && ! confirm "Apply Cloudflare HTTPS settings for $host? This will create/modify scoped DNS, rules and certificate, then restart and verify services." no; then
+    CF_TOKEN=""; CF_MCP_AUTH_TOKEN=""
+    ui_notice info 'Cancelled before Cloudflare changes. No remote write or local TLS/config commit was started.'
+    return 20
+  fi
   stage="$(mktemp -d)"; chmod 0700 "$stage"
 
   cloudflare_transaction_exit(){
@@ -2322,7 +2431,7 @@ configure_cloudflare(){ (
   clear_cloudflare_transaction_state
   log "Public HTTPS health, unauthenticated rejection, and authenticated MCP initialize all passed."
   cleanup_old_cloudflare "$old_host" "$old_zone" "$old_dns" "$old_dns_owned" "$old_origin_ruleset" "$old_origin_rule" "$old_ssl_ruleset" "$old_ssl_rule" "$old_cert" "$host" "$cert_id" "$zone_id" "$old_dns_fingerprint" "$old_origin_fingerprint" "$old_ssl_fingerprint"
-  printf '\n%sServer setup complete.%s\n' "$GREEN" "$RESET"
+  ui_notice success 'Public HTTPS and authenticated MCP checks passed.'
   printf 'MCP URL: %shttps://%s/mcp%s\n' "$BOLD" "$host" "$RESET"
   printf 'Next: choose ChatGPT Setup from the menu.\n'
 ) }
@@ -2332,9 +2441,15 @@ configure_local(){ (
   [ ! -e "$CF_TXN_STATE" ] && [ ! -L "$CF_TXN_STATE" ] || die "Resolve the pending Cloudflare transaction with cloudflare-cleanup before changing local connection state."
   local port
   port="${AI_SERVER_AGENT_PORT:-$(current_port)}"
-  if ui_has_interactive_tty; then port="$(prompt_value 'Local MCP port' "$port")"; fi
+  if ui_has_interactive_tty; then
+    port="$(prompt_value 'Local MCP port' "$port")"
+    if ! confirm "Switch Agent to local/private port $port and restart services?" no; then
+      ui_notice info 'Cancelled before local connection changes.'
+      return 20
+    fi
+  fi
   write_config local "$port" "" ""
-  restart_and_verify_local || die "Agent did not recover in local mode."
+  restart_and_verify_local || die "Local-mode activation failed. Inspect current config and Agent/Executor health before retrying; no automatic rollback was verified."
   save_local_state "$port"
   log "Agent is now loopback-only. Existing TLS files and Cloudflare metadata were not deleted."
 ) }
@@ -2352,10 +2467,20 @@ configure_manual_tls(){ (
   [ -r "$src_crt" ] && [ -r "$src_key" ] || die "Certificate/key path is not readable."
   openssl x509 -in "$src_crt" -noout -checkhost "$host" >/dev/null || die "Certificate does not match $host."
   key_pub="$(openssl pkey -in "$src_key" -pubout -outform DER 2>/dev/null | sha256sum | awk '{print $1}')"; cert_pub="$(openssl x509 -in "$src_crt" -pubkey -noout 2>/dev/null | openssl pkey -pubin -outform DER 2>/dev/null | sha256sum | awk '{print $1}')"; [ "$key_pub" = "$cert_pub" ] || die "Certificate and private key do not match."
+  if ui_has_interactive_tty && ! confirm "Apply TLS for $host on port $port and restart services? Existing files will be backed up for recovery." no; then
+    ui_notice info 'Cancelled before TLS files or configuration were changed.'
+    return 20
+  fi
   backup="$(mktemp -d)"; [ -e "$TLS_DIR/origin.key" ] && cp -p "$TLS_DIR/origin.key" "$backup/origin.key" || true; [ -e "$TLS_DIR/origin.crt" ] && cp -p "$TLS_DIR/origin.crt" "$backup/origin.crt" || true
   install -d -o root -g "$AGENT_USER" -m 0750 "$TLS_DIR"; install -o root -g "$AGENT_USER" -m 0640 "$src_key" "$TLS_DIR/origin.key"; install -o root -g "$AGENT_USER" -m 0644 "$src_crt" "$TLS_DIR/origin.crt"
   config_backup="$(mktemp)"; cp -a "$CONFIG_FILE" "$config_backup"; write_config public "$port" "$TLS_DIR/origin.crt" "$TLS_DIR/origin.key"
-  if ! restart_and_verify_local; then install -o root -g "$AGENT_USER" -m 0640 "$config_backup" "$CONFIG_FILE"; restore_tls_backup "$backup"; systemctl restart ai-server-agent-executor.service ai-server-agent.service || true; rm -rf "$backup"; rm -f "$config_backup"; die "Manual TLS configuration failed; previous state restored."; fi
+  if ! restart_and_verify_local; then
+    install -o root -g "$AGENT_USER" -m 0640 "$config_backup" "$CONFIG_FILE"
+    restore_tls_backup "$backup"
+    systemctl restart ai-server-agent-executor.service ai-server-agent.service || true
+    rm -rf "$backup"; rm -f "$config_backup"
+    die "Manual TLS activation failed. Previous files were restored on disk and service restart was attempted, but recovery health was NOT verified. Inspect current status before retrying."
+  fi
   rm -rf "$backup"; rm -f "$config_backup"; save_manual_state "$host" "$port"
   log "Manual TLS/public mode configured. DNS/edge routing remains your responsibility."
 ) }
@@ -2372,7 +2497,7 @@ cloudflare_cleanup(){ (
       log "Completed Cloudflare transaction journal finalized without remote rollback."
       return 0
     fi
-    confirm "Retry the recorded rollback/recovery now?" no || { echo "Cancelled."; return 0; }
+    confirm "Retry the recorded rollback/recovery now?" no || { ui_notice info 'Cancelled; recovery journal left unchanged.'; return 20; }
     print_cf_token_guidance "$host"; load_cf_token
     if recover_cloudflare_transaction; then CF_TOKEN=""; log "Recorded Cloudflare recovery completed."; return 0; fi
     CF_TOKEN=""; die "Cloudflare recovery is still incomplete. Recovery state remains in $CF_TXN_STATE."
@@ -2381,7 +2506,7 @@ cloudflare_cleanup(){ (
   if [ -n "$previous_cert" ]; then
     host="$(managed_get '.cloudflare_previous_certificate.hostname')"
     printf 'Previous Cloudflare Origin CA certificate for: %s\n' "$host"
-    confirm "Revoke this previously replaced certificate now?" no || { echo "Cancelled."; return 0; }
+    confirm "Revoke this previously replaced certificate now?" no || { ui_notice info 'Cancelled; previous certificate retained.'; return 20; }
     print_cf_token_guidance "$host"; load_cf_token
     if cf_delete_owned "/certificates/$previous_cert"; then CF_TOKEN=""; clear_previous_cloudflare_certificate; log "Previous Origin CA certificate revoked or already absent."; return 0; fi
     CF_TOKEN=""; die "Previous certificate could not be revoked. Its ID remains recorded for a safe retry."
@@ -2404,7 +2529,7 @@ cloudflare_cleanup(){ (
     printf 'Recorded Cloudflare hostname: %s\n' "$host"
   fi
   if [ "$dns_owned" = "true" ]; then printf 'The DNS record is recorded as Agent-owned and can be removed by this cleanup.\n'; else printf 'The DNS record is external/reused and will be preserved.\n'; fi
-  confirm "Delete the recorded Agent-owned Cloudflare DNS (if any), Origin Rule, strict SSL Configuration Rule, and Origin CA certificate?" no || { echo "Cancelled."; return 0; }
+  confirm "Delete recorded Agent-owned Cloudflare DNS (if any), Origin Rule, SSL rule and certificate? External/reused DNS is preserved." no || { ui_notice info 'Cancelled; recorded Cloudflare resources left unchanged.'; return 20; }
   print_cf_token_guidance "$host"; load_cf_token
   if ! delete_recorded_cloudflare_resources "$zone_id" "$dns_id" "$dns_owned" "$origin_ruleset_id" "$origin_rule_id" "$ssl_ruleset_id" "$ssl_rule_id" "$cert_id" "$dns_fingerprint" "$origin_fingerprint" "$ssl_fingerprint"; then CF_TOKEN=""; die "Cloudflare cleanup was incomplete or resource drift was detected. Recorded ownership state was preserved for a safe retry/manual resolution."; fi
   CF_TOKEN=""
@@ -2426,11 +2551,11 @@ run_uninstall(){
     printf '%sPURGE removes Agent-owned config/state/log/runtime and the aiagent identity.%s\n' "$RED" "$RESET"
     printf 'It still preserves /srv/ai-workspace and the aiworker identity.\n'
     if [ -s "$CF_TXN_STATE" ] || [ -n "$(managed_get '.cloudflare.zone_id')" ] || [ -n "$(managed_get '.cloudflare_previous.zone_id')" ] || [ -n "$(managed_get '.cloudflare_previous_certificate.origin_certificate_id')" ]; then warn "Cloudflare-managed resources or recovery state are still recorded. Use Cloudflare cleanup first if you want them removed too."; fi
-    confirm "Purge Agent-owned server data?" no || { echo "Cancelled."; return 0; }
+    confirm "Purge Agent-owned config/state/logs/runtime and aiagent identity? Workspace and aiworker are preserved." no || { ui_notice info 'Cancelled; purge not started.'; return 20; }
     AI_SERVER_AGENT_YES=1 "$UNINSTALL_HELPER" --purge
   else
     ui_wrap '' 'Safe uninstall removes services, binary, and management command while preserving config/state/users/workspace.'
-    confirm "Uninstall AI Server Agent?" no || { echo "Cancelled."; return 0; }
+    confirm "Uninstall Agent services and binaries, preserving config, state, users and workspace?" no || { ui_notice info 'Cancelled; uninstall not started.'; return 20; }
     AI_SERVER_AGENT_YES=1 "$UNINSTALL_HELPER"
   fi
 }
@@ -2442,10 +2567,10 @@ connection_menu(){
   while true; do
     header
     ui_section 'Connection setup'
-    printf '  1) Cloudflare domain (guided HTTPS)\n'
-    printf '  2) Local/private (use a tunnel or SSH)\n'
-    printf '  3) Existing TLS certificate (advanced)\n'
-    printf '  0) Back\n\n'
+    ui_option 1 'Cloudflare HTTPS domain'
+    ui_option 2 'Local/private (tunnel or SSH)'
+    ui_option 3 'Existing TLS certificate (advanced)'
+    ui_option 0 'Back' navigation
     local choice
     if ! ui_read_choice choice 'Choose: '; then
       [ "${UI_SIGINT_CAUGHT:-0}" = 1 ] && continue
@@ -2471,13 +2596,13 @@ first_run(){
     header
     ui_section 'Initial connection setup'
     ui_wrap '  ' 'The Agent core is installed. Choose how an authorized MCP client will connect.'
-    printf '\n  1) %sCloudflare domain%s - guided HTTPS/domain setup\n' "$GREEN" "$RESET"
-    printf '  2) Local/private - keep loopback-only for a private tunnel\n'
-    printf '  3) Existing TLS certificate - advanced/manual setup\n'
+    ui_option 1 'Cloudflare domain (guided HTTPS)'
+    ui_option 2 'Local/private (private tunnel)'
+    ui_option 3 'Existing TLS cert (advanced)'
     if [ "$attempted" = 0 ] && [ "$(current_mode)" = local ]; then
-      printf '  0) Configure later - keep the healthy local Agent\n\n'
+      ui_option 0 'Configure later (keep local)' navigation
     else
-      printf '  0) Configure later - inspect the connection before retrying\n\n'
+      ui_option 0 'Configure later (check status)' navigation
     fi
     if ! ui_read_choice choice 'Choose [1]: '; then
       [ "${UI_SIGINT_CAUGHT:-0}" = 1 ] && continue
@@ -2519,7 +2644,7 @@ first_run(){
     ui_notice warning 'Connection setup was not verified. Review the error or recovery state, choose another connection option, or select 0 to defer.'
     pause
   done
-  printf '\n%sDone.%s\n' "$GREEN" "$RESET"
+  ui_notice success 'Connection setup completed and verified.'
   ui_wrap '' 'Use sudo ai-server-agent-manage any time to change settings.'
   printf '\n'
   chatgpt_setup
@@ -2531,21 +2656,22 @@ menu(){
   while true; do
     header
     ui_section 'Connection and status'
-    printf '  %s1)%s Status / health (connection)\n' "$CYAN" "$RESET"
-    printf '  %s2)%s ChatGPT setup / MCP client guide\n' "$CYAN" "$RESET"
-    printf '  %s3)%s Configure or change domain / connection / TLS\n' "$CYAN" "$RESET"
-    printf '  %s4)%s Rotate / renew Cloudflare TLS certificate\n' "$CYAN" "$RESET"
+    ui_option 1 'Status and health'
+    ui_option 2 'ChatGPT / MCP client setup'
+    ui_option 3 'Connection / TLS setup'
+    ui_option 4 'Renew Cloudflare certificate' caution
     ui_section 'Agent operations'
-    printf '  %s5)%s Update Agent\n' "$CYAN" "$RESET"
-    printf '  %s6)%s Repair / restart\n' "$CYAN" "$RESET"
-    printf '  %s11)%s Runtime limits and execution capacity\n' "$CYAN" "$RESET"
-    printf '  %s12)%s Server purpose / label\n' "$CYAN" "$RESET"
-    ui_section 'Access and removal'
-    printf '  %s10)%s MCP credentials\n' "$CYAN" "$RESET"
-    printf '  %s7)%s Safe uninstall (preserve data)\n' "$YELLOW" "$RESET"
-    printf '  %s8)%s Purge Agent-owned server data\n' "$RED" "$RESET"
-    printf '  %s9)%s Remove recorded Cloudflare resources\n' "$YELLOW" "$RESET"
-    if [ "$UI_COMPACT" = 1 ]; then printf '  0) Exit\n'; else printf '\n  0) Exit\n\n'; fi
+    ui_option 5 'Update Agent' caution
+    ui_option 6 'Repair / restart services' caution
+    ui_section 'Removal (destructive)'
+    ui_option 7 'Uninstall (preserve data)' destructive
+    ui_option 8 'Purge Agent-owned data' destructive
+    ui_option 9 'Delete Cloudflare resources' destructive
+    ui_section 'Settings and access'
+    ui_option 10 'MCP credentials' caution
+    ui_option 11 'Runtime capacity / timeouts'
+    ui_option 12 'Server purpose / label'
+    ui_option 0 'Exit' navigation
     local choice
     if ! ui_read_choice choice 'Choose: '; then
       [ "${UI_SIGINT_CAUGHT:-0}" = 1 ] && continue
@@ -2562,8 +2688,20 @@ menu(){
           ui_menu_action configure_cloudflare
         fi
         pause ;;
-      5) ui_menu_action update_agent; pause ;;
-      6) ui_menu_action repair; pause ;;
+      5)
+        if confirm "Update using the configured install channel? Services may restart, and update failure requires recovery." no; then
+          ui_menu_action update_agent
+        else
+          ui_notice info 'Cancelled; update not started.'
+        fi
+        pause ;;
+      6)
+        if confirm "Restart/repair Agent services? If health fails, repair may run the channel-aware updater." no; then
+          ui_menu_action repair
+        else
+          ui_notice info 'Cancelled; repair not started.'
+        fi
+        pause ;;
       7|8)
         if [ "$choice" = 7 ]; then
           ui_menu_action run_uninstall 0
@@ -2584,7 +2722,24 @@ menu(){
   done
 }
 
+manage_usage(){
+  ui_section 'AI Server Agent management'
+  ui_wrap '  ' 'Usage: sudo ai-server-agent-manage [command] [arguments]'
+  ui_section 'Inspect and connect'
+  ui_wrap '  ' 'menu (default), status, setup, chatgpt-setup, profile-show, runtime-show, credential-status'
+  ui_section 'Update settings'
+  ui_wrap '  ' 'profile-set development|validation, profile-label <label>, profile-label-clear'
+  ui_wrap '  ' 'runtime-set <key> <integer>, runtime-reset <key>'
+  ui_wrap '  ' 'credential-rotate direct-default|mcp-gateway, credential-revoke direct-default|mcp-gateway'
+  ui_section 'Connection and lifecycle'
+  ui_wrap '  ' 'configure-cloudflare, configure-local, configure-manual-tls, cloudflare-cleanup'
+  ui_wrap '  ' 'update, repair, uninstall, purge'
+  ui_section 'Safety'
+  ui_wrap '  ' 'State-changing commands may restart services or change protected settings. Use the interactive menu for guided confirmations; noninteractive subcommands keep their documented arguments, locks and security requirements.'
+}
+
 if [ "${AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY:-0}" = "1" ]; then return 0 2>/dev/null || exit 0; fi
+if [ "${1:-}" = help ] || [ "${1:-}" = --help ] || [ "${1:-}" = -h ]; then manage_usage; exit 0; fi
 
 need_root
 [ -s "$CONFIG_FILE" ] || die "AI Server Agent is not installed or $CONFIG_FILE is missing."
@@ -2614,5 +2769,5 @@ case "${1:-menu}" in
   repair) repair ;;
   uninstall) run_uninstall 0 ;;
   purge) run_uninstall 1 ;;
-  *) die "Unknown command: ${1:-}. Use menu, status, profile-show, profile-set, profile-label, profile-label-clear, runtime-show, runtime-set, runtime-reset, chatgpt-setup, credential-status, credential-rotate, credential-revoke, configure-cloudflare, configure-local, configure-manual-tls, cloudflare-cleanup, update, repair, uninstall, or purge." ;;
+  *) die "Unknown command: ${1:-}. Run 'ai-server-agent-manage help' for the complete command list." ;;
 esac

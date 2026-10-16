@@ -226,7 +226,7 @@ grep -Fq 'MENU_EXITED_CLEANLY' "$TMP/sigint-read.out"
 write_marker="$TMP/write-started"
 set +e
 {
-  printf '11\n1\n8\n'
+  printf '11\n1\n8\ny\n'
   for i in $(seq 1 240); do [ -f "$write_marker" ] && break; sleep 0.05; done
   printf '\003'
   sleep 2.4
@@ -267,7 +267,7 @@ set +e
 confirm_rc=$?
 set -e
 case "$confirm_rc" in 0|130) ;; *) echo "Confirmation signal fixture exit $confirm_rc" >&2; exit 1 ;; esac
-grep -Fq 'Confirm credential_issue for direct-default?' "$TMP/sigint-confirm.out"
+grep -Fq 'Issue/rotate direct-default?' "$TMP/sigint-confirm.out"
 grep -Fq 'Cancelled; credentials unchanged' "$TMP/sigint-confirm.out"
 grep -Fq 'MENU_EXITED_CLEANLY' "$TMP/sigint-confirm.out"
 ! grep -Eq 'ISSUED_UNEXPECTEDLY|REVOKED_UNEXPECTEDLY' "$TMP/sigint-confirm.out"

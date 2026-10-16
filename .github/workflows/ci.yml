@@ -272,7 +272,7 @@ jobs:
           grep -qF 'SETUP_INCOMPLETE=1' install.sh
           grep -qF 'Core installation succeeded, but connection setup was not completed.' install.sh
           grep -qF 'Resume setup with: sudo ai-server-agent-manage' install.sh
-          grep -qF 'Configure later - keep the healthy local Agent' manage.sh
+          grep -qF "ui_option 0 'Configure later (keep local)' navigation" manage.sh
           grep -qF 'ca-certificates curl git jq openssl tar xz-utils' install.sh
           grep -qF 'CONTROL_DIR="$CONFIG_DIR/control"' install.sh
           grep -qF 'INSTALL_STATE="$CONTROL_DIR/install-state.json"' install.sh
@@ -281,13 +281,13 @@ jobs:
             echo 'root-trusted install state must never be shell-sourced' >&2
             exit 1
           fi
-          grep -qF 'Status / health' manage.sh
-          grep -qF 'ChatGPT setup' manage.sh
-          grep -qF 'Configure or change domain / connection' manage.sh
-          grep -qF 'Rotate / renew Cloudflare TLS certificate' manage.sh
-          grep -qF 'Safe uninstall (preserve data)' manage.sh
-          grep -qF 'Purge Agent-owned server data' manage.sh
-          grep -qF 'Remove recorded Cloudflare resources' manage.sh
+          grep -qF "ui_option 1 'Status and health'" manage.sh
+          grep -qF "ui_option 2 'ChatGPT / MCP client setup'" manage.sh
+          grep -qF "ui_option 3 'Connection / TLS setup'" manage.sh
+          grep -qF "ui_option 4 'Renew Cloudflare certificate' caution" manage.sh
+          grep -qF "ui_option 7 'Uninstall (preserve data)' destructive" manage.sh
+          grep -qF "ui_option 8 'Purge Agent-owned data' destructive" manage.sh
+          grep -qF "ui_option 9 'Delete Cloudflare resources' destructive" manage.sh
       - name: Operator runtime settings and rollback contract
         if: ${{ needs.change-scope.outputs.runtime_changed != 'false' }}
         run: bash tests/runtime_settings.sh
