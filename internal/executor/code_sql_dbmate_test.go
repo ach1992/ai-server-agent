@@ -278,3 +278,86 @@ func TestSQLDBMateValidCommentTabWhitespacePreserved(t *testing.T) {
 		}
 	}
 }
+
+// R2 independent review REQUIRED-003: compound MySQL/MariaDB stored program
+// bodies do not need a client DELIMITER command. Nested semicolons must never
+// manufacture independent source-backed schema declarations or navigation.
+func TestSQLMySQLCompoundRoutineWithoutDelimiterFailsClosed(t *testing.T) {
+	routine := "CREATE PROCEDURE prepare_accounts()\n" +
+		"BEGIN\n SELECT 1;\n CREATE TABLE phantom (id INT);\nEND;\n"
+	cases := []struct {
+		name, source string
+	}{
+		{"plain_procedure", routine},
+		{"dbmate_procedure", "-- migrate:up\n" + routine +
+			"-- migrate:down\nDROP PROCEDURE prepare_accounts;\n"},
+		{"goose_procedure", "-- +goose Up\n" + routine +
+			"-- +goose Down\nDROP PROCEDURE prepare_accounts;\n"},
+		{"create_or_replace_procedure", "CREATE OR REPLACE " + routine[len("CREATE "):]},
+		{"create_definer_procedure", "CREATE DEFINER = CURRENT_USER " + routine[len("CREATE "):]},
+		{"create_definer_quoted_procedure", "CREATE DEFINER = 'service'@'localhost' " + routine[len("CREATE "):]},
+		{"procedure_single_statement", "CREATE PROCEDURE prepare_accounts() SELECT 1;\n"},
+		{"function", "CREATE FUNCTION calculate_total() RETURNS INT\n" +
+			"BEGIN\n SELECT 1;\n CREATE TABLE phantom (id INT);\n RETURN 1;\nEND;\n"},
+		{"trigger", "CREATE TRIGGER audit_insert BEFORE INSERT ON accounts\n" +
+			"FOR EACH ROW BEGIN\n SELECT 1;\n CREATE TABLE phantom (id INT);\nEND;\n"},
+		{"event", "CREATE EVENT nightly_cleanup ON SCHEDULE EVERY 1 DAY DO\n" +
+			"BEGIN\n SELECT 1;\n CREATE TABLE phantom (id INT);\nEND;\n"},
+		{"anonymous_compound", "BEGIN NOT ATOMIC\nSELECT 1;\n" +
+			"CREATE TABLE phantom (id INT);\nEND;\n"},
+	}
+	for _, dialect := range []string{"mysql", "mariadb"} {
+		for _, tc := range cases {
+			t.Run(dialect+"_"+tc.name, func(t *testing.T) {
+				if tokens, valid := sqlDDLTokens(tc.source, dialect); valid || len(tokens) != 0 {
+					t.Fatalf("unsupported routine/body accepted by shared lexer: valid=%t tokens=%+v", valid, tokens)
+				}
+				if symbols := sqlDDLSymbols(tc.source, dialect); len(symbols) != 0 {
+					t.Fatalf("nested procedural CREATE fabricated forward DDL: %+v", symbols)
+				}
+				if occ, valid := sqlNavOccurrences(tc.source, dialect); valid || len(occ) != 0 {
+					t.Fatalf("nested procedural CREATE fabricated source navigation: valid=%t %+v", valid, occ)
+				}
+				if _, found := sqlNavSelected(tc.source, dialect, 3, 16); found {
+					t.Fatal("cursor navigation selected a phantom routine-body table")
+				}
+			})
+		}
+	}
+}
+
+func TestSQLMySQLCompoundGuardPreservesPlainDDLAndQuotedKeywords(t *testing.T) {
+	plain := "CREATE TABLE accounts (id INT, note VARCHAR(255) DEFAULT 'CREATE PROCEDURE fake BEGIN END');\n" +
+		"-- CREATE PROCEDURE ignored() BEGIN CREATE TABLE phantom (id INT); END;\n" +
+		"ALTER TABLE accounts ADD COLUMN active BOOLEAN;\n"
+	dbmate := "-- migrate:up\n" + plain +
+		"-- migrate:down\nDROP TABLE accounts;\n"
+	goose := "-- +goose Up\n" + plain +
+		"-- +goose Down\nDROP TABLE accounts;\n"
+	transaction := "BEGIN;\nCREATE TABLE accounts (id INT);\nCOMMIT;\n"
+	transactionWork := "BEGIN WORK;\nCREATE TABLE accounts (id INT);\nCOMMIT;\n"
+	rollbackOnlyProcedure := "-- migrate:up\nCREATE TABLE accounts (id INT);\n" +
+		"-- migrate:down\nCREATE PROCEDURE rollback_only() BEGIN SELECT 1; END;\n"
+	for _, dialect := range []string{"mysql", "mariadb"} {
+		for _, tc := range []struct{ name, source string }{
+			{"plain", plain}, {"dbmate", dbmate}, {"goose", goose}, {"transaction", transaction}, {"transaction_work", transactionWork}, {"dbmate_rollback_only_procedure", rollbackOnlyProcedure},
+		} {
+			t.Run(dialect+"_"+tc.name, func(t *testing.T) {
+				symbols := sqlDDLSymbols(tc.source, dialect)
+				if len(symbols) == 0 || symbols[0].Name != "accounts" {
+					t.Fatalf("legitimate CREATE was suppressed: %+v", symbols)
+				}
+				occ, valid := sqlNavOccurrences(tc.source, dialect)
+				if !valid || len(occ) == 0 || occ[0].name != "accounts" || !occ[0].declaration {
+					t.Fatalf("legitimate source navigation was suppressed: valid=%t %+v", valid, occ)
+				}
+			})
+		}
+	}
+	postgres := "CREATE FUNCTION ignored() RETURNS void LANGUAGE plpgsql AS $$\n" +
+		"BEGIN\nCREATE TABLE phantom (id INT);\nEND;\n$$;\n" +
+		"CREATE TABLE accounts (id INT);\n"
+	if symbols := sqlDDLSymbols(postgres, "postgres"); len(symbols) != 1 || symbols[0].Name != "accounts" {
+		t.Fatalf("PostgreSQL function-body isolation regressed: %+v", symbols)
+	}
+}
