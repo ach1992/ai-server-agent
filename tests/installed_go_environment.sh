@@ -65,8 +65,10 @@ sudo -u aiworker git -C "$fixture" -c user.name='CI Acceptance' \
 # Historical installations also used a nested /var/tmp/e temp root. Cover
 # both default and one-level nested temp roots without scanning worktrees.
 find_probes(){
-  find /tmp /var/tmp -mindepth 1 -maxdepth 2 -type d \
-    -name 'ai-server-agent-env-probe-*' -print 2>/dev/null | LC_ALL=C sort
+  # Enumerate as root: a private nested temp parent might not be traversable
+  # by the runner user, and a partial listing must never be treated as PASS.
+  sudo find /tmp /var/tmp -mindepth 1 -maxdepth 2 -type d \
+    -name 'ai-server-agent-env-probe-*' -print | LC_ALL=C sort
 }
 find_probes > "$scratch/before"
 # Exercise the same initialize handshake as a real MCP client; never use a
