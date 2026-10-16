@@ -109,14 +109,88 @@ func sqlDDLTokens(source, dialect string) ([]sqlDDLToken, bool) {
 	if len(source) > codeMaxDocumentBytes {
 		return nil, false
 	}
-	forward, ok := sqlDDLGooseForwardSQL(source, dialect)
+	// A MySQL/MariaDB DELIMITER command replaces semicolon statement
+	// boundaries (often inside stored routines). Do not parse its body as
+	// independent top-level DDL. Both outlines and navigation share this
+	// fail-closed guard before forward-only migration normalization.
+	if (dialect == "mysql" || dialect == "mariadb") && sqlNavMySQLDelimiter.MatchString(source) {
+		return nil, false
+	}
+	forward, ok := sqlDDLDBMateForwardSQL(source, dialect)
 	if !ok {
 		return nil, false
 	}
-	return sqlDDLTokensRaw(forward, dialect)
+	forward, ok = sqlDDLGooseForwardSQL(forward, dialect)
+	if !ok {
+		return nil, false
+	}
+	// Only forward SQL can define schema. Earlier migration-directive checks
+	// deliberately use raw tokenization, so rollback-only executable comments
+	// must not invalidate an otherwise valid forward source.
+	tokens, ok := sqlDDLTokenize(forward, dialect, true)
+	if !ok {
+		return nil, false
+	}
+	if (dialect == "mysql" || dialect == "mariadb") && sqlDDLMySQLUnsupportedCompound(tokens) {
+		return nil, false
+	}
+	return tokens, true
+}
+
+// MySQL/MariaDB compound routine bodies change the meaning of semicolons
+// even without a mysql-client DELIMITER command (for example, when SQL is
+// submitted through a driver). This bounded source-only analyzer does not
+// implement stored-program grammar: reject any routine-definition header or
+// non-transaction BEGIN block before exposing DDL and navigation from tokens.
+//
+// The existing tokenizer has already excluded comments, quoted strings and
+// quoted identifiers; scanning their raw text would wrongly reject ordinary
+// CREATE/ALTER source. A plain BEGIN; or BEGIN WORK; transaction stays valid.
+func sqlDDLMySQLUnsupportedCompound(tokens []sqlDDLToken) bool {
+	inDefinition := false
+	for i, token := range tokens {
+		keyword := token.keyword()
+		if keyword == "BEGIN" {
+			// MySQL BEGIN [WORK]; is a transaction statement. Any other
+			// BEGIN starts an unsupported compound statement/body.
+			if i+1 >= len(tokens) || (tokens[i+1].text != ";" &&
+				!(tokens[i+1].keyword() == "WORK" && i+2 < len(tokens) && tokens[i+2].text == ";")) {
+				return true
+			}
+		}
+		if token.text == ";" {
+			inDefinition = false
+			continue
+		}
+		if keyword == "CREATE" || keyword == "ALTER" {
+			inDefinition = true
+			continue
+		}
+		if !inDefinition {
+			continue
+		}
+		switch keyword {
+		case "PROCEDURE", "FUNCTION", "TRIGGER", "EVENT", "PACKAGE":
+			return true
+		case "TABLE", "VIEW", "INDEX", "DATABASE", "SCHEMA", "SEQUENCE",
+			"USER", "ROLE", "TABLESPACE", "SERVER":
+			// Ordinary object DDL: column names and query expressions must
+			// not be mistaken for unsupported CREATE routine headers.
+			inDefinition = false
+		}
+	}
+	return false
 }
 
 func sqlDDLTokensRaw(source, dialect string) ([]sqlDDLToken, bool) {
+	return sqlDDLTokenize(source, dialect, false)
+}
+
+// MySQL/MariaDB executable comments carry conditional SQL that can change
+// statement grammar. Their effect cannot be inferred without server context.
+// Reject them only in the already-normalized forward SQL, while keeping the
+// same quote/comment scanner for migration-directive recognition.
+func sqlDDLTokenize(source, dialect string, rejectExecutableComments bool) ([]sqlDDLToken, bool) {
 	if len(source) > codeMaxDocumentBytes {
 		return nil, false
 	}
@@ -157,6 +231,11 @@ func sqlDDLTokensRaw(source, dialect string) ([]sqlDDLToken, bool) {
 			advance(end)
 			continue
 		case source[i] == '/' && i+1 < len(source) && source[i+1] == '*':
+			if rejectExecutableComments && mysql &&
+				(strings.HasPrefix(source[i:], "/*!") ||
+					(dialect == "mariadb" && strings.HasPrefix(source[i:], "/*M!"))) {
+				return nil, false
+			}
 			depth, end := 1, i+2
 			for end < len(source) && depth > 0 {
 				if end+1 < len(source) && source[end:end+2] == "/*" && !mysql {
