@@ -4,7 +4,7 @@ AI Server Agent connects an authorized AI client to a real Linux development or 
 
 Regular project work runs as the unprivileged `aiworker` account. Explicitly authorized host administration can use the separate **root-capable** executor. This is intended for a server you control, **not** as a sandbox for mutually untrusted users.
 
-You can connect a compatible client directly; **MCP Gateway is optional** and is not required. ChatGPT has a dedicated setup guide.
+The Agent exposes its MCP tools directly to compatible AI clients. ChatGPT has a dedicated connection guide.
 
 ## Requirements
 

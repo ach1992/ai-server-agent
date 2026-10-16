@@ -8,7 +8,7 @@
 
 AI Server Agent should give an authorized AI client a compact, high-leverage remote development environment on a real Linux development/test server while keeping Git/GitHub as durable project truth.
 
-This entire target loop is a standalone Agent capability. MCP Gateway is an optional future upstream consumer of the same tools, not a source of required development features or a prerequisite for their implementation, direct acceptance or standalone release. Connector readiness must not freeze the Agent's additive tool evolution; prepare reusable bounded contracts and add further integration changes only when evidence requires them.
+This entire development loop is a standalone Agent capability exposed through its own MCP and Executor contracts. No unapproved intermediary is a prerequisite or an active delivery target. Preserve a client-neutral, bounded tool surface; add integration-specific work only after an explicit scope decision backed by a real consumer.
 
 The product is **not** trying to recreate every IDE feature or wrap every developer CLI. It should make the common development loop excellent, keep uncommon work possible through general Linux/CLI/root/PTY capabilities, and stay cheap to extend when a real new need appears.
 
@@ -398,7 +398,7 @@ Technical capability and project/action authorization remain separate.
 
 ## 15. Public API evolution
 
-Published MCP tool names, input schemas, output fields and decision-relevant error semantics are compatibility contracts for direct clients and integrations such as MCP Gateway.
+Published MCP tool names, input schemas, output fields and decision-relevant error semantics are compatibility contracts for clients of the supported MCP interface.
 
 Prefer additive-compatible changes. Material rename/removal/semantic breaks require an explicit deprecation/compatibility or breaking-version boundary.
 

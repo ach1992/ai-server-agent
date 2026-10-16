@@ -195,7 +195,7 @@ The public endpoint remains bearer-authenticated. Treat the bearer credential as
 
 ### MCP credential lifecycle
 
-The Agent keeps a bounded named-principal credential set. `direct/default` is the normal direct-client principal; `mcp-gateway` is an optional separately managed principal for a future Gateway connection and does not make Gateway a runtime dependency. The server derives principal ID/class/name from the matched verifier and attaches it to request context; callers cannot select or override that identity.
+The Agent keeps a bounded named-principal credential set. `direct/default` is the normal direct-client principal. The current binary also recognizes the separately manageable `mcp-gateway` credential identity, but **that identity is not an implemented Gateway connector or a supported connection workflow**; it is not needed for ordinary direct-client setup. The server derives principal ID/class/name from the matched verifier and attaches it to request context; callers cannot select or override that identity.
 
 Use `sudo ai-server-agent-manage credential-status` for non-secret state, `credential-rotate direct-default|mcp-gateway` to issue or rotate a credential, and `credential-revoke direct-default|mcp-gateway` to revoke one. Rotation is immediate after verified service cutover: there is no grace overlap. Revoking the last active credential is refused. Safe uninstall preserves the credential store; update/repair preserve it; purge removes Agent-owned credential state so a later fresh install gets fresh credentials.
 

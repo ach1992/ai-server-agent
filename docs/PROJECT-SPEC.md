@@ -47,9 +47,9 @@ Git/GitHub remain the sources of truth for code, project specifications, unresol
 
 ## 5. Client and Connection Independence
 
-**Direct AI-client connection is a first-class standalone use case.** An intermediary such as MCP Gateway is an optional integration, never a prerequisite for using, developing, releasing, or managing the Agent.
+**Direct MCP client access is a first-class product requirement.** No dedicated upstream-connector implementation or acceptance is in the current Agent scope. An intermediary integration would require a separate explicit Owner decision and must not become a prerequisite for standalone operation.
 
-MCP is the initial common protocol; the core is AI-provider/client neutral. Future provider/protocol adapters should reuse existing Agent capabilities and authorization semantics rather than introduce duplicate execution stacks. Provider compatibility claims require observed client-side evidence.
+MCP is the current common protocol, and the core remains AI-provider/client neutral. Any separately authorized client integration must reuse existing Agent capabilities and authorization semantics rather than introduce a duplicate execution stack. Compatibility claims require observed client-side evidence.
 
 ## 6. Authority and Security Without Artificial Disability
 
