@@ -139,6 +139,11 @@ grep -Fq 'Unknown option' "$TMP/menu.out"
 grep -Fq 'BEFORE_SIMULATED_FAILURE' "$TMP/menu.out"
 grep -Fq 'Action failed (exit 1)' "$TMP/menu.out"
 grep -Fq 'Cancelled; credentials unchanged' "$TMP/menu.out"
+grep -Fq 'Issue/rotate secondary client credential' "$TMP/menu.out"
+if grep -Fq 'Gateway credential' "$TMP/menu.out"; then
+  echo 'Retired Gateway credential appeared in the active operator menu' >&2
+  exit 1
+fi
 grep -Fq 'MENU_EXITED_CLEANLY' "$TMP/menu.out"
 if grep -Eq 'AFTER_SIMULATED_FAILURE|ISSUED_UNEXPECTEDLY|REVOKED_UNEXPECTEDLY|PROFILE_CHANGED_UNEXPECTEDLY|RUNTIME_CHANGED_UNEXPECTEDLY|CLOUDFLARE_CHANGED_UNEXPECTEDLY|CONNECTION_CHANGED_UNEXPECTEDLY|TLS_CHANGED_UNEXPECTEDLY' "$TMP/menu.out"; then
   echo 'Menu leaked a forbidden action or suppressed the failing child errexit' >&2
@@ -304,6 +309,11 @@ set -Eeuo pipefail
 export AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1
 source "$ASA_MANAGE_SOURCE"
 if ui_has_interactive_tty; then echo 'PHANTOM_CONTROLLING_TTY' >&2; exit 1; fi
+[ "$(credential_principal_fields direct-secondary)" = 'direct|direct/secondary' ] || exit 1
+if credential_principal_fields mcp-gateway >/dev/null; then
+  echo 'RETIRED_GATEWAY_PRINCIPAL_REISSUABLE' >&2
+  exit 1
+fi
 for entry in menu connection_menu first_run runtime_menu profile_menu credential_menu; do
   if output="$("$entry" 2>&1)"; then
     printf 'NON_TTY_ENTRYPOINT_ACCEPTED=%s\n' "$entry" >&2
@@ -322,5 +332,31 @@ echo 'NO_TTY_ENTRYPOINTS_AND_CONFIRMATION_REJECTED'
 SH
 ASA_MANAGE_SOURCE="$ROOT/manage.sh" bash "$TMP/no-tty-entrypoints.sh" > "$TMP/no-tty-entrypoints.out" 2>&1
 grep -Fq 'NO_TTY_ENTRYPOINTS_AND_CONFIRMATION_REJECTED' "$TMP/no-tty-entrypoints.out"
+
+# A stored retired Gateway record may still say enabled in the old format,
+# but it cannot authenticate and must not permit revoking the only usable token.
+cat > "$TMP/retired-store.json" <<'JSON'
+{"version":1,"credentials":[{"principal":{"id":"direct-default"},"enabled":true},{"principal":{"id":"mcp-gateway"},"enabled":true}]}
+JSON
+cat > "$TMP/retired-revoke.sh" <<'SH'
+#!/usr/bin/env bash
+set -Eeuo pipefail
+export AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1
+source "$ASA_MANAGE_SOURCE"
+acquire_management_lock(){ :; }
+validate_credential_store_file(){ :; }
+CREDENTIAL_STORE="$ASA_RETIRED_STORE"
+before="$(sha256sum "$CREDENTIAL_STORE" | awk '{print $1}')"
+if result="$(credential_revoke direct-default 2>&1)"; then
+  echo 'REVOKED_ONLY_USABLE_TOKEN_UNEXPECTEDLY' >&2
+  exit 1
+fi
+[[ "$result" == *'Refusing to revoke the last usable MCP credential.'* ]] || {
+  echo 'MISSING_LAST_USABLE_TOKEN_PROTECTION' >&2
+  exit 1
+}
+test "$(sha256sum "$CREDENTIAL_STORE" | awk '{print $1}')" = "$before"
+SH
+ASA_MANAGE_SOURCE="$ROOT/manage.sh" ASA_RETIRED_STORE="$TMP/retired-store.json" bash "$TMP/retired-revoke.sh"
 
 echo 'Operator menu TTY navigation/strict failure/Back/precommit/SIGINT read+confirm/protected commit/one-use FD3/non-TTY entrypoints/reinstall/no-color PASS'

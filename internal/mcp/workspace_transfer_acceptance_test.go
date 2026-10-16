@@ -189,7 +189,7 @@ func runDirectMCPTransferAcceptance(t *testing.T, installedBinary string) {
 		records := make([]credential.Record, 2)
 		principals := []credential.Principal{
 			{ID: "direct-default", Class: "direct", Name: "direct/default"},
-			{ID: "mcp-gateway", Class: "gateway", Name: "mcp-gateway"},
+			{ID: "direct-secondary", Class: "direct", Name: "direct/secondary"},
 		}
 		for i := range tokens {
 			raw := make([]byte, credential.TokenHexLength/2)

@@ -145,14 +145,14 @@ func TestBrowserAuditActionOverrideIsBounded(t *testing.T) {
 	}
 }
 
-func TestAuditCorrelationAcrossDirectAndGatewayPrincipals(t *testing.T) {
+func TestAuditCorrelationAcrossDirectAndSecondaryPrincipals(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "audit.jsonl")
 	s := &Server{audit: audit.New(path)}
 	principals := []struct {
 		id, class, name string
 	}{
 		{id: "direct-default", class: "direct", name: "direct/default"},
-		{id: "mcp-gateway", class: "gateway", name: "mcp-gateway"},
+		{id: "direct-secondary", class: "direct", name: "direct/secondary"},
 	}
 	for i, principal := range principals {
 		req := Request{
@@ -194,7 +194,7 @@ func TestAuditCorrelationAcrossDirectAndGatewayPrincipals(t *testing.T) {
 		}
 		seenPrincipals[event.PrincipalID]++
 	}
-	if seenPrincipals["direct-default"] != 2 || seenPrincipals["mcp-gateway"] != 2 {
+	if seenPrincipals["direct-default"] != 2 || seenPrincipals["direct-secondary"] != 2 {
 		t.Fatalf("principal correlation counts=%v", seenPrincipals)
 	}
 }

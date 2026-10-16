@@ -52,7 +52,7 @@ func TestWorkerStdioSessionLifecycleAndPrincipalIsolation(t *testing.T) {
 		t.Fatalf("unexpected session identity %q", id)
 	}
 	other := owner
-	other.PrincipalID = "mcp-gateway"
+	other.PrincipalID = "direct-secondary"
 	if err := s.sessions.write(other, id, []byte("secret")); !errors.Is(err, errSessionNotFound) {
 		t.Fatalf("different principal unexpectedly wrote to session: %v", err)
 	}

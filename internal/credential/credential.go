@@ -79,7 +79,13 @@ func (s *Store) Validate() error {
 			if rec.Principal.Class != "direct" || rec.Principal.Name != "direct/default" {
 				return fmt.Errorf("MCP principal %q metadata does not match its fixed identity", rec.Principal.ID)
 			}
+		case "direct-secondary":
+			if rec.Principal.Class != "direct" || rec.Principal.Name != "direct/secondary" {
+				return fmt.Errorf("MCP principal %q metadata does not match its fixed identity", rec.Principal.ID)
+			}
 		case "mcp-gateway":
+			// Pre-retirement stores can still contain this reserved identity.
+			// Validate its original metadata but never authorize its bearer.
 			if rec.Principal.Class != "gateway" || rec.Principal.Name != "mcp-gateway" {
 				return fmt.Errorf("MCP principal %q metadata does not match its fixed identity", rec.Principal.ID)
 			}
@@ -113,7 +119,9 @@ func (s *Store) Validate() error {
 			if rec.RevokedAt != "" {
 				return fmt.Errorf("MCP credential %q is both enabled and revoked", rec.Principal.ID)
 			}
-			active++
+			if rec.Principal.ID != "mcp-gateway" {
+				active++
+			}
 		} else if rec.RevokedAt == "" {
 			return fmt.Errorf("disabled MCP credential %q has no revocation timestamp", rec.Principal.ID)
 		}
@@ -161,7 +169,12 @@ func (s *Store) Authenticate(token string) (Principal, bool) {
 		if rec.Enabled && rec.RevokedAt == "" {
 			active = 1
 		}
-		match := cmp & active
+		// A retired Gateway bearer in an older store must never authenticate.
+		allowed := 0
+		if rec.Principal.ID != "mcp-gateway" {
+			allowed = 1
+		}
+		match := cmp & active & allowed
 		matches += match
 		if match == 1 {
 			principal = rec.Principal

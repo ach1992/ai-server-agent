@@ -829,7 +829,7 @@ random_mcp_token(){ od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; printf '\n'; }
 credential_principal_fields(){
   case "$1" in
     direct-default) printf 'direct|direct/default\n' ;;
-    mcp-gateway) printf 'gateway|mcp-gateway\n' ;;
+    direct-secondary) printf 'direct|direct/secondary\n' ;;
     *) return 1 ;;
   esac
 }
@@ -894,7 +894,7 @@ credential_status(){
       "  \(.principal.name)",
       "    ID:      \(.principal.id)",
       "    Class:   \(.principal.class)",
-      "    State:   \(if .enabled then "active" else "revoked" end)",
+      "    State:   \(if .principal.id=="mcp-gateway" then "retired (authentication disabled)" elif .enabled then "active" else "revoked" end)",
       "    Created: \(.created_at)"
     ]
     + (if (.rotated_at // "") != "" then ["    Rotated: \(.rotated_at)"] else [] end)
@@ -925,7 +925,7 @@ credential_issue(){ (
   backup="$(mktemp "$CONTROL_DIR/.mcp-credentials.backup.XXXXXX")"
   cp -a "$CREDENTIAL_STORE" "$backup"
   jq --arg id "$principal" --arg class "$class" --arg name "$name" --arg verifier "$verifier" --arg created "$created" --arg now "$now" --argjson existed "$existed" '
-    .credentials = ([.credentials[] | select(.principal.id != $id)] + [{
+    .credentials = ([.credentials[] | select(.principal.id != $id and ($id != "direct-secondary" or .principal.id != "mcp-gateway"))] + [{
       principal:{id:$id,class:$class,name:$name},
       verifier_algorithm:"sha256-v1",
       verifier:$verifier,
@@ -964,8 +964,8 @@ credential_revoke(){ (
   credential_principal_fields "$principal" >/dev/null || die "Unknown MCP principal: $principal"
   validate_credential_store_file
   jq -e --arg id "$principal" '.credentials[] | select(.principal.id==$id and .enabled==true)' "$CREDENTIAL_STORE" >/dev/null || die "Credential $principal is not active."
-  active="$(jq '[.credentials[] | select(.enabled==true)] | length' "$CREDENTIAL_STORE")"
-  [ "$active" -gt 1 ] || die "Refusing to revoke the last active MCP credential."
+  active="$(jq '[.credentials[] | select(.enabled==true and .principal.id!="mcp-gateway")] | length' "$CREDENTIAL_STORE")"
+  [ "$active" -gt 1 ] || die "Refusing to revoke the last usable MCP credential."
   now="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
   candidate="$(mktemp "$CONFIG_DIR/.mcp-credentials.candidate.XXXXXX")"
   backup="$(mktemp "$CONTROL_DIR/.mcp-credentials.backup.XXXXXX")"
@@ -997,9 +997,9 @@ credential_menu(){
     ui_menu_action credential_status
     ui_section 'Manage credentials'
     ui_option 1 'Issue/rotate direct credential' caution
-    ui_option 2 'Issue/rotate Gateway credential' caution
+    ui_option 2 'Issue/rotate secondary client credential' caution
     ui_option 3 'Revoke direct credential' destructive
-    ui_option 4 'Revoke Gateway credential' destructive
+    ui_option 4 'Revoke secondary client credential' destructive
     ui_option 0 'Back' navigation
     local choice principal action
     if ! ui_read_choice choice 'Choose: '; then
@@ -1010,9 +1010,9 @@ credential_menu(){
       1|2|3|4)
         case "$choice" in
           1) principal=direct-default; action=credential_issue ;;
-          2) principal=mcp-gateway; action=credential_issue ;;
+          2) principal=direct-secondary; action=credential_issue ;;
           3) principal=direct-default; action=credential_revoke ;;
-          4) principal=mcp-gateway; action=credential_revoke ;;
+          4) principal=direct-secondary; action=credential_revoke ;;
         esac
         local effect
         if [ "$action" = credential_revoke ]; then
@@ -2730,7 +2730,7 @@ manage_usage(){
   ui_section 'Update settings'
   ui_wrap '  ' 'profile-set development|validation, profile-label <label>, profile-label-clear'
   ui_wrap '  ' 'runtime-set <key> <integer>, runtime-reset <key>'
-  ui_wrap '  ' 'credential-rotate direct-default|mcp-gateway, credential-revoke direct-default|mcp-gateway'
+  ui_wrap '  ' 'credential-rotate direct-default|direct-secondary, credential-revoke direct-default|direct-secondary'
   ui_section 'Connection and lifecycle'
   ui_wrap '  ' 'configure-cloudflare, configure-local, configure-manual-tls, cloudflare-cleanup'
   ui_wrap '  ' 'update, repair, uninstall, purge'
@@ -2758,8 +2758,8 @@ case "${1:-menu}" in
   chatgpt|chatgpt-setup) chatgpt_setup ;;
   reveal-auth) reveal_auth ;;
   credentials|credential-status) credential_status ;;
-  credential-rotate) [ "$#" -eq 2 ] || die "Usage: ai-server-agent-manage credential-rotate direct-default|mcp-gateway"; credential_issue "$2" ;;
-  credential-revoke) [ "$#" -eq 2 ] || die "Usage: ai-server-agent-manage credential-revoke direct-default|mcp-gateway"; credential_revoke "$2" ;;
+  credential-rotate) [ "$#" -eq 2 ] || die "Usage: ai-server-agent-manage credential-rotate direct-default|direct-secondary"; credential_issue "$2" ;;
+  credential-revoke) [ "$#" -eq 2 ] || die "Usage: ai-server-agent-manage credential-revoke direct-default|direct-secondary"; credential_revoke "$2" ;;
   setup|configure) connection_menu ;;
   configure-cloudflare) configure_cloudflare ;;
   configure-local) configure_local ;;
