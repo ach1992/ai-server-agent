@@ -13,10 +13,13 @@ export AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1
 source "$ASA_SOURCE"
 RUNTIME_BINARY=/bin/true
 CF_TXN_STATE="$ASA_TMP/no-pending-transaction"
+runtime_config_safe(){ :; }
+runtime_binary_safe(){ :; }
+profile_pending_backup(){ :; }
 installed_identity(){ printf 'source|source|0123456789abcdef0123456789abcdef01234567\n'; }
 config_get(){
   case "$1" in
-    environment_profile) printf 'validation\n' ;;
+    environment_profile) printf '%s\n' "${ASA_PURPOSE_PROFILE:-validation}" ;;
     server_label)
       if [ "${ASA_LABEL_WITH_CONTROL:-0}" = 1 ]; then printf 'QA Console\033[31m\033]0;window-title\007\n'; else printf 'QA Console\n'; fi ;;
     listen_address) printf '127.0.0.1:3210\n' ;;
@@ -46,6 +49,7 @@ update_agent(){ printf 'UNSAFE_UPDATE_STARTED\n'; exit 1; }
 repair(){ printf 'UNSAFE_REPAIR_STARTED\n'; exit 1; }
 case "${1:-}" in
   main) menu ;;
+  purpose) profile_menu ;;
   local) configure_local ;;
   cloudflare) configure_cloudflare ;;
   tls) configure_manual_tls ;;
@@ -76,6 +80,29 @@ for width in 40 60; do
   [ -n "$first_rows" ] && [ "$first_rows" -le 24 ] || {
     echo "The first $width-column menu used $first_rows rows in a 24-row terminal" >&2; exit 1
   }
+done
+
+# The third purpose must stay readable and actionable even at 40x24. A
+# verbose role description may hide all choices above the visible PTY frame.
+for width in 40 60; do
+  printf '0\n' | ASA_SOURCE="$ROOT/manage.sh" ASA_TMP="$TMP" ASA_PURPOSE_PROFILE=production \
+    NO_COLOR=1 TERM=dumb COLUMNS="$width" LINES=24 \
+    script -q -e -c "bash '$TMP/fixture.sh' purpose" /dev/null > "$TMP/purpose-$width.out"
+  tr -d '\r' < "$TMP/purpose-$width.out" > "$TMP/purpose-$width.txt"
+  grep -Fq 'Production - ask before changes' "$TMP/purpose-$width.txt" || {
+    echo "Production purpose choice missing at width $width" >&2; exit 1;
+  }
+  grep -Fq 'Advisory only' "$TMP/purpose-$width.txt" || {
+    echo "Production purpose advisory missing at width $width" >&2; exit 1;
+  }
+  first_rows="$(awk '/^AI Server Agent/{seen=1} seen{rows++} /Choose:/ && seen{print rows; exit}' "$TMP/purpose-$width.txt")"
+  [ -n "$first_rows" ] && [ "$first_rows" -le 24 ] || {
+    echo "Production purpose menu uses $first_rows rows at width $width; expected at most 24" >&2
+    exit 1
+  }
+  if awk -v width="$width" 'length($0)>width && $0 !~ /^0$/ {bad=1} END{exit bad?0:1}' "$TMP/purpose-$width.txt"; then
+    echo "Production purpose menu overflowed width $width" >&2; exit 1
+  fi
 done
 
 printf '0\n' | ASA_SOURCE="$ROOT/manage.sh" ASA_TMP="$TMP" TERM=xterm NO_COLOR= COLUMNS=80 LINES=30 \

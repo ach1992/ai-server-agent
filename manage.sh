@@ -650,12 +650,26 @@ profile_show(){
   runtime_binary_safe
   "$RUNTIME_BINARY" -config "$CONFIG_FILE" validate-config >/dev/null || die "Installed Agent rejected current config."
   printf '%sEnvironment purpose%s\n' "$BOLD" "$RESET"
-  printf '  Profile: %s\n' "$(config_get environment_profile)"
-  local label
+  local label profile purpose
+  profile="$(config_get environment_profile)"
+  printf '  Profile: %s\n' "$profile"
   label="$(config_get server_label)"
   printf '  Label:   %s\n' "${label:-(not set)}"
-  ui_wrap '  ' 'Development: code, builds and debugging. Validation: testing, diagnostics and acceptance. Production: live workloads; inspect first and ask for fresh, action-specific consent before every change.'
-  ui_wrap '  ' 'Purpose is AI guidance, not enforced per-action consent or an access-control tier. All authorized tools and Root approval rules remain unchanged. Updating purpose restarts only the Agent; MCP clients may reconnect.'
+  case "$profile" in
+    production) purpose='Production: inspect read-only first. Ask for fresh, action-specific consent before every change; never reuse earlier approval.' ;;
+    validation) purpose='Validation: candidate testing, diagnostics and acceptance.' ;;
+    *) purpose='Development: source editing, builds and debugging.' ;;
+  esac
+  if [ "${UI_COMPACT:-0}" = 1 ]; then
+    # A 40x24 terminal must still show the purpose choices and input prompt.
+    case "$profile" in
+      production) ui_wrap '  ' 'Production: read-only first; ask again before each change. Advisory only.' ;;
+      *) ui_wrap '  ' "$purpose" ;;
+    esac
+  else
+    ui_wrap '  ' "$purpose"
+    ui_wrap '  ' 'Purpose is AI guidance, not enforced per-action consent or an access-control tier. All authorized tools and Root approval rules remain unchanged. Updating purpose restarts only the Agent; MCP clients may reconnect.'
+  fi
   if [ -n "$(profile_pending_backup)" ]; then
     warn "An earlier profile update left a protected rollback snapshot. Reconcile Agent health and config before another change."
   fi
@@ -742,7 +756,7 @@ profile_menu(){
     ui_section 'Change server purpose / label'
     ui_option 1 'Development - build and debug'
     ui_option 2 'Validation - test and accept'
-    ui_option 3 'Production - inspect first; ask before changes'
+    ui_option 3 'Production - ask before changes'
     ui_option 4 'Set server label'
     ui_option 5 'Clear server label' caution
     ui_option 0 'Back' navigation
