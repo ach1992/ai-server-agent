@@ -26,10 +26,10 @@ To install the **latest published immutable Stable**:
 curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | bash
 ```
 
-To install a **specific published Stable**, for example `v0.1.14`:
+To install a **specific published Stable**, for example `v0.1.15`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | bash -s -- v0.1.14
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | bash -s -- v0.1.15
 ```
 
 **Fresh installations only:** both commands reject a machine with Agent-owned
@@ -58,7 +58,7 @@ Although its public **source** comes from reviewed `main`, the Stable bootstrap 
 
 ### Fresh-install baseline and upgrade compatibility
 
-Issue #140's first optional multi-language slice was published starting in immutable Stable `v0.1.13`; `v0.1.14` retains it. Source and isolated-installer tests are **not** evidence that every optional language adapter is installed or that a fresh, occupied-host-independent installation has completed the full direct-client acceptance in [#137](https://github.com/ach1992/ai-server-agent/issues/137) and [#59](https://github.com/ach1992/ai-server-agent/issues/59). These remaining clean-install and extended-recovery tests are separate from publication and ordinary installed smoke.
+Issue #140's first optional multi-language slice was published starting in immutable Stable `v0.1.13` and remains part of later releases. Optional language-adapter readiness must be checked on the **actual installed host**; source tests do not install those dependencies. [#137](https://github.com/ach1992/ai-server-agent/issues/137) and [#59](https://github.com/ach1992/ai-server-agent/issues/59) record the Owner-accepted bounded real-host/client validation, not a claim that every optional adapter or failure case was tested. Additional invasive fresh-host or fault tests are not release prerequisites without a concrete new risk.
 
 Do **not** infer state-preserving migration of a historical `v0.1.12` installation, including credentials, active jobs, Browser profiles or terminals, from a new-baseline clean-install test. Before updating an occupied older host, separately verify backup/recovery and the applicable update procedure. This does not remove backward-compatible MCP names or the Agent's required restart/reconnect/cleanup guarantees within the new baseline. Subsequent baseline upgrades require evidence appropriate to their actual changes.
 
@@ -283,7 +283,7 @@ sudo ai-server-agent-manage uninstall
 sudo ai-server-agent-manage purge
 ```
 
-**Environment purpose profiles:** Development/Validation are included in immutable Stable `v0.1.13` and later; **Production is available only on a later supporting version** (not `v0.1.14`). The three profiles describe code/build/debug work, candidate testing/acceptance, or live workloads with a request for fresh human consent before each change. Production is **guidance only, not enforced read-only access or verified per-action approval**. For `profile-show`, `profile-set`, `profile-label` and `profile-label-clear`, installer options, Agent-only restart/reconnect, and MCP discovery, see [Environment Purpose Profiles](ENVIRONMENT-PROFILES.md). Profiles do not change existing MCP/root/worker permissions or connection mode.
+**Environment purpose profiles:** Development/Validation are included in immutable Stable `v0.1.13` and later; **Production was introduced in immutable Stable `v0.1.15`** (not `v0.1.14`). The three profiles describe code/build/debug work, candidate testing/acceptance, or live workloads with a request for fresh human consent before each change. Production is **guidance only, not enforced read-only access or verified per-action approval**. For `profile-show`, `profile-set`, `profile-label` and `profile-label-clear`, installer options, Agent-only restart/reconnect, and MCP discovery, see [Environment Purpose Profiles](ENVIRONMENT-PROFILES.md). Profiles do not change existing MCP/root/worker permissions or connection mode.
 
 Runtime settings persist in the existing root-managed `/etc/ai-server-agent/config.json`. `runtime-show` lists the effective configured values, safe value ranges and units; `runtime-set` and `runtime-reset` validate with the installed binary **before** updating the config, restart Agent/Executor, verify local health, and restore the prior config on verified restart failure. Run those commands in an independent SSH/operator terminal because restarting the Agent may disconnect an MCP client. No source edit or new release is needed to change supported settings **once this capability has been installed**. A configured value is not guaranteed active until both services restart and health is checked. An invalid value never restarts them. These are per-request/network operational budgets, not a way to disable authentication, bypass approval or transfer an unlimited file in one MCP response. Large authorized files use bounded version-pinned reads and the separate staged worker upload contract; real-client attachment and typed-artifact acceptance remain Issue #99.
 
