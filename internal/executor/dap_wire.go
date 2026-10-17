@@ -64,7 +64,8 @@ type dapState struct {
 	initialized         bool // DAP initialized event: adapter ready for config
 	pendingLaunchSeq    int  // one deferred launch response, bound to its request
 	socketDir           string
-	phpProxy            *phpDBGpProxy // CLI-only verified DBGp Unix peer/proxy; broker owns lifecycle
+	phpProxy            *phpDBGpProxy       // verified DBGp Unix peer/proxy; broker owns lifecycle
+	phpHTTP             *phpHTTPDebugTarget // independently service-owned target; never stopped by DAP
 }
 
 func dapFrame(conn net.Conn, obj any) error {
@@ -137,7 +138,9 @@ func (d *dapState) acceptEvent(packet dapPacket) {
 	if packet.Event == "initialized" {
 		d.initialized = true
 	}
-	if packet.Event == "process" && d.pinError == "" {
+	if packet.Event == "process" && d.pinError == "" && d.phpHTTP == nil {
+		// Service-owned PHP identity is proven from the original DBGp
+		// kernel peer, NOT from an untrusted DAP process notification.
 		if err := d.pinDebuggeeProcess(packet.Body); err != nil {
 			d.pinError = err.Error()
 			d.stage = "failed"
