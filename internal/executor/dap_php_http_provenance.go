@@ -169,17 +169,35 @@ func (p *phpHTTPDebugTarget) verifyPHPIdentity() error {
 		return errors.New("PHP HTTP pinned service and interpreter identity missing")
 	}
 	p.mu.Lock()
-	service, phpPin := p.service, p.phpPin
-	p.mu.Unlock()
-	if service == nil || service.pidfd == nil || phpPin == nil {
+	if p.service == nil || p.service.pidfd == nil || p.phpPin == nil {
+		p.mu.Unlock()
 		return errors.New("PHP HTTP pinned service and interpreter identity missing")
 	}
-	if unix.PidfdSendSignal(int(service.pidfd.Fd()), 0, nil, 0) != nil ||
-		unix.PidfdSendSignal(int(phpPin.Fd()), 0, nil, 0) != nil {
+	// Retain stable, independent fd references while the session broker
+	// may concurrently retire the original read-only pins. An unlocked
+	// File.Fd() could otherwise be closed and reused during verification.
+	serviceFD, serviceErr := unix.Dup(int(p.service.pidfd.Fd()))
+	phpFD := -1
+	var phpErr error
+	if serviceErr == nil {
+		phpFD, phpErr = unix.Dup(int(p.phpPin.Fd()))
+	}
+	unit := p.service.unit
+	p.mu.Unlock()
+	if serviceErr != nil {
+		return fmt.Errorf("PHP HTTP service pin duplication failed: %w", serviceErr)
+	}
+	defer unix.Close(serviceFD)
+	if phpErr != nil {
+		return fmt.Errorf("PHP HTTP process pin duplication failed: %w", phpErr)
+	}
+	defer unix.Close(phpFD)
+	if unix.PidfdSendSignal(serviceFD, 0, nil, 0) != nil ||
+		unix.PidfdSendSignal(phpFD, 0, nil, 0) != nil {
 		return errors.New("PHP HTTP original service or PHP process no longer live")
 	}
 	group, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", p.phpPID))
-	if err != nil || strings.TrimSpace(string(group)) != "0::"+service.unit.cgroup {
+	if err != nil || strings.TrimSpace(string(group)) != "0::"+unit.cgroup {
 		return errors.New("PHP HTTP process escaped the exact service cgroup")
 	}
 	proc, err := os.Stat(fmt.Sprintf("/proc/%d/exe", p.phpPID))

@@ -55,7 +55,36 @@ func TestApprovedRootPHPHTTPServiceOwnedDAP(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Register cleanup BEFORE systemd-run. A failed/ambiguous launch reply
+	// can still have created a transient service; never erase its workspace
+	// while its original unit may be running.
+	unitID := ""
+	launchAttempted := false
 	t.Cleanup(func() {
+		reconciled := !launchAttempted
+		if launchAttempted {
+			exists, lookupErr := jobUnitExists(unitID)
+			if lookupErr != nil {
+				t.Errorf("isolated PHP HTTP unit existence unverified: %v", lookupErr)
+			} else {
+				if exists {
+					cmd := exec.Command("/usr/bin/systemctl", "stop", "ai-job-"+unitID+".service")
+					if output, stopErr := cmd.CombinedOutput(); stopErr != nil {
+						t.Errorf("isolated PHP HTTP unit stop unverified: %v %.300s", stopErr, output)
+					}
+				}
+				active, activeErr := jobUnitActive(unitID)
+				if activeErr == nil && !active {
+					reconciled = true
+				} else {
+					t.Errorf("isolated PHP HTTP unit still active or unverified: %v active=%t", activeErr, active)
+				}
+			}
+		}
+		if !reconciled {
+			t.Errorf("preserving task-owned PHP HTTP fixture for reconciliation at %s", base)
+			return
+		}
 		if err := os.RemoveAll(base); err != nil {
 			t.Errorf("test-owned isolated scratch cleanup: %v", err)
 		}
@@ -123,6 +152,7 @@ func TestApprovedRootPHPHTTPServiceOwnedDAP(t *testing.T) {
 	if exists, e := jobUnitExists(jobID); e != nil || exists {
 		t.Fatalf("isolated service ID collision: %v %t", e, exists)
 	}
+	unitID = jobID
 	owner := Request{PrincipalID: "php-http-root-e2e", PrincipalClass: "direct", Workspace: workspace, JobID: jobID}
 	claim := jobClaim{Version: 1, JobID: jobID, State: "started", Kind: "service",
 		PrincipalID: owner.PrincipalID, PrincipalClass: owner.PrincipalClass,
@@ -140,19 +170,11 @@ func TestApprovedRootPHPHTTPServiceOwnedDAP(t *testing.T) {
 		"ASA_PHP_HTTP_FIXTURE_SOCKET="+socket, "ASA_PHP_HTTP_FIXTURE_PHP="+php,
 		"ASA_PHP_HTTP_FIXTURE_MODULE="+xdebug,
 		workerTest, "-test.run=^TestPHPHTTPServiceWorkerFixture$", "-test.timeout=90s")
+	launchAttempted = true
 	out, err := command.CombinedOutput()
 	if err != nil {
-		t.Fatalf("isolated worker unit start: %v %.500s", err, out)
+		t.Fatalf("isolated worker unit start outcome uncertain; cleanup reconciles exact unit: %v %.500s", err, out)
 	}
-	t.Cleanup(func() {
-		stop := exec.Command("/usr/bin/systemctl", "stop", "ai-job-"+jobID+".service")
-		if out, err := stop.CombinedOutput(); err != nil {
-			t.Errorf("private unit stop uncertain: %v %.300s", err, out)
-		}
-		if active, err := jobUnitActive(jobID); err != nil || active {
-			t.Errorf("private unit cleanup unverified: %v %t", err, active)
-		}
-	})
 	client := &http.Client{Timeout: 500 * time.Millisecond}
 	endpoint := fmt.Sprintf("http://127.0.0.1:%d/index.php", port)
 	ok := false
