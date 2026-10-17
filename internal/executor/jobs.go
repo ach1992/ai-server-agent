@@ -2,6 +2,7 @@ package executor
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
@@ -32,6 +33,11 @@ const (
 	jobLogHeaderSize                  = 32
 	maxOperationIDBytes               = 128
 	systemdOutputLimit                = 64 << 10
+	jobSystemdProbeTimeout            = 4 * time.Second
+	jobSystemdLaunchTimeout           = 25 * time.Second
+	jobSystemdStopTimeout             = 25 * time.Second
+	jobStateLockTimeout               = 5 * time.Second
+	jobSystemdWaitDelay               = 750 * time.Millisecond
 	jobRunnerFailureExit              = 125
 	jobStateOverheadBytes       int64 = 64 << 20
 	lifecycleManagementLockPath       = "/run/lock/ai-server-agent/management.lock"
@@ -40,6 +46,57 @@ const (
 var jobLogMagic = [8]byte{'A', 'I', 'S', 'A', 'J', 'L', '0', '1'}
 
 const jobStatusUnknown = "unknown"
+const jobStatusStopped = "stopped"
+
+// A stalled systemd operation must not hold jobsMu indefinitely. Keep
+// the synchronization needed for protected claims and runner status, but
+// give every caller a bounded, retryable path when another Job is busy.
+func (s *Server) lockJobState(parent context.Context) error {
+	ctx, cancel := context.WithTimeout(parent, jobStateLockTimeout)
+	defer cancel()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if s.jobsMu.TryLock() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tick.C:
+		}
+	}
+}
+
+func jobStateBusyResponse(operation, jobID string, err error) Response {
+	return Response{
+		Error:      fmt.Sprintf("%s could not acquire Job state lock within %s: %v; retry after the other operation finishes", operation, jobStateLockTimeout, err),
+		ReasonCode: "job_state_unavailable", ErrorCode: "job_state_unavailable",
+		ErrorClass: "state", Status: "busy", Retryable: true, JobID: jobID,
+	}
+}
+
+// Systemd calls share a bounded collector and independent deadlines. A
+// disconnected client does not cancel durable launch/stop reconciliation.
+func runBoundedJobSystemd(parent context.Context, timeout time.Duration, program string, args ...string) (boundedOutputResult, error) {
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	out := newBoundedOutputCollector(systemdOutputLimit)
+	cmd := exec.CommandContext(ctx, program, args...)
+	// A child inheriting stdout must not keep Cmd.Wait alive after the
+	// systemd process exits or is killed by the context deadline.
+	cmd.WaitDelay = jobSystemdWaitDelay
+	cmd.Stdout, cmd.Stderr = out, out
+	err := cmd.Run()
+	result := out.Result()
+	if ctx.Err() != nil {
+		return result, fmt.Errorf("%s operation exceeded its deadline: %w", program, ctx.Err())
+	}
+	return result, err
+}
 
 type jobPaths struct {
 	command string
@@ -60,6 +117,8 @@ type jobClaim struct {
 	Workspace      string `json:"workspace,omitempty"`
 	Kind           string `json:"kind,omitempty"`
 	Label          string `json:"label,omitempty"`
+	// Root Executor proof; never sourced from a worker-writable .status file.
+	VerifiedStopped bool `json:"verified_stopped,omitempty"`
 }
 
 type jobLogHeader struct {
@@ -129,7 +188,9 @@ func (s *Server) startJobBounded(req Request) (resp Response) {
 		defer releasePersistentJobAdmissionLock(lifecycleLock)
 	}
 
-	s.jobsMu.Lock()
+	if err := s.lockJobState(context.Background()); err != nil {
+		return jobStateBusyResponse("start_job", "", err)
+	}
 	defer s.jobsMu.Unlock()
 
 	if req.OperationID == "" {
@@ -232,6 +293,9 @@ func (s *Server) startJobBounded(req Request) (resp Response) {
 		return jobStateError("job_prepare_failed", err)
 	}
 
+	// Persist before calling systemd-run: from this point an external
+	// dispatch may have happened, even if the unit has not appeared yet.
+	// Only a still-claimed record proves that no launch was attempted.
 	claim.State = "launching"
 	if claimPath != "" {
 		if err := updateJobClaim(claimPath, claim); err != nil {
@@ -354,47 +418,39 @@ func (s *Server) resumeClaimedJob(req Request, jobsDir, claimPath string, claim 
 		return resp
 	}
 
-	if claim.State == "claimed" {
-		// The durable claim is written before any launch attempt. If the
-		// executor crashed while preparing the protected handoff, no unit could
-		// have been launched yet. Remove partial handoff state now; rebuilding
-		// happens only after the same resource-admission checks as a new job.
-		cleanupJobPaths(paths)
-	} else {
-		if _, err := os.Lstat(paths.command); err != nil {
-			if os.IsNotExist(err) {
-				claim.State = "failed"
-				_ = updateJobClaim(claimPath, claim)
-				return Response{
-					Error:            "persistent-job launch state was interrupted after launch became possible; completion cannot be proven; use a new operation_id to retry",
-					ReasonCode:       "unknown_completion",
-					ErrorCode:        "unknown_completion",
-					ErrorClass:       "state",
-					JobID:            claim.JobID,
-					IdempotentReplay: true,
-				}
-			}
-			return jobStateError("job_state_unavailable", err)
-		}
+	// "launching" was durably committed before systemd-run was invoked.
+	// A lost/timed-out reply or Executor restart cannot establish non-delivery
+	// merely from a missing transient unit or started marker. Never submit a
+	// second launch for the same operation_id, including legacy launching
+	// claims created before this no-blind-replay correction.
+	if claim.State == "launching" {
+		resp := unknownJobLaunchResponse(claim.JobID,
+			"persistent job launch may have reached systemd but execution is not proven; inspect the original job_id; the original operation_id cannot be automatically re-dispatched")
+		resp.IdempotentReplay = true
+		return resp
 	}
 
+	// Only "claimed" proves systemd-run was never invoked. Safely rebuild
+	// any partial handoff before rechecking resource admission.
+	cleanupJobPaths(paths)
 	if blocked := persistentJobAdmissionResponseWithLimit(jobsDir, s.persistentTaskCapacity(), kind); blocked != nil {
 		blocked.JobID = claim.JobID
 		blocked.IdempotentReplay = true
 		return *blocked
 	}
 
-	if claim.State == "claimed" {
-		if err := s.prepareJobFiles(paths, req); err != nil {
-			claim.State = "failed"
-			_ = updateJobClaim(claimPath, claim)
-			return jobStateError("job_prepare_failed", err)
-		}
-		claim.State = "launching"
-		if err := updateJobClaim(claimPath, claim); err != nil {
-			cleanupJobPaths(paths)
-			return jobStateError("job_state_unavailable", err)
-		}
+	if err := s.prepareJobFiles(paths, req); err != nil {
+		claim.State = "failed"
+		_ = updateJobClaim(claimPath, claim)
+		return jobStateError("job_prepare_failed", err)
+	}
+	// The durable transition is the one-way external-dispatch boundary.
+	// A crash before this write remains safely retryable; after it,
+	// uncertain delivery is never blindly retried.
+	claim.State = "launching"
+	if err := updateJobClaim(claimPath, claim); err != nil {
+		cleanupJobPaths(paths)
+		return jobStateError("job_state_unavailable", err)
 	}
 
 	resp := s.launchPreparedJob(req, paths, claim.JobID)
@@ -415,6 +471,10 @@ func (s *Server) resumeClaimedJob(req Request, jobsDir, claimPath string, claim 
 }
 
 func (s *Server) launchPreparedJob(req Request, paths jobPaths, id string) Response {
+	return s.launchPreparedJobWithTimeout(req, paths, id, jobSystemdLaunchTimeout)
+}
+
+func (s *Server) launchPreparedJobWithTimeout(req Request, paths jobPaths, id string, timeout time.Duration) Response {
 	home := filepath.Join(s.cfg.StateDir, "worker-home")
 	workDir := req.Workspace
 	if req.Root {
@@ -447,12 +507,7 @@ func (s *Server) launchPreparedJob(req Request, paths jobPaths, id string) Respo
 		"--started-file", paths.started,
 	)
 
-	out := newBoundedOutputCollector(systemdOutputLimit)
-	cmd := exec.Command("systemd-run", args...)
-	cmd.Stdout = out
-	cmd.Stderr = out
-	err = cmd.Run()
-	result := out.Result()
+	result, err := runBoundedJobSystemd(context.Background(), timeout, "systemd-run", args...)
 	if err != nil {
 		active, activeErr := jobUnitActive(id)
 		if activeErr != nil {
@@ -509,6 +564,14 @@ func (s *Server) launchPreparedJob(req Request, paths jobPaths, id string) Respo
 			return resp
 		}
 
+		// A timed-out systemd-run may have reached PID1 before its reply was
+		// lost. Preserve the protected launching claim and handoff rather
+		// than treating the absence of immediate unit evidence as failure.
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, exec.ErrWaitDelay) {
+			resp := unknownJobLaunchResponse(id, "systemd-run exceeded its process or output deadline; launch outcome remains uncertain; reconcile the original operation_id before retrying")
+			applyOutputResult(&resp, result)
+			return resp
+		}
 		if cleanupErr := removeTerminalCommandHandoff(paths.command); cleanupErr != nil {
 			resp := jobStateError("job_state_unavailable", cleanupErr)
 			resp.JobID = id
@@ -742,6 +805,67 @@ func updateJobClaim(path string, claim jobClaim) error {
 	return os.Rename(tmpName, path)
 }
 
+// Locate root-owned recovery proof using the existing protected claim store.
+// A worker-controlled status-file string is never affirmative stop evidence.
+func findJobClaimForID(dir, id string) (jobClaim, string, bool, error) {
+	if err := trustedDir(dir); err != nil {
+		if os.IsNotExist(err) {
+			return jobClaim{}, "", false, nil
+		}
+		return jobClaim{}, "", false, err
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return jobClaim{}, "", false, err
+	}
+	if len(entries) > maxPersistentJobClaims+maxFailedJobClaims {
+		return jobClaim{}, "", false, errors.New("job claim directory exceeds bounded recovery capacity")
+	}
+	var match jobClaim
+	var matchPath string
+	for _, entry := range entries {
+		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
+			continue
+		}
+		path := filepath.Join(dir, entry.Name())
+		claim, found, err := readJobClaim(path)
+		if err != nil {
+			return jobClaim{}, "", false, err
+		}
+		if !found || claim.JobID != id {
+			continue
+		}
+		if matchPath != "" {
+			return jobClaim{}, "", false, errors.New("ambiguous duplicate protected claims for job")
+		}
+		match, matchPath = claim, path
+	}
+	return match, matchPath, matchPath != "", nil
+}
+
+// Only the root Executor calls this after verifying exact-unit inactivity.
+// Atomic claim replacement keeps the proof recoverable across Executor restarts.
+func (s *Server) recordVerifiedJobStop(id string, hasStatusRecord bool) error {
+	claim, path, found, err := findJobClaimForID(filepath.Join(s.cfg.StateDir, "jobs", "claims"), id)
+	if err != nil {
+		return err
+	}
+	if !found {
+		// Legacy jobs without any state record retain their old stop
+		// acknowledgement. Never silently lose the mandatory protected proof
+		// for a newly-recorded job.
+		if hasStatusRecord {
+			return errors.New("protected job claim missing for existing status record")
+		}
+		return nil
+	}
+	if claim.VerifiedStopped {
+		return nil
+	}
+	claim.VerifiedStopped = true
+	return updateJobClaim(path, claim)
+}
+
 func readJobClaim(path string) (jobClaim, bool, error) {
 	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
@@ -795,14 +919,10 @@ func (s *Server) failJobClaim(path string, claim *jobClaim) {
 }
 
 func activeAgentJobCount() (int, error) {
-	out := newBoundedOutputCollector(systemdOutputLimit)
-	cmd := exec.Command("systemctl", "list-units", "--type=service", "--state=activating,active,deactivating,reloading", "--no-legend", "--no-pager", "ai-job-*.service")
-	cmd.Stdout = out
-	cmd.Stderr = out
-	if err := cmd.Run(); err != nil {
-		return 0, fmt.Errorf("list persistent jobs: %w: %s", err, out.Result().Output)
+	result, err := runBoundedJobSystemd(context.Background(), jobSystemdProbeTimeout, "systemctl", "list-units", "--type=service", "--state=activating,active,deactivating,reloading", "--no-legend", "--no-pager", "ai-job-*.service")
+	if err != nil {
+		return 0, fmt.Errorf("list persistent jobs: %w: %s", err, result.Output)
 	}
-	result := out.Result()
 	if result.Truncated {
 		return 0, errors.New("persistent job listing exceeded its bounded response")
 	}
@@ -816,15 +936,11 @@ func activeAgentJobCount() (int, error) {
 }
 
 func jobUnitExists(id string) (bool, error) {
-	out := newBoundedOutputCollector(systemdOutputLimit)
-	cmd := exec.Command("systemctl", "show", "ai-job-"+id, "--property=LoadState", "--value", "--no-pager")
-	cmd.Stdout = out
-	cmd.Stderr = out
-	err := cmd.Run()
-	result := out.Result()
+	result, err := runBoundedJobSystemd(context.Background(), jobSystemdProbeTimeout, "systemctl", "show", "ai-job-"+id, "--property=LoadState", "--value", "--no-pager")
 	value := strings.TrimSpace(result.Output)
 	if err != nil {
-		if strings.Contains(value, "not-found") || strings.Contains(value, "could not be found") {
+		if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, exec.ErrWaitDelay) &&
+			(strings.Contains(value, "not-found") || strings.Contains(value, "could not be found")) {
 			return false, nil
 		}
 		return false, fmt.Errorf("inspect persistent job unit: %w: %s", err, value)
@@ -833,14 +949,14 @@ func jobUnitExists(id string) (bool, error) {
 }
 
 func jobUnitActive(id string) (bool, error) {
-	out := newBoundedOutputCollector(systemdOutputLimit)
-	cmd := exec.Command("systemctl", "list-units", "--type=service", "--state=activating,active,deactivating,reloading", "--no-legend", "--no-pager", "ai-job-"+id+".service")
-	cmd.Stdout = out
-	cmd.Stderr = out
-	if err := cmd.Run(); err != nil {
-		return false, fmt.Errorf("inspect persistent job activity: %w: %s", err, out.Result().Output)
+	return jobUnitActiveContext(context.Background(), id)
+}
+
+func jobUnitActiveContext(parent context.Context, id string) (bool, error) {
+	result, err := runBoundedJobSystemd(parent, jobSystemdProbeTimeout, "systemctl", "list-units", "--type=service", "--state=activating,active,deactivating,reloading", "--no-legend", "--no-pager", "ai-job-"+id+".service")
+	if err != nil {
+		return false, fmt.Errorf("inspect persistent job activity: %w: %s", err, result.Output)
 	}
-	result := out.Result()
 	if result.Truncated {
 		return false, errors.New("persistent job activity response exceeded its bounded limit")
 	}
@@ -936,9 +1052,16 @@ func removeTerminalCommandHandoff(path string) error {
 	return nil
 }
 
+func verifiedJobStopResponse(jobID string) Response {
+	const detail = "stop verified; command exit code unavailable"
+	return Response{OK: true, Status: "stopped", JobID: jobID, ExitCode: -1,
+		Output: detail, OutputEncoding: "utf-8",
+		BytesSeen: int64(len(detail)), BytesReturned: int64(len(detail))}
+}
+
 func terminalJobResponse(status, jobID string) Response {
-	if status == jobStatusUnknown {
-		return unknownJobLaunchResponse(jobID, "persistent job ended without a durable exit status; completion cannot be proven")
+	if status == jobStatusUnknown || status == jobStatusStopped {
+		return unknownJobLaunchResponse(jobID, "persistent job ended without a trusted terminal exit status; completion cannot be proven")
 	}
 	code, err := strconv.Atoi(status)
 	if err != nil {
@@ -1101,7 +1224,7 @@ func (s *Server) cleanupCompletedJobArtifacts(jobsDir, claimsDir string) error {
 				return err
 			}
 		}
-		if status != jobStatusUnknown {
+		if status != jobStatusUnknown && status != jobStatusStopped {
 			if _, err := strconv.Atoi(status); err != nil {
 				return fmt.Errorf("invalid job status file: %s", paths.status)
 			}
@@ -1126,15 +1249,22 @@ func (s *Server) cleanupCompletedJobArtifacts(jobsDir, claimsDir string) error {
 	return nil
 }
 
+// Terminal status is numeric runner exit evidence. The affirmative stop is
+// separately recorded in the protected, atomically replaced Executor claim.
 func (s *Server) jobTerminalReplayResponse(statusPath, jobID string) (Response, bool) {
 	status, _, err := s.readJobStatusValue(statusPath)
-	if err != nil {
-		if os.IsNotExist(err) {
-			return Response{}, false
-		}
+	if err != nil && !os.IsNotExist(err) {
 		return jobStateError("job_status_unavailable", err), true
 	}
-	if status == "" {
+	verified := false
+	if status == "" || status == jobStatusUnknown || status == jobStatusStopped {
+		claim, _, found, claimErr := findJobClaimForID(filepath.Join(s.cfg.StateDir, "jobs", "claims"), jobID)
+		if claimErr != nil {
+			return jobStateError("job_status_unavailable", claimErr), true
+		}
+		verified = found && claim.VerifiedStopped
+	}
+	if status == "" && !verified {
 		return Response{}, false
 	}
 	active, err := jobUnitActive(jobID)
@@ -1148,6 +1278,15 @@ func (s *Server) jobTerminalReplayResponse(statusPath, jobID string) (Response, 
 	if err := removeTerminalCommandHandoff(commandPath); err != nil {
 		return jobStateError("job_status_unavailable", err), true
 	}
+	if status != "" && status != jobStatusUnknown && status != jobStatusStopped {
+		return terminalJobResponse(status, jobID), true
+	}
+	if verified {
+		return verifiedJobStopResponse(jobID), true
+	}
+	if status == jobStatusStopped {
+		return unknownJobLaunchResponse(jobID, "worker job status cannot prove a verified stop"), true
+	}
 	return terminalJobResponse(status, jobID), true
 }
 
@@ -1157,6 +1296,12 @@ func (s *Server) readJobStatusValue(path string) (string, time.Time, error) {
 		return "", time.Time{}, err
 	}
 	defer f.Close()
+	// Coordinate readers with the runner's numeric exit writer and the
+	// unknown-status reconciler on the same status inode.
+	if err := lockJobStatusFile(f, syscall.LOCK_SH); err != nil {
+		return "", time.Time{}, err
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	b, err := io.ReadAll(io.LimitReader(f, 65))
 	if err != nil {
 		return "", time.Time{}, err
@@ -1169,7 +1314,7 @@ func (s *Server) readJobStatusValue(path string) (string, time.Time, error) {
 		return "", time.Time{}, err
 	}
 	status := strings.TrimSpace(string(b))
-	if status != "" && status != jobStatusUnknown {
+	if status != "" && status != jobStatusUnknown && status != jobStatusStopped {
 		if _, err := strconv.Atoi(status); err != nil {
 			return "", time.Time{}, fmt.Errorf("invalid job status file: %s", path)
 		}
@@ -1203,6 +1348,27 @@ func (s *Server) jobStarted(path string) (bool, error) {
 	return true, nil
 }
 
+// Unknown reconciliation never overwrites numeric runner exit evidence.
+// Verified stop proof resides in the root claim, not this worker-owned file.
+// A worker can retain a file lock. Bound each privilege-crossing wait so
+// status inspection and reconciliation cannot hang the root Executor.
+func lockJobStatusFile(f *os.File, mode int) error {
+	deadline := time.Now().Add(750 * time.Millisecond)
+	for {
+		err := syscall.Flock(int(f.Fd()), mode|syscall.LOCK_NB)
+		if err == nil {
+			return nil
+		}
+		if !errors.Is(err, syscall.EWOULDBLOCK) && !errors.Is(err, syscall.EAGAIN) {
+			return err
+		}
+		if time.Now().After(deadline) {
+			return errors.New("job status file is busy; retry after the writer finishes")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
 func (s *Server) markJobStatusUnknownIfEmpty(path string) error {
 	f, err := os.OpenFile(path, os.O_RDWR|syscall.O_NOFOLLOW, 0)
 	if err != nil {
@@ -1217,6 +1383,10 @@ func (s *Server) markJobStatusUnknownIfEmpty(path string) error {
 	if !fi.Mode().IsRegular() || !ok || (st.Uid != 0 && st.Uid != s.workerUID) || fi.Mode().Perm()&0002 != 0 {
 		return fmt.Errorf("job status file has unsafe ownership or mode: %s", path)
 	}
+	if err := lockJobStatusFile(f, syscall.LOCK_EX); err != nil {
+		return err
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
 	b, err := io.ReadAll(io.LimitReader(f, 65))
 	if err != nil {
 		return err
@@ -1224,15 +1394,11 @@ func (s *Server) markJobStatusUnknownIfEmpty(path string) error {
 	if len(b) > 64 {
 		return fmt.Errorf("job status file exceeds limit: %s", path)
 	}
-	status := strings.TrimSpace(string(b))
-	if status != "" {
-		if status == jobStatusUnknown {
-			return nil
-		}
-		if _, err := strconv.Atoi(status); err != nil {
-			return fmt.Errorf("invalid job status file: %s", path)
-		}
+	if strings.TrimSpace(string(b)) != "" {
 		return nil
+	}
+	if s.jobUnknownBeforeWriteTestHook != nil {
+		s.jobUnknownBeforeWriteTestHook()
 	}
 	if err := f.Truncate(0); err != nil {
 		return err
@@ -1626,11 +1792,21 @@ func writeJobMarker(path string) error {
 }
 
 func writeJobStatus(path string, code int) error {
-	f, err := os.OpenFile(path, os.O_WRONLY|os.O_TRUNC|syscall.O_NOFOLLOW, 0)
+	f, err := os.OpenFile(path, os.O_WRONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
+	if err := lockJobStatusFile(f, syscall.LOCK_EX); err != nil {
+		return err
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	if err := f.Truncate(0); err != nil {
+		return err
+	}
+	if _, err := f.Seek(0, io.SeekStart); err != nil {
+		return err
+	}
 	if _, err := fmt.Fprintf(f, "%d\n", code); err != nil {
 		return err
 	}

@@ -8,10 +8,11 @@ import (
 	"time"
 )
 
-// cleanupStalePrelaunchClaims retires crash-window launch state after the
-// executor's broad connection deadline has elapsed. Active/completed execution
-// evidence always wins; only claims for which execution cannot have progressed
-// are failed and their protected handoff files removed.
+// cleanupStalePrelaunchClaims retires only demonstrably unsubmitted claims
+// after the executor's broad connection deadline. A "launching" record
+// precedes an external systemd-run dispatch; missing current unit evidence
+// cannot prove that its request never reached systemd. Preserve that claim
+// and handoff on uncertainty, even after this retention deadline.
 func (s *Server) cleanupStalePrelaunchClaims(jobsDir, claimsDir string, now time.Time) error {
 	entries, err := os.ReadDir(claimsDir)
 	if err != nil {
@@ -58,6 +59,11 @@ func (s *Server) cleanupStalePrelaunchClaims(jobsDir, claimsDir string, now time
 					return err
 				}
 			}
+			continue
+		}
+		if claim.State == "launching" {
+			// Not seeing a collected/transient unit is not affirmative proof
+			// that an attempted launch had no side effects.
 			continue
 		}
 		if err := removeJobPaths(paths); err != nil {

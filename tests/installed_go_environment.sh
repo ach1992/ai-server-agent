@@ -3,6 +3,9 @@
 # Run ONLY on a disposable CI/test installation with an already authenticated
 # direct MCP bearer supplied on stdin. Never invoke on occupied Agent hosts.
 set -Eeuo pipefail
+# Trace nested CI acceptance failures without printing bearer or responses.
+phase=preflight
+trap 'rc=$?; printf "INSTALLED_GO_PROBE_FAILED phase=%s line=%s rc=%s\n" "$phase" "$LINENO" "$rc" >&2' ERR
 
 [ "$(id -u)" -ne 0 ] || { echo "run this test as the disposable runner, not root" >&2; exit 1; }
 command -v curl >/dev/null && command -v jq >/dev/null && command -v sudo >/dev/null
@@ -17,6 +20,7 @@ sudo systemctl is-active --quiet ai-server-agent-executor.service
 IFS= read -r bearer
 [[ "$bearer" =~ ^[0-9a-f]{64}$ ]] || { echo 'invalid CI-only MCP bearer' >&2; exit 1; }
 
+phase=trusted-go-check
 # GitHub's setup-go binary normally lives outside the Agent's trusted system
 # search paths. Only on this disposable runner, provision the actual Go binary
 # into a root-owned, production-discoverable path if neither is occupied.
@@ -38,6 +42,7 @@ for candidate in /usr/local/bin/go /usr/bin/go; do
 done
 [ "$go_available" = true ] || { echo 'no trusted Go executable available for installed probe' >&2; exit 1; }
 
+phase=fixture
 fixture="$(sudo mktemp -d /srv/ai-workspace/ci-installed-go-probe.XXXXXXXX)"
 scratch="$(mktemp -d)"
 chmod 0700 "$scratch"
@@ -70,9 +75,11 @@ find_probes(){
   sudo find /tmp /var/tmp -mindepth 1 -maxdepth 2 -type d \
     -name 'ai-server-agent-env-probe-*' -print | LC_ALL=C sort
 }
+phase=probe-baseline
 find_probes > "$scratch/before"
 # Exercise the same initialize handshake as a real MCP client; never use a
 # fabricated executor-only shortcut to bypass bearer and transport checks.
+phase=initialize
 initialize='{"jsonrpc":"2.0","id":0,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"ci-installed-go-probe","version":"1"}}}'
 init_status="$(printf 'header = "Authorization: Bearer %s"\n' "$bearer" |
   curl --fail-with-body -sS --max-time 20 --config - \
@@ -86,6 +93,7 @@ init_status="$(printf 'header = "Authorization: Bearer %s"\n' "$bearer" |
     echo 'installed direct MCP initialize failed' >&2
     exit 1
   }
+phase=repository-environment
 for attempt in 1 2 3 4 5 6; do
   body="$(jq -cn --argjson id "$attempt" --arg path "$fixture" \
     '{jsonrpc:"2.0",id:$id,method:"tools/call",params:{name:"repository_environment",arguments:{path:$path}}}')"
@@ -117,6 +125,7 @@ for attempt in 1 2 3 4 5 6; do
     exit 1
   }
 done
+phase=delayed-probe-check
 for delay in 1 3; do
   sleep "$delay"
   find_probes > "$scratch/after"
@@ -127,4 +136,5 @@ for delay in 1 3; do
 done
 sudo systemctl is-active --quiet ai-server-agent.service
 sudo systemctl is-active --quiet ai-server-agent-executor.service
+phase=final-health
 printf 'INSTALLED_GO_ENVIRONMENT_MCP_NO_PROBE_LEAK_PASS calls=6 delayed_seconds=4\n'

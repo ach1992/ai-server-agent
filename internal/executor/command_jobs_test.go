@@ -589,7 +589,20 @@ func TestPersistentServiceClaimReplayUsesServiceCapacity(t *testing.T) {
 				if err != nil || !found {
 					t.Fatalf("read replay claim: found=%v err=%v", found, err)
 				}
-				if tc.wantOK {
+				if claimState == "launching" {
+					// A launching claim may already have been dispatched.
+					// Even when capacity exists it must never auto-resend.
+					if resp.OK || resp.ErrorCode != "unknown_completion" || resp.Status != "unknown" ||
+						!resp.IdempotentReplay || resp.JobID != claim.JobID || recovered.State != "launching" {
+						t.Fatalf("uncertain service launch was misclassified: %+v, claim=%+v", resp, recovered)
+					}
+					if _, err := os.Stat(launchMarker); !os.IsNotExist(err) {
+						t.Fatalf("uncertain service launch was re-dispatched; err=%v", err)
+					}
+					if _, err := os.Stat(jobPathsFor(jobs, claim.JobID).command); err != nil {
+						t.Fatalf("uncertain service launch handoff lost; err=%v", err)
+					}
+				} else if tc.wantOK {
 					if !resp.OK || !resp.IdempotentReplay || resp.JobID != claim.JobID {
 						t.Fatalf("service replay should use independent service capacity: %+v", resp)
 					}
@@ -1215,7 +1228,7 @@ func TestStalePrelaunchClaimRetiresProtectedHandoff(t *testing.T) {
 		Version:     1,
 		JobID:       id,
 		Fingerprint: strings.Repeat("b", 64),
-		State:       "launching",
+		State:       "claimed", // demonstrably never dispatched
 		CreatedAt:   created.UTC().Format(time.RFC3339Nano),
 	}
 	if err := createJobClaim(claimPath, claim); err != nil {
