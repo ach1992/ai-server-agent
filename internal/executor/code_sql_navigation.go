@@ -220,6 +220,43 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 					statement[at+1].keyword() == "EXISTS" {
 					at += 2
 				}
+				if !materialized && operation == "ALTER" && at < len(statement) &&
+					statement[at].keyword() == "ONLY" {
+					at++
+				}
+				// PostgreSQL ordinary TABLE/VIEW RENAME TO and SET SCHEMA
+				// change the relation identity. Never serve the old CREATE as
+				// current source, nor mistake a renamed relation in the same
+				// schema for an unrelated unqualified table. A missing/invalid
+				// target still invalidates the original source; no fabricated
+				// new identifier is emitted.
+				if !materialized && operation == "ALTER" &&
+					(dialect == "postgres" || dialect == "postgresql") {
+					relation, end, valid := sqlNavName(statement, at)
+					if valid && end+1 < len(statement) &&
+						(statement[end].keyword() == "RENAME" && statement[end+1].keyword() == "TO" ||
+							statement[end].keyword() == "SET" && statement[end+1].keyword() == "SCHEMA") {
+						relation.drop = true
+						result = append(result, relation)
+						target, next, ok := sqlNavName(statement, end+2)
+						if ok && next == len(statement) && !strings.Contains(target.identity, "\x00") {
+							if statement[end].keyword() == "RENAME" {
+								if prefix := strings.LastIndex(relation.identity, "\x00"); prefix >= 0 {
+									target.identity = relation.identity[:prefix+1] + target.identity
+								}
+							} else {
+								last := strings.LastIndex(relation.identity, "\x00")
+								target.identity += "\x00" + relation.identity[last+1:]
+								target.searchTerm = relation.searchTerm
+								target.lifecycleOnly = true
+							}
+							target.name = strings.ReplaceAll(target.identity, "\x00", ".")
+							target.drop = true
+							result = append(result, target)
+						}
+						return
+					}
+				}
 				if materialized && operation == "ALTER" {
 					// A materialized relation's identity may change across ordered
 					// migrations. Invalidate the old CREATE; a limited parser must
