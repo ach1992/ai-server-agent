@@ -23,19 +23,30 @@ IFS= read -r bearer
 phase=trusted-go-check
 # The disposable CI runner's /usr/bin/go may be a distro-managed
 # symlink. Production rejects symlinked executables, and a lower-priority
-# alias must not prevent provisioning a trusted higher-priority copy.
+# alias must not prevent provisioning a trusted higher-priority entry point.
 # Preserve an occupied /usr/local/bin/go as-is: never replace an unknown
 # binary or symlink. The CI setup-go toolchain is the only source when
-# provisioning this otherwise vacant system path.
+# provisioning this otherwise vacant system path. Copying Go's binary can
+# break its relative GOROOT; use a root-owned wrapper that executes the
+# versioned setup-go toolchain from its original location.
 if [ ! -e /usr/local/bin/go ] && [ ! -L /usr/local/bin/go ]; then
   ci_go="$(command -v go)"
   [ -x "$ci_go" ] && [ -f "$ci_go" ] || { echo 'CI Go executable missing' >&2; exit 1; }
+  [ -n "${RUNNER_TOOL_CACHE:-}" ] &&
+    [[ "$ci_go" == "$RUNNER_TOOL_CACHE"/go/*/bin/go ]] &&
+    [[ "$ci_go" =~ ^[A-Za-z0-9_./-]+$ ]] || {
+      echo 'CI Go must be an absolute setup-go toolcache executable' >&2
+      exit 1
+    }
   "$ci_go" version | grep -Eq '^go version go1[.]26[.]'
-  sudo install -m 0755 -o root -g root "$ci_go" /usr/local/bin/go
-  cmp -s -- "$ci_go" /usr/local/bin/go || {
-    echo 'CI Go staging did not preserve the selected toolchain bytes' >&2
+  staged_wrapper="$(mktemp)"
+  printf '#!/bin/sh\nexec "%s" "$@"\n' "$ci_go" > "$staged_wrapper"
+  sudo install -m 0755 -o root -g root "$staged_wrapper" /usr/local/bin/go
+  cmp -s -- "$staged_wrapper" /usr/local/bin/go || {
+    echo 'CI Go wrapper differs from the selected toolchain launcher' >&2
     exit 1
   }
+  rm -f -- "$staged_wrapper"
 fi
 # The higher-priority production path is authoritative. Reject it if
 # untrusted rather than silently falling back to /usr/bin/go.
