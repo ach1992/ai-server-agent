@@ -30,6 +30,9 @@ type sqlNavOccurrence struct {
 	declaration                    bool
 	drop                           bool
 	isColumn                       bool
+	materialized                   bool // Proven PostgreSQL materialized-view declaration/drop
+	requiresMaterialized           bool // REFRESH/DROP must not resolve to an ordinary table/view
+	lifecycleOnly                  bool // Synthetic SET SCHEMA identity, not a selectable source token
 }
 
 type sqlNavLocation struct {
@@ -123,16 +126,26 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 		// CTEs and executable/procedural SQL have name-shadowing and scope
 		// rules beyond this bounded source analyzer. Do not fabricate links.
 		switch operation {
-		case "CREATE", "ALTER", "DROP", "RENAME", "INSERT", "UPDATE", "DELETE", "SELECT", "TRUNCATE":
+		case "CREATE", "ALTER", "DROP", "RENAME", "INSERT", "UPDATE", "DELETE", "SELECT", "TRUNCATE", "REFRESH":
 		default:
 			return
 		}
 		hasWithClause := false
-		for _, token := range statement {
-			if token.keyword() == "WITH" {
-				hasWithClause = true
-				break
+		for i, token := range statement {
+			if token.keyword() != "WITH" {
+				continue
 			}
+			// PostgreSQL CREATE MATERIALIZED VIEW ... AS SELECT ... WITH
+			// [NO] DATA ends in a population clause, not a scoped CTE.
+			// Keep the conservative CTE guard for every other WITH form.
+			if operation == "CREATE" && statement[1].keyword() == "MATERIALIZED" &&
+				(i+2 == len(statement) && statement[i+1].keyword() == "DATA" ||
+					i+3 == len(statement) && statement[i+1].keyword() == "NO" &&
+						statement[i+2].keyword() == "DATA") {
+				continue
+			}
+			hasWithClause = true
+			break
 		}
 		appendName := func(at int, declaration, drop bool) int {
 			occ, end, ok := sqlNavName(statement, at)
@@ -159,6 +172,16 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 				}
 			}
 		createdType:
+			materialized := at < len(statement) && statement[at].keyword() == "MATERIALIZED"
+			if materialized {
+				// No native MySQL/MariaDB materialized view and no
+				// PostgreSQL TEMP/OR REPLACE materialized-view syntax.
+				if (dialect != "postgres" && dialect != "postgresql") ||
+					at != 1 || at+1 >= len(statement) || statement[at+1].keyword() != "VIEW" {
+					return
+				}
+				at++
+			}
 			if at < len(statement) && (statement[at].keyword() == "TABLE" ||
 				statement[at].keyword() == "VIEW") {
 				object := statement[at].keyword()
@@ -171,19 +194,120 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 				if valid && next < len(statement) &&
 					((object == "TABLE" && (statement[next].text == "(" ||
 						statement[next].keyword() == "AS" || statement[next].keyword() == "LIKE")) ||
-						(object == "VIEW" && statement[next].keyword() == "AS")) {
+						(object == "VIEW" && (materialized && sqlDDLMaterializedQuery(statement, next) ||
+							!materialized && statement[next].keyword() == "AS"))) {
 					occ.declaration = true
+					occ.materialized = materialized
 					result = append(result, occ)
+				} else if materialized {
+					return // malformed/unsupported header cannot supply query references
 				}
 			} else if table, _, ok := sqlNavIndexTarget(statement, dialect); ok {
 				result = append(result, table)
 			}
 		case "ALTER", "DROP":
+			materialized := statement[at].keyword() == "MATERIALIZED"
+			if materialized {
+				if (dialect != "postgres" && dialect != "postgresql") ||
+					at+1 >= len(statement) || statement[at+1].keyword() != "VIEW" {
+					return
+				}
+				at++
+			}
 			if statement[at].keyword() == "TABLE" || statement[at].keyword() == "VIEW" {
 				at++
 				if at+1 < len(statement) && statement[at].keyword() == "IF" &&
 					statement[at+1].keyword() == "EXISTS" {
 					at += 2
+				}
+				if materialized && operation == "ALTER" {
+					// A materialized relation's identity may change across ordered
+					// migrations. Invalidate the old CREATE; a limited parser must
+					// not present a stale definition after an unsupported ALTER.
+					relation, end, valid := sqlNavName(statement, at)
+					if !valid || end >= len(statement) {
+						return
+					}
+					// These known clauses preserve the relation's identity.
+					if end+1 < len(statement) &&
+						(statement[end].keyword() == "OWNER" && statement[end+1].keyword() == "TO" ||
+							statement[end].keyword() == "SET" && (statement[end+1].keyword() == "TABLESPACE" ||
+								statement[end+1].text == "(") ||
+							statement[end].keyword() == "RESET" && statement[end+1].text == "(") {
+						return
+					}
+					// PostgreSQL RENAME [COLUMN] old TO new only changes the
+					// column identity. Do not tombstone the relation's CREATE.
+					// RENAME TO new is a distinct, relation-changing form.
+					if statement[end].keyword() == "RENAME" {
+						columnAt := end + 1
+						if columnAt < len(statement) && statement[columnAt].keyword() == "COLUMN" {
+							columnAt++
+						}
+						_, oldEnd, oldOK := sqlNavName(statement, columnAt)
+						_, newEnd, newOK := sqlNavName(statement, columnAt+2)
+						if oldOK && oldEnd == columnAt+1 &&
+							columnAt+1 < len(statement) && statement[columnAt+1].keyword() == "TO" &&
+							newOK && newEnd == len(statement) {
+							return // unsupported column graph remains with SQLLens
+						}
+					}
+					relation.drop, relation.materialized, relation.requiresMaterialized = true, true, true
+					result = append(result, relation)
+					if end+2 < len(statement) && (statement[end].keyword() == "RENAME" &&
+						statement[end+1].keyword() == "TO" ||
+						statement[end].keyword() == "SET" && statement[end+1].keyword() == "SCHEMA") {
+						newName, next, ok := sqlNavName(statement, end+2)
+						if ok && next == len(statement) && !strings.Contains(newName.identity, "\x00") {
+							if statement[end].keyword() == "RENAME" {
+								// Schema prefixes are separated in identity, not
+								// by dots inside quoted SQL identifiers.
+								if i := strings.LastIndex(relation.identity, "\x00"); i >= 0 {
+									newName.identity = relation.identity[:i+1] + newName.identity
+								}
+							} else {
+								// SET SCHEMA keeps the old relation's final name.
+								last := strings.LastIndex(relation.identity, "\x00")
+								newName.identity += "\x00" + relation.identity[last+1:]
+								newName.searchTerm = relation.searchTerm
+								newName.lifecycleOnly = true
+							}
+							newName.name = strings.ReplaceAll(newName.identity, "\x00", ".")
+							newName.drop, newName.materialized, newName.requiresMaterialized = true, true, true
+							result = append(result, newName)
+						}
+					}
+					break
+				}
+				if materialized {
+					// Parse the entire DROP list before reporting tombstones.
+					// Partial/malformed statements must not poison history.
+					var drops []sqlNavOccurrence
+					for {
+						if at >= len(statement) ||
+							(statement[at].kind == 'i' &&
+								(statement[at].keyword() == "CASCADE" || statement[at].keyword() == "RESTRICT")) {
+							return // a trailing DROP modifier is not a relation name
+						}
+						occ, end, valid := sqlNavName(statement, at)
+						if !valid {
+							return
+						}
+						occ.drop, occ.materialized, occ.requiresMaterialized = true, true, true
+						drops = append(drops, occ)
+						if end < len(statement) && statement[end].text == "," {
+							at = end + 1
+							continue
+						}
+						if end < len(statement) &&
+							(end+1 != len(statement) ||
+								(statement[end].keyword() != "CASCADE" && statement[end].keyword() != "RESTRICT")) {
+							return
+						}
+						result = append(result, drops...)
+						break
+					}
+					break
 				}
 				if at < len(statement) && statement[at].keyword() == "ONLY" {
 					at++
@@ -220,6 +344,35 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 					}
 				}
 			}
+		case "REFRESH":
+			if (dialect != "postgres" && dialect != "postgresql") ||
+				at+1 >= len(statement) || statement[at].keyword() != "MATERIALIZED" ||
+				statement[at+1].keyword() != "VIEW" {
+				return
+			}
+			at += 2
+			concurrent := at < len(statement) && statement[at].keyword() == "CONCURRENTLY"
+			if concurrent {
+				at++
+			}
+			occ, end, valid := sqlNavName(statement, at)
+			if !valid {
+				return
+			}
+			// REFRESH [CONCURRENTLY] name [WITH [NO] DATA].
+			noData := end+2 < len(statement) && statement[end].keyword() == "WITH" &&
+				statement[end+1].keyword() == "NO" && statement[end+2].keyword() == "DATA"
+			withData := end+1 < len(statement) && statement[end].keyword() == "WITH" &&
+				statement[end+1].keyword() == "DATA"
+			if end != len(statement) && !(withData && end+2 == len(statement)) &&
+				!(noData && end+3 == len(statement)) {
+				return
+			}
+			if concurrent && noData {
+				return // PostgreSQL disallows CONCURRENTLY WITH NO DATA
+			}
+			occ.materialized, occ.requiresMaterialized = true, true
+			result = append(result, occ)
 		case "RENAME":
 			if statement[at].keyword() == "TABLE" {
 				at++
@@ -302,7 +455,7 @@ func sqlNavSelected(source, dialect string, line, character int) (sqlNavOccurren
 		return sqlNavOccurrence{}, false
 	}
 	for _, occ := range occurrences {
-		if sqlNavAt(occ.span, line, character) {
+		if !occ.lifecycleOnly && sqlNavAt(occ.span, line, character) {
 			return occ, true
 		}
 	}
@@ -448,6 +601,57 @@ func (s *Server) sqlOfflineNavigation(parent context.Context, req Request, sourc
 			return fileError("sql_schema_target_changed", "conflict", errors.New("SQL candidate file changed during navigation")), true
 		}
 	}
+	// Source-backed relation kinds must agree in *both* directions.
+	// A REFRESH or DROP MATERIALIZED VIEW cannot be a reference to an
+	// ordinary table/view. Untyped SELECT uses can follow either kind.
+	hasMaterialized, hasOrdinary := false, false
+	for _, item := range foundItems {
+		if item.declaration {
+			if item.materialized {
+				hasMaterialized = true
+			} else {
+				hasOrdinary = true
+			}
+		}
+	}
+	if hasMaterialized && hasOrdinary {
+		return fileError("sql_schema_history_ambiguous", "validation",
+			errors.New("source defines conflicting ordinary and materialized relation declarations")), true
+	}
+	// Typed relation lifecycle operations are not interchangeable. An
+	// ordinary DROP TABLE/VIEW cannot belong to a materialized relation
+	// history (nor a materialized DROP to an ordinary one). Reject the
+	// conflicting source rather than returning a fabricated reference.
+	for _, item := range foundItems {
+		if item.drop && !item.isColumn &&
+			(hasMaterialized && !item.materialized || hasOrdinary && item.materialized) {
+			return fileError("sql_schema_history_ambiguous", "validation",
+				errors.New("source contains a relation-kind-incompatible lifecycle operation")), true
+		}
+	}
+	if !hasMaterialized {
+		if selected.materialized || selected.requiresMaterialized {
+			if !hasOrdinary {
+				for _, item := range foundItems {
+					if item.materialized && item.drop {
+						return fileError("sql_schema_history_ambiguous", "validation",
+							errors.New("materialized relation lifecycle has no source-backed active declaration")), true
+					}
+				}
+			}
+			foundItems = nil
+		} else {
+			// A type-specific materialized event does not belong to an
+			// ordinary relation graph when no materialized CREATE exists.
+			filtered := foundItems[:0]
+			for _, item := range foundItems {
+				if !item.materialized {
+					filtered = append(filtered, item)
+				}
+			}
+			foundItems = filtered
+		}
+	}
 	var locations []sqlNavLocation
 	if req.CodeMethod == "definition" {
 		drops := 0
@@ -475,7 +679,9 @@ func (s *Server) sqlOfflineNavigation(parent context.Context, req Request, sourc
 		}
 	} else {
 		for _, item := range foundItems {
-			locations = append(locations, item.sqlNavLocation)
+			if !item.lifecycleOnly {
+				locations = append(locations, item.sqlNavLocation)
+			}
 		}
 	}
 	if len(locations) == 0 && rollbackMatches {

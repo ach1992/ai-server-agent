@@ -426,7 +426,116 @@ func sqlDDLColumns(tokens []sqlDDLToken, at int) []sqlDDLSymbol {
 	return nil // incomplete parenthesized DDL: do not claim a parsed column schema
 }
 
-func sqlDDLStatement(tokens []sqlDDLToken) (sqlDDLSymbol, bool) {
+// Materialized-view navigation supports only source-provable PostgreSQL
+// declarations with a direct AS query. Storage options and other richer
+// headers remain with the real SQL LSP rather than being guessed offline.
+func sqlDDLMaterializedQuery(tokens []sqlDDLToken, at int) bool {
+	if at < len(tokens) && tokens[at].text == "(" {
+		at++
+		count := 0
+		for {
+			if at >= len(tokens) || (tokens[at].kind != 'i' && tokens[at].kind != 'q') || count >= 64 {
+				return false
+			}
+			count++
+			at++
+			if at >= len(tokens) {
+				return false
+			}
+			if tokens[at].text == ")" {
+				at++
+				break
+			}
+			if tokens[at].text != "," {
+				return false
+			}
+			at++
+		}
+	}
+	if at+1 >= len(tokens) || tokens[at].keyword() != "AS" {
+		return false
+	}
+	depth := 0
+	for _, token := range tokens[at+1:] {
+		switch token.text {
+		case "(":
+			depth++
+		case ")":
+			depth--
+			if depth < 0 {
+				return false
+			}
+		}
+	}
+	if depth != 0 {
+		return false // an incomplete expression/CTE cannot prove a declaration
+	}
+	// PostgreSQL permits a single terminal WITH DATA or WITH NO DATA
+	// population clause. Anything trailing it, or another top-level WITH
+	// after the query starts, is not provable by this bounded parser.
+	end := len(tokens)
+	if tokens[end-1].text == ";" {
+		end--
+	}
+	depth = 0
+	for i := at + 1; i < end; i++ {
+		switch tokens[i].text {
+		case "(":
+			depth++
+		case ")":
+			depth--
+		}
+		if depth != 0 || i == at+1 || tokens[i].keyword() != "WITH" {
+			continue // leading WITH may introduce a supported CTE
+		}
+		if i+1 < end && (tokens[i+1].keyword() == "ORDINALITY" || tokens[i+1].keyword() == "TIES") {
+			continue // valid SELECT query clauses, not population suffixes
+		}
+		if i+2 == end && tokens[i+1].keyword() == "DATA" ||
+			i+3 == end && tokens[i+1].keyword() == "NO" && tokens[i+2].keyword() == "DATA" {
+			break
+		}
+		return false
+	}
+	switch tokens[at+1].keyword() {
+	case "SELECT", "TABLE", "VALUES":
+		return at+2 < len(tokens) && tokens[at+2].text != ";"
+	case "WITH":
+		// Handle one source-provable CTE binding only; multi-CTE/recursive
+		// statement shapes stay unsupported. WITH NO DATA alone is not SQL.
+		cte := at + 2
+		if cte < len(tokens) && tokens[cte].keyword() == "RECURSIVE" {
+			cte++
+		}
+		if cte+2 >= len(tokens) ||
+			(tokens[cte].kind != 'i' && tokens[cte].kind != 'q') ||
+			tokens[cte+1].keyword() != "AS" || tokens[cte+2].text != "(" {
+			return false
+		}
+		depth = 0
+		for i := cte + 2; i < len(tokens); i++ {
+			switch tokens[i].text {
+			case "(":
+				depth++
+			case ")":
+				depth--
+			}
+			if depth == 0 {
+				if i+1 >= len(tokens) {
+					return false
+				}
+				switch tokens[i+1].keyword() {
+				case "SELECT", "TABLE", "VALUES":
+					return true
+				}
+				return false
+			}
+		}
+	}
+	return false
+}
+
+func sqlDDLStatement(tokens []sqlDDLToken, dialect string) (sqlDDLSymbol, bool) {
 	if len(tokens) < 3 || (tokens[0].keyword() != "CREATE" && tokens[0].keyword() != "ALTER") {
 		return sqlDDLSymbol{}, false
 	}
@@ -448,6 +557,18 @@ objectType:
 	if at >= len(tokens) {
 		return sqlDDLSymbol{}, false
 	}
+	materialized := false
+	if tokens[at].keyword() == "MATERIALIZED" {
+		// PostgreSQL has no CREATE OR REPLACE/TEMP MATERIALIZED VIEW.
+		// MySQL/MariaDB have no native materialized-view DDL.
+		if operation != "CREATE" || at != 1 ||
+			(dialect != "postgres" && dialect != "postgresql") ||
+			at+1 >= len(tokens) || tokens[at+1].keyword() != "VIEW" {
+			return sqlDDLSymbol{}, false
+		}
+		materialized = true
+		at++
+	}
 	object := tokens[at].keyword()
 	if object != "TABLE" && (operation != "CREATE" || object != "VIEW") {
 		return sqlDDLSymbol{}, false
@@ -459,15 +580,19 @@ objectType:
 		at += 3
 	}
 	name, nameRange, next, ok := sqlDDLQualifiedName(tokens, at)
-	if !ok {
+	if !ok || (materialized && !sqlDDLMaterializedQuery(tokens, next)) {
 		return sqlDDLSymbol{}, false
 	}
 	kind := 23 // LSP SymbolKind.Struct, closest representation of a table
 	if object == "VIEW" {
 		kind = 11 // LSP SymbolKind.Interface
 	}
+	detail := operation + " " + object + " (offline source)"
+	if materialized {
+		detail = "CREATE MATERIALIZED VIEW (offline source)"
+	}
 	symbol := sqlDDLSymbol{
-		Name: name, Kind: kind, Detail: operation + " " + object + " (offline source)",
+		Name: name, Kind: kind, Detail: detail,
 		Range:          sqlDDLRange{Start: tokens[0].start, End: tokens[len(tokens)-1].end},
 		SelectionRange: nameRange,
 	}
@@ -494,7 +619,7 @@ func sqlDDLSymbols(source, dialect string) []sqlDDLSymbol {
 			}
 		case ";":
 			if depth == 0 {
-				if symbol, valid := sqlDDLStatement(tokens[start : i+1]); valid {
+				if symbol, valid := sqlDDLStatement(tokens[start:i+1], dialect); valid {
 					result = append(result, symbol)
 				}
 				start = i + 1
@@ -502,7 +627,7 @@ func sqlDDLSymbols(source, dialect string) []sqlDDLSymbol {
 		}
 	}
 	if start < len(tokens) {
-		if symbol, valid := sqlDDLStatement(tokens[start:]); valid {
+		if symbol, valid := sqlDDLStatement(tokens[start:], dialect); valid {
 			result = append(result, symbol)
 		}
 	}
