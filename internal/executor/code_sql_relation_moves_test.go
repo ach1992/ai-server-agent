@@ -169,13 +169,13 @@ func TestSQLPostgresOrdinaryMovesRealWorkerDefinition(t *testing.T) {
 			if tc.name == "table_set_schema" {
 				newRelation = "archive.events"
 			}
-			queryBody = "SELECT * FROM " + newRelation + ";\\n"
+			queryBody = "SELECT * FROM " + newRelation + ";\n"
 			write(query, queryBody)
 			moved := definition()
 			if moved.OK || moved.ErrorCode != "sql_schema_history_ambiguous" {
 				t.Fatalf("new relation identity was linked to stale CREATE: %+v", moved)
 			}
-			queryBody = "SELECT * FROM reporting.events;\\n"
+			queryBody = "SELECT * FROM reporting.events;\n"
 			write(query, queryBody)
 			write(recreate, tc.create)
 			expectOne(recreate)
