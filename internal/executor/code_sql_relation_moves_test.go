@@ -9,6 +9,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ach1992/ai-server-agent/internal/systemexec"
 )
 
 // A relation move is a lifecycle transition, not a new CREATE or a harmless
@@ -73,7 +75,16 @@ func TestSQLPostgresOrdinaryRelationMoveOccurrences(t *testing.T) {
 // Prove through the actual unprivileged worker and versioned source search,
 // not only token slices: a move cannot resurrect an obsolete migration.
 func TestSQLPostgresOrdinaryMovesRealWorkerDefinition(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("worker-only SQL integration requires an ordinary UID")
+	}
 	requireWorkerLandlockV2(t)
+	// The real worker uses the operator-provisioned trusted ripgrep
+	// binary. Native CI runners without this optional search dependency
+	// still exercise all pure SQL lifecycle/identity regressions above.
+	if !systemexec.Trusted("/usr/bin/rg") {
+		t.Skip("trusted worker ripgrep unavailable")
+	}
 	helper := filepath.Join(t.TempDir(), "agent-file-helper")
 	build := exec.Command("go", "build", "-o", helper, "./cmd/ai-server-agent")
 	build.Dir = filepath.Join("..", "..")
