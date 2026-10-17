@@ -120,17 +120,23 @@ func (s *Server) debugPHPHTTPRequest(ctx context.Context, req Request, d *dapSta
 				_ = conn.Close()
 				return nil, errors.New("php_http_original_listener_changed_before_request")
 			}
+			if hook := t.afterAuthorizedDialTestHook; hook != nil {
+				hook("before_bind")
+			}
 			if err := t.proxy.terminalFailure(); err != nil {
 				_ = conn.Close()
-				return nil, fmt.Errorf("php_http_dbgp_provenance_failed_before_http_send: %w", err)
+				return nil, fmt.Errorf("%w: %w", errPHPHTTPProvenanceBeforeSend, err)
 			}
 			if err := t.bindAuthorizedRequestSocket(conn); err != nil {
 				_ = conn.Close()
 				return nil, err
 			}
+			if hook := t.afterAuthorizedDialTestHook; hook != nil {
+				hook("after_bind")
+			}
 			if err := t.proxy.terminalFailure(); err != nil {
 				_ = conn.Close()
-				return nil, fmt.Errorf("php_http_dbgp_provenance_failed_before_http_send: %w", err)
+				return nil, fmt.Errorf("%w: %w", errPHPHTTPProvenanceBeforeSend, err)
 			}
 			return &phpHTTPProvenanceWriteConn{Conn: conn, proxy: t.proxy}, nil
 		},

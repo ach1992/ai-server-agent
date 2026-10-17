@@ -34,8 +34,9 @@ type phpHTTPDebugTarget struct {
 	sourceInfo                   os.FileInfo
 	proxy                        *phpDBGpProxy
 	requestStarted               bool
-	requestSocket                *os.File // independent fd pin of exact Executor-originated loopback GET
-	beforeAuthorizedDialTestHook func()   // deterministic competing-trigger interleaving, test-only
+	requestSocket                *os.File     // independent fd pin of exact Executor-originated loopback GET
+	beforeAuthorizedDialTestHook func()       // deterministic competing-trigger interleaving, test-only
+	afterAuthorizedDialTestHook  func(string) // pre-bind/post-bind transport gates, test-only
 	requestDone                  bool
 	requestError                 string
 	httpCode                     int

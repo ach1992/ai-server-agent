@@ -1,9 +1,12 @@
 package executor
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"encoding/hex"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net"
@@ -62,6 +65,9 @@ func TestApprovedRootPHPHTTPServiceOwnedDAP(t *testing.T) {
 	// can still have created a transient service; never erase its workspace
 	// while its original unit may be running.
 	unitID, claimPath := "", ""
+	fallbackJobID, fallbackClaimPath := "", ""
+	fallbackAttempted := false
+	var fallbackOriginal phpHTTPServiceUnit
 	var originalUnit phpHTTPServiceUnit // must be captured from live root manager, never guessed from name
 	launchAttempted := false
 	t.Cleanup(func() {
@@ -110,6 +116,41 @@ func TestApprovedRootPHPHTTPServiceOwnedDAP(t *testing.T) {
 		if !reconciled {
 			t.Errorf("preserving task-owned PHP HTTP fixture for reconciliation at %s", base)
 			return
+		}
+		if fallbackAttempted {
+			claim, found, err := readJobClaim(fallbackClaimPath)
+			if err != nil || !found || claim.Kind != "service" || claim.Root ||
+				claim.PrincipalID != "php-http-root-e2e" || claim.PrincipalClass != "direct" ||
+				claim.Workspace != filepath.Join(base, "workspace") ||
+				(fallbackJobID != "" && claim.JobID != fallbackJobID) {
+				t.Errorf("second test-owned fallback claim cannot be reconciled; preserving %s: found=%t err=%v", base, found, err)
+				return
+			}
+			fallbackJobID = claim.JobID
+			if _, err := safeID(fallbackJobID); err != nil {
+				t.Errorf("untrusted fallback Service Job ID, preserving %s: %v", base, err)
+				return
+			}
+			active, err := jobUnitActive(fallbackJobID)
+			if err != nil {
+				t.Errorf("fallback Service unit activity unknown, preserving %s: %v", base, err)
+				return
+			}
+			if active {
+				if fallbackOriginal.id != fallbackJobID {
+					t.Errorf("fallback Service lacks captured original identity; preserving %s", base)
+					return
+				}
+				if err := stopOriginalPHPHTTPFixtureUnit(context.Background(), fallbackOriginal, "aiworker", uint32(uid)); err != nil {
+					t.Errorf("fallback Service original runner cleanup uncertain, preserving %s: %v", base, err)
+					return
+				}
+				active, err = jobUnitActive(fallbackJobID)
+				if err != nil || active {
+					t.Errorf("fallback Service remains active after targeted pin stop; preserving %s", base)
+					return
+				}
+			}
 		}
 		if err := os.RemoveAll(base); err != nil {
 			t.Errorf("test-owned isolated scratch cleanup: %v", err)
@@ -165,7 +206,16 @@ func TestApprovedRootPHPHTTPServiceOwnedDAP(t *testing.T) {
 	}
 	workspace, state := filepath.Join(base, "workspace"), filepath.Join(base, "state")
 	script := filepath.Join(workspace, "index.php")
-	source := []byte("<?php\nfunction double(int $n): int {\n    $result = $n * 2;\n    return $result;\n}\necho double(21), \"\\n\";\n")
+	source := []byte(`<?php
+function double(int $n): int {
+    $result = $n * 2;
+    return $result;
+}
+if (isset($_GET['XDEBUG_TRIGGER'])) {
+    file_put_contents(__DIR__ . '/triggered-hits.log', "hit\n", FILE_APPEND);
+}
+echo double(21), "\n";
+`)
 	if err := os.WriteFile(script, source, 0644); err != nil {
 		t.Fatal(err)
 	}
@@ -608,6 +658,141 @@ func TestApprovedRootPHPHTTPServiceOwnedDAP(t *testing.T) {
 			t.Fatalf("R2 terminal failure affected original Service: %v %t", err, active)
 		}
 	})
+	// F1: terminal provenance arriving AFTER one-shot admission and after
+	// the actual TCP dial must remain a precise "before-send" result. Force
+	// the two independent DialContext health checks deterministically.
+	t.Run("async_pre_send_provenance_classification", func(t *testing.T) {
+		hitsPath := filepath.Join(workspace, "triggered-hits.log")
+		for _, stage := range []string{"before_bind", "after_bind"} {
+			t.Run(stage, func(t *testing.T) {
+				before, err := os.ReadFile(hitsPath)
+				if err != nil && !errors.Is(err, os.ErrNotExist) {
+					t.Fatal(err)
+				}
+				attack := s.debugAction(ctx, req)
+				if !attack.OK || attack.SessionID == "" {
+					t.Fatalf("F1 DAP launch: %+v", attack)
+				}
+				id, cleaned := attack.SessionID, false
+				defer func() {
+					if !cleaned {
+						if err := s.workerStdioClose(req, id); err != nil {
+							t.Errorf("F1 DAP cleanup uncertain: %v", err)
+						}
+					}
+				}()
+				entry, err := s.sessions.get(req, id)
+				if err != nil {
+					t.Fatal(err)
+				}
+				entry.mu.Lock()
+				dp := entry.dap
+				entry.mu.Unlock()
+				if dp == nil || dp.phpHTTP == nil || dp.phpProxy == nil {
+					t.Fatal("F1 target/broker unavailable")
+				}
+				attackBP := bp
+				attackBP.SessionID = id
+				if out := s.debugAction(ctx, attackBP); !out.OK {
+					t.Fatalf("F1 breakpoint setup: %+v", out)
+				}
+				config := req
+				config.Action, config.SessionID, config.DebugMethod = "debug_action", id, "configure"
+				if out := s.debugAction(ctx, config); !out.OK {
+					t.Fatalf("F1 configure: %+v", out)
+				}
+				entered, release := make(chan struct{}), make(chan struct{})
+				defer func() {
+					select {
+					case <-release:
+					default:
+						close(release)
+					}
+				}()
+				dp.phpHTTP.afterAuthorizedDialTestHook = func(point string) {
+					if point == stage {
+						close(entered)
+						<-release
+					}
+				}
+				request := req
+				request.Action, request.SessionID, request.DebugMethod = "debug_action", id, "http_request"
+				if out := s.debugAction(ctx, request); !out.OK || out.Status != "request_dispatched" {
+					t.Fatalf("F1 single-request admission: %+v", out)
+				}
+				select {
+				case <-entered:
+				case <-time.After(3 * time.Second):
+					t.Fatal("F1 request did not reach selected post-dial gate")
+				}
+				peer, err := net.DialTimeout("unix", socket, 2*time.Second)
+				if err != nil {
+					t.Fatal(err)
+				}
+				_ = peer.Close()
+				const cause = "php_http_dbgp_peer_is_not_original_service_php"
+				var terminal error
+				for deadline := time.Now().Add(3 * time.Second); time.Now().Before(deadline); {
+					terminal = dp.phpProxy.terminalFailure()
+					if terminal != nil {
+						break
+					}
+					time.Sleep(15 * time.Millisecond)
+				}
+				if terminal == nil || !strings.Contains(terminal.Error(), cause) {
+					t.Fatalf("F1 invalid peer was not rejected: %v", terminal)
+				}
+				close(release)
+				verified := false
+				for deadline := time.Now().Add(4 * time.Second); time.Now().Before(deadline); {
+					status := req
+					status.Action, status.SessionID = "debug_status", id
+					out := s.debugAction(ctx, status)
+					if !out.OK {
+						t.Fatalf("F1 status: %+v", out)
+					}
+					var payload struct {
+						HTTPRequest struct {
+							Completed bool   `json:"completed"`
+							Result    string `json:"result"`
+							Failure   string `json:"dbgp_provenance_error"`
+						} `json:"http_request"`
+					}
+					if err := json.Unmarshal([]byte(out.Output), &payload); err != nil {
+						t.Fatalf("F1 status payload invalid: %v", err)
+					}
+					if payload.HTTPRequest.Completed {
+						if payload.HTTPRequest.Result != errPHPHTTPProvenanceBeforeSend.Error() ||
+							!strings.Contains(payload.HTTPRequest.Failure, cause) {
+							t.Fatalf("F1 before-send classification/provenance lost: %+v", payload.HTTPRequest)
+						}
+						verified = true
+						break
+					}
+					time.Sleep(20 * time.Millisecond)
+				}
+				if !verified {
+					t.Fatal("F1 async Dial refused no completed before-send status")
+				}
+				after, err := os.ReadFile(hitsPath)
+				if err != nil && !errors.Is(err, os.ErrNotExist) {
+					t.Fatal(err)
+				}
+				if !bytes.Equal(before, after) {
+					t.Fatalf("F1 request reached PHP handler despite before-send refusal: before=%q after=%q", before, after)
+				}
+				stop := req
+				stop.Action, stop.SessionID = "debug_stop", id
+				if out := s.debugAction(ctx, stop); !out.OK {
+					t.Fatalf("F1 adapter-only stop failed: %+v", out)
+				}
+				cleaned = true
+				if active, err := jobUnitActive(jobID); err != nil || !active {
+					t.Fatalf("F1 invalid peer stopped original PHP Service: active=%t err=%v", active, err)
+				}
+			})
+		}
+	})
 	// Spoof: separate DAP session, no authorized HTTP trigger. A root-test
 	// process may dial the root-owned AF_UNIX path, but its SO_PEERCRED UID/PID
 	// must never be mistaken for the original worker-owned PHP process.
@@ -781,36 +966,151 @@ func TestApprovedRootPHPHTTPServiceOwnedDAP(t *testing.T) {
 	if out := s.debugAction(ctx, req); out.OK || out.SessionID != "" || out.ErrorCode != "php_http_service_unverified" {
 		t.Fatalf("stopped PHP Service Job was accepted as a live debug target: %+v", out)
 	}
+	// F2: also exercise the positive fallback path on a SECOND completely
+	// test-owned transient Service, after the primary PHP Job was stopped
+	// through the separately authorized job_stop path. No installed service
+	// or reusable name is ever passed to systemctl stop by fallback cleanup.
+	t.Run("fallback_pidfd_stops_exact_original_systemd_service", func(t *testing.T) {
+		fallbackOperation := "asa174-fallback-" + hex.EncodeToString(random[:8])
+		fallbackReq := owner
+		fallbackReq.Action, fallbackReq.Kind, fallbackReq.Label = "start_job", "service", "asa174-cleanup"
+		fallbackReq.JobID = ""
+		fallbackReq.OperationID, fallbackReq.Command = fallbackOperation, "exec /bin/sleep 60"
+		fallbackClaimPath = filepath.Join(state, "jobs", "claims", operationClaimName(fallbackOperation, owner.PrincipalID))
+		fallbackAttempted = true
+		launched := s.startJob(fallbackReq)
+		if !launched.OK || launched.JobID == "" || launched.Status != "accepted" {
+			t.Fatalf("F2 isolated fallback service could not start: %+v", launched)
+		}
+		fallbackJobID = launched.JobID
+		claim, found, err := readJobClaim(fallbackClaimPath)
+		if err != nil || !found || claim.JobID != fallbackJobID || claim.State != "started" ||
+			claim.Kind != "service" || claim.PrincipalID != owner.PrincipalID ||
+			claim.PrincipalClass != owner.PrincipalClass || claim.Workspace != workspace {
+			t.Fatalf("F2 separate test-owned service claim not durable: found=%t claim=%+v err=%v", found, claim, err)
+		}
+		for deadline := time.Now().Add(5 * time.Second); time.Now().Before(deadline); {
+			fallbackOriginal, err = readPHPHTTPServiceUnit(context.Background(), fallbackJobID, "aiworker")
+			if err == nil {
+				break
+			}
+			time.Sleep(35 * time.Millisecond)
+		}
+		if err != nil || fallbackOriginal.id != fallbackJobID {
+			t.Fatalf("F2 actual original runner unit identity unavailable: %v %+v", err, fallbackOriginal)
+		}
+		if err := stopOriginalPHPHTTPFixtureUnit(context.Background(), fallbackOriginal, "aiworker", uint32(uid)); err != nil {
+			t.Fatalf("F2 pin-scoped original service cleanup failed: %v", err)
+		}
+		if active, err := jobUnitActive(fallbackJobID); err != nil || active {
+			t.Fatalf("F2 PIDFD cleanup did not retire test-owned systemd unit: active=%t err=%v", active, err)
+		}
+		t.Log("PHP_HTTP_ROOT_PIDFD_ONLY_FALLBACK_NO_NAME_STOP_PASS")
+	})
 	t.Log("PHP_HTTP_ROOT_REAL_START_JOB_CLAIM_WRITER_DBGp_BREAKPOINT_SPOOF_CRASH_DRIFT_AND_EXPLICIT_STOP_PASS")
 }
 
-// Fallback cleanup has no authority over a same-named replacement Job.
-// Guard the exact captured InvocationID, cgroup, main PID and pinned runner
-// immediately before systemctl stop; retain scratch on any uncertainty.
+// Fallback cleanup may target only the original, verified job runner via
+// its pinned pidfd. A systemctl stop by the reusable unit *name* is unsafe:
+// another actor might replace that name between validation and PID1 dispatch.
+// The job runner's exit lets systemd retire its own transient Service cgroup.
+// An ambiguous or replaced Service is retained for explicit reconciliation.
 func stopOriginalPHPHTTPFixtureUnit(ctx context.Context, original phpHTTPServiceUnit, worker string, uid uint32) error {
-	if original.id == "" || original.invocation == "" || uid == 0 {
+	return stopOriginalPHPHTTPFixtureUnitWith(ctx, original, worker, uid, phpHTTPFixtureStopOps{
+		read: readPHPHTTPServiceUnit, pin: verifyPHPHTTPServiceRunner, active: jobUnitActiveContext,
+	})
+}
+
+// A narrow test seam substitutes read-only service observations and exact
+// runner pinning. The production fixture uses only the real root proofs.
+type phpHTTPFixtureStopOps struct {
+	read            func(context.Context, string, string) (phpHTTPServiceUnit, error)
+	pin             func(phpHTTPServiceUnit, uint32) (*os.File, error)
+	active          func(context.Context, string) (bool, error)
+	afterFinalCheck func() // test only: simulate unit-name replacement at the check/use boundary
+}
+
+func stopOriginalPHPHTTPFixtureUnitWith(ctx context.Context, original phpHTTPServiceUnit, worker string, uid uint32, ops phpHTTPFixtureStopOps) error {
+	if original.id == "" || original.invocation == "" || uid == 0 ||
+		ops.read == nil || ops.pin == nil || ops.active == nil {
 		return fmt.Errorf("php_http_test_original_unit_identity_unavailable")
 	}
-	live, err := readPHPHTTPServiceUnit(ctx, original.id, worker)
+	ctx, cancel := context.WithTimeout(ctx, jobSystemdStopTimeout)
+	defer cancel()
+	live, err := ops.read(ctx, original.id, worker)
 	if err != nil || live != original {
 		return fmt.Errorf("php_http_test_unit_replaced_or_unverified: %v", err)
 	}
-	pidfd, err := verifyPHPHTTPServiceRunner(live, uid)
+	pidfd, err := ops.pin(live, uid)
 	if err != nil {
 		return fmt.Errorf("php_http_test_original_runner_unverified: %w", err)
 	}
 	defer pidfd.Close()
-	// Re-read unit identity after pinning to close the ordinary observation
-	// window. On drift never issue even the first stop command.
-	current, err := readPHPHTTPServiceUnit(ctx, original.id, worker)
+	current, err := ops.read(ctx, original.id, worker)
 	if err != nil || current != original || unix.PidfdSendSignal(int(pidfd.Fd()), 0, nil, 0) != nil {
 		return fmt.Errorf("php_http_test_unit_identity_changed_before_fallback_stop: %v", err)
 	}
-	result, err := runBoundedJobSystemd(ctx, jobSystemdStopTimeout, "systemctl", "stop", "ai-job-"+original.id+".service")
-	if err != nil || result.Truncated {
-		return fmt.Errorf("php_http_test_unit_stop_unverified: %v output=%.300s", err, result.Output)
+	// No unit-name stop here or afterward, even if the name now resolves to
+	// another invocation. SIGTERM targets only the pinned original runner.
+	if err := signalPinnedPHPHTTPFixtureRunner(ctx, pidfd, ops.afterFinalCheck); err != nil {
+		return fmt.Errorf("php_http_test_original_runner_stop_unverified: %w", err)
 	}
-	return nil
+	for {
+		active, err := ops.active(ctx, original.id)
+		if err != nil {
+			return fmt.Errorf("php_http_test_unit_postsignal_state_unverified: %w", err)
+		}
+		if !active {
+			return nil // PID1 retired the original Service; never issue a name stop
+		}
+		live, err := ops.read(ctx, original.id, worker)
+		if err == nil && live != original {
+			return errors.New("php_http_test_replacement_unit_active_after_original_runner_stop")
+		}
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("php_http_test_original_unit_still_active_after_pinned_stop: %w", err)
+		}
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("php_http_test_original_unit_still_active_after_pinned_stop: %w", ctx.Err())
+		case <-time.After(40 * time.Millisecond):
+		}
+	}
+}
+
+// A pidfd cannot retarget to a later process that reuses the numeric PID or
+// systemd unit name. Poll for exit rather than treating signal delivery as a
+// successful stop. No numeric kill or systemctl name fallback is permitted.
+func signalPinnedPHPHTTPFixtureRunner(ctx context.Context, pin *os.File, afterFinalCheck func()) error {
+	if pin == nil || pin.Fd() == ^uintptr(0) {
+		return errors.New("php_http_test_original_runner_pidfd_missing")
+	}
+	fd := int(pin.Fd())
+	if afterFinalCheck != nil {
+		afterFinalCheck()
+	}
+	if err := unix.PidfdSendSignal(fd, unix.SIGTERM, nil, 0); err != nil {
+		return fmt.Errorf("php_http_test_original_pidfd_signal_failed: %w", err)
+	}
+	pfd := []unix.PollFd{{Fd: int32(fd), Events: unix.POLLIN}}
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		_, err := unix.Poll(pfd, 100)
+		if err == unix.EINTR {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("php_http_test_original_runner_exit_poll_failed: %w", err)
+		}
+		if pfd[0].Revents&unix.POLLIN != 0 {
+			return nil
+		}
+		if pfd[0].Revents&(unix.POLLERR|unix.POLLNVAL) != 0 {
+			return errors.New("php_http_test_original_runner_pidfd_poll_invalid")
+		}
+	}
 }
 
 // Test-only shim: the real start_job writer launches os.Executable()
