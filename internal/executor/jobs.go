@@ -2,6 +2,7 @@ package executor
 
 import (
 	"bytes"
+	"context"
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
@@ -32,6 +33,11 @@ const (
 	jobLogHeaderSize                  = 32
 	maxOperationIDBytes               = 128
 	systemdOutputLimit                = 64 << 10
+	jobSystemdProbeTimeout            = 4 * time.Second
+	jobSystemdLaunchTimeout           = 25 * time.Second
+	jobSystemdStopTimeout             = 25 * time.Second
+	jobStateLockTimeout               = 5 * time.Second
+	jobSystemdWaitDelay               = 750 * time.Millisecond
 	jobRunnerFailureExit              = 125
 	jobStateOverheadBytes       int64 = 64 << 20
 	lifecycleManagementLockPath       = "/run/lock/ai-server-agent/management.lock"
@@ -41,6 +47,56 @@ var jobLogMagic = [8]byte{'A', 'I', 'S', 'A', 'J', 'L', '0', '1'}
 
 const jobStatusUnknown = "unknown"
 const jobStatusStopped = "stopped"
+
+// A stalled systemd operation must not hold jobsMu indefinitely. Keep
+// the synchronization needed for protected claims and runner status, but
+// give every caller a bounded, retryable path when another Job is busy.
+func (s *Server) lockJobState(parent context.Context) error {
+	ctx, cancel := context.WithTimeout(parent, jobStateLockTimeout)
+	defer cancel()
+	tick := time.NewTicker(10 * time.Millisecond)
+	defer tick.Stop()
+	for {
+		if err := ctx.Err(); err != nil {
+			return err
+		}
+		if s.jobsMu.TryLock() {
+			return nil
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-tick.C:
+		}
+	}
+}
+
+func jobStateBusyResponse(operation, jobID string, err error) Response {
+	return Response{
+		Error:      fmt.Sprintf("%s could not acquire Job state lock within %s: %v; retry after the other operation finishes", operation, jobStateLockTimeout, err),
+		ReasonCode: "job_state_unavailable", ErrorCode: "job_state_unavailable",
+		ErrorClass: "state", Status: "busy", Retryable: true, JobID: jobID,
+	}
+}
+
+// Systemd calls share a bounded collector and independent deadlines. A
+// disconnected client does not cancel durable launch/stop reconciliation.
+func runBoundedJobSystemd(parent context.Context, timeout time.Duration, program string, args ...string) (boundedOutputResult, error) {
+	ctx, cancel := context.WithTimeout(parent, timeout)
+	defer cancel()
+	out := newBoundedOutputCollector(systemdOutputLimit)
+	cmd := exec.CommandContext(ctx, program, args...)
+	// A child inheriting stdout must not keep Cmd.Wait alive after the
+	// systemd process exits or is killed by the context deadline.
+	cmd.WaitDelay = jobSystemdWaitDelay
+	cmd.Stdout, cmd.Stderr = out, out
+	err := cmd.Run()
+	result := out.Result()
+	if ctx.Err() != nil {
+		return result, fmt.Errorf("%s operation exceeded its deadline: %w", program, ctx.Err())
+	}
+	return result, err
+}
 
 type jobPaths struct {
 	command string
@@ -132,7 +188,9 @@ func (s *Server) startJobBounded(req Request) (resp Response) {
 		defer releasePersistentJobAdmissionLock(lifecycleLock)
 	}
 
-	s.jobsMu.Lock()
+	if err := s.lockJobState(context.Background()); err != nil {
+		return jobStateBusyResponse("start_job", "", err)
+	}
 	defer s.jobsMu.Unlock()
 
 	if req.OperationID == "" {
@@ -418,6 +476,10 @@ func (s *Server) resumeClaimedJob(req Request, jobsDir, claimPath string, claim 
 }
 
 func (s *Server) launchPreparedJob(req Request, paths jobPaths, id string) Response {
+	return s.launchPreparedJobWithTimeout(req, paths, id, jobSystemdLaunchTimeout)
+}
+
+func (s *Server) launchPreparedJobWithTimeout(req Request, paths jobPaths, id string, timeout time.Duration) Response {
 	home := filepath.Join(s.cfg.StateDir, "worker-home")
 	workDir := req.Workspace
 	if req.Root {
@@ -450,12 +512,7 @@ func (s *Server) launchPreparedJob(req Request, paths jobPaths, id string) Respo
 		"--started-file", paths.started,
 	)
 
-	out := newBoundedOutputCollector(systemdOutputLimit)
-	cmd := exec.Command("systemd-run", args...)
-	cmd.Stdout = out
-	cmd.Stderr = out
-	err = cmd.Run()
-	result := out.Result()
+	result, err := runBoundedJobSystemd(context.Background(), timeout, "systemd-run", args...)
 	if err != nil {
 		active, activeErr := jobUnitActive(id)
 		if activeErr != nil {
@@ -512,6 +569,14 @@ func (s *Server) launchPreparedJob(req Request, paths jobPaths, id string) Respo
 			return resp
 		}
 
+		// A timed-out systemd-run may have reached PID1 before its reply was
+		// lost. Preserve the protected launching claim and handoff rather
+		// than treating the absence of immediate unit evidence as failure.
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(err, exec.ErrWaitDelay) {
+			resp := unknownJobLaunchResponse(id, "systemd-run exceeded its process or output deadline; launch outcome remains uncertain; reconcile the original operation_id before retrying")
+			applyOutputResult(&resp, result)
+			return resp
+		}
 		if cleanupErr := removeTerminalCommandHandoff(paths.command); cleanupErr != nil {
 			resp := jobStateError("job_state_unavailable", cleanupErr)
 			resp.JobID = id
@@ -859,14 +924,10 @@ func (s *Server) failJobClaim(path string, claim *jobClaim) {
 }
 
 func activeAgentJobCount() (int, error) {
-	out := newBoundedOutputCollector(systemdOutputLimit)
-	cmd := exec.Command("systemctl", "list-units", "--type=service", "--state=activating,active,deactivating,reloading", "--no-legend", "--no-pager", "ai-job-*.service")
-	cmd.Stdout = out
-	cmd.Stderr = out
-	if err := cmd.Run(); err != nil {
-		return 0, fmt.Errorf("list persistent jobs: %w: %s", err, out.Result().Output)
+	result, err := runBoundedJobSystemd(context.Background(), jobSystemdProbeTimeout, "systemctl", "list-units", "--type=service", "--state=activating,active,deactivating,reloading", "--no-legend", "--no-pager", "ai-job-*.service")
+	if err != nil {
+		return 0, fmt.Errorf("list persistent jobs: %w: %s", err, result.Output)
 	}
-	result := out.Result()
 	if result.Truncated {
 		return 0, errors.New("persistent job listing exceeded its bounded response")
 	}
@@ -880,15 +941,11 @@ func activeAgentJobCount() (int, error) {
 }
 
 func jobUnitExists(id string) (bool, error) {
-	out := newBoundedOutputCollector(systemdOutputLimit)
-	cmd := exec.Command("systemctl", "show", "ai-job-"+id, "--property=LoadState", "--value", "--no-pager")
-	cmd.Stdout = out
-	cmd.Stderr = out
-	err := cmd.Run()
-	result := out.Result()
+	result, err := runBoundedJobSystemd(context.Background(), jobSystemdProbeTimeout, "systemctl", "show", "ai-job-"+id, "--property=LoadState", "--value", "--no-pager")
 	value := strings.TrimSpace(result.Output)
 	if err != nil {
-		if strings.Contains(value, "not-found") || strings.Contains(value, "could not be found") {
+		if !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, exec.ErrWaitDelay) &&
+			(strings.Contains(value, "not-found") || strings.Contains(value, "could not be found")) {
 			return false, nil
 		}
 		return false, fmt.Errorf("inspect persistent job unit: %w: %s", err, value)
@@ -897,14 +954,14 @@ func jobUnitExists(id string) (bool, error) {
 }
 
 func jobUnitActive(id string) (bool, error) {
-	out := newBoundedOutputCollector(systemdOutputLimit)
-	cmd := exec.Command("systemctl", "list-units", "--type=service", "--state=activating,active,deactivating,reloading", "--no-legend", "--no-pager", "ai-job-"+id+".service")
-	cmd.Stdout = out
-	cmd.Stderr = out
-	if err := cmd.Run(); err != nil {
-		return false, fmt.Errorf("inspect persistent job activity: %w: %s", err, out.Result().Output)
+	return jobUnitActiveContext(context.Background(), id)
+}
+
+func jobUnitActiveContext(parent context.Context, id string) (bool, error) {
+	result, err := runBoundedJobSystemd(parent, jobSystemdProbeTimeout, "systemctl", "list-units", "--type=service", "--state=activating,active,deactivating,reloading", "--no-legend", "--no-pager", "ai-job-"+id+".service")
+	if err != nil {
+		return false, fmt.Errorf("inspect persistent job activity: %w: %s", err, result.Output)
 	}
-	result := out.Result()
 	if result.Truncated {
 		return false, errors.New("persistent job activity response exceeded its bounded limit")
 	}

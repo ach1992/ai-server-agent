@@ -327,7 +327,9 @@ func (s *Server) jobStatus(req Request) Response {
 	}
 	// start_job/replay/retention already hold this lock. Serialize stop with
 	// status reconciliation; the separate runner shares the status inode flock.
-	s.jobsMu.Lock()
+	if err := s.lockJobState(context.Background()); err != nil {
+		return jobStateBusyResponse("job_status", id, err)
+	}
 	defer s.jobsMu.Unlock()
 	jobsDir := filepath.Join(s.cfg.StateDir, "jobs")
 	paths := jobPathsFor(jobsDir, id)
@@ -364,12 +366,7 @@ func (s *Server) jobStatus(req Request) Response {
 	}
 
 	unit := "ai-job-" + id
-	out := newBoundedOutputCollector(systemdOutputLimit)
-	cmd := exec.Command("systemctl", "show", unit, "--property=ActiveState,SubState,ExecMainStatus,MainPID", "--no-pager")
-	cmd.Stdout = out
-	cmd.Stderr = out
-	er := cmd.Run()
-	result := out.Result()
+	result, er := runBoundedJobSystemd(context.Background(), jobSystemdProbeTimeout, "systemctl", "show", unit, "--property=ActiveState,SubState,ExecMainStatus,MainPID", "--no-pager")
 	if er != nil {
 		resp := Response{Error: er.Error(), ReasonCode: "job_status_unavailable", ErrorCode: "job_status_unavailable", ErrorClass: "state"}
 		applyOutputResult(&resp, result)
@@ -392,21 +389,20 @@ func (s *Server) jobStop(req Request) (resp Response) {
 	defer func() {
 		resp = s.finishActionAudit(req, "job_stop", "root", "", "", auditStarted, resp)
 	}()
-	s.jobsMu.Lock()
+	// Include lock acquisition in the overall stop deadline. A stalled
+	// status/replay/start operation cannot keep a different Job unstoppable.
+	stopCtx, stopCancel := context.WithTimeout(context.Background(), jobSystemdStopTimeout)
+	defer stopCancel()
+	if err := s.lockJobState(stopCtx); err != nil {
+		return jobStateBusyResponse("job_stop", id, err)
+	}
 	defer s.jobsMu.Unlock()
 
-	out := newBoundedOutputCollector(systemdOutputLimit)
-	// systemctl stop may block behind a hung unit. An interrupted stop is
-	// uncertain, never proof that the service has been terminated.
-	stopCtx, stopCancel := context.WithTimeout(context.Background(), 25*time.Second)
-	defer stopCancel()
-	cmd := exec.CommandContext(stopCtx, "systemctl", "stop", "ai-job-"+id)
-	cmd.Stdout = out
-	cmd.Stderr = out
-	er := cmd.Run()
-	result := out.Result()
+	// systemctl stop can be interrupted after PID1 has observed the action.
+	// Such an outcome is unknown, never proof of successful termination.
+	result, er := runBoundedJobSystemd(stopCtx, jobSystemdStopTimeout, "systemctl", "stop", "ai-job-"+id)
 	if er != nil {
-		if stopCtx.Err() != nil {
+		if stopCtx.Err() != nil || errors.Is(er, context.DeadlineExceeded) || errors.Is(er, exec.ErrWaitDelay) {
 			resp = unknownJobLaunchResponse(id, "systemd job stop timed out; unit termination has not been verified")
 		} else {
 			resp = Response{Error: er.Error(), ReasonCode: "job_stop_failed", ErrorCode: "job_stop_failed", ErrorClass: "process", JobID: id}
@@ -414,7 +410,7 @@ func (s *Server) jobStop(req Request) (resp Response) {
 		applyOutputResult(&resp, result)
 		return resp
 	}
-	active, verifyErr := jobUnitActive(id)
+	active, verifyErr := jobUnitActiveContext(stopCtx, id)
 	if verifyErr != nil || active {
 		reason := "job unit remains active after stop"
 		if verifyErr != nil {
