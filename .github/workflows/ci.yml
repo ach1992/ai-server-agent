@@ -139,6 +139,50 @@ jobs:
             exit 1
           fi
           echo 'REAL_TRANSFER_WORKER_LANDLOCK_PROOF_PASS'
+      - name: Provision trusted ripgrep for SQL worker acceptance
+        if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
+        run: |
+          set -Eeuo pipefail
+          # SQL's source-search Worker deliberately requires a root-owned,
+          # symlink-free /usr/bin/rg. GitHub's disposable Ubuntu image does
+          # not necessarily include this OPTIONAL production dependency.
+          # Install the signed distribution package only when absent.
+          if [ ! -e /usr/bin/rg ] && [ ! -L /usr/bin/rg ]; then
+            sudo apt-get update -qq
+            sudo env DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends ripgrep
+          fi
+          for path in / /usr /usr/bin /usr/bin/rg; do
+            if [ -L "$path" ] || [ ! -e "$path" ]; then
+              echo "Untrusted SQL worker executable component: $path" >&2
+              exit 1
+            fi
+            uid="$(stat -c '%u' "$path")"
+            mode="$(stat -c '%a' "$path")"
+            if [ "$uid" -ne 0 ] || (( (8#$mode & 0022) != 0 )); then
+              echo "Unsafe SQL worker executable ownership or mode: $path" >&2
+              exit 1
+            fi
+          done
+          test -f /usr/bin/rg && test -x /usr/bin/rg
+          /usr/bin/rg --version
+          echo 'TRUSTED_SQL_RIPGREP_CI_READY'
+      - name: Non-skipped materialized SQL real worker/Landlock acceptance
+        if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
+        env:
+          ASA_REQUIRE_SQL_MATERIALIZED_WORKER: '1'
+        run: |
+          set -Eeuo pipefail
+          printf 'SQL_WORKER_PROOF_HEAD=%s\nSQL_WORKER_PROOF_TREE=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
+          log="$(mktemp)"
+          trap 'rm -f -- "$log"' EXIT
+          go test -v ./internal/executor -run '^TestSQLMaterializedViewWorkerCrossFileHistory$' -count=1 -timeout 240s 2>&1 | tee "$log"
+          grep -Fq '=== RUN   TestSQLMaterializedViewWorkerCrossFileHistory' "$log"
+          grep -Fq -- '--- PASS: TestSQLMaterializedViewWorkerCrossFileHistory' "$log"
+          if grep -Fq -- '--- SKIP: TestSQLMaterializedViewWorkerCrossFileHistory' "$log"; then
+            echo 'Required SQL worker acceptance was skipped' >&2
+            exit 1
+          fi
+          echo 'REAL_SQL_MATERIALIZED_WORKER_LANDLOCK_PROOF_PASS'
       - name: Real pinned gopls large-Go semantic acceptance
         if: ${{ needs.change-scope.outputs.lsp_changed == 'true' }}
         run: |
