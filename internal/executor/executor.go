@@ -39,6 +39,7 @@ type Server struct {
 	browserAdmission                  browserSessionAdmission // exclusive shared profile lease
 	browserNodeBinary                 string                  // test-only private fixture override; production always uses root-owned pinned Node
 	jobsMu                            sync.Mutex
+	jobUnknownBeforeWriteTestHook     func() // test-only deterministic status reconciliation interleaving
 	lifecycleLockPath                 string
 	fileWriteHooks                    *fileWriteTestHooks
 	workspaceHooks                    *workspaceTestHooks
@@ -324,6 +325,10 @@ func (s *Server) jobStatus(req Request) Response {
 	if err != nil {
 		return Response{Error: err.Error(), ReasonCode: "invalid_job_id", ErrorCode: "invalid_job_id", ErrorClass: "validation"}
 	}
+	// start_job/replay/retention already hold this lock. Serialize stop with
+	// status reconciliation; the separate runner shares the status inode flock.
+	s.jobsMu.Lock()
+	defer s.jobsMu.Unlock()
 	jobsDir := filepath.Join(s.cfg.StateDir, "jobs")
 	paths := jobPathsFor(jobsDir, id)
 	if terminal, found := s.jobTerminalReplayResponse(paths.status, id); found {
@@ -387,6 +392,8 @@ func (s *Server) jobStop(req Request) (resp Response) {
 	defer func() {
 		resp = s.finishActionAudit(req, "job_stop", "root", "", "", auditStarted, resp)
 	}()
+	s.jobsMu.Lock()
+	defer s.jobsMu.Unlock()
 
 	out := newBoundedOutputCollector(systemdOutputLimit)
 	// systemctl stop may block behind a hung unit. An interrupted stop is
@@ -417,13 +424,25 @@ func (s *Server) jobStop(req Request) (resp Response) {
 		applyOutputResult(&resp, result)
 		return resp
 	}
-	paths := jobPathsFor(filepath.Join(s.cfg.StateDir, "jobs"), id)
-	if err := s.markJobStatusStoppedIfUnproven(paths.status); err != nil && !os.IsNotExist(err) {
-		resp = unknownJobLaunchResponse(id, "job unit is inactive, but durable stop evidence could not be saved: "+err.Error())
+	// Verify the existing runner status record is a safe regular file
+	// before recording privileged stop evidence; never follow symlinks.
+	statusPath := jobPathsFor(filepath.Join(s.cfg.StateDir, "jobs"), id).status
+	status, _, statusErr := s.readJobStatusValue(statusPath)
+	if statusErr != nil && !os.IsNotExist(statusErr) {
+		resp = unknownJobLaunchResponse(id, "job unit is inactive but status evidence is unsafe: "+statusErr.Error())
 		applyOutputResult(&resp, result)
 		return resp
 	}
-	resp = Response{OK: true, JobID: id, Status: "stopped"}
+	if err := s.recordVerifiedJobStop(id, statusErr == nil); err != nil {
+		resp = unknownJobLaunchResponse(id, "job unit is inactive, but protected stop evidence could not be saved: "+err.Error())
+		applyOutputResult(&resp, result)
+		return resp
+	}
+	resp = Response{OK: true, JobID: id, Status: "stopped", ExitCode: -1}
+	// The runner's genuine numeric exit, when available, must be preserved.
+	if code, err := strconv.Atoi(status); err == nil {
+		resp.ExitCode = code
+	}
 	applyOutputResult(&resp, result)
 	return resp
 }

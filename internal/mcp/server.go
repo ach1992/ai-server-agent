@@ -399,7 +399,7 @@ func (s *Server) registerTools() {
 			return s.responseResult(resp)
 		})
 
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "job_stop", Description: "Stop an exact persistent job; verify its unit is inactive and, when a status record exists, retain a durable stopped marker without inventing a successful command exit.", Annotations: annotations(false, true, true, false)},
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "job_stop", Description: "Stop an exact persistent job; verify its unit is inactive and retain root-owned stop evidence in its protected recovery claim (when present), without fabricating a command exit code.", Annotations: annotations(false, true, true, false)},
 		func(ctx context.Context, req *mcpsdk.CallToolRequest, input JobInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 			resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "job_stop", JobID: input.JobID})
 			if err != nil {

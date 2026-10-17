@@ -192,13 +192,12 @@ func (s *Server) runtimeListContext(parent context.Context, req Request) Respons
 			default:
 				value, _, readErr := s.readJobStatusValue(filepath.Join(jobsDir, id+".status"))
 				if readErr == nil && value != "" {
-					if value == jobStatusUnknown {
-						status = "unknown"
-					} else if value == jobStatusStopped {
-						status = "stopped"
-					} else if _, parseErr := strconv.Atoi(value); parseErr == nil {
+					if _, parseErr := strconv.Atoi(value); parseErr == nil {
 						status = "completed"
 					}
+				}
+				if status == "unknown" && claim.VerifiedStopped {
+					status = "stopped"
 				}
 			}
 			response.RuntimeEntries = append(response.RuntimeEntries, RuntimeEntry{
