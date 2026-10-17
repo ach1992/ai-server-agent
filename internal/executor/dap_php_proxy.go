@@ -41,6 +41,8 @@ type phpDBGpProxy struct {
 	phpBinary   string
 	program     string
 	workerUID   uint32
+	http        *phpHTTPDebugTarget // service-owned target: never belongs to DAP cgroup
+	clientInode os.FileInfo         // prevent deleting a replacement worker-owned socket
 	cancel      context.CancelFunc
 	context     context.Context
 	started     bool
@@ -124,6 +126,28 @@ func (p *phpDBGpProxy) await(ctx context.Context) error {
 	return nil
 }
 
+// Do not block waiting for the legitimate DBGp peer: HTTP dispatch is
+// what causes it to connect. But an already-terminal rejected peer MUST
+// prevent a later side-effecting HTTP request.
+func (p *phpDBGpProxy) terminalFailure() error {
+	if p == nil {
+		return errors.New("php_http_dbgp_proxy_unavailable")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.failure != nil {
+		return p.failure
+	}
+	select {
+	case <-p.ready:
+		if !p.verified {
+			return errors.New("php_http_dbgp_proxy_completed_without_peer_verification")
+		}
+	default:
+	}
+	return nil
+}
+
 // Calling shutdown from the session broker (even on unexpected adapter exit)
 // closes all waiters without taking its e.mu/d.mu locks or waiting for a
 // goroutine which may be concurrently inspecting process metadata.
@@ -165,12 +189,24 @@ func (p *phpDBGpProxy) removeAfterStop() error {
 		}
 	}
 	for _, file := range []string{p.clientPath, p.adapterPath} {
+		if file == p.clientPath && p.http != nil {
+			current, err := os.Lstat(file)
+			if err != nil && !errors.Is(err, os.ErrNotExist) {
+				return fmt.Errorf("php_http_socket_identity_unavailable: %w", err)
+			}
+			if err == nil && (p.clientInode == nil || current.Mode()&os.ModeSocket == 0 || !socketRootOwned(current) || !os.SameFile(current, p.clientInode)) {
+				return errors.New("php_http_socket_replaced_during_debugging")
+			}
+		}
 		if err := os.Remove(file); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return fmt.Errorf("php_dap_socket_cleanup_unknown: %w", err)
 		}
 	}
 	if err := os.Remove(p.dir); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("php_dap_private_dir_cleanup_unknown: %w", err)
+	}
+	if p.http != nil {
+		p.http.close() // close read-only PID pins; NEVER signal service/job/PHP
 	}
 	return nil
 }
@@ -282,6 +318,9 @@ func (p *phpDBGpProxy) verifyOriginalPHP(conn *net.UnixConn) (*os.File, []byte, 
 	cred, err := phpDBGpPeerCredentials(conn)
 	if err != nil {
 		return nil, nil, err
+	}
+	if p.http != nil {
+		return p.verifyOriginalPHPHTTP(conn, cred)
 	}
 	if cred.Uid != p.workerUID || p.containment == nil || !p.containment.containsPID(int(cred.Pid)) {
 		return nil, nil, errors.New("php_dap_peer_outside_private_containment")

@@ -46,6 +46,8 @@ type Request struct {
 	DebugMethod      string              `json:"debug_method,omitempty"`
 	DebugProgram     string              `json:"debug_program,omitempty"`
 	DebugMode        string              `json:"debug_mode,omitempty"`
+	DebugHTTPPort    int                 `json:"debug_http_port,omitempty"`
+	DebugHTTPTrigger string              `json:"debug_http_trigger,omitempty"`
 	DebugLines       []int               `json:"debug_lines,omitempty"`
 	DebugThreadID    int                 `json:"debug_thread_id,omitempty"`
 	DebugFrameID     int                 `json:"debug_frame_id,omitempty"`

@@ -489,6 +489,10 @@ func (s *Server) debugResult(req Request, d *dapState, result json.RawMessage, s
 	var body []byte
 	for {
 		payload := map[string]any{"result": json.RawMessage(out), "events": converted, "events_dropped": dropped, "adapter": d.adapter, "state": stage}
+		if d.phpHTTP != nil {
+			payload["http_request"] = d.phpHTTP.requestSnapshot()
+			payload["service_owned"] = true
+		}
 		if len(evidence) > 0 && evidence[0] != nil {
 			payload["adapter_exited"] = evidence[0].adapterExited
 			if evidence[0].adapterExited {
@@ -549,6 +553,14 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 	if method != "breakpoints" {
 		if err := s.checkDAPBreakpointSources(ctx, req, d); err != nil {
 			return fileError("debug_source_changed", "conflict", err)
+		}
+	}
+	if method == "http_request" {
+		return s.debugPHPHTTPRequest(ctx, req, d)
+	}
+	if d.phpHTTP != nil {
+		if err := d.phpHTTP.verifyService(ctx, s.cfg.WorkerUser); err != nil {
+			return fileError("php_http_service_drift", "state", err)
 		}
 	}
 	command := method
@@ -683,11 +695,16 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 		d.sourceVersions[breakpointStat.Path] = req.FileVersion
 	}
 	if method == "configure" {
+		if d.phpHTTP != nil {
+			if err := d.phpProxy.terminalFailure(); err != nil {
+				return fileError("php_http_dbgp_provenance_failed", "state", err)
+			}
+		}
 		// debugpy sends its real process event after configurationDone's
 		// response. Never expose control over a Python target until its
 		// pidfd, worker UID, trusted interpreter and dedicated cgroup
 		// membership have been verified by the common DAP event consumer.
-		if d.adapter == "php/xdebug" {
+		if d.adapter == "php/xdebug" && d.phpHTTP == nil {
 			if d.phpProxy == nil {
 				return fileError("php_dap_missing_verified_proxy", "state", errors.New("PHP DBGp verifier absent; stop session"))
 			}
@@ -789,6 +806,13 @@ func (s *Server) debugStatus(ctx context.Context, req Request) (response Respons
 		}
 		d.mu.Unlock()
 	}
+	if d.phpHTTP != nil && d.phpProxy != nil {
+		if err := d.phpProxy.terminalFailure(); err != nil {
+			d.mu.Lock()
+			d.stage = "failed"
+			d.mu.Unlock()
+		}
+	}
 	result := s.debugResult(req, d, json.RawMessage(`{}`), started, &dapRuntimeEvidence{
 		adapterExited: exited, cleanupVerified: exited && cleanupErr == nil, adapterExitCode: exitCode,
 		finalDrainIncomplete: exited && !finalDrainComplete,
@@ -827,12 +851,29 @@ func (s *Server) debugStop(ctx context.Context, req Request) (response Response)
 	d.mu.Lock()
 	passiveClosed := d.passiveClosed
 	d.mu.Unlock()
+	// Service-owned HTTP must only detach the debugger; never terminate the
+	// independent PHP Service Job. Preserve its exact pre-stop identity.
+	isHTTP := d.phpHTTP != nil
+	var priorService phpHTTPServiceUnit
+	var priorPHP, priorPort int
+	var priorExe string
+	phpFD := -1
+	var phpPinErr error
+	if isHTTP {
+		priorService, priorPHP, priorPort, priorExe, phpFD, phpPinErr = d.phpHTTP.pinServiceForDetach()
+	}
+	if phpFD >= 0 {
+		defer unix.Close(phpFD)
+	}
 	// No wire request is valid after passive EOF; the broker remains the
 	// sole process-containment cleanup authority in this case.
 	if !alreadyExited && !passiveClosed {
 		stopCtx, cancel := context.WithTimeout(ctx, 4*time.Second)
 		defer cancel()
-		_, dapErr = d.call(stopCtx, "disconnect", map[string]any{"terminateDebuggee": true})
+		_, dapErr = d.call(stopCtx, "disconnect", map[string]any{"terminateDebuggee": !isHTTP})
+	}
+	if isHTTP {
+		d.phpHTTP.finishHTTPRequestAfterDetach() // HTTP client only; never signal Service Job
 	}
 	err = s.workerStdioClose(req, e.id)
 	if err != nil {
@@ -841,6 +882,19 @@ func (s *Server) debugStop(ctx context.Context, req Request) (response Response)
 	// The pidfd-pinned broker removes this session's private socket only
 	// after confirmed process-group cleanup; do not race a second removal.
 	response = Response{OK: dapErr == nil, SessionID: req.SessionID, Status: "terminated", DurationMS: time.Since(started).Milliseconds()}
+	if isHTTP {
+		serviceErr := phpPinErr
+		if serviceErr == nil {
+			serviceErr = verifyPHPHTTPServiceAfterDetach(ctx, priorService, s.cfg.WorkerUser, priorPHP, phpFD, priorExe, priorPort)
+		}
+		if serviceErr != nil {
+			response.OK = false
+			response.Status = "cleanup_confirmed_service_liveness_unverified"
+			response.ErrorCode, response.ErrorClass = "php_http_service_drift", "state"
+			response.Error = "DAP resources cleaned; independently owned PHP HTTP service identity or liveness unverified: " + serviceErr.Error()
+			return response
+		}
+	}
 	if alreadyExited {
 		response.Status = "cleanup_confirmed_adapter_already_exited"
 		return response
