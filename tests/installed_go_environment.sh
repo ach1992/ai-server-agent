@@ -21,26 +21,38 @@ IFS= read -r bearer
 [[ "$bearer" =~ ^[0-9a-f]{64}$ ]] || { echo 'invalid CI-only MCP bearer' >&2; exit 1; }
 
 phase=trusted-go-check
-# GitHub's setup-go binary normally lives outside the Agent's trusted system
-# search paths. Only on this disposable runner, provision the actual Go binary
-# into a root-owned, production-discoverable path if neither is occupied.
-if [ ! -e /usr/local/bin/go ] && [ ! -L /usr/local/bin/go ] &&
-   [ ! -e /usr/bin/go ] && [ ! -L /usr/bin/go ]; then
+# The disposable CI runner's /usr/bin/go may be a distro-managed
+# symlink. Production rejects symlinked executables, and a lower-priority
+# alias must not prevent provisioning a trusted higher-priority copy.
+# Preserve an occupied /usr/local/bin/go as-is: never replace an unknown
+# binary or symlink. The CI setup-go toolchain is the only source when
+# provisioning this otherwise vacant system path.
+if [ ! -e /usr/local/bin/go ] && [ ! -L /usr/local/bin/go ]; then
   ci_go="$(command -v go)"
-  [ -x "$ci_go" ] || { echo 'CI Go executable missing' >&2; exit 1; }
+  [ -x "$ci_go" ] && [ -f "$ci_go" ] || { echo 'CI Go executable missing' >&2; exit 1; }
+  "$ci_go" version | grep -Eq '^go version go1[.]26[.]'
   sudo install -m 0755 -o root -g root "$ci_go" /usr/local/bin/go
+  cmp -s -- "$ci_go" /usr/local/bin/go || {
+    echo 'CI Go staging did not preserve the selected toolchain bytes' >&2
+    exit 1
+  }
 fi
-go_available=false
-for candidate in /usr/local/bin/go /usr/bin/go; do
-  if [ -e "$candidate" ] || [ -L "$candidate" ]; then
-    test -f "$candidate" && test ! -L "$candidate"
-    test "$(stat -c '%u:%a' "$candidate")" = '0:755'
-    "$candidate" version | grep -Eq '^go version go'
-    go_available=true
-    break
-  fi
-done
-[ "$go_available" = true ] || { echo 'no trusted Go executable available for installed probe' >&2; exit 1; }
+# The higher-priority production path is authoritative. Reject it if
+# untrusted rather than silently falling back to /usr/bin/go.
+candidate=/usr/local/bin/go
+if [ ! -e "$candidate" ] && [ ! -L "$candidate" ]; then
+  candidate=/usr/bin/go
+fi
+if [ -L "$candidate" ] || [ ! -f "$candidate" ]; then
+  echo "installed Go probe refuses non-regular or symlinked system executable: $candidate" >&2
+  exit 1
+fi
+if [ "$(stat -c '%u:%a' "$candidate")" != '0:755' ]; then
+  echo "installed Go probe refuses unsafe owner/mode: $candidate" >&2
+  exit 1
+fi
+"$candidate" version | grep -Eq '^go version go'
+
 
 phase=fixture
 fixture="$(sudo mktemp -d /srv/ai-workspace/ci-installed-go-probe.XXXXXXXX)"
