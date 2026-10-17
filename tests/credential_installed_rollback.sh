@@ -18,6 +18,23 @@ trap 'rm -rf -- "$SCRATCH"; unset direct_token gateway_token secondary_token' EX
 mkdir -p "$SCRATCH/old-source"
 git archive "$BASE" | tar -x -C "$SCRATCH/old-source"
 (cd "$SCRATCH/old-source" && CGO_ENABLED=0 go build -trimpath -o "$SCRATCH/old-agent" ./cmd/ai-server-agent)
+# systemd restart returning does not prove that the old/new HTTP listener
+# has rebound its port yet. Wait for a real healthy listener, but never treat
+# an unresponsive or crashing service as successful authentication.
+await_healthy_listener(){
+  local attempt
+  for attempt in {1..40}; do
+    if sudo systemctl is-active --quiet ai-server-agent.service &&
+       curl --silent --fail --max-time 2 http://127.0.0.1:3210/healthz >/dev/null; then
+      return 0
+    fi
+    sleep 0.25
+  done
+  echo 'AGENT_LISTENER_NOT_HEALTHY_AFTER_RESTART' >&2
+  sudo systemctl is-active ai-server-agent.service >&2 || true
+  sudo journalctl -u ai-server-agent.service --no-pager -n 25 -o cat 2>&1 | sed -E 's/[0-9a-f]{64}/[redacted]/g' >&2 || true
+  return 1
+}
 token_status(){
   local token="$1"
   printf 'header = "Authorization: Bearer %s"\n' "$token" | curl -sS --max-time 7 --config - -o /dev/null -w '%{http_code}' http://127.0.0.1:3210/agent-environment.json
@@ -64,6 +81,7 @@ gateway_verifier="$(printf '%s' "$gateway_token" | sha256sum | awk '{print $1}')
 sudo jq --arg gv "$gateway_verifier" '(.credentials[] | select(.principal.id=="direct-default")) |= (.enabled=false | .revoked_at="2026-10-09T00:00:00Z") | .credentials += [{principal:{id:"mcp-gateway",class:"gateway",name:"mcp-gateway"},verifier_algorithm:"sha256-v1",verifier:$gv,created_at:"2026-10-08T00:00:00Z",enabled:true}]' /etc/ai-server-agent/mcp-credentials.json > "$SCRATCH/gateway-only.json"
 sudo install -o root -g aiagent -m 0640 "$SCRATCH/gateway-only.json" /etc/ai-server-agent/mcp-credentials.json
 sudo systemctl restart ai-server-agent.service
+await_healthy_listener
 verify_tokens "$direct_token" "$gateway_token" 401 200
 assert_rejected_preserving_install /tmp/ai-server-agent 'Existing MCP credentials are incompatible with the target Agent binary'
 verify_tokens "$direct_token" "$gateway_token" 401 200
