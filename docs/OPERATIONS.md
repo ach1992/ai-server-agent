@@ -32,6 +32,15 @@ To install a **specific published Stable**, for example `v0.1.14`:
 curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | bash -s -- v0.1.14
 ```
 
+**Fresh installations only:** both commands reject a machine with Agent-owned
+installation files, state, or services, including incomplete installs. The
+bootstrap checks before release requests or optional privileged APT
+prerequisites, then checks again in its privileged handoff. A specific Stable
+tag is **not** a downgrade mechanism. To update an installed Agent, run
+`sudo ai-server-agent-manage update`; to return to an older version, follow
+the credential preparation and protected-updater instructions below. Never
+rerun a historical installer or bootstrap over an occupied installation.
+
 The default resolves GitHub's newest published non-draft, non-prerelease, immutable release; the optional tag selects the named release and fails closed if it is not immutable. When `jq` is missing, the bootstrap may first invoke `sudo apt-get update` and `sudo apt-get install ca-certificates jq` for supported Ubuntu/Debian hosts using configured APT repositories, **before** fetching or verifying release metadata. This privileged **OS prerequisite** operation is distinct from privileged execution of release `install.sh`: the latter occurs only **after** SHA-256 verification, followed by digest re-verification in protected root staging. **Do not use `curl ... | sudo bash`** for this initial bootstrap, and do not execute a moving release asset as root. If stronger bootstrap-source provenance is required, operators can independently review or pin the source, but the normal one-line install command deliberately uses the permanent `main` URL. The installed manager already supports version-free Stable updates via `sudo ai-server-agent-manage update`.
 
 Do **not** use `releases/latest/download/install.sh | sudo bash` as the stable trust path: that executes release-supplied code as root before the same asset can be authenticated.
@@ -231,8 +240,18 @@ while preserving the active `direct/default` verifier, and restarts/health-
 checks the current Agent with recovery on failure. Secondary clients lose
 access immediately. The removed records cannot be recovered from retained
 plaintext; issue fresh secondary credentials after returning to a compatible
-newer version. Only after this cleanup should an operator retry a rollback,
-which independently checks compatibility before switching the binary.
+newer version. Only after this cleanup should an operator retry a rollback through the
+**installed, protected updater**; for example, to select published immutable
+Stable `v0.1.14` explicitly (only where this older version is otherwise
+compatible):
+
+```bash
+sudo env AI_SERVER_AGENT_UPDATE_CHANNEL=stable AI_SERVER_AGENT_VERSION=v0.1.14 /usr/local/sbin/ai-server-agent-manage update
+```
+
+The updater independently checks credentials before invoking the downloaded
+historical installer. Neither public Stable bootstrap command is an update
+or downgrade route for an existing installation.
 
 A raw rollback of an `enabled=true` retired Gateway record could reactivate
 its bearer; a raw rollback with even a revoked `direct/secondary` record could

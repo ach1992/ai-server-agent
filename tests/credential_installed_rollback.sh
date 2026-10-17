@@ -60,6 +60,43 @@ assert_rejected_preserving_install(){
   sudo systemctl is-active --quiet ai-server-agent.service
   sudo systemctl is-active --quiet ai-server-agent-executor.service
 }
+# The exact documented Stable bootstrap (with a historical tag) must refuse
+# *before* invoking any old installer on an occupied host. Check the real
+# installed state and its live services, not just a static guard string.
+assert_bootstrap_rejected_preserving_install(){
+  local stage="$1" before_binary before_config before_store
+  before_binary="$(binary_digest)"; before_config="$(config_digest)"; before_store="$(store_digest)"
+  if AI_SERVER_AGENT_NONINTERACTIVE=1 bash "$ROOT/scripts/install-stable.sh" v0.1.14 > "$SCRATCH/bootstrap-$stage.log" 2>&1; then
+    echo "UNSAFE_STABLE_BOOTSTRAP_ACCEPTED_$stage" >&2; exit 1
+  fi
+  grep -Fq 'Stable bootstrap is for fresh installations only' "$SCRATCH/bootstrap-$stage.log" || {
+    echo "MISSING_STABLE_BOOTSTRAP_REFUSAL_$stage" >&2; exit 1;
+  }
+  test "$(binary_digest)" = "$before_binary"
+  test "$(config_digest)" = "$before_config"
+  test "$(store_digest)" = "$before_store"
+  sudo systemctl is-active --quiet ai-server-agent.service
+  sudo systemctl is-active --quiet ai-server-agent-executor.service
+}
+# Real published v0.1.14 asset, not the historical source-built fixture.
+# Only the downloaded installer is reached; the current updater must stop it
+# before any credential/config/service mutation.
+assert_protected_update_refused(){
+  local before_binary before_config before_store
+  before_binary="$(binary_digest)"; before_config="$(config_digest)"; before_store="$(store_digest)"
+  if sudo env AI_SERVER_AGENT_UPDATE_CHANNEL=stable AI_SERVER_AGENT_VERSION=v0.1.14 \
+      bash "$ROOT/update.sh" > "$SCRATCH/update-refused.log" 2>&1; then
+    echo 'UNSAFE_PROTECTED_UPDATER_ACCEPTED' >&2; exit 1
+  fi
+  grep -Fq 'not safe for an older version' "$SCRATCH/update-refused.log" || {
+    echo 'MISSING_PROTECTED_UPDATER_DIAGNOSTIC' >&2; exit 1;
+  }
+  test "$(binary_digest)" = "$before_binary"
+  test "$(config_digest)" = "$before_config"
+  test "$(store_digest)" = "$before_store"
+  sudo systemctl is-active --quiet ai-server-agent.service
+  sudo systemctl is-active --quiet ai-server-agent-executor.service
+}
 issue_secret(){
   local kind="$1" transcript="$SCRATCH/$1.transcript" token
   umask 077
@@ -90,15 +127,19 @@ direct_token="$(issue_secret direct-default)"
 verify_tokens "$direct_token" "$gateway_token" 200 200
 sudo env AI_SERVER_AGENT_BINARY=/tmp/ai-server-agent AI_SERVER_AGENT_NONINTERACTIVE=1 bash install.sh >/dev/null
 verify_tokens "$direct_token" "$gateway_token" 200 401
+assert_bootstrap_rejected_preserving_install gateway-retained
+assert_protected_update_refused
 echo 'STAGE: block rollback that would reactivate a retired bearer'
 assert_rejected_preserving_install "$SCRATCH/old-agent" 'Unsafe rollback credential state'
 verify_tokens "$direct_token" "$gateway_token" 200 401
 echo 'STAGE: block rollback with newly issued AND revoked secondary'
 secondary_token="$(issue_secret direct-secondary)"
 verify_tokens "$direct_token" "$secondary_token" 200 200
+assert_bootstrap_rejected_preserving_install secondary-active
 assert_rejected_preserving_install "$SCRATCH/old-agent" 'Unsafe rollback credential state'
 sudo ai-server-agent-manage credential-revoke direct-secondary >/dev/null
 verify_tokens "$direct_token" "$secondary_token" 200 401
+assert_bootstrap_rejected_preserving_install secondary-revoked
 assert_rejected_preserving_install "$SCRATCH/old-agent" 'Unsafe rollback credential state'
 echo 'STAGE: explicit rollback preparation cancellation and failed-restart recovery'
 before_failure="$(store_digest)"
@@ -128,8 +169,16 @@ test "$(sudo jq '.credentials | length' /etc/ai-server-agent/mcp-credentials.jso
 test "$(sudo jq -r '.credentials[0].principal.id' /etc/ai-server-agent/mcp-credentials.json)" = direct-default
 test "$(sudo jq -r '.credentials[0].verifier' /etc/ai-server-agent/mcp-credentials.json)" = "$direct_verifier"
 verify_tokens "$direct_token" "$secondary_token" 200 401
-echo 'STAGE: target old binary now accepts safe direct-only rollback'
-sudo env AI_SERVER_AGENT_BINARY="$SCRATCH/old-agent" AI_SERVER_AGENT_NONINTERACTIVE=1 bash install.sh >/dev/null
+assert_bootstrap_rejected_preserving_install direct-only
+echo 'STAGE: protected updater installs published v0.1.14 after explicit cleanup'
+sudo env AI_SERVER_AGENT_UPDATE_CHANNEL=stable AI_SERVER_AGENT_VERSION=v0.1.14 \
+  bash "$ROOT/update.sh" > "$SCRATCH/update-success.log" 2>&1 || {
+    echo 'PROTECTED_PUBLISHED_RELEASE_ROLLBACK_FAILED' >&2
+    tail -n 30 "$SCRATCH/update-success.log" >&2
+    exit 1
+  }
+sudo jq -e '.channel=="stable" and .version=="v0.1.14" and .ref=="v0.1.14"' \
+  /etc/ai-server-agent/control/install-state.json >/dev/null
 verify_tokens "$direct_token" "$gateway_token" 200 401
 verify_tokens "$direct_token" "$secondary_token" 200 401
 sudo env AI_SERVER_AGENT_BINARY=/tmp/ai-server-agent AI_SERVER_AGENT_NONINTERACTIVE=1 bash install.sh >/dev/null
