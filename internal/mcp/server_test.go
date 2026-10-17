@@ -730,7 +730,7 @@ func TestNamedCredentialAuthAttachesServerDerivedPrincipal(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	storeJSON := `{"version":1,"credentials":[{"principal":{"id":"direct-default","class":"direct","name":"direct/default"},"verifier_algorithm":"sha256-v1","verifier":"` + directDigest + `","created_at":"2026-10-08T00:00:00Z","enabled":true},{"principal":{"id":"mcp-gateway","class":"gateway","name":"mcp-gateway"},"verifier_algorithm":"sha256-v1","verifier":"` + digest + `","created_at":"2026-10-08T00:00:00Z","enabled":true}]}`
+	storeJSON := `{"version":1,"credentials":[{"principal":{"id":"direct-default","class":"direct","name":"direct/default"},"verifier_algorithm":"sha256-v1","verifier":"` + directDigest + `","created_at":"2026-10-08T00:00:00Z","enabled":true},{"principal":{"id":"direct-secondary","class":"direct","name":"direct/secondary"},"verifier_algorithm":"sha256-v1","verifier":"` + digest + `","created_at":"2026-10-08T00:00:00Z","enabled":true}]}`
 	if err := os.WriteFile(storePath, []byte(storeJSON), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -757,8 +757,58 @@ func TestNamedCredentialAuthAttachesServerDerivedPrincipal(t *testing.T) {
 	if w.Code != http.StatusNoContent {
 		t.Fatalf("status = %d, want %d", w.Code, http.StatusNoContent)
 	}
-	if got.ID != "mcp-gateway" || got.Class != "gateway" || got.Name != "mcp-gateway" {
+	if got.ID != "direct-secondary" || got.Class != "direct" || got.Name != "direct/secondary" {
 		t.Fatalf("unexpected principal: %+v", got)
+	}
+}
+
+func TestRetiredGatewayBearerCannotAccessMCP(t *testing.T) {
+	cfg := testConfig(t, "bearer")
+	direct := strings.Repeat("3", credential.TokenHexLength)
+	retired := strings.Repeat("4", credential.TokenHexLength)
+	directDigest, err := credential.VerifyToken(direct)
+	if err != nil {
+		t.Fatal(err)
+	}
+	retiredDigest, err := credential.VerifyToken(retired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := credential.Store{Version: credential.StoreVersion, Credentials: []credential.Record{
+		{Principal: credential.Principal{ID: "direct-default", Class: "direct", Name: "direct/default"},
+			VerifierAlgorithm: credential.VerifierAlgorithm, Verifier: directDigest,
+			CreatedAt: "2026-10-08T00:00:00Z", Enabled: true},
+		{Principal: credential.Principal{ID: "mcp-gateway", Class: "gateway", Name: "mcp-gateway"},
+			VerifierAlgorithm: credential.VerifierAlgorithm, Verifier: retiredDigest,
+			CreatedAt: "2026-10-08T00:00:00Z", Enabled: true},
+	}}
+	raw, err := json.Marshal(store)
+	if err != nil {
+		t.Fatal(err)
+	}
+	storePath := filepath.Join(cfg.StateDir, "mcp-credentials.json")
+	if err := os.WriteFile(storePath, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	cfg.BearerTokenFile = ""
+	cfg.CredentialStoreFile = storePath
+	server, err := New(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		token string
+		want  int
+	}{
+		{retired, http.StatusUnauthorized}, {direct, http.StatusOK},
+	} {
+		req := httptest.NewRequest(http.MethodGet, "/agent-environment.json", nil)
+		req.Header.Set("Authorization", "Bearer "+tc.token)
+		response := httptest.NewRecorder()
+		server.Handler().ServeHTTP(response, req)
+		if response.Code != tc.want {
+			t.Fatalf("authenticated route status = %d; want %d", response.Code, tc.want)
+		}
 	}
 }
 
@@ -770,7 +820,7 @@ func TestNamedCredentialStoreFailsClosedOnDuplicateVerifier(t *testing.T) {
 		t.Fatal(err)
 	}
 	storePath := filepath.Join(cfg.StateDir, "mcp-credentials.json")
-	storeJSON := `{"version":1,"credentials":[{"principal":{"id":"direct-default","class":"direct","name":"direct/default"},"verifier_algorithm":"sha256-v1","verifier":"` + digest + `","created_at":"2026-10-08T00:00:00Z","enabled":true},{"principal":{"id":"mcp-gateway","class":"gateway","name":"mcp-gateway"},"verifier_algorithm":"sha256-v1","verifier":"` + digest + `","created_at":"2026-10-08T00:00:00Z","enabled":true}]}`
+	storeJSON := `{"version":1,"credentials":[{"principal":{"id":"direct-default","class":"direct","name":"direct/default"},"verifier_algorithm":"sha256-v1","verifier":"` + digest + `","created_at":"2026-10-08T00:00:00Z","enabled":true},{"principal":{"id":"direct-secondary","class":"direct","name":"direct/secondary"},"verifier_algorithm":"sha256-v1","verifier":"` + digest + `","created_at":"2026-10-08T00:00:00Z","enabled":true}]}`
 	if err := os.WriteFile(storePath, []byte(storeJSON), 0600); err != nil {
 		t.Fatal(err)
 	}

@@ -353,7 +353,7 @@ func TestClientCallContextOverridesCallerPrincipalFromAuthenticatedContext(t *te
 	}()
 
 	ctx := credential.WithPrincipal(context.Background(), credential.Principal{
-		ID: "mcp-gateway", Class: "gateway", Name: "mcp-gateway",
+		ID: "direct-secondary", Class: "direct", Name: "direct/secondary",
 	})
 	ctx, requestID, err := WithNewRequestCorrelation(ctx)
 	if err != nil {
@@ -375,7 +375,7 @@ func TestClientCallContextOverridesCallerPrincipalFromAuthenticatedContext(t *te
 	case err := <-errCh:
 		t.Fatal(err)
 	case req := <-reqCh:
-		if req.PrincipalID != "mcp-gateway" || req.PrincipalClass != "gateway" || req.PrincipalName != "mcp-gateway" {
+		if req.PrincipalID != "direct-secondary" || req.PrincipalClass != "direct" || req.PrincipalName != "direct/secondary" {
 			t.Fatalf("executor request principal was not server-derived: %+v", req)
 		}
 		if req.RequestID != requestID || req.ApprovalID == "" {

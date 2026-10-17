@@ -1241,8 +1241,8 @@ func TestStalePrelaunchClaimRetiresProtectedHandoff(t *testing.T) {
 func TestOperationClaimNameIsPrincipalScoped(t *testing.T) {
 	const operationID = "shared-operation"
 	direct := operationClaimName(operationID, "direct-default")
-	gateway := operationClaimName(operationID, "mcp-gateway")
-	if direct == gateway {
+	secondary := operationClaimName(operationID, "direct-secondary")
+	if direct == secondary {
 		t.Fatal("different authenticated principals share an idempotency claim name")
 	}
 	if direct == legacyOperationClaimName(operationID) {

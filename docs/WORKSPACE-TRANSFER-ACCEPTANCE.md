@@ -44,6 +44,12 @@ ASA_TRANSFER_ACCEPTANCE_SHA256=<verified-64-character-sha256> \
   -run '^TestDirectMCPTransferInstalledAcceptance$' ./internal/mcp
 ```
 
+The installed-mode harness uses the current source credential schema for
+two unrelated direct MCP principals (`direct/default` and `direct/secondary`).
+Use a binary compatible with this source revision; for an older released
+binary, use the acceptance harness from its matching release rather than
+claiming a failure caused by mixing versions.
+
 The test explicitly rejects a non-absolute or mismatched binary. Its
 temporary processes bind an OS-assigned **127.0.0.1** port, not the live
 service address. It generates **two unrelated, temporary authenticated

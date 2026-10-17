@@ -223,7 +223,8 @@ Initial Stable installation separates the **mutable, reviewed `main` bootstrap s
 
 `tests/stable_bootstrap.sh` guards the documented permanent `main` bootstrap URL and explicit-version example and uses deterministic mocked GitHub HTTP and `sudo`/APT boundaries (no real package changes) to verify that the bootstrap:
 
-- accepts a valid latest immutable release and an explicit valid stable tag, both with `jq` already installed and after its simulated absence/prerequisite provisioning on supported Debian and Ubuntu hosts;
+- accepts a valid latest immutable release and an explicit valid stable tag **on a fresh host**, both with `jq` already installed and after its simulated absence/prerequisite provisioning on supported Debian and Ubuntu hosts;
+- rejects existing/partial Agent installations before release lookups or optional APT operations and again at the privileged handoff if an installation appears during the bootstrap;
 - requires exactly the expected tag-scoped `install.sh` asset representation;
 - rejects a mutable release before downloading or executing the release installer;
 - rejects an unexpected asset URL before installer download/execution;
@@ -232,7 +233,18 @@ Initial Stable installation separates the **mutable, reviewed `main` bootstrap s
 - fails closed when the invoking-user-writable installer pathname is adversarially replaced after the first verification but before privileged staging;
 - proves that neither the original nor substituted installer executes when privileged re-verification fails.
 
-This test is behavioral for bootstrap control flow, privilege ordering, and the local verified-path replacement threat. GitHub Release HTTP and the `sudo` command are mocked; the root-trust High Assurance job executes the same production bootstrap/test under the privileged supported-runner context. The test does not prove future GitHub repository settings or external network behavior.
+This test is behavioral for bootstrap control flow, privilege ordering, and the local verified-path replacement threat. GitHub Release HTTP and the `sudo` command are mocked; the root-trust High Assurance job executes the same bootstrap control flow under the privileged supported-runner context. When that job already has an Agent installation, only fixed Agent-presence paths in the test's bootstrap copy are redirected to private fixtures; actual installed-path refusal is verified separately below. The test does not prove future GitHub repository settings or external network behavior.
+
+On the separate disposable installed-systemd CI runner,
+`tests/credential_installed_rollback.sh` additionally proves that the
+**actual public bootstrap entrypoint** refuses occupied installs containing an
+enabled retired Gateway record or active/revoked secondary credentials without
+changing the installed binary, config, store or services. After explicitly
+confirmed credential cleanup, the **protected updater** uses the published
+immutable `v0.1.14` release asset to complete a real downgrade. The other
+historical compatibility assertions build the binary from the immutable
+`v0.1.14` source commit; that source-built binary is not itself the published
+release artifact or proof of a published-release installation.
 
 ### Release-scoped installer
 

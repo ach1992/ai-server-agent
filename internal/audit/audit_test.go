@@ -27,9 +27,9 @@ func TestWriteIncludesStructuredPrincipalAndFingerprintWithoutCommand(t *testing
 		Command:        "printf %s " + strings.Join(secrets, " ") + " https://example.invalid",
 		RequestID:      "req-1",
 		OperationID:    "op-1",
-		PrincipalID:    "mcp-gateway",
-		PrincipalClass: "gateway",
-		PrincipalName:  "mcp-gateway",
+		PrincipalID:    "direct-secondary",
+		PrincipalClass: "direct",
+		PrincipalName:  "direct/secondary",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -52,7 +52,7 @@ func TestWriteIncludesStructuredPrincipalAndFingerprintWithoutCommand(t *testing
 	if got.SchemaVersion != SchemaVersion || got.Phase != "start" || got.RequestID != "req-1" || got.OperationID != "op-1" {
 		t.Fatalf("unexpected structured event: %+v", got)
 	}
-	if got.PrincipalID != "mcp-gateway" || got.PrincipalClass != "gateway" || got.PrincipalName != "mcp-gateway" {
+	if got.PrincipalID != "direct-secondary" || got.PrincipalClass != "direct" || got.PrincipalName != "direct/secondary" {
 		t.Fatalf("unexpected principal context: %+v", got)
 	}
 	if got.CommandFingerprint == "" || got.FingerprintKeyVersion != 1 || got.FingerprintKeyID == "" {

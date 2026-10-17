@@ -660,9 +660,9 @@ func TestRepositoryMutationAuditIncludesServerDerivedPrincipal(t *testing.T) {
 		StartRef:       "main",
 		ExpectedSHA:    head,
 		RequestID:      "req-repository-audit",
-		PrincipalID:    "mcp-gateway",
-		PrincipalClass: "gateway",
-		PrincipalName:  "mcp-gateway",
+		PrincipalID:    "direct-secondary",
+		PrincipalClass: "direct",
+		PrincipalName:  "direct/secondary",
 	}
 	resp := s.worktreeCreateContext(context.Background(), req)
 	if !resp.OK {
@@ -677,9 +677,9 @@ func TestRepositoryMutationAuditIncludesServerDerivedPrincipal(t *testing.T) {
 		`"phase":"complete"`,
 		`"action":"worktree_create"`,
 		`"request_id":"req-repository-audit"`,
-		`"principal_id":"mcp-gateway"`,
-		`"principal_class":"gateway"`,
-		`"principal_name":"mcp-gateway"`,
+		`"principal_id":"direct-secondary"`,
+		`"principal_class":"direct"`,
+		`"principal_name":"direct/secondary"`,
 	} {
 		if !strings.Contains(string(b), want) {
 			t.Fatalf("repository mutation audit missing %s: %s", want, b)

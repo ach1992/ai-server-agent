@@ -223,8 +223,8 @@ func TestWorkspaceTransferAbortIsolationExpiryAndQuota(t *testing.T) {
 	op.SHA256 = bytesDigest(make([]byte, 120))
 	a := applyTransfer(t, op)
 	badPrincipal := transferFollowup(op, a.TransferID, "status")
-	badPrincipal.PrincipalID = "mcp-gateway"
-	badPrincipal.PrincipalClass = "gateway"
+	badPrincipal.PrincipalID = "direct-secondary"
+	badPrincipal.PrincipalClass = "direct"
 	if res := workerWorkspaceTransfer(badPrincipal); res.OK || res.ErrorCode != "transfer_scope_mismatch" {
 		t.Fatalf("principal leaked %+v", res)
 	}

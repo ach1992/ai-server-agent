@@ -16,22 +16,22 @@ func verifier(token string) string {
 
 func TestStoreAuthenticateNamedPrincipal(t *testing.T) {
 	direct := strings.Repeat("a", TokenHexLength)
-	gateway := strings.Repeat("b", TokenHexLength)
+	secondary := strings.Repeat("b", TokenHexLength)
 	store := Store{
 		Version: StoreVersion,
 		Credentials: []Record{
 			{Principal: Principal{ID: "direct-default", Class: "direct", Name: "direct/default"}, VerifierAlgorithm: VerifierAlgorithm, Verifier: verifier(direct), CreatedAt: "2026-10-08T00:00:00Z", Enabled: true},
-			{Principal: Principal{ID: "mcp-gateway", Class: "gateway", Name: "mcp-gateway"}, VerifierAlgorithm: VerifierAlgorithm, Verifier: verifier(gateway), CreatedAt: "2026-10-08T00:00:00Z", Enabled: true},
+			{Principal: Principal{ID: "direct-secondary", Class: "direct", Name: "direct/secondary"}, VerifierAlgorithm: VerifierAlgorithm, Verifier: verifier(secondary), CreatedAt: "2026-10-08T00:00:00Z", Enabled: true},
 		},
 	}
 	if err := store.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	p, ok := store.Authenticate(gateway)
+	p, ok := store.Authenticate(secondary)
 	if !ok {
-		t.Fatal("gateway credential rejected")
+		t.Fatal("secondary client credential rejected")
 	}
-	if p.ID != "mcp-gateway" || p.Class != "gateway" || p.Name != "mcp-gateway" {
+	if p.ID != "direct-secondary" || p.Class != "direct" || p.Name != "direct/secondary" {
 		t.Fatalf("unexpected principal: %+v", p)
 	}
 	if _, ok := store.Authenticate(strings.Repeat("c", TokenHexLength)); ok {
@@ -53,7 +53,7 @@ func TestStoreRejectsAmbiguousAndRevokedState(t *testing.T) {
 			name: "duplicate verifier",
 			store: Store{Version: StoreVersion, Credentials: []Record{
 				base,
-				{Principal: Principal{ID: "other", Class: "gateway", Name: "other"}, VerifierAlgorithm: VerifierAlgorithm, Verifier: base.Verifier, CreatedAt: base.CreatedAt, Enabled: true},
+				{Principal: Principal{ID: "other", Class: "invalid", Name: "other"}, VerifierAlgorithm: VerifierAlgorithm, Verifier: base.Verifier, CreatedAt: base.CreatedAt, Enabled: true},
 			}},
 		},
 		{
@@ -112,7 +112,7 @@ func TestStoreRejectsPrincipalsOutsideBoundedSchema(t *testing.T) {
 	token := strings.Repeat("e", TokenHexLength)
 	tests := []Record{
 		{Principal: Principal{ID: "unknown", Class: "direct", Name: "unknown"}, VerifierAlgorithm: VerifierAlgorithm, Verifier: verifier(token), CreatedAt: "2026-10-08T00:00:00Z", Enabled: true},
-		{Principal: Principal{ID: "direct-default", Class: "gateway", Name: "direct/default"}, VerifierAlgorithm: VerifierAlgorithm, Verifier: verifier(token), CreatedAt: "2026-10-08T00:00:00Z", Enabled: true},
+		{Principal: Principal{ID: "direct-default", Class: "invalid", Name: "direct/default"}, VerifierAlgorithm: VerifierAlgorithm, Verifier: verifier(token), CreatedAt: "2026-10-08T00:00:00Z", Enabled: true},
 	}
 	for _, rec := range tests {
 		store := Store{Version: StoreVersion, Credentials: []Record{rec}}
@@ -146,19 +146,19 @@ func TestSelectedPrincipalReplacementHasImmediateCutover(t *testing.T) {
 
 func TestRevokedPrincipalFailsClosedWhileAnotherPrincipalRemainsActive(t *testing.T) {
 	direct := strings.Repeat("3", TokenHexLength)
-	gateway := strings.Repeat("4", TokenHexLength)
+	secondary := strings.Repeat("4", TokenHexLength)
 	store := Store{
 		Version: StoreVersion,
 		Credentials: []Record{
 			{Principal: Principal{ID: "direct-default", Class: "direct", Name: "direct/default"}, VerifierAlgorithm: VerifierAlgorithm, Verifier: verifier(direct), CreatedAt: "2026-10-08T00:00:00Z", Enabled: true},
-			{Principal: Principal{ID: "mcp-gateway", Class: "gateway", Name: "mcp-gateway"}, VerifierAlgorithm: VerifierAlgorithm, Verifier: verifier(gateway), CreatedAt: "2026-10-08T00:00:00Z", Enabled: false, RevokedAt: "2026-10-08T01:00:00Z"},
+			{Principal: Principal{ID: "direct-secondary", Class: "direct", Name: "direct/secondary"}, VerifierAlgorithm: VerifierAlgorithm, Verifier: verifier(secondary), CreatedAt: "2026-10-08T00:00:00Z", Enabled: false, RevokedAt: "2026-10-08T01:00:00Z"},
 		},
 	}
 	if err := store.Validate(); err != nil {
 		t.Fatal(err)
 	}
-	if _, ok := store.Authenticate(gateway); ok {
-		t.Fatal("revoked gateway credential remained valid")
+	if _, ok := store.Authenticate(secondary); ok {
+		t.Fatal("revoked secondary credential remained valid")
 	}
 	if p, ok := store.Authenticate(direct); !ok || p.ID != "direct-default" {
 		t.Fatalf("remaining direct credential rejected: principal=%+v ok=%v", p, ok)
@@ -168,7 +168,7 @@ func TestRevokedPrincipalFailsClosedWhileAnotherPrincipalRemainsActive(t *testin
 func TestStoreRequiresDirectDefaultPrincipalRecord(t *testing.T) {
 	token := strings.Repeat("5", TokenHexLength)
 	store := Store{Version: StoreVersion, Credentials: []Record{{
-		Principal:         Principal{ID: "mcp-gateway", Class: "gateway", Name: "mcp-gateway"},
+		Principal:         Principal{ID: "direct-secondary", Class: "direct", Name: "direct/secondary"},
 		VerifierAlgorithm: VerifierAlgorithm,
 		Verifier:          verifier(token),
 		CreatedAt:         "2026-10-08T00:00:00Z",
@@ -176,5 +176,40 @@ func TestStoreRequiresDirectDefaultPrincipalRecord(t *testing.T) {
 	}}}
 	if err := store.Validate(); err == nil || !strings.Contains(err.Error(), "missing the direct-default principal") {
 		t.Fatalf("Validate() error = %v, want missing direct-default rejection", err)
+	}
+}
+
+// A legacy second-credential record may survive an upgrade. Keeping its
+// original verifier metadata parseable avoids a service-start failure, but the
+// retired Gateway bearer must never authorize a request.
+func TestRetiredGatewayPrincipalCannotAuthenticate(t *testing.T) {
+	direct := strings.Repeat("6", TokenHexLength)
+	retired := strings.Repeat("7", TokenHexLength)
+	old := Record{
+		Principal:         Principal{ID: "mcp-gateway", Class: "gateway", Name: "mcp-gateway"},
+		VerifierAlgorithm: VerifierAlgorithm,
+		Verifier:          verifier(retired), CreatedAt: "2026-10-08T00:00:00Z", Enabled: true,
+	}
+	directRecord := Record{
+		Principal:         Principal{ID: "direct-default", Class: "direct", Name: "direct/default"},
+		VerifierAlgorithm: VerifierAlgorithm,
+		Verifier:          verifier(direct), CreatedAt: "2026-10-08T00:00:00Z", Enabled: true,
+	}
+	s := Store{Version: StoreVersion, Credentials: []Record{directRecord, old}}
+	if err := s.Validate(); err != nil {
+		t.Fatalf("old store should stay readable: %v", err)
+	}
+	if got, ok := s.Authenticate(retired); ok {
+		t.Fatalf("retired principal authenticated: %+v", got)
+	}
+	if got, ok := s.Authenticate(direct); !ok || got.ID != "direct-default" {
+		t.Fatalf("direct credential lost during legacy compatibility: %+v, ok=%v", got, ok)
+	}
+	// The retired record does not count toward the minimum active credentials.
+	directRecord.Enabled = false
+	directRecord.RevokedAt = "2026-10-08T01:00:00Z"
+	s.Credentials[0] = directRecord
+	if err := s.Validate(); err == nil || !strings.Contains(err.Error(), "no active credential") {
+		t.Fatalf("legacy-only live bearer was incorrectly counted as usable: %v", err)
 	}
 }

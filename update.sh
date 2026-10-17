@@ -143,6 +143,50 @@ printf '[ai-server-agent] Target version: %s\n' "$TARGET_VERSION"
 printf '[ai-server-agent] Target ref: %s\n' "$TARGET_REF"
 if [ "$PLAN_ONLY" -eq 1 ]; then exit 0; fi
 
+# The target can be an older released/source installer that predates the
+# credential safety guard in the installed version. Do not execute it with
+# a store it might reject, or worse, with a retired bearer it might reactivate.
+# An explicit cleanup on the CURRENT installed Agent is the only supported
+# way to narrow an incompatible store; the updater never mutates credentials.
+verify_downloaded_installer_credential_compatibility(){
+  local candidate="$1" config="${2:-/etc/ai-server-agent/config.json}" expected_store="${3:-/etc/ai-server-agent/mcp-credentials.json}" active_binary="${4:-/usr/local/bin/ai-server-agent}" store
+  [ -s "$config" ] || return 0
+  if ! "$active_binary" -config "$config" validate-config >/dev/null 2>&1; then
+    cli_error "Existing Agent configuration cannot be validated; refusing to execute an older installer or infer its credential source."
+    return 1
+  fi
+  store="$(jq -er '.credential_store_file // empty' "$config" 2>/dev/null || true)"
+  [ -n "$store" ] || return 0 # Older plaintext-bearer migration is separate.
+  [ "$store" = "$expected_store" ] && [ -f "$store" ] && [ ! -L "$store" ] || {
+    cli_error "Existing named MCP credential store is missing, unsafe or outside the managed path; refusing the update."
+    return 1
+  }
+  if grep -Fq 'CREDENTIAL_PREFLIGHT_CONTRACT_V1:' "$candidate"; then
+    return 0 # Target installer performs the exact-binary validation itself.
+  fi
+  # No advertised credential preflight: accept only a safely reduced
+  # direct/default-only store AND an installer that understands named stores.
+  # The old server would otherwise re-enable a retired Gateway verifier, or
+  # reject even a revoked direct/secondary record on startup.
+  if ! grep -Fq 'MCP_CREDENTIAL_STORE=' "$candidate" ||
+     ! grep -Fq 'credential_store_file' "$candidate" ||
+     ! jq -e '
+       type=="object" and .version==1 and (.credentials|type)=="array" and
+       (.credentials|length)==1 and
+       (.credentials[0].principal.id=="direct-default") and
+       (.credentials[0].principal.class=="direct") and
+       (.credentials[0].principal.name=="direct/default") and
+       (.credentials[0].enabled==true) and
+       ((.credentials[0].revoked_at // "")=="") and
+       (.credentials[0].verifier_algorithm=="sha256-v1") and
+       (.credentials[0].verifier|type=="string" and test("^[0-9a-f]{64}$")) and
+       (.credentials[0].created_at|type=="string" and length>0)
+     ' "$store" >/dev/null 2>&1; then
+    cli_error "The target installer predates credential safety preflight or the current store is not safe for an older version. The running Agent and credentials were preserved. Verify direct/default, run 'sudo ai-server-agent-manage credential-prepare-rollback' while the current version is active, and retry; older versions without named credentials are unsupported."
+    return 1
+  fi
+}
+
 TMP="$(mktemp -d)"; trap 'rm -rf "$TMP"' EXIT
 if [ "$CHANNEL" = "stable" ]; then
   release_json="$(verified_stable_release_json "$TARGET_VERSION")"
@@ -162,6 +206,7 @@ if [ "$CHANNEL" = "stable" ]; then
     exit 1
   }
   chmod +x "$TMP/install.sh"
+  verify_downloaded_installer_credential_compatibility "$TMP/install.sh"
   AI_SERVER_AGENT_NONINTERACTIVE=1 \
   AI_SERVER_AGENT_SETUP_MODE=keep \
     bash "$TMP/install.sh"
@@ -173,6 +218,7 @@ else
     "https://api.github.com/repos/$REPO/contents/install.sh" \
     -o "$TMP/install.sh"
   chmod +x "$TMP/install.sh"
+  verify_downloaded_installer_credential_compatibility "$TMP/install.sh"
   AI_SERVER_AGENT_VERSION="$TARGET_VERSION" \
   AI_SERVER_AGENT_REF="$TARGET_REF" \
   AI_SERVER_AGENT_TRACK_REF="$TARGET_TRACK_REF" \

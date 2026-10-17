@@ -15,7 +15,7 @@ fixture for verified task-only cleanup. The default mode additionally
 requires spare global ai-job capacity and never stops unrelated jobs.
 Only task-owned temporary resources change.
 This proves the isolated wire/process path, not installed-service acceptance,
-ChatGPT rendering or Gateway.
+native ChatGPT rendering.
 """
 
 import base64
@@ -132,7 +132,7 @@ def main(candidate, *, terminal_only=False):
                  "verifier_algorithm": "sha256-v1",
                  "verifier": hashlib.sha256(token.encode("ascii")).hexdigest(),
                  "created_at": now, "enabled": True},
-                {"principal": {"id": "mcp-gateway", "class": "gateway", "name": "mcp-gateway"},
+                {"principal": {"id": "direct-secondary", "class": "direct", "name": "direct/secondary"},
                  "verifier_algorithm": "sha256-v1",
                  "verifier": hashlib.sha256(other_token.encode("ascii")).hexdigest(),
                  "created_at": now, "enabled": True},
@@ -263,7 +263,7 @@ def main(candidate, *, terminal_only=False):
             if terminal_only:
                 # Exercise two distinct authenticated principals on the same
                 # loopback MCP endpoint. The second is a named fixture-only
-                # gateway identity, not an installed Gateway integration.
+                # secondary ordinary MCP client, with a distinct bearer.
                 assert other_token is not None
                 other_init, _ = rpc(
                     "initialize",

@@ -8,6 +8,24 @@ VERSION="${1:-}"
 log(){ printf '[ai-server-agent] %s\n' "$*"; }
 die(){ printf '[ai-server-agent] ERROR: %s\n' "$*" >&2; exit 1; }
 
+# Only a first installation may use the public bootstrap: an older immutable
+# release installer cannot be assumed to validate newer credential schemas.
+# Include partial installations and symlinks; do not inspect credential bytes.
+bootstrap_has_existing_agent(){
+  local path
+  for path in \
+    /etc/ai-server-agent \
+    /var/lib/ai-server-agent \
+    /usr/local/bin/ai-server-agent \
+    /usr/local/sbin/ai-server-agent-manage \
+    /usr/local/lib/ai-server-agent \
+    /etc/systemd/system/ai-server-agent.service \
+    /etc/systemd/system/ai-server-agent-executor.service; do
+    if [ -e "$path" ] || [ -L "$path" ]; then return 0; fi
+  done
+  return 1
+}
+
 UBUNTU_MIN_VERSION=22.04
 DEBIAN_MIN_VERSION=11
 
@@ -44,6 +62,11 @@ case "$#" in
 esac
 if [ -n "$VERSION" ] && ! [[ "$VERSION" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
   die "Stable version must look like v0.1.2."
+fi
+
+# Reject installed hosts before network access or potentially privileged APT.
+if bootstrap_has_existing_agent; then
+  die "Stable bootstrap is for fresh installations only. Existing Agent state was detected; use the installed protected updater ('sudo ai-server-agent-manage update') for updates or compatible rollbacks. Nothing was changed."
 fi
 
 for cmd in curl sha256sum mktemp; do
@@ -146,6 +169,22 @@ actual_digest="sha256:$(sha256sum "$root_stage/install.sh" | awk '{print $1}')"
   exit 1
 }
 printf '[ai-server-agent] Privileged staging re-verified the authenticated installer bytes.\n'
+# Authoritative second check immediately before executing the historical
+# installer, after verified root staging. This also detects an installation
+# that appeared after the first, unprivileged check.
+for install_path in \
+  /etc/ai-server-agent \
+  /var/lib/ai-server-agent \
+  /usr/local/bin/ai-server-agent \
+  /usr/local/sbin/ai-server-agent-manage \
+  /usr/local/lib/ai-server-agent \
+  /etc/systemd/system/ai-server-agent.service \
+  /etc/systemd/system/ai-server-agent-executor.service; do
+  if [ -e "$install_path" ] || [ -L "$install_path" ]; then
+    printf '[ai-server-agent] ERROR: Stable bootstrap is for fresh installations only. Existing Agent state was detected at privileged handoff; use the installed protected updater instead. Nothing was changed.\n' >&2
+    exit 1
+  fi
+done
 # Pass only the explicitly supported purpose inputs to the verified installer.
 # The label is data, never shell-evaluated, and is validated by install.sh.
 installer_env=()

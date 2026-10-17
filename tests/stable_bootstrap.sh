@@ -1,11 +1,47 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-BOOTSTRAP="$ROOT/scripts/install-stable.sh"
+SOURCE_BOOTSTRAP="$ROOT/scripts/install-stable.sh"
+BOOTSTRAP="$SOURCE_BOOTSTRAP"
 TMP="$(mktemp -d)"
 trap 'rm -rf "$TMP"' EXIT
 
-bash -n "$BOOTSTRAP"
+# This behavioral suite is also invoked by root_trust_boundary.sh *after*
+# Agent installation. Keep real root/credential/service state untouched:
+# substitute only the fixed detection paths on such an occupied test host.
+# The disposable installed-systemd suite separately runs the unchanged
+# production bootstrap against actual installed paths and credentials.
+rewrite_bootstrap_install_markers(){
+  local source="$1" dest="$2" prefix="$3"
+  sed \
+    -e "s#/etc/ai-server-agent#$prefix/config#g" \
+    -e "s#/var/lib/ai-server-agent#$prefix/state#g" \
+    -e "s#/usr/local/bin/ai-server-agent#$prefix/bin#g" \
+    -e "s#/usr/local/sbin/ai-server-agent-manage#$prefix/manage#g" \
+    -e "s#/usr/local/lib/ai-server-agent#$prefix/lib#g" \
+    -e "s#/etc/systemd/system/ai-server-agent.service#$prefix/agent.service#g" \
+    -e "s#/etc/systemd/system/ai-server-agent-executor.service#$prefix/executor.service#g" \
+    "$source" > "$dest"
+}
+markers=(
+  /etc/ai-server-agent /var/lib/ai-server-agent
+  /usr/local/bin/ai-server-agent /usr/local/sbin/ai-server-agent-manage
+  /usr/local/lib/ai-server-agent /etc/systemd/system/ai-server-agent.service
+  /etc/systemd/system/ai-server-agent-executor.service
+)
+occupied=false
+for marker in "${markers[@]}"; do
+  [ "$(grep -Fc "$marker" "$SOURCE_BOOTSTRAP")" -eq 2 ] || {
+    echo "Stable bootstrap guard missing or changed: $marker" >&2
+    exit 1
+  }
+  if [ -e "$marker" ] || [ -L "$marker" ]; then occupied=true; fi
+done
+if [ "$occupied" = true ]; then
+  BOOTSTRAP="$TMP/bootstrap-isolated-host.sh"
+  rewrite_bootstrap_install_markers "$SOURCE_BOOTSTRAP" "$BOOTSTRAP" "$TMP/isolation"
+fi
+bash -n "$SOURCE_BOOTSTRAP" "$BOOTSTRAP"
 # The public bootstrap URL is permanent but its source on main is mutable.
 # The selected release, verified installer and root staging remain immutable.
 bootstrap_url='https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh'
@@ -108,6 +144,11 @@ done
 case "$url" in
   https://api.github.com/repos/ach1992/ai-server-agent/releases/latest|https://api.github.com/repos/ach1992/ai-server-agent/releases/tags/v0.1.2)
     printf '%s\n' "$url" >> "$RELEASE_REQUEST_MARKER"
+    # Only a private test fixture: simulate another installation beginning
+    # after the caller's unprivileged check but before the root handoff.
+    if [ -n "${BOOTSTRAP_LATE_INSTALL_MARKER:-}" ]; then
+      mkdir -p -- "$BOOTSTRAP_LATE_INSTALL_MARKER"
+    fi
     printf 'release-metadata\n' >> "$EVENT_MARKER"
     printf '{"tag_name":"v0.1.2","draft":false,"prerelease":false,"immutable":%s,"assets":[{"name":"install.sh","state":"uploaded","digest":"%s","browser_download_url":"%s"}]}\n' "$IMMUTABLE" "$INSTALLER_DIGEST" "$INSTALLER_URL"
     ;;
@@ -203,6 +244,45 @@ make_fixture true false false
 bash "$BOOTSTRAP" v0.1.2 > "$FIXTURE/out"
 test -s "$SUDO_MARKER"
 test -s "$EXEC_MARKER"
+test ! -e "$PATH_ATTACK_MARKER"
+
+# Exercise both fresh-only checks without modifying the real host's Agent
+# paths. Only the canonical path constant is redirected to a private marker;
+# the production logic, release verification and privilege handoff are intact.
+make_install_guard_fixture(){
+  EXISTING_MARKER="$FIXTURE/marker-root/config"
+  rewrite_bootstrap_install_markers "$SOURCE_BOOTSTRAP" "$FIXTURE/bootstrap-marker-fixture.sh" "$FIXTURE/marker-root"
+  [ "$(grep -Fc "$EXISTING_MARKER" "$FIXTURE/bootstrap-marker-fixture.sh")" -eq 2 ] || {
+    echo 'Expected both bootstrap installation guards in the fixture' >&2
+    exit 1
+  }
+}
+
+make_fixture true false false
+make_install_guard_fixture
+mkdir -p "$EXISTING_MARKER"
+if bash "$FIXTURE/bootstrap-marker-fixture.sh" v0.1.2 > "$FIXTURE/out" 2>&1; then
+  echo 'already-installed host was accepted by the Stable bootstrap' >&2
+  exit 1
+fi
+grep -qF 'Stable bootstrap is for fresh installations only' "$FIXTURE/out"
+test ! -e "$RELEASE_REQUEST_MARKER"
+test ! -e "$DOWNLOAD_MARKER"
+test ! -e "$SUDO_MARKER"
+test ! -e "$EXEC_MARKER"
+test ! -e "$PREREQ_MARKER"
+
+make_fixture true false false
+make_install_guard_fixture
+BOOTSTRAP_LATE_INSTALL_MARKER="$EXISTING_MARKER" \
+  bash "$FIXTURE/bootstrap-marker-fixture.sh" v0.1.2 > "$FIXTURE/out" 2>&1 &&
+  { echo 'late install bypassed the privileged Stable bootstrap guard' >&2; exit 1; }
+grep -qF 'Existing Agent state was detected at privileged handoff' "$FIXTURE/out"
+test -d "$EXISTING_MARKER"
+test -s "$RELEASE_REQUEST_MARKER"
+test -s "$DOWNLOAD_MARKER"
+test -s "$SUDO_MARKER"
+test ! -e "$EXEC_MARKER"
 test ! -e "$PATH_ATTACK_MARKER"
 
 make_fixture true false false

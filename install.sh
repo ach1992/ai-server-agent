@@ -557,17 +557,77 @@ download_release(){ (
   install_helpers "$payload_root"
 ); }
 
+# CREDENTIAL_PREFLIGHT_CONTRACT_V1: verify named auth before executable replacement.
 # Before replacing the installed executable, prove that a target-version
 # binary accepts the existing operator configuration. A source/stable version
 # that cannot understand a known runtime override MUST fail visibly instead of
 # silently discarding that setting during a state-preserving update.
 verify_existing_runtime_compatibility(){
-  local candidate="$1"
+  local candidate="$1" store response probe
   [ "$FRESH_INSTALL" -eq 0 ] || return 0
   if jq -e 'has("runtime")' "$CONFIG_FILE" >/dev/null; then
     if ! "$candidate" -config "$CONFIG_FILE" validate-config >/dev/null; then
       die "Existing operator runtime settings are incompatible with the target Agent binary. No service or active config was switched. Select a compatible version or explicitly reconcile config.json runtime settings before retrying."
     fi
+  elif ! "$candidate" -config "$CONFIG_FILE" validate-config >/dev/null; then
+    die "The target Agent rejects the existing installation configuration. No binary, credentials or active service was switched."
+  fi
+
+  # An existing named store is a stateful authentication contract, not merely
+  # valid JSON. Prove compatibility using the *target binary* BEFORE replacing
+  # the executable, management helpers, config or restarting services.
+  if ! jq -e '(.credential_store_file // "") | type=="string" and length>0' "$CONFIG_FILE" >/dev/null; then
+    return 0 # Pre-named legacy bearer migration has its own activation guard.
+  fi
+  store="$(jq -er '.credential_store_file' "$CONFIG_FILE")" || die "Cannot resolve existing MCP credential store."
+  [ "$store" = "$MCP_CREDENTIAL_STORE" ] || die "The current credential store path differs from the managed installation path. Refusing implicit credential replacement; reconcile the actual credential source before updating."
+  [ -f "$store" ] && [ ! -L "$store" ] || die "Existing named MCP credential store is missing or unsafe. Refusing to replace the Agent binary."
+  response=""
+  if response="$("$candidate" -config "$CONFIG_FILE" validate-credential-store 2>&1)"; then
+    return 0
+  fi
+  if [ "$response" != "unknown command" ]; then
+    die "Existing MCP credentials are incompatible with the target Agent binary. The running binary, services, config and credential store were not replaced. If direct/default is disabled, rotate it locally with the installed manager before retrying; never regenerate or migrate a bearer silently."
+  fi
+
+  # Older supported binaries do not know the new read-only preflight command.
+  # First positively prove the target understands named-credential configs:
+  # adding a second auth source MUST produce this exact validation error.
+  # Otherwise fail closed rather than trusting a binary from before named auth.
+  probe="$(mktemp "$CONFIG_DIR/.mcp-rollback-probe.XXXXXX")" || die "Cannot stage read-only target credential schema probe."
+  if ! jq '.bearer_token_file="/unused-auth-source-preflight"' "$CONFIG_FILE" > "$probe"; then
+    rm -f -- "$probe"
+    die "Could not prepare the target credential schema probe."
+  fi
+  response="$("$candidate" -config "$probe" validate-config 2>&1)" || true
+  rm -f -- "$probe"
+  [ "$response" = "config must select exactly one MCP credential source" ] ||
+    die "The target Agent binary cannot prove named-credential compatibility. Refusing unsafe downgrade; no running executable or credentials were changed."
+
+  # The former named-principal schema knows direct/default and mcp-gateway,
+  # but NOT direct/secondary. A previously enabled mcp-gateway verifier would
+  # be reactivated by rollback; reject it even if the old binary accepts it.
+  # A disabled legacy record is safe; a secondary record (even revoked) is
+  # unknown to that binary and must first be removed explicitly.
+  if ! jq -e '
+    type=="object" and .version==1 and (.credentials|type)=="array" and
+    (.credentials|length)>=1 and (.credentials|length)<=2 and
+    ([.credentials[].principal.id]|unique|length)==(.credentials|length) and
+    ([.credentials[].verifier]|unique|length)==(.credentials|length) and
+    ([.credentials[]|select(.principal.id=="direct-default" and
+      .principal.class=="direct" and .principal.name=="direct/default" and
+      .enabled==true and (.revoked_at // "")=="")]|length)==1 and
+    all(.credentials[];
+      (.verifier_algorithm=="sha256-v1") and
+      (.verifier|type=="string" and test("^[0-9a-f]{64}$")) and
+      (.created_at|type=="string" and length>0) and
+      (if .principal.id=="direct-default" then true
+       else .principal.id=="mcp-gateway" and .principal.class=="gateway" and
+         .principal.name=="mcp-gateway" and .enabled==false and
+         (.revoked_at|type=="string" and length>0) end)
+    )
+  ' "$store" >/dev/null 2>&1; then
+    die "Unsafe rollback credential state: the older target cannot use direct/secondary or would reactivate a retired Gateway bearer. Running services and credential store were preserved. While the current Agent is active, use 'sudo ai-server-agent-manage credential-prepare-rollback' to explicitly remove optional credentials, verify direct/default access, then retry the rollback."
   fi
 }
 
