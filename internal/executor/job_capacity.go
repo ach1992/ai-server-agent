@@ -4,10 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os/exec"
 	"path/filepath"
 	"strings"
-	"time"
 )
 
 // This bounded, read-only PID1 view is shared by admission and discovery.
@@ -17,19 +15,15 @@ func activeAgentUnitIDs() ([]string, error) {
 }
 
 func activeAgentUnitIDsContext(parent context.Context) ([]string, error) {
-	out := newBoundedOutputCollector(systemdOutputLimit)
-	// Inventory runs on both admission and passive discovery; never let a
-	// stalled PID1/dbus interaction monopolize either path indefinitely.
-	ctx, cancel := context.WithTimeout(parent, 4*time.Second)
-	defer cancel()
-	cmd := exec.CommandContext(ctx, "systemctl", "list-units", "--type=service",
+	// Shared bounded process/pipe wait applies to both admission (under
+	// jobsMu) and passive discovery, including inherited stdout/stderr.
+	// Preserve the caller's earlier cancellation deadline.
+	result, err := runBoundedJobSystemd(parent, jobSystemdProbeTimeout, "systemctl", "list-units", "--type=service",
 		"--state=activating,active,deactivating,reloading",
 		"--no-legend", "--no-pager", "ai-job-*.service")
-	cmd.Stdout, cmd.Stderr = out, out
-	if err := cmd.Run(); err != nil {
+	if err != nil {
 		return nil, fmt.Errorf("systemd job inventory unavailable: %w", err)
 	}
-	result := out.Result()
 	if result.Truncated {
 		return nil, errors.New("systemd job inventory exceeds bound")
 	}

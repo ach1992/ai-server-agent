@@ -293,6 +293,9 @@ func (s *Server) startJobBounded(req Request) (resp Response) {
 		return jobStateError("job_prepare_failed", err)
 	}
 
+	// Persist before calling systemd-run: from this point an external
+	// dispatch may have happened, even if the unit has not appeared yet.
+	// Only a still-claimed record proves that no launch was attempted.
 	claim.State = "launching"
 	if claimPath != "" {
 		if err := updateJobClaim(claimPath, claim); err != nil {
@@ -415,47 +418,39 @@ func (s *Server) resumeClaimedJob(req Request, jobsDir, claimPath string, claim 
 		return resp
 	}
 
-	if claim.State == "claimed" {
-		// The durable claim is written before any launch attempt. If the
-		// executor crashed while preparing the protected handoff, no unit could
-		// have been launched yet. Remove partial handoff state now; rebuilding
-		// happens only after the same resource-admission checks as a new job.
-		cleanupJobPaths(paths)
-	} else {
-		if _, err := os.Lstat(paths.command); err != nil {
-			if os.IsNotExist(err) {
-				claim.State = "failed"
-				_ = updateJobClaim(claimPath, claim)
-				return Response{
-					Error:            "persistent-job launch state was interrupted after launch became possible; completion cannot be proven; use a new operation_id to retry",
-					ReasonCode:       "unknown_completion",
-					ErrorCode:        "unknown_completion",
-					ErrorClass:       "state",
-					JobID:            claim.JobID,
-					IdempotentReplay: true,
-				}
-			}
-			return jobStateError("job_state_unavailable", err)
-		}
+	// "launching" was durably committed before systemd-run was invoked.
+	// A lost/timed-out reply or Executor restart cannot establish non-delivery
+	// merely from a missing transient unit or started marker. Never submit a
+	// second launch for the same operation_id, including legacy launching
+	// claims created before this no-blind-replay correction.
+	if claim.State == "launching" {
+		resp := unknownJobLaunchResponse(claim.JobID,
+			"persistent job launch may have reached systemd but execution is not proven; inspect the original job_id; the original operation_id cannot be automatically re-dispatched")
+		resp.IdempotentReplay = true
+		return resp
 	}
 
+	// Only "claimed" proves systemd-run was never invoked. Safely rebuild
+	// any partial handoff before rechecking resource admission.
+	cleanupJobPaths(paths)
 	if blocked := persistentJobAdmissionResponseWithLimit(jobsDir, s.persistentTaskCapacity(), kind); blocked != nil {
 		blocked.JobID = claim.JobID
 		blocked.IdempotentReplay = true
 		return *blocked
 	}
 
-	if claim.State == "claimed" {
-		if err := s.prepareJobFiles(paths, req); err != nil {
-			claim.State = "failed"
-			_ = updateJobClaim(claimPath, claim)
-			return jobStateError("job_prepare_failed", err)
-		}
-		claim.State = "launching"
-		if err := updateJobClaim(claimPath, claim); err != nil {
-			cleanupJobPaths(paths)
-			return jobStateError("job_state_unavailable", err)
-		}
+	if err := s.prepareJobFiles(paths, req); err != nil {
+		claim.State = "failed"
+		_ = updateJobClaim(claimPath, claim)
+		return jobStateError("job_prepare_failed", err)
+	}
+	// The durable transition is the one-way external-dispatch boundary.
+	// A crash before this write remains safely retryable; after it,
+	// uncertain delivery is never blindly retried.
+	claim.State = "launching"
+	if err := updateJobClaim(claimPath, claim); err != nil {
+		cleanupJobPaths(paths)
+		return jobStateError("job_state_unavailable", err)
 	}
 
 	resp := s.launchPreparedJob(req, paths, claim.JobID)
