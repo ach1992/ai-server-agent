@@ -695,6 +695,11 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 		d.sourceVersions[breakpointStat.Path] = req.FileVersion
 	}
 	if method == "configure" {
+		if d.phpHTTP != nil {
+			if err := d.phpProxy.terminalFailure(); err != nil {
+				return fileError("php_http_dbgp_provenance_failed", "state", err)
+			}
+		}
 		// debugpy sends its real process event after configurationDone's
 		// response. Never expose control over a Python target until its
 		// pidfd, worker UID, trusted interpreter and dedicated cgroup
@@ -800,6 +805,13 @@ func (s *Server) debugStatus(ctx context.Context, req Request) (response Respons
 			}
 		}
 		d.mu.Unlock()
+	}
+	if d.phpHTTP != nil && d.phpProxy != nil {
+		if err := d.phpProxy.terminalFailure(); err != nil {
+			d.mu.Lock()
+			d.stage = "failed"
+			d.mu.Unlock()
+		}
 	}
 	result := s.debugResult(req, d, json.RawMessage(`{}`), started, &dapRuntimeEvidence{
 		adapterExited: exited, cleanupVerified: exited && cleanupErr == nil, adapterExitCode: exitCode,

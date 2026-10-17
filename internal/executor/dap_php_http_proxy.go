@@ -101,6 +101,9 @@ func (p *phpDBGpProxy) verifyOriginalPHPHTTP(conn *net.UnixConn, cred *unix.Ucre
 	if err := t.verifyService(ctx, t.workerUser); err != nil {
 		return nil, nil, fmt.Errorf("php_http_dbgp_service_provenance_changed: %w", err)
 	}
+	if err := t.verifyAuthorizedRequestSocket(); err != nil {
+		return nil, nil, err
+	}
 	// Dup the pinned original server's pidfd. The debuggee remains owned by
 	// the independent Service Job and must NOT be added to the DAP cgroup.
 	fd, err := unix.Dup(int(t.phpPin.Fd()))
@@ -120,6 +123,9 @@ func (p *phpDBGpProxy) verifyOriginalPHPHTTP(conn *net.UnixConn, cred *unix.Ucre
 	if err != nil || parsed.Scheme != "file" || parsed.Host != "" ||
 		parsed.RawQuery != "" || parsed.Fragment != "" || parsed.Path != p.program {
 		return fail(errors.New("php_http_dbgp_source_path_mismatch"))
+	}
+	if err := t.verifyAuthorizedRequestSocket(); err != nil {
+		return fail(err)
 	}
 	if err := t.verifyPHPIdentity(); err != nil ||
 		unix.PidfdSendSignal(int(pin.Fd()), 0, nil, 0) != nil {

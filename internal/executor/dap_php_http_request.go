@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -24,6 +25,9 @@ func (s *Server) debugPHPHTTPRequest(ctx context.Context, req Request, d *dapSta
 	d.mu.Lock()
 	configured := d.configured
 	d.mu.Unlock()
+	if err := t.proxy.terminalFailure(); err != nil {
+		return fileError("php_http_dbgp_provenance_failed", "state", err)
+	}
 	if !configured {
 		return fileError("debug_not_configured", "state", errors.New("set PHP breakpoints and call debug_configure before initiating one HTTP request"))
 	}
@@ -79,6 +83,18 @@ func (s *Server) debugPHPHTTPRequest(ctx context.Context, req Request, d *dapSta
 				_ = conn.Close()
 				return nil, errors.New("php_http_original_listener_changed_before_request")
 			}
+			if err := t.proxy.terminalFailure(); err != nil {
+				_ = conn.Close()
+				return nil, fmt.Errorf("php_http_dbgp_provenance_failed_before_http_send: %w", err)
+			}
+			if err := t.bindAuthorizedRequestSocket(conn); err != nil {
+				_ = conn.Close()
+				return nil, err
+			}
+			if err := t.proxy.terminalFailure(); err != nil {
+				_ = conn.Close()
+				return nil, fmt.Errorf("php_http_dbgp_provenance_failed_before_http_send: %w", err)
+			}
 			return conn, nil
 		},
 	}
@@ -88,6 +104,11 @@ func (s *Server) debugPHPHTTPRequest(ctx context.Context, req Request, d *dapSta
 			return http.ErrUseLastResponse // report redirect as failure; no second request
 		},
 	}
+	if err := t.proxy.terminalFailure(); err != nil {
+		cancel()
+		transport.CloseIdleConnections()
+		return fileError("php_http_dbgp_provenance_failed", "state", err)
+	}
 	if !t.markRequestDispatched(cancel) {
 		cancel()
 		transport.CloseIdleConnections()
@@ -96,6 +117,18 @@ func (s *Server) debugPHPHTTPRequest(ctx context.Context, req Request, d *dapSta
 	go func() {
 		defer cancel()
 		defer transport.CloseIdleConnections()
+		// The test-only hook forces the unauthorized triggered request to
+		// race after HTTP admission but before the authorized connection.
+		if hook := t.beforeAuthorizedDialTestHook; hook != nil {
+			hook()
+		}
+		if err := t.proxy.terminalFailure(); err != nil {
+			t.mu.Lock()
+			t.requestDone = true
+			t.requestError = "php_http_dbgp_provenance_failed_before_http_send: " + err.Error()
+			t.mu.Unlock()
+			return
+		}
 		result, err := client.Do(httpRequest)
 		code := 0
 		status := ""
@@ -159,6 +192,9 @@ func (t *phpHTTPDebugTarget) requestSnapshot() map[string]any {
 	if t.proxy != nil {
 		t.proxy.mu.Lock()
 		result["dbgp_verified"] = t.proxy.verified && t.proxy.failure == nil
+		if t.proxy.failure != nil {
+			result["dbgp_provenance_error"] = t.proxy.failure.Error()
+		}
 		t.proxy.mu.Unlock()
 	}
 	if t.requestDone {

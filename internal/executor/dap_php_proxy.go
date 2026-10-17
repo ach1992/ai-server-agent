@@ -126,6 +126,28 @@ func (p *phpDBGpProxy) await(ctx context.Context) error {
 	return nil
 }
 
+// Do not block waiting for the legitimate DBGp peer: HTTP dispatch is
+// what causes it to connect. But an already-terminal rejected peer MUST
+// prevent a later side-effecting HTTP request.
+func (p *phpDBGpProxy) terminalFailure() error {
+	if p == nil {
+		return errors.New("php_http_dbgp_proxy_unavailable")
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.failure != nil {
+		return p.failure
+	}
+	select {
+	case <-p.ready:
+		if !p.verified {
+			return errors.New("php_http_dbgp_proxy_completed_without_peer_verification")
+		}
+	default:
+	}
+	return nil
+}
+
 // Calling shutdown from the session broker (even on unexpected adapter exit)
 // closes all waiters without taking its e.mu/d.mu locks or waiting for a
 // goroutine which may be concurrently inspecting process metadata.

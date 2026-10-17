@@ -62,6 +62,7 @@ func TestApprovedRootPHPHTTPServiceOwnedDAP(t *testing.T) {
 	// can still have created a transient service; never erase its workspace
 	// while its original unit may be running.
 	unitID, claimPath := "", ""
+	var originalUnit phpHTTPServiceUnit // must be captured from live root manager, never guessed from name
 	launchAttempted := false
 	t.Cleanup(func() {
 		reconciled := !launchAttempted
@@ -84,17 +85,25 @@ func TestApprovedRootPHPHTTPServiceOwnedDAP(t *testing.T) {
 			if lookupErr != nil {
 				t.Errorf("isolated PHP HTTP unit existence unverified: %v", lookupErr)
 			} else {
-				if exists {
-					cmd := exec.Command("/usr/bin/systemctl", "stop", "ai-job-"+unitID+".service")
-					if output, stopErr := cmd.CombinedOutput(); stopErr != nil {
-						t.Errorf("isolated PHP HTTP unit stop unverified: %v %.300s", stopErr, output)
-					}
-				}
 				active, activeErr := jobUnitActive(unitID)
-				if activeErr == nil && !active {
+				if activeErr != nil {
+					t.Errorf("isolated PHP HTTP unit activity unverified: %v", activeErr)
+				} else if !active && !exists {
 					reconciled = true
+				} else if !active {
+					// A loaded but inactive unit must not be stopped.
+					reconciled = true
+				} else if originalUnit.id == "" {
+					t.Errorf("test-owned unit is active but its original InvocationID was never captured; refusing stop")
+				} else if stopErr := stopOriginalPHPHTTPFixtureUnit(context.Background(), originalUnit, "aiworker", uint32(uid)); stopErr != nil {
+					t.Errorf("test-owned original unit cannot be safely stopped: %v", stopErr)
 				} else {
-					t.Errorf("isolated PHP HTTP unit still active or unverified: %v active=%t", activeErr, active)
+					stillActive, activeErr := jobUnitActive(unitID)
+					if activeErr == nil && !stillActive {
+						reconciled = true
+					} else {
+						t.Errorf("test-owned unit termination not confirmed: active=%t err=%v", stillActive, activeErr)
+					}
 				}
 			}
 		}
@@ -237,6 +246,34 @@ func TestApprovedRootPHPHTTPServiceOwnedDAP(t *testing.T) {
 	if !ok {
 		t.Fatal("original PHP Service Job did not serve an untriggered HTTP request")
 	}
+	originalUnit, err = readPHPHTTPServiceUnit(context.Background(), jobID, "aiworker")
+	if err != nil {
+		t.Fatalf("capture original test-owned live InvocationID before fallback cleanup: %v", err)
+	}
+	// Discriminating real-systemd replacement/identity-drift guard: a
+	// forged expectation must NEVER lead to a stop of this live Service.
+	for _, change := range []struct {
+		name    string
+		replace func(*phpHTTPServiceUnit)
+	}{
+		{"InvocationID", func(u *phpHTTPServiceUnit) {
+			u.invocation = strings.Repeat("0", 32)
+			if u.invocation == originalUnit.invocation {
+				u.invocation = strings.Repeat("1", 32)
+			}
+		}},
+		{"MainPID", func(u *phpHTTPServiceUnit) { u.mainPID++ }},
+		{"ControlGroup", func(u *phpHTTPServiceUnit) { u.cgroup += "-replacement" }},
+	} {
+		forged := originalUnit
+		change.replace(&forged)
+		if err := stopOriginalPHPHTTPFixtureUnit(context.Background(), forged, "aiworker", uint32(uid)); err == nil {
+			t.Fatalf("fallback cleanup would stop a unit with drifted %s", change.name)
+		}
+		if active, err := jobUnitActive(jobID); err != nil || !active {
+			t.Fatalf("%s identity drift guard stopped original unit: %v %t", change.name, err, active)
+		}
+	}
 	ctx, cancel := context.WithTimeout(t.Context(), 70*time.Second)
 	defer cancel()
 	stat := s.workerWorkspaceFile(ctx, Request{Action: "workspace_stat", Workspace: workspace, Path: "index.php"})
@@ -377,6 +414,200 @@ func TestApprovedRootPHPHTTPServiceOwnedDAP(t *testing.T) {
 	if string(data) != "42\n" {
 		t.Fatalf("service response after DAP detach: %q", data)
 	}
+
+	// The contender uses the SAME localhost source and XDEBUG_TRIGGER as the
+	// authorized HTTP GET. Force it to run while requestStarted=true but
+	// before the Agent even dials, so PID/fileuri/trigger alone would match.
+	t.Run("competing_trigger_after_request_admission", func(t *testing.T) {
+		attack := s.debugAction(ctx, req)
+		if !attack.OK || attack.SessionID == "" {
+			t.Fatalf("competing DAP launch: %+v", attack)
+		}
+		id := attack.SessionID
+		cleaned := false
+		defer func() {
+			if !cleaned {
+				if err := s.workerStdioClose(req, id); err != nil {
+					t.Errorf("competing DAP cleanup: %v", err)
+				}
+			}
+		}()
+		entry, err := s.sessions.get(req, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entry.mu.Lock()
+		dp := entry.dap
+		entry.mu.Unlock()
+		if dp == nil || dp.phpProxy == nil || dp.phpHTTP == nil {
+			t.Fatal("competing DBGp target missing")
+		}
+		attackBP := bp
+		attackBP.SessionID = id
+		if out := s.debugAction(ctx, attackBP); !out.OK {
+			t.Fatalf("competing breakpoint: %+v", out)
+		}
+		config := req
+		config.Action, config.SessionID, config.DebugMethod = "debug_action", id, "configure"
+		if out := s.debugAction(ctx, config); !out.OK {
+			t.Fatalf("competing configure: %+v", out)
+		}
+		entered, release := make(chan struct{}), make(chan struct{})
+		defer func() {
+			select {
+			case <-release:
+			default:
+				close(release)
+			}
+		}()
+		dp.phpHTTP.beforeAuthorizedDialTestHook = func() { close(entered); <-release }
+		authorized := req
+		authorized.Action, authorized.SessionID, authorized.DebugMethod = "debug_action", id, "http_request"
+		if out := s.debugAction(ctx, authorized); !out.OK || out.Status != "request_dispatched" {
+			t.Fatalf("authorized request did not enter pre-dial gate: %+v", out)
+		}
+		select {
+		case <-entered:
+		case <-time.After(3 * time.Second):
+			t.Fatal("request did not reach deterministic pre-dial gate")
+		}
+		otherClient := &http.Client{Timeout: 4 * time.Second, Transport: &http.Transport{Proxy: nil, DisableKeepAlives: true}}
+		otherDone := make(chan struct{})
+		go func() {
+			defer close(otherDone)
+			out, err := otherClient.Get(endpoint + "?XDEBUG_TRIGGER=" + trigger)
+			if err == nil {
+				_, _ = io.Copy(io.Discard, io.LimitReader(out.Body, 256))
+				_ = out.Body.Close()
+			}
+		}()
+		const expectedFailure = "php_http_dbgp_no_active_authorized_request_socket"
+		var refused error
+		for until := time.Now().Add(4 * time.Second); time.Now().Before(until); {
+			refused = dp.phpProxy.terminalFailure()
+			if refused != nil {
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if refused == nil || !strings.Contains(refused.Error(), expectedFailure) {
+			t.Fatalf("competing triggered local request was admitted or rejected for wrong reason: %v", refused)
+		}
+		close(release)
+		aborted := false
+		for until := time.Now().Add(3 * time.Second); time.Now().Before(until); {
+			status := req
+			status.Action, status.SessionID = "debug_status", id
+			got := s.debugAction(ctx, status)
+			if got.OK && strings.Contains(got.Output, "\"completed\":true") {
+				if !strings.Contains(got.Output, "php_http_dbgp_provenance_failed_before_http_send") {
+					t.Fatalf("Agent attempted HTTP after terminal broker failure: %+v", got)
+				}
+				aborted = true
+				break
+			}
+			time.Sleep(20 * time.Millisecond)
+		}
+		if !aborted {
+			t.Fatal("pre-dial authorized request was not suppressed")
+		}
+		dp.phpHTTP.mu.Lock()
+		actualSocket := dp.phpHTTP.requestSocket
+		dp.phpHTTP.mu.Unlock()
+		if actualSocket != nil {
+			t.Fatal("Agent opened request socket after rejected competing DBGp peer")
+		}
+		status := req
+		status.Action, status.SessionID = "debug_status", id
+		if got := s.debugAction(ctx, status); !got.OK ||
+			!strings.Contains(got.Output, expectedFailure) ||
+			!strings.Contains(got.Output, "dbgp_provenance_error") {
+			t.Fatalf("debug_status concealed terminal provenance: %+v", got)
+		}
+		detach := req
+		detach.Action, detach.SessionID = "debug_stop", id
+		if out := s.debugAction(ctx, detach); !out.OK {
+			t.Fatalf("competing-trigger adapter-only cleanup failed: %+v", out)
+		}
+		cleaned = true
+		select {
+		case <-otherDone:
+		case <-time.After(5 * time.Second):
+			t.Fatal("competing request did not settle")
+		}
+		if active, err := jobUnitActive(jobID); err != nil || !active {
+			t.Fatalf("competing triggered request stopped original service: %v %t", err, active)
+		}
+	})
+	// R2: a terminal broker failure recorded BEFORE HTTP admission must
+	// never permit even a single side-effecting Agent GET.
+	t.Run("terminal_provenance_blocks_http_dispatch", func(t *testing.T) {
+		attack := s.debugAction(ctx, req)
+		if !attack.OK || attack.SessionID == "" {
+			t.Fatalf("R2 DAP launch: %+v", attack)
+		}
+		id, cleaned := attack.SessionID, false
+		defer func() {
+			if !cleaned {
+				if err := s.workerStdioClose(req, id); err != nil {
+					t.Errorf("R2 cleanup: %v", err)
+				}
+			}
+		}()
+		entry, err := s.sessions.get(req, id)
+		if err != nil {
+			t.Fatal(err)
+		}
+		entry.mu.Lock()
+		dp := entry.dap
+		entry.mu.Unlock()
+		if dp == nil || dp.phpProxy == nil {
+			t.Fatal("R2 proxy missing")
+		}
+		// A separate root test peer can connect but is NOT the pinned
+		// worker-owned PHP process. Its terminal rejection is stable.
+		other, err := net.DialTimeout("unix", socket, 2*time.Second)
+		if err != nil {
+			t.Fatal(err)
+		}
+		_ = other.Close()
+		var refusal error
+		for until := time.Now().Add(3 * time.Second); time.Now().Before(until); {
+			refusal = dp.phpProxy.terminalFailure()
+			if refusal != nil {
+				break
+			}
+			time.Sleep(15 * time.Millisecond)
+		}
+		if refusal == nil {
+			t.Fatal("R2 invalid peer did not fail terminally")
+		}
+		config := req
+		config.Action, config.SessionID, config.DebugMethod = "debug_action", id, "configure"
+		_ = s.debugAction(ctx, config)
+		request := req
+		request.Action, request.SessionID, request.DebugMethod = "debug_action", id, "http_request"
+		if out := s.debugAction(ctx, request); out.OK ||
+			out.ErrorCode != "php_http_dbgp_provenance_failed" ||
+			!strings.Contains(out.Error, refusal.Error()) {
+			t.Fatalf("known terminal peer failure did not block HTTP: %+v", out)
+		}
+		status := req
+		status.Action, status.SessionID = "debug_status", id
+		if out := s.debugAction(ctx, status); !out.OK ||
+			!strings.Contains(out.Output, refusal.Error()) {
+			t.Fatalf("debug_status lost original terminal error: %+v", out)
+		}
+		detach := req
+		detach.Action, detach.SessionID = "debug_stop", id
+		if out := s.debugAction(ctx, detach); !out.OK {
+			t.Fatalf("R2 debugger-only cleanup failed: %+v", out)
+		}
+		cleaned = true
+		if active, err := jobUnitActive(jobID); err != nil || !active {
+			t.Fatalf("R2 terminal failure affected original Service: %v %t", err, active)
+		}
+	})
 	// Spoof: separate DAP session, no authorized HTTP trigger. A root-test
 	// process may dial the root-owned AF_UNIX path, but its SO_PEERCRED UID/PID
 	// must never be mistaken for the original worker-owned PHP process.
@@ -551,6 +782,35 @@ func TestApprovedRootPHPHTTPServiceOwnedDAP(t *testing.T) {
 		t.Fatalf("stopped PHP Service Job was accepted as a live debug target: %+v", out)
 	}
 	t.Log("PHP_HTTP_ROOT_REAL_START_JOB_CLAIM_WRITER_DBGp_BREAKPOINT_SPOOF_CRASH_DRIFT_AND_EXPLICIT_STOP_PASS")
+}
+
+// Fallback cleanup has no authority over a same-named replacement Job.
+// Guard the exact captured InvocationID, cgroup, main PID and pinned runner
+// immediately before systemctl stop; retain scratch on any uncertainty.
+func stopOriginalPHPHTTPFixtureUnit(ctx context.Context, original phpHTTPServiceUnit, worker string, uid uint32) error {
+	if original.id == "" || original.invocation == "" || uid == 0 {
+		return fmt.Errorf("php_http_test_original_unit_identity_unavailable")
+	}
+	live, err := readPHPHTTPServiceUnit(ctx, original.id, worker)
+	if err != nil || live != original {
+		return fmt.Errorf("php_http_test_unit_replaced_or_unverified: %v", err)
+	}
+	pidfd, err := verifyPHPHTTPServiceRunner(live, uid)
+	if err != nil {
+		return fmt.Errorf("php_http_test_original_runner_unverified: %w", err)
+	}
+	defer pidfd.Close()
+	// Re-read unit identity after pinning to close the ordinary observation
+	// window. On drift never issue even the first stop command.
+	current, err := readPHPHTTPServiceUnit(ctx, original.id, worker)
+	if err != nil || current != original || unix.PidfdSendSignal(int(pidfd.Fd()), 0, nil, 0) != nil {
+		return fmt.Errorf("php_http_test_unit_identity_changed_before_fallback_stop: %v", err)
+	}
+	result, err := runBoundedJobSystemd(ctx, jobSystemdStopTimeout, "systemctl", "stop", "ai-job-"+original.id+".service")
+	if err != nil || result.Truncated {
+		return fmt.Errorf("php_http_test_unit_stop_unverified: %v output=%.300s", err, result.Output)
+	}
+	return nil
 }
 
 // Test-only shim: the real start_job writer launches os.Executable()

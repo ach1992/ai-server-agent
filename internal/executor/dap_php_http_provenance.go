@@ -19,25 +19,27 @@ import (
 // server in an independently started worker Service Job. Only its DAP adapter
 // can be terminated by debug_stop; never signal servicePIN/phpPIN.
 type phpHTTPDebugTarget struct {
-	mu             sync.Mutex
-	service        *phpHTTPServicePin
-	phpPID         int
-	phpPin         *os.File
-	phpExe         string
-	module         string
-	workerUser     string
-	workspace      string
-	program        string
-	port           int
-	trigger        string
-	socket         string
-	sourceInfo     os.FileInfo
-	proxy          *phpDBGpProxy
-	requestStarted bool
-	requestDone    bool
-	requestError   string
-	httpCode       int
-	cancel         context.CancelFunc
+	mu                           sync.Mutex
+	service                      *phpHTTPServicePin
+	phpPID                       int
+	phpPin                       *os.File
+	phpExe                       string
+	module                       string
+	workerUser                   string
+	workspace                    string
+	program                      string
+	port                         int
+	trigger                      string
+	socket                       string
+	sourceInfo                   os.FileInfo
+	proxy                        *phpDBGpProxy
+	requestStarted               bool
+	requestSocket                *os.File // independent fd pin of exact Executor-originated loopback GET
+	beforeAuthorizedDialTestHook func()   // deterministic competing-trigger interleaving, test-only
+	requestDone                  bool
+	requestError                 string
+	httpCode                     int
+	cancel                       context.CancelFunc
 }
 
 func validPHPHTTPTrigger(v string) bool {
@@ -303,14 +305,17 @@ func (p *phpHTTPDebugTarget) close() {
 		return
 	}
 	p.mu.Lock()
-	cancel, phpPin, service := p.cancel, p.phpPin, p.service
-	p.cancel, p.phpPin, p.service = nil, nil, nil
+	cancel, phpPin, service, requestSocket := p.cancel, p.phpPin, p.service, p.requestSocket
+	p.cancel, p.phpPin, p.service, p.requestSocket = nil, nil, nil, nil
 	p.mu.Unlock()
 	if cancel != nil {
 		cancel()
 	}
 	if phpPin != nil {
 		_ = phpPin.Close()
+	}
+	if requestSocket != nil {
+		_ = requestSocket.Close()
 	}
 	if service != nil {
 		_ = service.close()
