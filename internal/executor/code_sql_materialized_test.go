@@ -207,6 +207,17 @@ func TestSQLMaterializedViewWorkerCrossFileHistory(t *testing.T) {
 		[]byte("DROP MATERIALIZED VIEW reporting.monthly;\n"), 0600); err != nil {
 		t.Fatal(err)
 	}
+	dropRefs := get("references")
+	if len(dropRefs) != 4 {
+		t.Fatalf("genuine materialized DROP must remain in references: %+v", dropRefs)
+	}
+	sawMaterializedDrop := false
+	for _, ref := range dropRefs {
+		sawMaterializedDrop = sawMaterializedDrop || ref.URI == drop
+	}
+	if !sawMaterializedDrop {
+		t.Fatalf("missing genuine DROP MATERIALIZED VIEW reference: %+v", dropRefs)
+	}
 	owner.CodeMethod = "definition"
 	afterDrop := s.codeInspect(ctx, owner)
 	if afterDrop.OK || afterDrop.ErrorCode != "sql_schema_history_ambiguous" {
@@ -263,12 +274,38 @@ func TestSQLMaterializedViewWorkerCrossFileHistory(t *testing.T) {
 				t.Fatalf("%q: wrong-kind REFRESH included: %+v", ordinary, refs)
 			}
 		}
+		sameKindDrop := "DROP VIEW reporting.monthly;\n"
+		if strings.Contains(ordinary, "TABLE") {
+			sameKindDrop = "DROP TABLE reporting.monthly;\n"
+		}
+		writeSQL("queries/ordinary_drop.sql", sameKindDrop)
+		selectSQL("migrations/001_create.sql", ordinary, "monthly", "references")
+		sameKindRefs := get("references")
+		if len(sameKindRefs) != 3 {
+			t.Fatalf("%q: ordinary same-kind DROP not preserved: %+v", ordinary, sameKindRefs)
+		}
+		for _, ref := range sameKindRefs {
+			if ref.URI == "queries/refresh.sql" {
+				t.Fatalf("%q: materialized REFRESH joined ordinary graph: %+v", ordinary, sameKindRefs)
+			}
+		}
+		if err := os.Remove(filepath.Join(workspace, "queries/ordinary_drop.sql")); err != nil {
+			t.Fatal(err)
+		}
+		// A materialized-only DROP conflicts with an ordinary source
+		// declaration; do not quietly mix typed lifecycle histories.
+		writeSQL("queries/wrong_kind_drop.sql", "DROP MATERIALIZED VIEW reporting.monthly;\n")
+		selectSQL("migrations/001_create.sql", ordinary, "monthly", "references")
+		ambiguous("ordinary declaration with materialized DROP")
+		if err := os.Remove(filepath.Join(workspace, "queries/wrong_kind_drop.sql")); err != nil {
+			t.Fatal(err)
+		}
 		selectSQL("queries/refresh.sql", files["queries/refresh.sql"], "monthly", "definition")
 		if got := get("definition"); len(got) != 0 {
 			t.Fatalf("%q: REFRESH linked to ordinary declaration: %+v", ordinary, got)
 		}
 	}
-	mv := "CREATE MATERIALIZED VIEW reporting.monthly AS SELECT 1;\n"
+	mv := "CREATE MATERIALIZED VIEW reporting.monthly AS SELECT 1 AS id;\n"
 	writeSQL("migrations/001_create.sql", mv)
 	selectSQL("migrations/001_create.sql", mv, "monthly", "references")
 	if refs := get("references"); len(refs) != 3 {
@@ -287,6 +324,22 @@ func TestSQLMaterializedViewWorkerCrossFileHistory(t *testing.T) {
 	ambiguous("materialized declaration with mixed-kind declarations")
 	if err := os.Remove(filepath.Join(workspace, conflict)); err != nil {
 		t.Fatal(err)
+	}
+	// R2-1: DROP TABLE/VIEW are typed operations and cannot become
+	// references to a materialized CREATE, even if their names match.
+	for _, wrongDrop := range []string{
+		"DROP VIEW reporting.monthly;\n",
+		"DROP TABLE reporting.monthly;\n",
+	} {
+		wrongPath := "queries/wrong_kind_drop.sql"
+		writeSQL(wrongPath, wrongDrop)
+		selectSQL("migrations/001_create.sql", mv, "monthly", "references")
+		ambiguous("materialized CREATE with " + strings.TrimSpace(wrongDrop))
+		selectSQL("queries/refresh.sql", files["queries/refresh.sql"], "monthly", "definition")
+		ambiguous("materialized REFRESH with " + strings.TrimSpace(wrongDrop))
+		if err := os.Remove(filepath.Join(workspace, wrongPath)); err != nil {
+			t.Fatal(err)
+		}
 	}
 
 	// R2: the source-only resolver must not resurrect a CREATE after a
@@ -328,6 +381,29 @@ func TestSQLMaterializedViewWorkerCrossFileHistory(t *testing.T) {
 		selectSQL("queries/refresh.sql", files["queries/refresh.sql"], "monthly", "definition")
 		if def := get("definition"); len(def) != 1 || def[0].URI != "migrations/001_create.sql" {
 			t.Fatalf("%s: valid definition not restored after ALTER removal: %+v", tc.label, def)
+		}
+	}
+	// R2-2: the same materialized relation survives a column rename.
+	// Only the column's identity changes; RENAME TO of the relation above
+	// must continue to invalidate its previous identity.
+	for _, columnRename := range []string{
+		"ALTER MATERIALIZED VIEW reporting.monthly RENAME COLUMN id TO account_id;\n",
+		"ALTER MATERIALIZED VIEW reporting.monthly RENAME id TO account_id;\n",
+		"ALTER MATERIALIZED VIEW IF EXISTS reporting.monthly RENAME COLUMN id TO account_id;\n",
+	} {
+		writeSQL(alterPath, columnRename)
+		selectSQL("queries/refresh.sql", files["queries/refresh.sql"], "monthly", "definition")
+		definitions := get("definition")
+		if len(definitions) != 1 || definitions[0].URI != "migrations/001_create.sql" {
+			t.Fatalf("column rename invalidated materialized relation identity: %q => %+v", columnRename, definitions)
+		}
+		selectSQL("migrations/001_create.sql", mv, "monthly", "references")
+		refs := get("references")
+		if len(refs) != 3 {
+			t.Fatalf("column rename changed relation references: %q => %+v", columnRename, refs)
+		}
+		if err := os.Remove(filepath.Join(workspace, alterPath)); err != nil {
+			t.Fatal(err)
 		}
 	}
 }
@@ -389,6 +465,14 @@ func TestSQLMaterializedAlterInvalidatesSourceIdentity(t *testing.T) {
 		{"ALTER MATERIALIZED VIEW reporting.old_mv RENAME TO;",
 			[]string{"reporting.old_mv"}},
 		{"ALTER MATERIALIZED VIEW reporting.old_mv IDENTITY UNKNOWN;",
+			[]string{"reporting.old_mv"}},
+		{"ALTER MATERIALIZED VIEW reporting.old_mv RENAME COLUMN old_id TO new_id;", nil},
+		{"ALTER MATERIALIZED VIEW reporting.old_mv RENAME old_id TO new_id;", nil},
+		{"ALTER MATERIALIZED VIEW IF EXISTS reporting.old_mv RENAME COLUMN old_id TO new_id;", nil},
+		{`ALTER MATERIALIZED VIEW reporting.old_mv RENAME COLUMN "old.id" TO "new.id";`, nil},
+		{"ALTER MATERIALIZED VIEW reporting.old_mv RENAME COLUMN old_id TO;",
+			[]string{"reporting.old_mv"}},
+		{"ALTER MATERIALIZED VIEW reporting.old_mv RENAME old_id TO new_id EXTRA;",
 			[]string{"reporting.old_mv"}},
 		{"ALTER MATERIALIZED VIEW reporting.old_mv OWNER TO custodian;", nil},
 		{"ALTER MATERIALIZED VIEW reporting.old_mv SET TABLESPACE fast_space;", nil},

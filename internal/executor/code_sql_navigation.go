@@ -236,6 +236,22 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 							statement[end].keyword() == "RESET" && statement[end+1].text == "(") {
 						return
 					}
+					// PostgreSQL RENAME [COLUMN] old TO new only changes the
+					// column identity. Do not tombstone the relation's CREATE.
+					// RENAME TO new is a distinct, relation-changing form.
+					if statement[end].keyword() == "RENAME" {
+						columnAt := end + 1
+						if columnAt < len(statement) && statement[columnAt].keyword() == "COLUMN" {
+							columnAt++
+						}
+						_, oldEnd, oldOK := sqlNavName(statement, columnAt)
+						_, newEnd, newOK := sqlNavName(statement, columnAt+2)
+						if oldOK && oldEnd == columnAt+1 &&
+							columnAt+1 < len(statement) && statement[columnAt+1].keyword() == "TO" &&
+							newOK && newEnd == len(statement) {
+							return // unsupported column graph remains with SQLLens
+						}
+					}
 					relation.drop, relation.materialized, relation.requiresMaterialized = true, true, true
 					result = append(result, relation)
 					if end+2 < len(statement) && (statement[end].keyword() == "RENAME" &&
@@ -601,6 +617,17 @@ func (s *Server) sqlOfflineNavigation(parent context.Context, req Request, sourc
 	if hasMaterialized && hasOrdinary {
 		return fileError("sql_schema_history_ambiguous", "validation",
 			errors.New("source defines conflicting ordinary and materialized relation declarations")), true
+	}
+	// Typed relation lifecycle operations are not interchangeable. An
+	// ordinary DROP TABLE/VIEW cannot belong to a materialized relation
+	// history (nor a materialized DROP to an ordinary one). Reject the
+	// conflicting source rather than returning a fabricated reference.
+	for _, item := range foundItems {
+		if item.drop && !item.isColumn &&
+			(hasMaterialized && !item.materialized || hasOrdinary && item.materialized) {
+			return fileError("sql_schema_history_ambiguous", "validation",
+				errors.New("source contains a relation-kind-incompatible lifecycle operation")), true
+		}
 	}
 	if !hasMaterialized {
 		if selected.materialized || selected.requiresMaterialized {
