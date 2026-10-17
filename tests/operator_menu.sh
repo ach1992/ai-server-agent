@@ -80,6 +80,10 @@ chatgpt_setup(){ echo 'SIMULATED_CLIENT_GUIDANCE'; }
 configure_manual_tls(){ echo 'TLS_CHANGED_UNEXPECTEDLY'; exit 1; }
 case "${1:-}" in
   menu|menu-slow-view|menu-protected|menu-cancel-before-commit) menu; printf 'MENU_EXITED_CLEANLY\n' ;;
+  connection-retry)
+    export ASA_SIMULATE_FAILED_CLOUDFLARE=1 ASA_SIMULATE_LOCAL_SUCCESS=1
+    connection_menu
+    printf 'CONNECTION_MENU_EXITED\n' ;;
   first-run|first-run-failed-setup|first-run-success|first-run-retry-fd3)
     if [ "$1" = first-run-failed-setup ] || [ "$1" = first-run-retry-fd3 ]; then
       export ASA_SIMULATE_FAILED_CLOUDFLARE=1
@@ -159,6 +163,23 @@ if grep -E '^  (Repository|Build|Server|Connection)' "$TMP/menu.out" | awk 'leng
   exit 1
 fi
 
+# A failed connection attempt must remain in the child menu so an operator
+# can choose a different method without losing the recovery context.
+cat > "$TMP/connection-retry.in" <<'INPUT'
+1
+
+2
+
+INPUT
+ASA_MANAGE_SOURCE="$ROOT/manage.sh" script -q -e -c "bash '$TMP/console.sh' connection-retry" /dev/null < "$TMP/connection-retry.in" > "$TMP/connection-retry.out"
+grep -Fq 'BEGIN_CLOUDFLARE_FAILED_SETUP' "$TMP/connection-retry.out"
+grep -Fq 'Action failed (exit 1)' "$TMP/connection-retry.out"
+grep -Fq 'Connection setup was not verified' "$TMP/connection-retry.out"
+grep -Fq 'SIMULATED_LOCAL_CONFIG_SUCCESS' "$TMP/connection-retry.out"
+grep -Fq 'CONNECTION_MENU_EXITED' "$TMP/connection-retry.out"
+[ "$(grep -Fc 'Connection setup' "$TMP/connection-retry.out")" -ge 2 ]
+! grep -Fq 'AFTER_CLOUDFLARE_FAILURE' "$TMP/connection-retry.out"
+
 cat > "$TMP/first.in" <<'INPUT'
 bad
 
@@ -202,6 +223,7 @@ INPUT
 ASA_SIMULATE_PRECOMMIT_CANCEL=1 ASA_MANAGE_SOURCE="$ROOT/manage.sh" script -q -e -c "bash '$TMP/console.sh' menu-cancel-before-commit" /dev/null < "$TMP/precommit.in" > "$TMP/precommit.out"
 grep -Fq 'Cancelled at input prompt; no operation committed.' "$TMP/precommit.out"
 grep -Fq 'Operation deferred/cancelled (exit 20)' "$TMP/precommit.out"
+grep -Fq 'Connection setup was not verified' "$TMP/precommit.out"
 grep -Fq 'MENU_EXITED_CLEANLY' "$TMP/precommit.out"
 ! grep -Fq 'UNSAFE_LOCAL_CHANGE_AFTER_CANCEL' "$TMP/precommit.out"
 
