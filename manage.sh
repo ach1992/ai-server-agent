@@ -650,12 +650,26 @@ profile_show(){
   runtime_binary_safe
   "$RUNTIME_BINARY" -config "$CONFIG_FILE" validate-config >/dev/null || die "Installed Agent rejected current config."
   printf '%sEnvironment purpose%s\n' "$BOLD" "$RESET"
-  printf '  Profile: %s\n' "$(config_get environment_profile)"
-  local label
+  local label profile purpose
+  profile="$(config_get environment_profile)"
+  printf '  Profile: %s\n' "$profile"
   label="$(config_get server_label)"
   printf '  Label:   %s\n' "${label:-(not set)}"
-  ui_wrap '  ' 'Development prefers routine Git/source/build/debug work. Validation prefers installing/testing candidates, E2E and acceptance evidence. Both retain all authorized tools.'
-  ui_wrap '  ' 'The selected purpose is descriptive guidance only. GitHub credentials and permission/Root approval are independent. Changes require an Agent restart; an active MCP client may reconnect.'
+  case "$profile" in
+    production) purpose='Production: inspect read-only first. Ask for fresh, action-specific consent before every change; never reuse earlier approval.' ;;
+    validation) purpose='Validation: candidate testing, diagnostics and acceptance.' ;;
+    *) purpose='Development: source editing, builds and debugging.' ;;
+  esac
+  if [ "${UI_COMPACT:-0}" = 1 ]; then
+    # A 40x24 terminal must still show the purpose choices and input prompt.
+    case "$profile" in
+      production) ui_wrap '  ' 'Production: read-only first; ask again before each change. Advisory only.' ;;
+      *) ui_wrap '  ' "$purpose" ;;
+    esac
+  else
+    ui_wrap '  ' "$purpose"
+    ui_wrap '  ' 'Purpose is AI guidance, not enforced per-action consent or an access-control tier. All authorized tools and Root approval rules remain unchanged. Updating purpose restarts only the Agent; MCP clients may reconnect.'
+  fi
   if [ -n "$(profile_pending_backup)" ]; then
     warn "An earlier profile update left a protected rollback snapshot. Reconcile Agent health and config before another change."
   fi
@@ -683,7 +697,7 @@ profile_apply(){
   local key="$1" value="$2" staged backup restore_stage restored=false
   case "$key" in
     environment_profile)
-      case "$value" in development|validation) ;; *) die "Profile must be development or validation." ;; esac ;;
+      case "$value" in development|validation|production) ;; *) die "Profile must be development, validation or production." ;; esac ;;
     server_label) ;;
     *) die "Unsupported purpose setting: $key" ;;
   esac
@@ -742,8 +756,9 @@ profile_menu(){
     ui_section 'Change server purpose / label'
     ui_option 1 'Development - build and debug'
     ui_option 2 'Validation - test and accept'
-    ui_option 3 'Set server label'
-    ui_option 4 'Clear server label' caution
+    ui_option 3 'Production - ask before changes'
+    ui_option 4 'Set server label'
+    ui_option 5 'Clear server label' caution
     ui_option 0 'Back' navigation
     local choice label
     if ! ui_read_choice choice 'Choose: '; then
@@ -751,16 +766,22 @@ profile_menu(){
       return 0
     fi
     case "$choice" in
-      1|2)
+      1|2|3)
         local new_profile=development
-        [ "$choice" = 1 ] || new_profile=validation
+        case "$choice" in
+          2) new_profile=validation ;;
+          3) new_profile=production ;;
+        esac
+        if [ "$new_profile" = production ]; then
+          ui_notice warning 'Production requests fresh user consent before each change as AI guidance only; the Agent does not verify consent or disable tools.'
+        fi
         if confirm "Set purpose to $new_profile? The Agent service will restart; authorized tools stay unchanged." no; then
           ui_menu_action profile_apply environment_profile "$new_profile"
         else
           ui_notice info 'Cancelled; environment purpose unchanged.'
         fi
         pause ;;
-      3)
+      4)
         if ! ui_read_choice label 'Server label (b=cancel, max 80 characters): '; then
           [ "${UI_SIGINT_CAUGHT:-0}" = 1 ] && continue
           return 0
@@ -772,7 +793,7 @@ profile_menu(){
           ui_notice info 'Cancelled; server label unchanged.'
         fi
         pause ;;
-      4)
+      5)
         if confirm "Clear the server label? The Agent service will restart." no; then
           ui_menu_action profile_apply server_label ""
         else
@@ -2784,7 +2805,7 @@ manage_usage(){
   ui_section 'Inspect and connect'
   ui_wrap '  ' 'menu (default), status, setup, chatgpt-setup, profile-show, runtime-show, credential-status'
   ui_section 'Update settings'
-  ui_wrap '  ' 'profile-set development|validation, profile-label <label>, profile-label-clear'
+  ui_wrap '  ' 'profile-set development|validation|production, profile-label <label>, profile-label-clear'
   ui_wrap '  ' 'runtime-set <key> <integer>, runtime-reset <key>'
   ui_wrap '  ' 'credential-rotate direct-default|direct-secondary, credential-revoke direct-default|direct-secondary'
   ui_wrap '  ' 'credential-prepare-rollback (explicitly remove optional credentials before a compatible older release)'
@@ -2809,7 +2830,7 @@ case "${1:-menu}" in
   runtime-set) [ "$#" -eq 3 ] || die "Usage: ai-server-agent-manage runtime-set <key> <integer>"; runtime_apply set "$2" "$3" ;;
   runtime-reset) [ "$#" -eq 2 ] || die "Usage: ai-server-agent-manage runtime-reset <key>"; runtime_apply reset "$2" ;;
   profile-show) [ "$#" -eq 1 ] || die "Usage: ai-server-agent-manage profile-show"; profile_show ;;
-  profile-set) [ "$#" -eq 2 ] || die "Usage: ai-server-agent-manage profile-set development|validation"; profile_apply environment_profile "$2" ;;
+  profile-set) [ "$#" -eq 2 ] || die "Usage: ai-server-agent-manage profile-set development|validation|production"; profile_apply environment_profile "$2" ;;
   profile-label) [ "$#" -eq 2 ] || die "Usage: ai-server-agent-manage profile-label '<label>'"; profile_apply server_label "$2" ;;
   profile-label-clear) [ "$#" -eq 1 ] || die "Usage: ai-server-agent-manage profile-label-clear"; profile_apply server_label "" ;;
   chatgpt|chatgpt-setup) chatgpt_setup ;;

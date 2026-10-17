@@ -90,8 +90,8 @@ func (c Config) Validate() error {
 			}
 		}
 	}
-	if c.EnvironmentProfile != "development" && c.EnvironmentProfile != "validation" {
-		return fmt.Errorf("environment_profile must be development or validation (got %q)", c.EnvironmentProfile)
+	if c.EnvironmentProfile != "development" && c.EnvironmentProfile != "validation" && c.EnvironmentProfile != "production" {
+		return fmt.Errorf("environment_profile must be development, validation or production (got %q)", c.EnvironmentProfile)
 	}
 	if strings.TrimSpace(c.ServerLabel) != c.ServerLabel || len(c.ServerLabel) > 256 || utf8.RuneCountInString(c.ServerLabel) > 80 || !utf8.ValidString(c.ServerLabel) {
 		return errors.New("server_label must be valid UTF-8, at most 80 characters/256 bytes, with no surrounding whitespace")

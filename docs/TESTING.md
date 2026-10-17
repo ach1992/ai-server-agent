@@ -6,14 +6,14 @@ This is the durable testing/acceptance model, **not** a historical release log. 
 
 ## Installed Environment Profile acceptance (availability is version-dependent)
 
-The implemented Development and Validation purpose profiles (original source/installed acceptance: completed [#143](https://github.com/ach1992/ai-server-agent/issues/143)) have a reproducible focused verification contract:
+The original Development/Validation purpose profiles (original source/installed acceptance: completed [#143](https://github.com/ach1992/ai-server-agent/issues/143)) and the later version-gated Production advisory profile have a focused verification contract:
 
 - Fresh interactive installation clearly explains and records the chosen purpose; noninteractive install uses an explicit safe default or configured purpose.
 - A post-install operator can inspect and switch the non-secret purpose/label without reinstalling; invalid or contradictory values fail clearly and preserve the previous effective configuration.
 - Reinstall/update/repair of the **new baseline** preserve the selected profile, with no speculative migration promise from legacy Agents.
-- Both profiles advertise an unchanged MCP tool/capability inventory and Root/worker authorization model. A Validation instance retains Git, debug, browser, privileged commands and other available tools; profile selection must not provision or revoke GitHub credentials.
+- All three profiles advertise an unchanged MCP tool/capability inventory and Root/worker authorization model. Production must explicitly advise passive inspection and fresh consent before every change while acknowledging the Agent cannot verify approval; profile selection must not provision/revoke credentials or silently restrict tools.
 - Authenticated `agent_environment` and MCP `initialize` instructions advertise accurate purpose; client-specific actual delivery of instructions is verified and documented rather than assumed. Exercise the standalone direct-MCP client path.
-- Verify the feature on a fresh authorized installation, with configuration/management/service restart and rollback/error behavior appropriate to its implementation. No production or connected-occupied-host mutation without separate approval.
+- Verify the feature on a fresh authorized installation, with configuration/management/service restart and rollback/error behavior appropriate to its implementation. For Production, check authenticated MCP guidance, unchanged tool/Root/worker inventory and credential identity, plus a successful switch back to Development/Validation; older releases without Production support (including `v0.1.14`) must not be assumed to accept its config during rollback. No production or connected-occupied-host mutation without separate approval.
 
 Source/CI coverage does not substitute for installed feature proof. Consult the installed release and completed #143 for past evidence; #137/#59 own remaining clean first-install and cross-client program acceptance. Older Stable releases may not include these commands. For an upgraded real MCP client, distinguish **fresh server `tools/list`** from potentially cached client-facing tool descriptions and schemas; retry supported client discovery/refresh before diagnosing the server binary. Do not use an Agent restart or speculative client UI work as a substitute for identifying that boundary.
 

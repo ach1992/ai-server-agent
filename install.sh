@@ -232,9 +232,11 @@ if [ "$FRESH_INSTALL" -eq 1 ]; then
   if [ "$NONINTERACTIVE" != "1" ] && installer_has_interactive_tty && [ -z "${AI_SERVER_AGENT_ENVIRONMENT_PROFILE+x}" ]; then
     while true; do
       printf '\nSERVER PURPOSE\n' >/dev/tty
-      printf '  Both choices provide the same authorized Agent tools.\n' >/dev/tty
-      printf '  1) Development - source, builds and debugging\n' >/dev/tty
-      printf '  2) Validation  - integration, diagnostics and acceptance\n' >/dev/tty
+      printf '  All purposes keep the same authorized tools.\n' >/dev/tty
+      printf '  1) Development - code, builds and debugging\n' >/dev/tty
+      printf '  2) Validation  - testing and acceptance\n' >/dev/tty
+      printf '  3) Production  - live services; ask before changes\n' >/dev/tty
+      printf '     Advisory only: consent is not enforced by the profile.\n' >/dev/tty
       printf '  b) Cancel installation\n' >/dev/tty
       if ! IFS= read -r -p 'Choose [1]: ' profile_choice </dev/tty; then
         die 'Purpose selection interrupted. No Agent service setup was started; minimal prerequisite packages may have been installed.'
@@ -242,8 +244,9 @@ if [ "$FRESH_INSTALL" -eq 1 ]; then
       case "${profile_choice:-1}" in
         1) ENVIRONMENT_PROFILE=development; break ;;
         2) ENVIRONMENT_PROFILE=validation; break ;;
+        3) ENVIRONMENT_PROFILE=production; break ;;
         b|B) warn 'Installation cancelled before Agent service setup. Minimal prerequisite packages may have been installed.'; exit 20 ;;
-        *) printf 'WARNING: Choose 1, 2, or b to cancel.\n' >/dev/tty ;;
+        *) printf 'WARNING: Choose 1, 2, 3, or b to cancel.\n' >/dev/tty ;;
       esac
     done
   fi
@@ -255,8 +258,8 @@ else
   SERVER_LABEL="$(jq -er '.server_label // "" | strings' "$CONFIG_FILE")" || die "Existing server_label is not a string."
 fi
 case "$ENVIRONMENT_PROFILE" in
-  development|validation) ;;
-  *) die "AI_SERVER_AGENT_ENVIRONMENT_PROFILE must be development or validation." ;;
+  development|validation|production) ;;
+  *) die "AI_SERVER_AGENT_ENVIRONMENT_PROFILE must be development, validation or production." ;;
 esac
 
 # An instance has one non-secret identity for its entire state-preserving lifecycle.
@@ -565,11 +568,13 @@ download_release(){ (
 verify_existing_runtime_compatibility(){
   local candidate="$1" store response probe
   [ "$FRESH_INSTALL" -eq 0 ] || return 0
-  if jq -e 'has("runtime")' "$CONFIG_FILE" >/dev/null; then
-    if ! "$candidate" -config "$CONFIG_FILE" validate-config >/dev/null; then
+  if ! "$candidate" -config "$CONFIG_FILE" validate-config >/dev/null; then
+    if jq -e '.environment_profile == "production"' "$CONFIG_FILE" >/dev/null; then
+      die "Target Agent cannot validate the current configuration with Production purpose selected. No binary, credentials, config or services were switched. The target version may not support Production: while the current Agent is active, select development or validation with 'sudo ai-server-agent-manage profile-set', then retry. If still rejected, inspect other config settings."
+    fi
+    if jq -e 'has("runtime")' "$CONFIG_FILE" >/dev/null; then
       die "Existing operator runtime settings are incompatible with the target Agent binary. No service or active config was switched. Select a compatible version or explicitly reconcile config.json runtime settings before retrying."
     fi
-  elif ! "$candidate" -config "$CONFIG_FILE" validate-config >/dev/null; then
     die "The target Agent rejects the existing installation configuration. No binary, credentials or active service was switched."
   fi
 

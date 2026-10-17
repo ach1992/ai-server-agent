@@ -62,6 +62,12 @@ check_profile(){
     (.result.instructions | contains("guidance; it is not an authorization")) and
     (if $server_label=="" then true else (.result.instructions | contains("Server label: " + $server_label)) end)
   ' "$scratch/initialize" >/dev/null || fail 'Real MCP initialization contradicts effective role'
+  if [ "$role" = production ]; then
+    jq -e '.result.instructions |
+      contains("Before each change") and contains("never reuse prior approval") and
+      contains("Agent cannot verify consent")' "$scratch/initialize" >/dev/null ||
+      fail 'Production MCP instructions lack fresh-consent warning'
+  fi
 
   mcp_request '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agent_environment","arguments":{}}}' "$scratch/environment"
   manifest="$(jq -er '.result.content[0].text' "$scratch/environment")" ||
@@ -70,6 +76,13 @@ check_profile(){
     .environment_profile==$role and (.server_label // "")==$server_label and
     .instance_id==$id and .workspace_dir=="/srv/ai-workspace"
   ' <<< "$manifest" >/dev/null || fail 'Direct MCP environment did not reflect installed state'
+  if [ "$role" = production ]; then
+    jq -e '.purpose |
+      contains("passive read-only inspection") and
+      contains("fresh, action-specific permission") and
+      contains("does not verify such consent")' <<< "$manifest" >/dev/null ||
+      fail 'Production manifest missing honest advisory guidance'
+  fi
 
   mcp_request '{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}' "$scratch/tools"
   jq -ce '[.result.tools[] | {name,description}] | sort_by(.name)' "$scratch/tools" > "$scratch/current-tools" ||
@@ -105,6 +118,10 @@ sudo ai-server-agent-manage profile-set development >/dev/null
 check_profile development ''
 sudo ai-server-agent-manage profile-label 'Disposable CI' >/dev/null
 check_profile development 'Disposable CI'
+sudo ai-server-agent-manage profile-set production >/dev/null
+check_profile production 'Disposable CI'
+# Preserve the normal systemd start-rate budget before another profile switch.
+sleep 11
 sudo ai-server-agent-manage profile-set validation >/dev/null
 check_profile validation 'Disposable CI'
 

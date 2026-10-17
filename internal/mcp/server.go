@@ -199,8 +199,11 @@ func New(cfg config.Config) (*Server, error) {
 
 func instructions(cfg config.Config) string {
 	role := "Development: prefer source work, builds and debugging."
-	if cfg.EnvironmentProfile == "validation" {
+	switch cfg.EnvironmentProfile {
+	case "validation":
 		role = "Validation: prefer installs, integration/E2E and acceptance; development tools remain available."
+	case "production":
+		role = "Production: prefer read-only inspection. Before each change ask fresh, action-specific consent; never reuse prior approval. Advisory: Agent cannot verify consent."
 	}
 	label := ""
 	if cfg.ServerLabel != "" {
