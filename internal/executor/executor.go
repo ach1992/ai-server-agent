@@ -417,6 +417,12 @@ func (s *Server) jobStop(req Request) (resp Response) {
 		applyOutputResult(&resp, result)
 		return resp
 	}
+	paths := jobPathsFor(filepath.Join(s.cfg.StateDir, "jobs"), id)
+	if err := s.markJobStatusStoppedIfUnproven(paths.status); err != nil && !os.IsNotExist(err) {
+		resp = unknownJobLaunchResponse(id, "job unit is inactive, but durable stop evidence could not be saved: "+err.Error())
+		applyOutputResult(&resp, result)
+		return resp
+	}
 	resp = Response{OK: true, JobID: id, Status: "stopped"}
 	applyOutputResult(&resp, result)
 	return resp

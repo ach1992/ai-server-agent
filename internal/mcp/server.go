@@ -381,7 +381,7 @@ func (s *Server) registerTools() {
 			return s.responseResult(resp)
 		})
 
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "job_status", Description: "Read and reconcile the current state and exit status of a persistent job. Reconciliation may persist an unknown-completion marker and retire a stale protected command handoff after the transient unit is gone.", Annotations: annotations(false, false, true, false)},
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "job_status", Description: "Read/reconcile persistent job state. completed has a real exit code; stopped is a verified job_stop with command exit code unavailable; unknown never proves completion. Stale protected command handoffs are retired after the transient unit exits.", Annotations: annotations(false, false, true, false)},
 		func(ctx context.Context, req *mcpsdk.CallToolRequest, input JobInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 			resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "job_status", JobID: input.JobID})
 			if err != nil {
@@ -399,7 +399,7 @@ func (s *Server) registerTools() {
 			return s.responseResult(resp)
 		})
 
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "job_stop", Description: "Stop a persistent background job.", Annotations: annotations(false, true, true, false)},
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "job_stop", Description: "Stop an exact persistent job; verify its unit is inactive and, when a status record exists, retain a durable stopped marker without inventing a successful command exit.", Annotations: annotations(false, true, true, false)},
 		func(ctx context.Context, req *mcpsdk.CallToolRequest, input JobInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 			resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "job_stop", JobID: input.JobID})
 			if err != nil {

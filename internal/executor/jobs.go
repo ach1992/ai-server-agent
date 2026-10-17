@@ -40,6 +40,7 @@ const (
 var jobLogMagic = [8]byte{'A', 'I', 'S', 'A', 'J', 'L', '0', '1'}
 
 const jobStatusUnknown = "unknown"
+const jobStatusStopped = "stopped"
 
 type jobPaths struct {
 	command string
@@ -940,6 +941,12 @@ func terminalJobResponse(status, jobID string) Response {
 	if status == jobStatusUnknown {
 		return unknownJobLaunchResponse(jobID, "persistent job ended without a durable exit status; completion cannot be proven")
 	}
+	if status == jobStatusStopped {
+		const detail = "stop verified; command exit code unavailable"
+		return Response{OK: true, Status: "stopped", JobID: jobID, ExitCode: -1,
+			Output: detail, OutputEncoding: "utf-8",
+			BytesSeen: int64(len(detail)), BytesReturned: int64(len(detail))}
+	}
 	code, err := strconv.Atoi(status)
 	if err != nil {
 		return jobStateError("job_status_unavailable", fmt.Errorf("invalid terminal job status for %s", jobID))
@@ -1101,7 +1108,7 @@ func (s *Server) cleanupCompletedJobArtifacts(jobsDir, claimsDir string) error {
 				return err
 			}
 		}
-		if status != jobStatusUnknown {
+		if status != jobStatusUnknown && status != jobStatusStopped {
 			if _, err := strconv.Atoi(status); err != nil {
 				return fmt.Errorf("invalid job status file: %s", paths.status)
 			}
@@ -1169,7 +1176,7 @@ func (s *Server) readJobStatusValue(path string) (string, time.Time, error) {
 		return "", time.Time{}, err
 	}
 	status := strings.TrimSpace(string(b))
-	if status != "" && status != jobStatusUnknown {
+	if status != "" && status != jobStatusUnknown && status != jobStatusStopped {
 		if _, err := strconv.Atoi(status); err != nil {
 			return "", time.Time{}, fmt.Errorf("invalid job status file: %s", path)
 		}
@@ -1204,6 +1211,17 @@ func (s *Server) jobStarted(path string) (bool, error) {
 }
 
 func (s *Server) markJobStatusUnknownIfEmpty(path string) error {
+	return s.markJobTerminalMarker(path, jobStatusUnknown, false)
+}
+
+// A confirmed job_stop terminates the transient unit, but systemd may kill the
+// runner before it can durably write the command exit code. Preserve the
+// verified stop without inventing a successful command exit.
+func (s *Server) markJobStatusStoppedIfUnproven(path string) error {
+	return s.markJobTerminalMarker(path, jobStatusStopped, true)
+}
+
+func (s *Server) markJobTerminalMarker(path, marker string, upgradeUnknown bool) error {
 	f, err := os.OpenFile(path, os.O_RDWR|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return err
@@ -1226,13 +1244,19 @@ func (s *Server) markJobStatusUnknownIfEmpty(path string) error {
 	}
 	status := strings.TrimSpace(string(b))
 	if status != "" {
-		if status == jobStatusUnknown {
+		switch status {
+		case jobStatusUnknown:
+			if !upgradeUnknown {
+				return nil
+			}
+		case jobStatusStopped:
+			return nil
+		default:
+			if _, err := strconv.Atoi(status); err != nil {
+				return fmt.Errorf("invalid job status file: %s", path)
+			}
 			return nil
 		}
-		if _, err := strconv.Atoi(status); err != nil {
-			return fmt.Errorf("invalid job status file: %s", path)
-		}
-		return nil
 	}
 	if err := f.Truncate(0); err != nil {
 		return err
@@ -1240,7 +1264,7 @@ func (s *Server) markJobStatusUnknownIfEmpty(path string) error {
 	if _, err := f.Seek(0, io.SeekStart); err != nil {
 		return err
 	}
-	if _, err := io.WriteString(f, jobStatusUnknown+"\n"); err != nil {
+	if _, err := io.WriteString(f, marker+"\n"); err != nil {
 		return err
 	}
 	return f.Sync()

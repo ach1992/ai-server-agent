@@ -194,6 +194,8 @@ func (s *Server) runtimeListContext(parent context.Context, req Request) Respons
 				if readErr == nil && value != "" {
 					if value == jobStatusUnknown {
 						status = "unknown"
+					} else if value == jobStatusStopped {
+						status = "stopped"
 					} else if _, parseErr := strconv.Atoi(value); parseErr == nil {
 						status = "completed"
 					}
