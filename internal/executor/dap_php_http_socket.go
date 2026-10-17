@@ -117,18 +117,20 @@ func phpHTTPProcessOwnsAcceptedRequest(pid, serverPort, agentPort int) bool {
 	}
 	local := "0100007F:" + fmt.Sprintf("%04X", serverPort)
 	remote := "0100007F:" + fmt.Sprintf("%04X", agentPort)
-	// Collect every established inbound server socket, not only our own:
-	// if PHP holds another accepted connection at DBGp init, we cannot
-	// exclude that it is the transaction currently executing in PHP.
+	// Collect every potentially process-owned inbound socket, including
+	// CLOSE_WAIT after a contender half-closes its TCP connection. Looking
+	// only at ESTABLISHED sockets would wrongly authorize our idle connection
+	// while PHP is paused in the contender's Xdebug request. Only inode-zero
+	// kernel entries (which no process can hold as an fd) are excluded.
 	inbound := make(map[string]bool)
 	authorized := ""
 	for _, line := range strings.Split(string(b), "\n") {
 		fields := strings.Fields(line)
-		if len(fields) < 10 || !strings.EqualFold(fields[1], local) || fields[3] != "01" {
-			continue
+		if len(fields) < 10 || !strings.EqualFold(fields[1], local) || fields[3] == "0A" {
+			continue // LISTEN is not an accepted request socket
 		}
 		if fields[9] == "0" {
-			return false
+			continue // no associated file descriptor (for example TIME_WAIT)
 		}
 		if _, err := strconv.ParseUint(fields[9], 10, 64); err != nil {
 			return false
@@ -138,7 +140,7 @@ func phpHTTPProcessOwnsAcceptedRequest(pid, serverPort, agentPort int) bool {
 			return false
 		}
 		inbound[inode] = true
-		if strings.EqualFold(fields[2], remote) {
+		if fields[3] == "01" && strings.EqualFold(fields[2], remote) {
 			if authorized != "" {
 				return false
 			}

@@ -13,6 +13,43 @@ import (
 	"time"
 )
 
+// The final HTTP Write is the side-effect boundary, not DialContext.
+// Serialize it against the proxy's terminal-failure publication so a
+// known-rejected DBGp peer cannot race between the last Dial check and the
+// net/http Transport's actual request bytes. No unrelated Service is signaled.
+var errPHPHTTPProvenanceBeforeSend = errors.New("php_http_dbgp_provenance_failed_before_http_send")
+
+type phpHTTPProvenanceWriteConn struct {
+	net.Conn
+	proxy *phpDBGpProxy
+}
+
+func (c *phpHTTPProvenanceWriteConn) Write(b []byte) (int, error) {
+	if c.proxy == nil {
+		return 0, errPHPHTTPProvenanceBeforeSend
+	}
+	c.proxy.mu.Lock()
+	defer c.proxy.mu.Unlock()
+	if c.proxy.failure != nil {
+		return 0, fmt.Errorf("%w: %v", errPHPHTTPProvenanceBeforeSend, c.proxy.failure)
+	}
+	select {
+	case <-c.proxy.ready:
+		if !c.proxy.verified {
+			return 0, errPHPHTTPProvenanceBeforeSend
+		}
+	default:
+	}
+	// Holding the proxy lock gives an exact ordering with settled().
+	// Bound a stalled local TCP write so debugger teardown is not blocked.
+	if err := c.Conn.SetWriteDeadline(time.Now().Add(3 * time.Second)); err != nil {
+		return 0, err
+	}
+	n, err := c.Conn.Write(b)
+	_ = c.Conn.SetWriteDeadline(time.Time{})
+	return n, err
+}
+
 // One explicit, authenticated, immutable-path PHP request. This action is
 // side-effecting: never auto-retry after dispatch, even on timeout/cancel.
 // Only 127.0.0.1 and the already pinned PHP listener are permitted; no user
@@ -95,7 +132,7 @@ func (s *Server) debugPHPHTTPRequest(ctx context.Context, req Request, d *dapSta
 				_ = conn.Close()
 				return nil, fmt.Errorf("php_http_dbgp_provenance_failed_before_http_send: %w", err)
 			}
-			return conn, nil
+			return &phpHTTPProvenanceWriteConn{Conn: conn, proxy: t.proxy}, nil
 		},
 	}
 	client := &http.Client{
@@ -147,6 +184,9 @@ func (s *Server) debugPHPHTTPRequest(ctx context.Context, req Request, d *dapSta
 		}
 		if err != nil {
 			status = "http_request_completion_unverified"
+			if errors.Is(err, errPHPHTTPProvenanceBeforeSend) {
+				status = "php_http_dbgp_provenance_failed_before_http_send"
+			}
 		}
 		if status == "" && t.proxy != nil {
 			proofCtx, proofCancel := context.WithTimeout(context.Background(), 5*time.Second)

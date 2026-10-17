@@ -2,10 +2,12 @@ package executor
 
 import (
 	"errors"
+	"io"
 	"net"
 	"os"
 	"strings"
 	"testing"
+	"time"
 )
 
 // Real in-kernel TCP sockets, not simulated /proc rows: prove that a
@@ -66,6 +68,26 @@ func TestPHPHTTPAuthorizedTCPTransactionOwnership(t *testing.T) {
 	}
 	if err := target.verifyAuthorizedRequestSocket(); err == nil {
 		t.Fatal("DBGP admitted with competing established socket at same PHP listener")
+	}
+	// A contender may finish writing, then half-close before its Xdebug
+	// init. PHP still holds that accepted socket in CLOSE_WAIT. Ignoring
+	// non-ESTABLISHED states would falsely attribute the contender's DBGp
+	// connection to the unrelated, still-established Agent request.
+	if err := other.CloseWrite(); err != nil {
+		t.Fatal(err)
+	}
+	if err := otherAccepted.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatal(err)
+	}
+	var one [1]byte
+	if n, err := otherAccepted.Read(one[:]); n != 0 || err != io.EOF {
+		t.Fatalf("contender half-close was not delivered: bytes=%d err=%v", n, err)
+	}
+	if phpHTTPProcessOwnsAcceptedRequest(os.Getpid(), port, localPort) {
+		t.Fatal("half-closed competing request was hidden from the PHP socket proof")
+	}
+	if err := target.verifyAuthorizedRequestSocket(); err == nil {
+		t.Fatal("CLOSE_WAIT competing request was mistaken for exclusive Agent transaction")
 	}
 	_ = otherAccepted.Close()
 	if err := target.verifyAuthorizedRequestSocket(); err != nil {
