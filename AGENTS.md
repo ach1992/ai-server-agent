@@ -17,10 +17,10 @@ A new Master must recover the current task from **live GitHub Issues/PRs, exact-
 - Preserve `/srv/ai-workspace` and the `aiworker` account during purge.
 - Preserve bearer authentication and native TLS for direct public mode.
 - Keep the Agent core AI-client/vendor neutral: ChatGPT/OpenAI-specific setup, credentials, tunnels and UI behavior belong at explicit integration boundaries and must not become executor/policy/lifecycle/security assumptions. MCP is the current primary common protocol, not an OpenAI-only contract.
-- Keep every supported capability available through standalone direct Agent use. A dedicated MCP Gateway connector is not active scope; do not add Gateway-specific runtime, setup or acceptance work without a new explicit decision. Standalone delivery must never depend on a Gateway.
-- Implement host capabilities once in the Agent. Future connectors reuse the bounded MCP/executor/policy contracts and may narrow authority; do not add parallel Gateway-only execution paths or speculative connector frameworks. Evolve public contracts additively where practical, with explicit compatibility handling for material breaks.
+- Keep every supported capability available through standalone direct Agent use. A dedicated MCP Gateway connector is excluded from current scope (closed Issue #47, `not_planned`). Do not present it as an available or planned connection in README/setup guides or add Gateway-specific work without a new explicit Owner decision.
+- Implement host capabilities once in the Agent through shared bounded MCP/Executor/policy contracts. Do not add provider-specific parallel execution paths or speculative connector frameworks. Evolve public contracts additively where practical, with explicit compatibility handling for material breaks.
 - Preserve the intentional root executor capability and its approval guardrails.
-- Treat arbitrary root shell as genuinely root-capable: pattern/path approval checks are defense-in-depth, not a complete sandbox or exhaustive shell-effect classifier. Do not weaken this truth in tool descriptions, Gateway integration, review, or future permission UX.
+- Treat arbitrary root shell as genuinely root-capable: pattern/path approval checks are defense-in-depth, not a complete sandbox or exhaustive shell-effect classifier. Do not weaken this truth in tool descriptions, reviews, or client-specific permission UX.
 - Treat current `read_file` / `write_file` as privileged root-host-file capabilities: read can expose root-readable secrets and write can produce root-equivalent effects. Approval/path heuristics are additive guardrails, not a general sensitive-file sandbox.
 - Do not add nginx, Apache, Caddy, `cloudflared`, Docker, Node.js, Python, PHP, databases, or hosting panels as core dependencies.
 - Do not make the core control plane own ports 80/443.
@@ -90,7 +90,7 @@ See `docs/ARCHITECTURE.md` for trust boundaries and `docs/TESTING.md` for the cu
 
 ## Developer Runtime value-first rules
 
-When working on Issues #52-#66, #99, #118, #137, #140 or #143, read `docs/DEVELOPER-RUNTIME.md` and the current controlling Issue before designing or implementing a new capability.
+For changes to Developer Runtime capabilities, read `docs/DEVELOPER-RUNTIME.md` and the *current open owning Issue* before designing or implementing a new capability. Closed Issues and historical checkpoints are evidence, not fresh implementation instructions.
 
 The governing optimization is **maximum practical AI-development leverage per unit of total complexity**.
 
@@ -107,7 +107,7 @@ The governing optimization is **maximum practical AI-development leverage per un
 - For new capabilities, distinguish published source from evidence on a freshly installed, authorized test host and a real client. Do not introduce unrelated legacy-state migration or mutate occupied hosts merely to satisfy clean-install acceptance.
 - Keep project worktrees separate from worker HOME/config/cache, runtime/session state, generated artifacts and audit/log state.
 - Do not implement Ctags, managed Incus, multiple terminal backends, generic tool managers/environment-provider frameworks, custom indexes or similar deferred capabilities without new evidence satisfying their promotion rule.
-- Keep README truthful about shipped behavior; product requirements belong in `docs/PROJECT-SPEC.md` and runtime contracts in `docs/DEVELOPER-RUNTIME.md`. Verify optional adapter readiness rather than inferring it from publication. Later PHP HTTP/Shell/extension-host DAP and advanced SQL acceptance belongs to Issue #149, not the first Stable contract. Preserve independent review and immutable release gates where required.
+- Keep README a user-facing product introduction, installation and first-use guide, not an internal documentation index or release/work ledger; product requirements belong in `docs/PROJECT-SPEC.md` and runtime contracts in `docs/DEVELOPER-RUNTIME.md`. Verify optional adapter readiness rather than inferring it from publication. Later PHP HTTP/Shell/extension-host DAP and advanced SQL acceptance belongs to Issue #149, not the first Stable contract. Preserve independent review and immutable release gates where required.
 - Environment purpose profiles (Development/Validation) are descriptive routing hints, not permission tiers or alternate binaries. Keep Agent capability, GitHub credentials, and optional tool readiness independent from the profile; verify visibility in MCP instructions and authenticated environment discovery.
 
 For a proposed abstraction or dependency, ask: **what existing complexity or recurring failure does this remove, and is that payoff larger than its permanent maintenance/test/compatibility cost?**

@@ -4,7 +4,7 @@
 
 ## Platform support
 
-The stable supported-platform policy (including published immutable [`v0.1.12`](https://github.com/ach1992/ai-server-agent/releases/tag/v0.1.12) and later compatible source/releases) is:
+The supported Stable platform policy is:
 
 - **Ubuntu 22.04 or newer**
 - **Debian 11 or newer** (Debian 11 application compatibility is retained, but upstream Debian LTS ended on 2026-08-31; use Debian 12+ for an officially security-maintained base unless you have an ELTS arrangement)
@@ -13,8 +13,6 @@ The stable supported-platform policy (including published immutable [`v0.1.12`](
 - a dedicated development/test server where you are comfortable granting an AI-controlled MCP endpoint the documented capabilities
 
 OS support is minimum-version based, while CI keeps explicit compatibility cases for current Ubuntu/Debian releases and native lifecycle coverage on both supported CPU architectures. Stable release architectures are declared in `scripts/release-arches.txt`; installer architecture aliases are normalized at the install boundary so adding a future architecture does not require rewriting release publication logic.
-
-`v0.1.7` is the first stable release with this expanded platform matrix.
 
 AI Server Agent does not require nginx, Apache, Caddy, Docker, PHP, a database, Node.js, Python, `cloudflared`, or a hosting panel as core dependencies, and it does not need to take over ports 80/443.
 
@@ -51,7 +49,7 @@ Although its public **source** comes from reviewed `main`, the Stable bootstrap 
 
 ### Fresh-install baseline and upgrade compatibility
 
-Issue #140's first optional multi-language slice was published starting in immutable Stable `v0.1.13`; `v0.1.14` retains it. Source and isolated-installer tests are **not** evidence that every optional language adapter is installed or that a fresh, occupied-host-independent installation has completed the full direct-client acceptance in [#137](https://github.com/ach1992/ai-server-agent/issues/137), [#143](https://github.com/ach1992/ai-server-agent/issues/143) and [#59](https://github.com/ach1992/ai-server-agent/issues/59). These remaining clean-install and extended-recovery tests are separate from publication and ordinary installed smoke.
+Issue #140's first optional multi-language slice was published starting in immutable Stable `v0.1.13`; `v0.1.14` retains it. Source and isolated-installer tests are **not** evidence that every optional language adapter is installed or that a fresh, occupied-host-independent installation has completed the full direct-client acceptance in [#137](https://github.com/ach1992/ai-server-agent/issues/137) and [#59](https://github.com/ach1992/ai-server-agent/issues/59). These remaining clean-install and extended-recovery tests are separate from publication and ordinary installed smoke.
 
 Do **not** infer state-preserving migration of a historical `v0.1.12` installation, including credentials, active jobs, Browser profiles or terminals, from a new-baseline clean-install test. Before updating an occupied older host, separately verify backup/recovery and the applicable update procedure. This does not remove backward-compatible MCP names or the Agent's required restart/reconnect/cleanup guarantees within the new baseline. Subsequent baseline upgrades require evidence appropriate to their actual changes.
 
@@ -115,7 +113,7 @@ sudo ai-server-agent-manage
 
 ### Interactive console navigation and safe cancellation
 
-The interactive manager shows the verified installed build, server identity/purpose and non-secret connection details in its header. Use **0/Back** to leave a menu, **b** to cancel setup inputs before any commit, or **No** to decline a confirmation. An invalid choice stays in the menu. Failed actions report their result and keep the console usable when the manager is still installed. The menus use text-backed semantic signals (`INFO`, `SUCCESS`, `WARNING`, `ERROR`) and consistent choice coloring: cyan navigation/action, yellow for caution, red for destructive operations; `NO_COLOR` and non-TTY output remain readable without ANSI. Review the [CLI inventory/presentation contract](OPERATOR-CLI-UX.md) for the source interface and test boundary. Run `ai-server-agent-manage help` to inspect the command groups without opening the interactive menu. When a one-line installer streams script bytes through stdin, the interactive flow still detects a real controlling terminal on stdout/stderr; a fully detached or redirected process will not be asked for input. Before interactive runtime/purpose edits or update/repair, the manager asks for explicit confirmation; noninteractive subcommands retain their existing calling contracts.
+The interactive manager shows the verified installed build, server identity/purpose and non-secret connection details in its header. Use **0/Back** to leave a menu, **b** to cancel setup inputs before any commit, or **No** to decline a confirmation. An invalid choice stays in the menu. Failed actions report their result and keep the console usable when the manager is still installed. The menus use text-backed semantic signals (`INFO`, `SUCCESS`, `WARNING`, `ERROR`) and consistent choice coloring: cyan navigation/action, yellow for caution, red for destructive operations; `NO_COLOR` and non-TTY output remain readable without ANSI. Verify the actual version/identity shown in the header; test coverage and remaining fresh-install/failure acceptance are defined in [Testing](TESTING.md#operator-console--first-run-ux-acceptance) and [Issue #147](https://github.com/ach1992/ai-server-agent/issues/147). Run `ai-server-agent-manage help` to inspect the command groups without opening the interactive menu. When a one-line installer streams script bytes through stdin, the interactive flow still detects a real controlling terminal on stdout/stderr; a fully detached or redirected process will not be asked for input. Before interactive runtime/purpose edits or update/repair, the manager asks for explicit confirmation; noninteractive subcommands retain their existing calling contracts.
 
 **Ctrl+C** cancels a running *read-only* view (status/inspection) or a pending menu selection without ending the manager. In contrast, runtime/profile/credential/connection changes, Cloudflare transactions, updates, repair and uninstall may be holding a lifecycle lock, committing configuration, changing remote resources or restarting services. These protected operations **do not accept Ctrl+C cancellation mid-change**, because interruption could bypass rollback/recovery. Cancel at an offered input/confirmation, or let the protected action finish; if it fails, check its recovery/status message before retrying. Closing the terminal, killing the manager, or losing SSH cannot be assumed to roll back an active transaction. For unattended automation, use the documented noninteractive subcommands, whose existing exit/signal contracts are unchanged.
 
@@ -197,7 +195,7 @@ The public endpoint remains bearer-authenticated. Treat the bearer credential as
 
 ### MCP credential lifecycle
 
-The Agent keeps a bounded named-principal credential set. `direct/default` is the normal direct-client principal; `mcp-gateway` is an optional separately managed principal for a future Gateway connection and does not make Gateway a runtime dependency. The server derives principal ID/class/name from the matched verifier and attaches it to request context; callers cannot select or override that identity.
+The Agent keeps a bounded named-principal credential set. `direct/default` is the normal direct-client principal. The current binary also recognizes the separately manageable `mcp-gateway` credential identity, but **that identity is not an implemented Gateway connector or a supported connection workflow**; it is not needed for ordinary direct-client setup. The server derives principal ID/class/name from the matched verifier and attaches it to request context; callers cannot select or override that identity.
 
 Use `sudo ai-server-agent-manage credential-status` for non-secret state, `credential-rotate direct-default|mcp-gateway` to issue or rotate a credential, and `credential-revoke direct-default|mcp-gateway` to revoke one. Rotation is immediate after verified service cutover: there is no grace overlap. Revoking the last active credential is refused. Safe uninstall preserves the credential store; update/repair preserve it; purge removes Agent-owned credential state so a later fresh install gets fresh credentials.
 

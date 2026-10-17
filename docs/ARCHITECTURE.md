@@ -69,11 +69,11 @@ The Agent must not require OpenAI credentials for core operation. Provider-speci
 
 ### Environment purpose versus connection and authority
 
-**Implemented in immutable Stable `v0.1.13`:** An Agent instance can declare `development` or `validation` as its **Environment Purpose Profile**, plus an optional non-secret server label. Installed-client acceptance remains separate (Issue #143). Both profiles reuse the same binary, processes, MCP tool inventory, root/worker execution boundaries, bearer principals, and optional adapter installation mechanisms.
+**Implemented in immutable Stable `v0.1.13`:** An Agent instance can declare `development` or `validation` as its **Environment Purpose Profile**, plus an optional non-secret server label. Initial installed-client acceptance is recorded in completed Issue #143; new client/host claims still require direct verification. Both profiles reuse the same binary, processes, MCP tool inventory, root/worker execution boundaries, bearer principals, and optional adapter installation mechanisms.
 
 A profile is guidance for choosing the correct host: Development for routine source/Git/build/debug work; Validation for candidate installation, reproduction, E2E and acceptance evidence. It must not grant, revoke, or conceal capabilities, change Root approval behavior, install/remove GitHub credentials, or silently enforce server-side policies. It is independent from local/public/Cloudflare connectivity mode and the authenticated principal identity. Selected purpose should be discoverable through authenticated `agent_environment` data and concise MCP server instructions, subject to actual AI-client support for instruction presentation.
 
-The existing Agent configuration persists the selection and management commands update it without a new daemon, profile-specific installer or permission engine. Validate actual installed-client visibility before declaring Issue #143 complete. [Issue #143](https://github.com/ach1992/ai-server-agent/issues/143) owns candidate and installed/client acceptance.
+The existing Agent configuration persists the selected purpose, and management commands update it without an additional daemon, profile-specific installer or permission engine. Verify client discovery on the actual installed build; clean-host and combined workflow acceptance are distinct from the already-completed profile feature.
 
 ### Root command environment
 
@@ -109,17 +109,17 @@ Job log/status/runner files are created with exclusive, no-follow semantics. Rea
 
 Every persistent launch gets a root-owned recovery claim containing a keyed fingerprint over the material command/root request rather than plaintext command content; callers may additionally supply `operation_id` for durable retry identity. Same-key/same-material retries recover or return the same job handle; same-key/different-material reuse fails closed. A crash while only the pre-launch claim exists can rebuild the protected handoff from a fingerprint-matched retry; once launch may have happened, reconciliation requires durable runner/unit evidence and never starts a differently identified duplicate merely because completion is uncertain. Stale pre-launch claims older than the executor's broad connection deadline are reconciled on later job admission: active/pending execution evidence promotes them to started, terminal/inactive evidence without a durable exit status becomes `unknown_completion`, while no execution evidence retires the protected handoff and marks the claim failed. Failed claims and the total recovery-claim namespace are explicitly bounded; claims for terminal jobs age out with terminal-artifact retention, so recovery metadata cannot become an unbounded second job database.
 
-The bearer-authenticated surface uses a bounded named-principal namespace. The server matches a versioned one-way credential verifier, derives the stable non-secret principal ID/class/name, and attaches that identity to request context; request parameters cannot override it. `direct/default` is the direct-client principal and optional `mcp-gateway` is independently rotatable/revocable without introducing a Gateway runtime dependency. Persistent-job `operation_id` claims are keyed by authenticated principal plus caller operation ID, while migrated legacy direct/default claims remain readable for compatibility.
+The bearer-authenticated surface uses a bounded named-principal namespace. The server matches a versioned one-way credential verifier, derives the stable non-secret principal ID/class/name, and attaches that identity to request context; request parameters cannot override it. `direct/default` is the normal direct-client identity. The code also recognizes an optional independently rotatable/revocable credential identity named `mcp-gateway`; **this credential slot is not a Gateway connector or an active integration**. Persistent-job `operation_id` claims are keyed by authenticated principal plus caller operation ID, while migrated legacy direct/default claims remain readable for compatibility.
 
 Named credential activation is transactional at the local service boundary. Installer migration first builds the verifier-backed store from the existing direct bearer without rotating it, switches configuration, restarts the MCP service, and proves that same credential reaches the authenticated MCP path before deleting legacy plaintext files. A failed migration restores the previous config and leaves the legacy credential available only for recovery. Later rotation replaces exactly one principal record, restarts the MCP service, verifies the newly issued value locally without placing it in process argv, and restores the prior store on activation failure. Successful rotation has immediate cutover with no grace overlap. Safe uninstall preserves credential state; repair/update preserve it; purge removes it.
 
 Safe uninstall/purge first reconciles active `ai-job-*.service` units and refuses while any are active, preventing removal of the Agent control plane from silently orphaning still-running persistent work.
 
-### Standalone execution/data boundary and optional integrations
+### Standalone execution and data boundary
 
-AI Server Agent owns its host capabilities and safety boundaries independently of an upstream aggregator. Every supported capability is available directly; installation, operation, Agent-side implementation and standalone release do not require MCP Gateway. The bounded execution/data work in #42 and local audit work in #41 protect direct use as well as future integrations. README/current source remain authoritative for which parts of these rules are shipped.
+AI Server Agent owns its host capabilities and security boundaries. All supported capabilities are available through its authenticated standalone MCP interface; installation, operation and release must not depend on an upstream aggregator or separate connector. The bounded execution/data and audit controls protect the same host operations for every authorized client.
 
-Future Gateway integration consumes these same MCP tools, structured results, executor and policy boundaries. Real Gateway acceptance belongs to #47 and validates only the Gateway compatibility claim; it is not a prerequisite for standalone Agent acceptance. Do not add a duplicate execution path, freeze the Agent tool inventory for an unfinished connector, or introduce a generic connector framework without an evidenced need. Public API evolution follows the additive-first policy in `DEVELOPER-RUNTIME.md`. Later connector-driven changes remain possible through the normal compatibility and validation process.
+Keep the MCP tools, structured results, Executor and policy boundary client-neutral. Do not add provider-specific execution paths, freeze the tool inventory for a hypothetical intermediary or build speculative connector frameworks. Public MCP evolution follows the additive-first policy in `DEVELOPER-RUNTIME.md`.
 
 The durable execution/data rules are:
 
@@ -276,28 +276,21 @@ Stable and source channels are distinct.
 
 ### Stable bootstrap and first install
 
-The release `install.sh` cannot authenticate itself before it executes, so it is deliberately **not** the stable trust root. Initial stable installation begins with `scripts/install-stable.sh` loaded from a Git tag already bound to a published immutable GitHub Release. The README stable-install command names the immutable release tag used as the bootstrap source; this architecture document intentionally does not pin that current release number.
+Initial Stable installation begins with the **permanent, version-free URL** `https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh`. This deliberately reads reviewed **mutable `main`** source, not an immutable tagged bootstrap. Protecting and reviewing `main` is therefore a real supply-chain boundary: the bootstrap itself is not authenticated by an immutable release digest. Changes to it must continue to install the currently published Stable (including explicit-version selections) before any new Stable is published.
 
-GitHub immutable releases lock their associated tag against movement/deletion while the release exists, and a deleted immutable release does not permit reuse of the same tag name. The bootstrap source therefore does not depend on preservation of a feature branch or a particular merge strategy.
+The bootstrap starts as the invoking user (`curl ... | bash`, **not** `sudo bash`). If required OS prerequisites such as `jq`/CA certificates are missing on supported Debian/Ubuntu hosts, it may run `sudo apt-get update/install` **before** the release installer is authenticated. Do not describe the entire bootstrap as free of privileged operations before release verification; the following digest gate applies to the **downloaded release `install.sh`**, not to OS package prerequisites or the mutable bootstrap source.
 
-The immutable-tag bootstrap runs before release `install.sh` bytes receive root execution. It:
+For the selected explicit tag or GitHub's latest release, the bootstrap:
 
-1. resolves an explicit stable tag or GitHub's latest release metadata;
-2. requires the release to be non-draft, non-prerelease and immutable;
-3. requires exactly one uploaded `install.sh` asset at the exact tag-scoped release URL;
-4. requires the GitHub release asset `sha256:` digest;
-5. downloads that release installer without privileged execution and verifies its bytes against the digest;
-6. crosses the privilege boundary through a fixed bootstrap helper that copies the candidate into a root-owned `0700` staging directory;
-7. recomputes the same expected release-asset digest on the root-controlled copy and fails closed on any mismatch;
-8. executes only that re-verified root-controlled copy.
+1. verifies that the selected release is published, non-draft, non-prerelease and immutable;
+2. requires one exact tag-scoped uploaded `install.sh` asset and its GitHub release-asset `sha256:` digest;
+3. downloads that installer without elevated execution and checks its SHA-256 against the release digest;
+4. crosses the privilege boundary using a fixed helper to copy the verified candidate into root-owned `0700` staging;
+5. independently checks the root-controlled copy against the same expected digest and executes **only** that copy.
 
-The original invoking-user-writable pathname is therefore never trusted for root execution after the privilege boundary. Replacing that pathname between the unprivileged hash and `sudo` can at most cause the privileged re-verification to fail; it cannot make different bytes pass into the installer execution path.
+Once authenticated, the release-scoped installer pins the selected release version/ref, rejects `AI_SERVER_AGENT_BINARY` overrides, and verifies release archives against `SHA256SUMS`. The root staging check prevents a user-writable candidate being replaced between initial hashing and privileged execution. The immutable release and its tag are the **installation target**, distinct from the intentionally mutable bootstrap source.
 
-The release-scoped `install.sh` is generated with its version/ref pinned to the release tag. Once authenticated by the bootstrap, it rejects `AI_SERVER_AGENT_BINARY` overrides, downloads the release archive plus `SHA256SUMS`, and continues only after archive checksum verification.
-
-A direct `releases/.../install.sh | sudo bash` command is intentionally not a supported stable trust path because it would execute the asset before authenticating that same asset. A mutable branch is likewise not an acceptable stable bootstrap source.
-
-Stable release architectures are enumerated in `scripts/release-arches.txt`; the current target publishes both amd64 and arm64 archives under the same checksum manifest.
+Do **not** pipe `releases/.../install.sh` into `sudo bash`, execute `main/install.sh` as root, or use mutable `main` binaries as the Stable installation target. Official commands and operator instructions are in [Operations](OPERATIONS.md#install-the-latest-stable-release). Stable release architectures are declared in `scripts/release-arches.txt` (amd64 and arm64).
 
 ### Stable update
 
@@ -353,9 +346,9 @@ The target is deliberately value-first:
 
 Core target capabilities include repository/worktree identity, safe worker editing, text + ast-grep structural search, LSP, persistent worker/root PTY, DAP and Playwright-backed browser/E2E validation.
 
-**Multi-language extension direction (Issue #140; implementation/release status is owned by its live Issue/PR):** Keep the existing public `code_*`/`debug_*` families and executor-owned #66 session substrate. LSP/DAP must expose shared protocol/lifecycle/authorization/worker-file contracts; thin bounded language/adapter profiles own actual supported capabilities, trusted transitive launch/toolchain readiness, target-process ownership, and unavoidable language-specific launch/attach differences. DAP must not terminate a separately service-owned target when a debug session detaches; read-only LSP must reject unsolicited writes. Do not make optional language runtimes core dependencies or introduce another broker, universal plugin framework, language-specific file writer or Agent-side database.
+**Multi-language extension direction (first optional slice delivered; advanced acceptance in #149):** Keep the existing public `code_*`/`debug_*` families and executor-owned #66 session substrate. LSP/DAP must expose shared protocol/lifecycle/authorization/worker-file contracts; thin bounded language/adapter profiles own actual supported capabilities, trusted transitive launch/toolchain readiness, target-process ownership, and unavoidable language-specific launch/attach differences. DAP must not terminate a separately service-owned target when a debug session detaches; read-only LSP must reject unsolicited writes. Do not make optional language runtimes core dependencies or introduce another broker, universal plugin framework, language-specific file writer or Agent-side database.
 
-**Next-candidate installation boundary:** Its acceptance is on a new, empty, authorized Linux host. Legacy install-script, config, runtime-state, job-claim, terminal-handle, profile or mixed-version upgrade migration is not a requirement, and must not add compatibility complexity. This does not alter published Stable update/provenance guarantees, authorize deletion of an existing installation, weaken first-install security, or waive reconnect/restart recovery within the new baseline. **That new baseline must be evolved responsibly for its future users; skipping legacy installed-state migration does not forbid future, evidence-driven upgrade support.** #137 Shared Runtime retains its own acceptance and integration ownership; current PR/head state belongs to its live GitHub Issue/PR, not this durable architecture document. The historical #140 documentation-first Owner gate was satisfied and its separate source-development authorization was granted; consult the live #140 Issue/PR for subsequent integration and release gates.
+**Fresh-install acceptance boundary (#137):** The shared-runtime reference has been integrated and published, but a first-ever install and cold-chat multi-project recovery must still be proven on an independently authorized empty supported host. This acceptance does not require speculative migration of legacy Agent config, job claims, Browser profiles or terminal handles. It also does **not** waive future supported upgrades for real users of the new generation, existing Stable installer/update integrity, public MCP compatibility, safe reconnect/restart within a generation, or preservation of an occupied host. #137 owns this focused acceptance; #149 owns advanced adapter/platform work and #59/#99 own combined client/data delivery.
 
 This architecture document remains authoritative for overall host/process/trust/lifecycle boundaries. `docs/DEVELOPER-RUNTIME.md` owns the detailed development-capability composition and Layer-1/Layer-2/deferred boundary.
 
