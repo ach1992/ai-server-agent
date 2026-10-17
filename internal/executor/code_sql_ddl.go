@@ -455,19 +455,55 @@ func sqlDDLMaterializedQuery(tokens []sqlDDLToken, at int) bool {
 	if at+1 >= len(tokens) || tokens[at].keyword() != "AS" {
 		return false
 	}
+	depth := 0
+	for _, token := range tokens[at+1:] {
+		switch token.text {
+		case "(":
+			depth++
+		case ")":
+			depth--
+			if depth < 0 {
+				return false
+			}
+		}
+	}
+	if depth != 0 {
+		return false // an incomplete expression/CTE cannot prove a declaration
+	}
 	switch tokens[at+1].keyword() {
 	case "SELECT", "TABLE", "VALUES":
 		return at+2 < len(tokens) && tokens[at+2].text != ";"
 	case "WITH":
-		// A CTE must begin with a named ... AS (...) binding. A trailing
-		// WITH NO DATA is not a query and cannot declare a materialized view.
+		// Handle one source-provable CTE binding only; multi-CTE/recursive
+		// statement shapes stay unsupported. WITH NO DATA alone is not SQL.
 		cte := at + 2
 		if cte < len(tokens) && tokens[cte].keyword() == "RECURSIVE" {
 			cte++
 		}
-		return cte+2 < len(tokens) &&
-			(tokens[cte].kind == 'i' || tokens[cte].kind == 'q') &&
-			tokens[cte+1].keyword() == "AS" && tokens[cte+2].text == "("
+		if cte+2 >= len(tokens) ||
+			(tokens[cte].kind != 'i' && tokens[cte].kind != 'q') ||
+			tokens[cte+1].keyword() != "AS" || tokens[cte+2].text != "(" {
+			return false
+		}
+		depth = 0
+		for i := cte + 2; i < len(tokens); i++ {
+			switch tokens[i].text {
+			case "(":
+				depth++
+			case ")":
+				depth--
+			}
+			if depth == 0 {
+				if i+1 >= len(tokens) {
+					return false
+				}
+				switch tokens[i+1].keyword() {
+				case "SELECT", "TABLE", "VALUES":
+					return true
+				}
+				return false
+			}
+		}
 	}
 	return false
 }

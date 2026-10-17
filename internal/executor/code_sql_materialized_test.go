@@ -92,6 +92,8 @@ func TestSQLMaterializedViewUnsupportedSyntaxFailsClosed(t *testing.T) {
 		"CREATE MATERIALIZED VIEW missing_query AS;",
 		"CREATE MATERIALIZED VIEW incomplete AS SELECT;",
 		"CREATE MATERIALIZED VIEW wrong_with AS WITH NO DATA;",
+		"CREATE MATERIALIZED VIEW incomplete_cte AS WITH item AS (SELECT 1);",
+		"CREATE MATERIALIZED VIEW unclosed_cte AS WITH item AS (SELECT 1;",
 		"CREATE MATERIALIZED VIEW storage WITH (fillfactor=90) AS SELECT * FROM accounts;",
 		"CREATE MATERIALIZED VIEW bad_columns (a,) AS SELECT * FROM accounts;",
 		"CREATE OR REPLACE MATERIALIZED VIEW unsupported AS SELECT * FROM accounts;",
