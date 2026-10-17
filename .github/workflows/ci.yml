@@ -183,6 +183,27 @@ jobs:
             exit 1
           fi
           echo 'REAL_SQL_MATERIALIZED_WORKER_LANDLOCK_PROOF_PASS'
+      - name: Non-skipped ordinary PostgreSQL relation-move Worker/Landlock acceptance
+        if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
+        env:
+          ASA_REQUIRE_SQL_ORDINARY_WORKER: '1'
+        run: |
+          set -Eeuo pipefail
+          # Runs AFTER trusted ripgrep setup. Portable/native arm64 suites
+          # may skip the optional real-worker search dependency.
+          printf 'SQL_ORDINARY_WORKER_PROOF_HEAD=%s\nSQL_ORDINARY_WORKER_PROOF_TREE=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
+          log="$(mktemp)"
+          trap 'rm -f -- "$log"' EXIT
+          go test -v ./internal/executor -run '^TestSQLPostgresOrdinaryMovesRealWorkerDefinition$' -count=1 -timeout 240s 2>&1 | tee "$log"
+          grep -Fq -- '--- PASS: TestSQLPostgresOrdinaryMovesRealWorkerDefinition (' "$log"
+          for scenario in table_set_schema view_rename table_rename; do
+            grep -Fq -- "--- PASS: TestSQLPostgresOrdinaryMovesRealWorkerDefinition/$scenario (" "$log"
+          done
+          if grep -Fq -- '--- SKIP: TestSQLPostgresOrdinaryMovesRealWorkerDefinition' "$log"; then
+            echo 'Required ordinary SQL relation-move Worker acceptance was skipped' >&2
+            exit 1
+          fi
+          echo 'REAL_SQL_ORDINARY_WORKER_LANDLOCK_PROOF_PASS'
       - name: Real pinned gopls large-Go semantic acceptance
         if: ${{ needs.change-scope.outputs.lsp_changed == 'true' }}
         run: |
