@@ -36,6 +36,12 @@ profile_text="$(profile_show)"
 grep -Fq 'Profile: development' <<<"$profile_text" || fail 'default role not visible'
 profile_apply environment_profile validation >/dev/null
 [ "$(jq -r '.environment_profile' "$CONFIG_FILE")" = validation ] || fail 'validation role not stored'
+profile_apply environment_profile production >/dev/null
+[ "$(jq -r '.environment_profile' "$CONFIG_FILE")" = production ] || fail 'production role not stored'
+prod_text="$(profile_show)"
+grep -Fq 'Profile: production' <<<"$prod_text" || fail 'production purpose not visible'
+grep -Fq 'not enforced per-action consent' <<<"$prod_text" || fail 'production guidance inaccurately claimed enforcement'
+profile_apply environment_profile validation >/dev/null
 [ "$(jq -r '.bearer_token_file' "$CONFIG_FILE")" = /tmp/profile-test-secret-file ] || fail 'credential source altered'
 profile_apply server_label 'QA آزمایش' >/dev/null
 [ "$(jq -r '.server_label' "$CONFIG_FILE")" = 'QA آزمایش' ] || fail 'Unicode label not persisted'

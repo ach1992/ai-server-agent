@@ -139,8 +139,8 @@ install_profile="${3:-}"
 install_label="${4:-}"
 install_noninteractive="${5:-}"
 case "$install_profile" in
-  ''|development|validation) ;;
-  *) printf '[ai-server-agent] ERROR: Invalid environment purpose. Use development or validation.\n' >&2; exit 1 ;;
+  ''|development|validation|production) ;;
+  *) printf '[ai-server-agent] ERROR: Invalid environment purpose. Use development, validation or production.\n' >&2; exit 1 ;;
 esac
 case "$install_noninteractive" in
   ''|0|1) ;;

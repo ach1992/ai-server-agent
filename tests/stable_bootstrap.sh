@@ -227,6 +227,24 @@ test "$(sed -n '3p' "$ENV_MARKER")" = 1
 test ! -e "$PATH_ATTACK_MARKER"
 
 make_fixture true false false
+AI_SERVER_AGENT_ENVIRONMENT_PROFILE=production AI_SERVER_AGENT_SERVER_LABEL='Live Host' \
+  AI_SERVER_AGENT_NONINTERACTIVE=1 bash "$BOOTSTRAP" > "$FIXTURE/out"
+test -s "$SUDO_MARKER"
+test -s "$EXEC_MARKER"
+test "$(sed -n '1p' "$ENV_MARKER")" = production
+test "$(sed -n '2p' "$ENV_MARKER")" = 'Live Host'
+test "$(sed -n '3p' "$ENV_MARKER")" = 1
+
+make_fixture true false false
+if AI_SERVER_AGENT_ENVIRONMENT_PROFILE=Production bash "$BOOTSTRAP" > "$FIXTURE/out" 2>&1; then
+  echo 'unknown purpose passed privileged bootstrap validation' >&2
+  exit 1
+fi
+grep -Fq 'Invalid environment purpose' "$FIXTURE/out"
+test -s "$SUDO_MARKER"
+test ! -e "$EXEC_MARKER"
+
+make_fixture true false false
 ROOT_BIN="$FIXTURE/root-bin"
 mkdir -p "$ROOT_BIN"
 for cmd in bash curl sha256sum mktemp jq awk chmod rm cp; do

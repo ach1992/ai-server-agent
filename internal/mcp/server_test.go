@@ -580,6 +580,7 @@ func TestInstructionsRouteToolsConciselyAndPreserveSafety(t *testing.T) {
 		{profile: "development", label: maxLabel},
 		{profile: "validation", label: "QA Server"},
 		{profile: "validation", label: maxLabel},
+		{profile: "production", label: maxLabel},
 		{profile: "development", label: maxLabel, workspace: "/srv/shared developer workspace"},
 		{profile: "validation", label: maxLabel, workspace: "/srv/shared developer workspace"},
 	} {

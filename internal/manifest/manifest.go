@@ -53,8 +53,11 @@ type Manifest struct {
 
 func Build(c config.Config) Manifest {
 	purpose := "This server is designated for AI-operated software development, Git/source work, builds and debugging. It can also run real tests. Preserve the AI Server Agent control plane and respect task authorization."
-	if c.EnvironmentProfile == "validation" {
+	switch c.EnvironmentProfile {
+	case "validation":
 		purpose = "This server is designated for AI-operated candidate installation, real testing, reproduction and acceptance evidence. Keep ordinary Git/development/root tools available when the authorized task requires them. Preserve the AI Server Agent control plane."
+	case "production":
+		purpose = "Production: live workloads and data. Prefer passive read-only inspection. Before each state-changing action, ask the user for fresh, action-specific permission; never reuse prior consent. This is AI guidance only: the Agent does not verify such consent or restrict tools. Preserve the AI Server Agent control plane."
 	}
 	browserEngine := "/opt/ai-server-agent/browser"
 	browserData := filepath.Join(c.StateDir, "runtime/browser")

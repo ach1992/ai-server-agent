@@ -14,7 +14,7 @@ import (
 
 func TestMCPEnvironmentPurposeKeepsToolInventory(t *testing.T) {
 	var reference []string
-	for _, role := range []string{"development", "validation"} {
+	for _, role := range []string{"development", "validation", "production"} {
 		t.Run(role, func(t *testing.T) {
 			cfg := testConfig(t, "bearer")
 			cfg.EnvironmentProfile = role
@@ -38,6 +38,11 @@ func TestMCPEnvironmentPurposeKeepsToolInventory(t *testing.T) {
 				!strings.Contains(instructions, "guidance; it is not an authorization") ||
 				!strings.Contains(instructions, "Server label: "+cfg.ServerLabel) {
 				t.Fatalf("MCP role instructions missing: %q", instructions)
+			}
+			if role == "production" && (!strings.Contains(instructions, "Before each change") ||
+				!strings.Contains(instructions, "never reuse prior approval") ||
+				!strings.Contains(instructions, "Agent cannot verify consent")) {
+				t.Fatalf("production instructions did not state fresh-consent guidance and its limitation: %q", instructions)
 			}
 			env, err := session.CallTool(context.Background(), &mcpsdk.CallToolParams{Name: "agent_environment", Arguments: map[string]any{}})
 			if err != nil || env.IsError || len(env.Content) == 0 {

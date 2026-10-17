@@ -1,6 +1,6 @@
 # AI Server Agent
 
-AI Server Agent connects an authorized AI client to a real Linux development or testing server through **MCP**. It lets the client inspect and edit projects, run commands and tests, debug applications, work with Git repositories, and investigate the server and its services.
+AI Server Agent connects an authorized AI client to a Linux server through **MCP**. It lets the client inspect and edit projects, run commands and tests, debug applications, work with Git repositories, and investigate the server and its services.
 
 Regular project work runs as the unprivileged `aiworker` account. Explicitly authorized host administration can use the separate **root-capable** executor. This is intended for a server you control, **not** as a sandbox for mutually untrusted users.
 
@@ -10,7 +10,7 @@ The Agent exposes its MCP tools directly to compatible AI clients. ChatGPT has a
 
 - Ubuntu 22.04+ or Debian 11+ with `systemd`
 - Linux `amd64`/`x86_64` or `arm64`/`aarch64`
-- A dedicated development or validation host whose owner authorizes AI-controlled operations
+- An authorized Linux host; production workloads require extra operator care because the Agent retains broad execution capabilities
 
 Optional features such as browser automation and additional language debuggers may require separately installed tools. The Agent itself does not require Docker, a web server, a database, Node.js, Python, PHP, or control of ports 80/443. For Debian 11, arrange appropriate extended security maintenance or prefer Debian 12+.
 
@@ -65,9 +65,9 @@ Use the [ChatGPT connection guide](docs/CONNECT_CHATGPT.md) to set up a custom M
 
 Features, language adapters, and file/image presentation can vary with the **installed Agent version**, host tools, and AI client. The authenticated `agent_environment` result and tool status report the available capabilities. See the [MCP tool reference](docs/TOOL-REFERENCE.md) for exact operations and limitations.
 
-## Development or Validation server
+## Server purpose: Development, Validation or Production
 
-In supported installed versions, an Agent can be labeled **Development** or **Validation** to help an AI client select the right host. These are descriptive roles, **not** different permission tiers or separate binaries. Both retain the same authorized tools. See [Environment profiles](docs/ENVIRONMENT-PROFILES.md) for setup and management.
+A supported Agent can describe its intended use as **Development** (build/debug), **Validation** (test/acceptance) or **Production** (live workloads; inspect first, request fresh consent for each change). These are **AI guidance, not enforced permission tiers**; all authorized tools remain accessible. The Production choice requires a version that includes it (not Stable `v0.1.14`). See [Environment profiles](docs/ENVIRONMENT-PROFILES.md) for setup and the approval limitation.
 
 ## Security
 
