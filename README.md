@@ -67,7 +67,7 @@ Features, language adapters, and file/image presentation can vary with the **ins
 
 ## Server purpose: Development, Validation or Production
 
-A supported Agent can describe its intended use as **Development** (build/debug), **Validation** (test/acceptance) or **Production** (live workloads; inspect first, request fresh consent for each change). These are **AI guidance, not enforced permission tiers**; all authorized tools remain accessible. The Production choice requires a version that includes it (not Stable `v0.1.14`). See [Environment profiles](docs/ENVIRONMENT-PROFILES.md) for setup and the approval limitation.
+A supported Agent can describe its intended use as **Development** (build/debug), **Validation** (test/acceptance) or **Production** (live workloads; inspect first, request fresh consent for each change). These are **AI guidance, not enforced permission tiers**; all authorized tools remain accessible. The Production choice is available starting with Stable `v0.1.15` (not in `v0.1.14`). See [Environment profiles](docs/ENVIRONMENT-PROFILES.md) for setup and the approval limitation.
 
 ## Security
 
