@@ -26,10 +26,10 @@ To install the **latest published immutable Stable**:
 curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | bash
 ```
 
-To install a **specific published Stable**, for example `v0.1.15`:
+To install a **specific published Stable**, for example `v0.1.16`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | bash -s -- v0.1.15
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | bash -s -- v0.1.16
 ```
 
 **Fresh installations only:** both commands reject a machine with Agent-owned
@@ -62,7 +62,7 @@ Issue #140's first optional multi-language slice was published starting in immut
 
 Do **not** infer state-preserving migration of a historical `v0.1.12` installation, including credentials, active jobs, Browser profiles or terminals, from a new-baseline clean-install test. Before updating an occupied older host, separately verify backup/recovery and the applicable update procedure. This does not remove backward-compatible MCP names or the Agent's required restart/reconnect/cleanup guarantees within the new baseline. Subsequent baseline upgrades require evidence appropriate to their actual changes.
 
-Optional language-server/debugger runtimes are **not** core dependencies or automatically installed. Missing complete, administrator-controlled and version-verified adapter resources return explicit unavailable/dependency errors. For supported language methods/modes and deferred functionality, see [Tool Reference](TOOL-REFERENCE.md#optional-multi-language-code-and-debugger-readiness) and [Issue #149](https://github.com/ach1992/ai-server-agent/issues/149). Real DAP launches execute selected workspace code; use an authorized test host, not an assumed read-only inspection.
+Optional language-server/debugger runtimes are **not** core dependencies or automatically installed. Missing complete, administrator-controlled and version-verified adapter resources return explicit unavailable/dependency errors. In a connected MCP client, check `debug_adapter_status(language=php)` before attempting PHP CLI or Service-owned HTTP debugging; a successful tool call returning `status=unavailable` is not usable adapter readiness. Source integration or a Stable upgrade alone does not provision Xdebug, the pinned PHP DBGp-to-DAP adapter, or its trusted runtime. For supported language methods/modes and deferred functionality, see [Tool Reference](TOOL-REFERENCE.md#optional-multi-language-code-and-debugger-readiness) and [Issue #149](https://github.com/ach1992/ai-server-agent/issues/149). Real DAP launches execute selected workspace code; use an authorized test host, not an assumed read-only inspection.
 
 ### What the verified release installer does
 
