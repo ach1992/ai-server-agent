@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ach1992/ai-server-agent/internal/systemexec"
+	"golang.org/x/sys/unix"
 )
 
 // PostgreSQL materialized views are persisted relations, but SQLLens cannot
@@ -128,11 +129,29 @@ func TestSQLMaterializedViewUnsupportedSyntaxFailsClosed(t *testing.T) {
 // Exercise actual bounded worker search, file-version checks and migration
 // resolution without a database, SQL execution, or any installed-host changes.
 func TestSQLMaterializedViewWorkerCrossFileHistory(t *testing.T) {
+	// The ordinary local suite may skip when no real worker sandbox is
+	// available. CI's named acceptance step must instead fail, not give
+	// the appearance of a successful integration proof after SKIP.
+	required := os.Getenv("ASA_REQUIRE_SQL_MATERIALIZED_WORKER") == "1"
 	if os.Geteuid() == 0 {
+		if required {
+			t.Fatal("required SQL worker acceptance must run unprivileged")
+		}
 		t.Skip("worker-only integration fixture")
 	}
-	requireWorkerLandlockV2(t)
+	if required {
+		abi, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, 0, 0,
+			uintptr(unix.LANDLOCK_CREATE_RULESET_VERSION))
+		if errno != 0 || abi < 2 {
+			t.Fatalf("required SQL worker acceptance needs Landlock ABI v2: abi=%d errno=%v", abi, errno)
+		}
+	} else {
+		requireWorkerLandlockV2(t)
+	}
 	if !systemexec.Trusted("/usr/bin/rg") {
+		if required {
+			t.Fatal("required SQL worker acceptance needs trusted /usr/bin/rg")
+		}
 		t.Skip("trusted worker ripgrep unavailable")
 	}
 	s, owner, workspace := testStdioBroker(t)

@@ -139,6 +139,23 @@ jobs:
             exit 1
           fi
           echo 'REAL_TRANSFER_WORKER_LANDLOCK_PROOF_PASS'
+      - name: Non-skipped materialized SQL real worker/Landlock acceptance
+        if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
+        env:
+          ASA_REQUIRE_SQL_MATERIALIZED_WORKER: '1'
+        run: |
+          set -Eeuo pipefail
+          printf 'SQL_WORKER_PROOF_HEAD=%s\nSQL_WORKER_PROOF_TREE=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
+          log="$(mktemp)"
+          trap 'rm -f -- "$log"' EXIT
+          go test -v ./internal/executor -run '^TestSQLMaterializedViewWorkerCrossFileHistory$' -count=1 -timeout 240s 2>&1 | tee "$log"
+          grep -Fq '=== RUN   TestSQLMaterializedViewWorkerCrossFileHistory' "$log"
+          grep -Fq -- '--- PASS: TestSQLMaterializedViewWorkerCrossFileHistory' "$log"
+          if grep -Fq -- '--- SKIP: TestSQLMaterializedViewWorkerCrossFileHistory' "$log"; then
+            echo 'Required SQL worker acceptance was skipped' >&2
+            exit 1
+          fi
+          echo 'REAL_SQL_MATERIALIZED_WORKER_LANDLOCK_PROOF_PASS'
       - name: Real pinned gopls large-Go semantic acceptance
         if: ${{ needs.change-scope.outputs.lsp_changed == 'true' }}
         run: |
