@@ -63,7 +63,10 @@ check_profile(){
     (if $server_label=="" then true else (.result.instructions | contains("Server label: " + $server_label)) end)
   ' "$scratch/initialize" >/dev/null || fail 'Real MCP initialization contradicts effective role'
   if [ "$role" = production ]; then
-    jq -e '.result.instructions | contains("Before each change") and contains("never reuse prior approval") and contains("Agent cannot verify consent")'       "$scratch/initialize" >/dev/null || fail 'Production MCP instructions lack fresh-consent warning'
+    jq -e '.result.instructions |
+      contains("Before each change") and contains("never reuse prior approval") and
+      contains("Agent cannot verify consent")' "$scratch/initialize" >/dev/null ||
+      fail 'Production MCP instructions lack fresh-consent warning'
   fi
 
   mcp_request '{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"agent_environment","arguments":{}}}' "$scratch/environment"
@@ -74,7 +77,11 @@ check_profile(){
     .instance_id==$id and .workspace_dir=="/srv/ai-workspace"
   ' <<< "$manifest" >/dev/null || fail 'Direct MCP environment did not reflect installed state'
   if [ "$role" = production ]; then
-    jq -e '.purpose | contains("passive read-only inspection") and contains("fresh, action-specific permission") and contains("does not verify such consent")'       <<< "$manifest" >/dev/null || fail 'Production manifest missing honest advisory guidance'
+    jq -e '.purpose |
+      contains("passive read-only inspection") and
+      contains("fresh, action-specific permission") and
+      contains("does not verify such consent")' <<< "$manifest" >/dev/null ||
+      fail 'Production manifest missing honest advisory guidance'
   fi
 
   mcp_request '{"jsonrpc":"2.0","id":3,"method":"tools/list","params":{}}' "$scratch/tools"

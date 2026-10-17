@@ -107,7 +107,7 @@ It does not require every programming language, database, browser, container run
 
 The product meets its intended outcome when a supported AI client can reliably authenticate, identify the host and available capabilities, perform substantial authorized development or validation workflows, inspect actionable evidence, and recover relevant work without reliance on chat history.
 
-Installation, updates, and failure recovery must be reproducible and diagnosable; host capability must not be unnecessarily obstructed by the Agent itself. Operational concurrency and retained state must be understandable and manageable for the supported host environment.
+Installation, updates, and failure recovery must be reproducible and diagnosable; host capability must not be unnecessarily obstructed by the Agent itself. Operational concurrency and retained state must be understandable and manageable for the supported host environment. On a Production-designated instance, the authenticated client must be able to discover the purpose and receive its fresh-consent guidance without any claim that the Agent verifies approval or enforces read-only access.
 
 Representative success must be demonstrated through an authorized direct-client development workflow, a realistic Validation-host test and diagnosis workflow, and recovery of relevant in-progress work after a client/chat interruption, using exact repository/host identity. Specific workflow fixtures, negative cases and release gates belong to [Testing](TESTING.md) and their owning Issues, not to this product-level document.
 

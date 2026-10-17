@@ -568,11 +568,13 @@ download_release(){ (
 verify_existing_runtime_compatibility(){
   local candidate="$1" store response probe
   [ "$FRESH_INSTALL" -eq 0 ] || return 0
-  if jq -e 'has("runtime")' "$CONFIG_FILE" >/dev/null; then
-    if ! "$candidate" -config "$CONFIG_FILE" validate-config >/dev/null; then
+  if ! "$candidate" -config "$CONFIG_FILE" validate-config >/dev/null; then
+    if jq -e '.environment_profile == "production"' "$CONFIG_FILE" >/dev/null; then
+      die "Target Agent cannot validate the current configuration with Production purpose selected. No binary, credentials, config or services were switched. The target version may not support Production: while the current Agent is active, select development or validation with 'sudo ai-server-agent-manage profile-set', then retry. If still rejected, inspect other config settings."
+    fi
+    if jq -e 'has("runtime")' "$CONFIG_FILE" >/dev/null; then
       die "Existing operator runtime settings are incompatible with the target Agent binary. No service or active config was switched. Select a compatible version or explicitly reconcile config.json runtime settings before retrying."
     fi
-  elif ! "$candidate" -config "$CONFIG_FILE" validate-config >/dev/null; then
     die "The target Agent rejects the existing installation configuration. No binary, credentials or active service was switched."
   fi
 

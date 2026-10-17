@@ -51,6 +51,27 @@ assert_refuse(){
 MODE=direct-only; write_fixture "$MODE"
 assert_accept "$TMP/new-agent"
 assert_accept "$TMP/old-agent"
+
+# New Production is advisory but an older target cannot parse the config.
+# The actual installer preflight must refuse before binary/service replacement
+# and explain the compatible profile-set path, not blame credentials.
+cp "$CONFIG_FILE" "$TMP/pre-production-config.json"
+jq '.environment_profile="production"' "$CONFIG_FILE" > "$TMP/production-config.json"
+mv "$TMP/production-config.json" "$CONFIG_FILE"
+before_cfg="$(sha256sum "$CONFIG_FILE" | awk '{print $1}')"
+before_store="$(sha256sum "$CREDENTIAL_STORE" | awk '{print $1}')"
+MODE=production-direct-only
+assert_accept "$TMP/new-agent"
+assert_refuse "$TMP/old-agent"
+grep -Fq 'Production purpose selected' "$TMP/reject.out" || {
+  echo 'Production downgrade refusal lacks an actionable purpose diagnosis' >&2
+  exit 1
+}
+grep -Fq 'profile-set' "$TMP/reject.out" || exit 1
+[ "$(sha256sum "$CONFIG_FILE" | awk '{print $1}')" = "$before_cfg" ] || exit 1
+[ "$(sha256sum "$CREDENTIAL_STORE" | awk '{print $1}')" = "$before_store" ] || exit 1
+mv "$TMP/pre-production-config.json" "$CONFIG_FILE"
+
 MODE=gateway-active; write_fixture "$MODE"
 assert_accept "$TMP/new-agent"
 assert_refuse "$TMP/old-agent"
@@ -81,7 +102,7 @@ SCRIPT
 chmod +x "$TMP/too-old-agent"
 MODE=direct-only; write_fixture "$MODE"
 assert_refuse "$TMP/too-old-agent"
-echo 'Credential upgrade/rollback target-binary preflight PASS (7 old/new fixtures, invalid staged replacement, unsupported historical target)'
+echo 'Credential/profile upgrade/rollback target-binary preflight PASS (named stores, Production downgrade refusal, invalid staged replacement, unsupported historical target)'
 # Assert that the installed updater refuses to execute an unsafe historical
 # installer before any target script is run (source/stable share this gate).
 awk '/^verify_downloaded_installer_credential_compatibility\(\)\{/ {grab=1} grab {print} grab && /^}$/ {exit}' update.sh > "$TMP/updater-preflight-fn.sh"
