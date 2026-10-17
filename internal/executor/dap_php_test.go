@@ -148,8 +148,8 @@ func TestPHPDAPStatusAndUnsupportedAttach(t *testing.T) {
 	}
 	req.Action, req.DebugMode = "debug_launch", "http"
 	req.DebugProgram, req.FileVersion = "main.php", "exact-version"
-	if got := s.debugAction(t.Context(), req); got.OK || got.ErrorCode != "php_dap_unsupported_mode" || got.SessionID != "" {
-		t.Fatalf("unsupported PHP HTTP takeover created a session: %+v", got)
+	if got := s.debugAction(t.Context(), req); got.OK || got.ErrorCode != "php_http_identity_required" || got.SessionID != "" {
+		t.Fatalf("PHP HTTP without existing verified Service Job parameters created a session: %+v", got)
 	}
 	req.DebugMode = "attach"
 	if got := s.debugAction(t.Context(), req); got.OK || got.ErrorCode != "php_dap_unsupported_mode" {

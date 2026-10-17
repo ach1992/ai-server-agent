@@ -19,6 +19,9 @@ import (
 // Unix DBGp broker validates the exact PHP peer before forwarding protocol.
 // Existing HTTP Job/Service attach is a separate, not-yet-shipped contract.
 func (s *Server) debugLaunchPHP(ctx context.Context, req Request) (response Response) {
+	if req.DebugMode == "http" {
+		return s.debugLaunchPHPHTTP(ctx, req)
+	}
 	if req.DebugMode != "" && req.DebugMode != "cli" {
 		return fileError("php_dap_unsupported_mode", "validation", errors.New("PHP supports only contained single-script cli mode; local HTTP/remote attach not enabled"))
 	}

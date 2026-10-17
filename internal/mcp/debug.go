@@ -13,12 +13,15 @@ type DebugAdapterStatusInput struct {
 	Language string `json:"language,omitempty" jsonschema:"Optional language: go (default), rust, php, python, javascript or typescript; passive trusted adapter readiness only"`
 }
 type DebugLaunchInput struct {
-	Workspace   string `json:"workspace" jsonschema:"Exact absolute worker workspace/worktree directory"`
-	Program     string `json:"program" jsonschema:"Workspace-relative Go/Rust executable, PHP .php, Python .py, Node .js/.mjs/.cjs or JavaScript Browser .html; TypeScript requires precompiled .js/.js.map"`
-	FileVersion string `json:"file_version" jsonschema:"Exact program/source version from workspace_stat; stale versions are rejected"`
-	Language    string `json:"language,omitempty" jsonschema:"Optional debugger language: go (default), rust, php, python, javascript or precompiled typescript"`
-	Mode        string `json:"mode,omitempty" jsonschema:"Go/Rust exec (default); PHP cli; Python script/module/test; JavaScript/TypeScript precompiled node; JavaScript local HTML browser with pinned Chromium pipe; no extension/remote attach"`
-	StopOnEntry bool   `json:"stop_on_entry,omitempty" jsonschema:"Pause the selected Go/Rust/PHP/Python/Node program at its entrypoint"`
+	Workspace    string `json:"workspace" jsonschema:"Exact absolute worker workspace/worktree directory"`
+	Program      string `json:"program" jsonschema:"Workspace-relative Go/Rust executable, PHP .php, Python .py, Node .js/.mjs/.cjs or JavaScript Browser .html; TypeScript requires precompiled .js/.js.map"`
+	FileVersion  string `json:"file_version" jsonschema:"Exact program/source version from workspace_stat; stale versions are rejected"`
+	Language     string `json:"language,omitempty" jsonschema:"Optional debugger language: go (default), rust, php, python, javascript or precompiled typescript"`
+	Mode         string `json:"mode,omitempty" jsonschema:"Go/Rust exec; PHP cli or verified local service-owned http; Python script/module/test; JavaScript/TypeScript node or local Chromium browser; no remote/extension attach"`
+	ServiceJobID string `json:"service_job_id,omitempty" jsonschema:"PHP http only: exact existing authorized worker start_job(kind=service) job_id; DAP never starts or stops this service"`
+	HTTPPort     int    `json:"http_port,omitempty" jsonschema:"PHP http only: original service PHP -S IPv4 loopback listener port 1024..65535"`
+	HTTPTrigger  string `json:"http_trigger,omitempty" jsonschema:"PHP http only: 32 lowercase hex token already preconfigured into service Xdebug trigger_value and root-owned sticky /tmp Unix socket pathname; never an authorization credential"`
+	StopOnEntry  bool   `json:"stop_on_entry,omitempty" jsonschema:"Pause the selected Go/Rust/PHP/Python/Node program at its entrypoint"`
 }
 type DebugOwnerInput struct {
 	Workspace string `json:"workspace" jsonschema:"Exact absolute workspace used at debug_launch"`
@@ -59,9 +62,9 @@ func (s *Server) registerDebugTools() {
 		return s.callDebug(ctx, executor.Request{Action: "debug_adapter_status", Language: in.Language})
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-		Name: "debug_launch", Description: "Launch worker-only DAP for Go, Rust ELF, PHP CLI, Python, Node/precompiled TypeScript or local HTML Browser with trusted optional adapters and exact file_version. Executes project code under Executor-owned cgroup-v2 containment where required. No root/remote attach, PHP HTTP/Shell/extension-host DAP, TCP inspector or runInTerminal.", Annotations: annotations(false, true, false, true),
+		Name: "debug_launch", Description: "Launch worker-only DAP for Go/Rust, PHP CLI or separately service-owned local PHP HTTP, Python, Node/TypeScript or local Chromium. PHP HTTP requires verified existing start_job Service, predeclared Xdebug Unix socket/trigger and explicit one-shot debug_http_request. Only debugger resources are owned by DAP; no remote/production/PHP-FPM/Apache, Shell or extension-host attach.", Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugLaunchInput) (*mcpsdk.CallToolResult, executor.Response, error) {
-		return s.callDebug(ctx, executor.Request{Action: "debug_launch", Workspace: in.Workspace, DebugProgram: in.Program, FileVersion: in.FileVersion, DebugStopOnEntry: in.StopOnEntry, Language: in.Language, DebugMode: in.Mode})
+		return s.callDebug(ctx, executor.Request{Action: "debug_launch", Workspace: in.Workspace, DebugProgram: in.Program, FileVersion: in.FileVersion, DebugStopOnEntry: in.StopOnEntry, Language: in.Language, DebugMode: in.Mode, JobID: in.ServiceJobID, DebugHTTPPort: in.HTTPPort, DebugHTTPTrigger: in.HTTPTrigger})
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name: "debug_breakpoints", Description: "Set/remove Go, Rust, PHP, Python or Node JavaScript source breakpoints with exact worker source file_version, before debug_configure. This may alter debuggee execution.", Annotations: annotations(false, true, false, true),
@@ -112,6 +115,9 @@ func (s *Server) registerDebugTools() {
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "debug_status", Description: "Inspect current debug session state and bounded asynchronous DAP events, including explicit dropped-events accounting. Does not imply the debuggee terminated on client disconnect.", Annotations: annotations(true, false, false, false)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugOwnerInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		return s.callDebug(ctx, executor.Request{Action: "debug_status", Workspace: in.Workspace, SessionID: in.SessionID})
+	})
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "debug_http_request", Description: "Explicitly dispatch ONE authorized, version-pinned PHP HTTP DAP request to an already verified local worker Service Job. Side-effecting GET; fixed 127.0.0.1 target, no redirects, no retries, no service start/stop. Inspect debug_status for result.", Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugOwnerInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+		return s.callDebug(ctx, executor.Request{Action: "debug_action", DebugMethod: "http_request", Workspace: in.Workspace, SessionID: in.SessionID})
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "debug_stop", Description: "Request debugger disconnect+terminateDebuggee and stop the executor-owned worker session with verified Go/Rust/PHP/Python/Node descendant cleanup. Uncertain results are not reported as success.", Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugOwnerInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		return s.callDebug(ctx, executor.Request{Action: "debug_stop", Workspace: in.Workspace, SessionID: in.SessionID})
