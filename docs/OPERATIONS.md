@@ -26,10 +26,10 @@ To install the **latest published immutable Stable**:
 curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | bash
 ```
 
-To install a **specific published Stable**, for example `v0.1.14`:
+To install a **specific published Stable**, for example `v0.1.15`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | bash -s -- v0.1.14
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | bash -s -- v0.1.15
 ```
 
 **Fresh installations only:** both commands reject a machine with Agent-owned
