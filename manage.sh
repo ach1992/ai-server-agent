@@ -2654,9 +2654,18 @@ connection_menu(){
       return 0
     fi
     case "$choice" in
-      1) ui_menu_action configure_cloudflare; pause; return ;;
-      2) ui_menu_action configure_local; pause; return ;;
-      3) ui_menu_action configure_manual_tls; pause; return ;;
+      1|2|3)
+        case "$choice" in
+          1) ui_menu_action configure_cloudflare ;;
+          2) ui_menu_action configure_local ;;
+          3) ui_menu_action configure_manual_tls ;;
+        esac
+        if [ "$UI_LAST_ACTION_OK" = 1 ]; then
+          pause
+          return 0
+        fi
+        ui_notice warning 'Connection setup was not verified. Check Status and any recovery state before retrying; choose another method or 0 to return to the main menu.'
+        pause ;;
       0|b|B) return ;;
       *) ui_notice warning 'Choose 1, 2, 3 or 0.'; pause ;;
     esac
