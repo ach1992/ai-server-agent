@@ -470,6 +470,33 @@ func sqlDDLMaterializedQuery(tokens []sqlDDLToken, at int) bool {
 	if depth != 0 {
 		return false // an incomplete expression/CTE cannot prove a declaration
 	}
+	// PostgreSQL permits a single terminal WITH DATA or WITH NO DATA
+	// population clause. Anything trailing it, or another top-level WITH
+	// after the query starts, is not provable by this bounded parser.
+	end := len(tokens)
+	if tokens[end-1].text == ";" {
+		end--
+	}
+	depth = 0
+	for i := at + 1; i < end; i++ {
+		switch tokens[i].text {
+		case "(":
+			depth++
+		case ")":
+			depth--
+		}
+		if depth != 0 || i == at+1 || tokens[i].keyword() != "WITH" {
+			continue // leading WITH may introduce a supported CTE
+		}
+		if i+1 < end && (tokens[i+1].keyword() == "ORDINALITY" || tokens[i+1].keyword() == "TIES") {
+			continue // valid SELECT query clauses, not population suffixes
+		}
+		if i+2 == end && tokens[i+1].keyword() == "DATA" ||
+			i+3 == end && tokens[i+1].keyword() == "NO" && tokens[i+2].keyword() == "DATA" {
+			break
+		}
+		return false
+	}
 	switch tokens[at+1].keyword() {
 	case "SELECT", "TABLE", "VALUES":
 		return at+2 < len(tokens) && tokens[at+2].text != ";"

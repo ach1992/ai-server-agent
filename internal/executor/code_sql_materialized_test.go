@@ -225,4 +225,198 @@ func TestSQLMaterializedViewWorkerCrossFileHistory(t *testing.T) {
 	if len(wrongKind) != 0 {
 		t.Fatalf("REFRESH incorrectly linked to an ordinary table: %+v", wrongKind)
 	}
+	// R1: prove the reverse navigation direction through actual worker search.
+	writeSQL := func(path, data string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(workspace, path), []byte(data), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	selectSQL := func(path, source, term, method string) {
+		t.Helper()
+		idx := strings.Index(source, term)
+		if idx < 0 {
+			t.Fatalf("missing %q in %q", term, source)
+		}
+		owner.Path, owner.FileVersion = path, version(path)
+		owner.CodeMethod, owner.Line, owner.Character = method, 0, idx+1
+	}
+	ambiguous := func(label string) {
+		t.Helper()
+		response := s.codeInspect(ctx, owner)
+		if response.OK || response.ErrorCode != "sql_schema_history_ambiguous" {
+			t.Fatalf("%s: source history was incorrectly resolved: %+v", label, response)
+		}
+	}
+	for _, ordinary := range []string{
+		"CREATE TABLE reporting.monthly (id integer);\n",
+		"CREATE VIEW reporting.monthly AS SELECT 1;\n",
+	} {
+		writeSQL("migrations/001_create.sql", ordinary)
+		selectSQL("migrations/001_create.sql", ordinary, "monthly", "references")
+		refs := get("references")
+		if len(refs) != 2 {
+			t.Fatalf("%q: ordinary declaration should have only itself and SELECT, got %+v", ordinary, refs)
+		}
+		for _, ref := range refs {
+			if ref.URI == "queries/refresh.sql" || ref.FileVersion != version(ref.URI) {
+				t.Fatalf("%q: wrong-kind REFRESH included: %+v", ordinary, refs)
+			}
+		}
+		selectSQL("queries/refresh.sql", files["queries/refresh.sql"], "monthly", "definition")
+		if got := get("definition"); len(got) != 0 {
+			t.Fatalf("%q: REFRESH linked to ordinary declaration: %+v", ordinary, got)
+		}
+	}
+	mv := "CREATE MATERIALIZED VIEW reporting.monthly AS SELECT 1;\n"
+	writeSQL("migrations/001_create.sql", mv)
+	selectSQL("migrations/001_create.sql", mv, "monthly", "references")
+	if refs := get("references"); len(refs) != 3 {
+		t.Fatalf("real materialized declaration lost REFRESH/SELECT references: %+v", refs)
+	}
+	selectSQL("queries/refresh.sql", files["queries/refresh.sql"], "monthly", "definition")
+	if def := get("definition"); len(def) != 1 || def[0].URI != "migrations/001_create.sql" {
+		t.Fatalf("real materialized CREATE not linked: %+v", def)
+	}
+	// Both directions must reject conflicting ordinary and materialized
+	// declarations of the same qualified name.
+	conflict := "migrations/002_conflict.sql"
+	writeSQL(conflict, "CREATE TABLE reporting.monthly (id integer);\n")
+	ambiguous("refresh with mixed-kind declarations")
+	selectSQL("migrations/001_create.sql", mv, "monthly", "references")
+	ambiguous("materialized declaration with mixed-kind declarations")
+	if err := os.Remove(filepath.Join(workspace, conflict)); err != nil {
+		t.Fatal(err)
+	}
+
+	// R2: the source-only resolver must not resurrect a CREATE after a
+	// relation identity changes in a later ordered migration.
+	alterPath := "migrations/002_alter.sql"
+	for _, tc := range []struct {
+		label, alter, newName string
+	}{
+		{"rename", "ALTER MATERIALIZED VIEW reporting.monthly RENAME TO renamed;\n", "reporting.renamed"},
+		{"set-schema", "ALTER MATERIALIZED VIEW reporting.monthly SET SCHEMA archive;\n", "archive.monthly"},
+		{"unknown", "ALTER MATERIALIZED VIEW reporting.monthly IDENTITY UNKNOWN;\n", ""},
+		{"incomplete-rename", "ALTER MATERIALIZED VIEW reporting.monthly RENAME TO;\n", ""},
+	} {
+		writeSQL(alterPath, tc.alter)
+		selectSQL("queries/refresh.sql", files["queries/refresh.sql"], "monthly", "definition")
+		ambiguous(tc.label + " obsolete source")
+		if tc.newName != "" {
+			target := "queries/new_materialized.sql"
+			newQuery := "REFRESH MATERIALIZED VIEW " + tc.newName + ";\n"
+			writeSQL(target, newQuery)
+			suffix := tc.newName[strings.LastIndex(tc.newName, ".")+1:]
+			selectSQL(target, newQuery, suffix, "definition")
+			response := s.codeInspect(ctx, owner)
+			if response.OK {
+				var locations []sqlNavLocation
+				if json.Unmarshal([]byte(response.Output), &locations) != nil || len(locations) != 0 {
+					t.Fatalf("%s new identity fabricated old CREATE: %+v", tc.label, response)
+				}
+			} else if response.ErrorCode != "sql_schema_history_ambiguous" {
+				t.Fatalf("%s new identity unexpected error: %+v", tc.label, response)
+			}
+			if err := os.Remove(filepath.Join(workspace, target)); err != nil {
+				t.Fatal(err)
+			}
+		}
+		if err := os.Remove(filepath.Join(workspace, alterPath)); err != nil {
+			t.Fatal(err)
+		}
+		selectSQL("queries/refresh.sql", files["queries/refresh.sql"], "monthly", "definition")
+		if def := get("definition"); len(def) != 1 || def[0].URI != "migrations/001_create.sql" {
+			t.Fatalf("%s: valid definition not restored after ALTER removal: %+v", tc.label, def)
+		}
+	}
+}
+
+func TestSQLMaterializedViewPopulationSuffixMustBeTerminal(t *testing.T) {
+	valid := []string{
+		"CREATE MATERIALIZED VIEW reporting.good AS SELECT 1 WITH DATA;",
+		"CREATE MATERIALIZED VIEW reporting.good AS SELECT * FROM orders WITH NO DATA;",
+		"CREATE MATERIALIZED VIEW reporting.good AS TABLE orders WITH NO DATA;",
+		"CREATE MATERIALIZED VIEW reporting.good AS VALUES (1) WITH DATA;",
+		"CREATE MATERIALIZED VIEW reporting.good AS WITH cte AS (SELECT 1) SELECT * FROM cte WITH NO DATA;",
+		"CREATE MATERIALIZED VIEW reporting.good AS SELECT * FROM generate_series(1, 3) WITH ORDINALITY;",
+		"CREATE MATERIALIZED VIEW reporting.good AS SELECT 1 ORDER BY 1 FETCH FIRST 1 ROWS WITH TIES;",
+	}
+	for _, source := range valid {
+		symbols := sqlDDLSymbols(source, "postgres")
+		if len(symbols) != 1 || symbols[0].Name != "reporting.good" {
+			t.Errorf("valid materialized population clause was rejected: %q => %+v", source, symbols)
+		}
+		found, ok := sqlNavOccurrences(source, "postgres")
+		if !ok || len(found) == 0 || !found[0].declaration || !found[0].materialized {
+			t.Errorf("valid materialized source declaration not indexed: %q => %+v", source, found)
+		}
+	}
+	invalid := []string{
+		"CREATE MATERIALIZED VIEW reporting.bad AS SELECT 1 WITH DATA EXTRA;",
+		"CREATE MATERIALIZED VIEW reporting.bad AS SELECT * FROM orders WITH NO DATA EXTRA;",
+		"CREATE MATERIALIZED VIEW reporting.bad AS SELECT 1 WITH NO;",
+		"CREATE MATERIALIZED VIEW reporting.bad AS SELECT 1 WITH;",
+		"CREATE MATERIALIZED VIEW reporting.bad AS SELECT 1 WITH DATA WITH NO DATA;",
+		"CREATE MATERIALIZED VIEW reporting.bad AS SELECT 1 WITH NO DATA WITH DATA;",
+		"CREATE MATERIALIZED VIEW reporting.bad AS TABLE orders WITH NO DATA INVALID;",
+		"CREATE MATERIALIZED VIEW reporting.bad AS VALUES (1) WITH DATA MORE;",
+		"CREATE MATERIALIZED VIEW reporting.bad AS WITH cte AS (SELECT 1) SELECT * FROM cte WITH NO DATA EXTRA;",
+	}
+	for _, source := range invalid {
+		if symbols := sqlDDLSymbols(source, "postgres"); len(symbols) != 0 {
+			t.Errorf("malformed population suffix produced a symbol: %q => %+v", source, symbols)
+		}
+		if found, ok := sqlNavOccurrences(source, "postgres"); !ok || len(found) != 0 {
+			t.Errorf("malformed materialized DDL produced source links: %q => %+v valid=%v", source, found, ok)
+		}
+	}
+}
+
+func TestSQLMaterializedAlterInvalidatesSourceIdentity(t *testing.T) {
+	cases := []struct {
+		sql       string
+		wantNames []string
+	}{
+		{"ALTER MATERIALIZED VIEW reporting.old_mv RENAME TO new_mv;",
+			[]string{"reporting.old_mv", "reporting.new_mv"}},
+		{"ALTER MATERIALIZED VIEW IF EXISTS reporting.old_mv SET SCHEMA archive;",
+			[]string{"reporting.old_mv", "archive.old_mv"}},
+		{`ALTER MATERIALIZED VIEW "reporting.data"."old.mv" RENAME TO "new.mv";`,
+			[]string{"reporting.data.old.mv", "reporting.data.new.mv"}},
+		{`ALTER MATERIALIZED VIEW "reporting.data"."old.mv" SET SCHEMA "archive.data";`,
+			[]string{"reporting.data.old.mv", "archive.data.old.mv"}},
+		{"ALTER MATERIALIZED VIEW reporting.old_mv RENAME TO;",
+			[]string{"reporting.old_mv"}},
+		{"ALTER MATERIALIZED VIEW reporting.old_mv IDENTITY UNKNOWN;",
+			[]string{"reporting.old_mv"}},
+		{"ALTER MATERIALIZED VIEW reporting.old_mv OWNER TO custodian;", nil},
+		{"ALTER MATERIALIZED VIEW reporting.old_mv SET TABLESPACE fast_space;", nil},
+		{"ALTER MATERIALIZED VIEW reporting.old_mv SET (fillfactor = 70);", nil},
+	}
+	for _, tc := range cases {
+		events, valid := sqlNavOccurrences(tc.sql, "postgres")
+		if !valid || len(events) != len(tc.wantNames) {
+			t.Errorf("alter %q: got %+v (valid=%v), want %v", tc.sql, events, valid, tc.wantNames)
+			continue
+		}
+		for i, want := range tc.wantNames {
+			if events[i].name != want || !events[i].drop || !events[i].materialized ||
+				!events[i].requiresMaterialized || events[i].declaration {
+				t.Errorf("alter %q: bad lifecycle marker at %d: %+v, want %s", tc.sql, i, events[i], want)
+			}
+		}
+	}
+	if events, ok := sqlNavOccurrences("ALTER MATERIALIZED VIEW reporting.old_mv RENAME TO new_mv;", "mysql"); ok && len(events) > 0 {
+		t.Errorf("MySQL fabricated ALTER MATERIALIZED VIEW support: %+v", events)
+	}
+	move := "ALTER MATERIALIZED VIEW reporting.old_mv SET SCHEMA archive;"
+	if selected, ok := sqlNavSelected(move, "postgres", 0, strings.Index(move, "archive")+2); ok {
+		t.Errorf("synthetic SET SCHEMA target incorrectly exposed as selectable object: %+v", selected)
+	}
+	rename := "ALTER MATERIALIZED VIEW reporting.old_mv RENAME TO new_mv;"
+	if selected, ok := sqlNavSelected(rename, "postgres", 0, strings.Index(rename, "new_mv")+2); !ok ||
+		selected.name != "reporting.new_mv" || !selected.drop {
+		t.Errorf("genuine RENAME TO target cannot be selected: %+v (found=%t)", selected, ok)
+	}
 }

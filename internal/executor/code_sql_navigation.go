@@ -32,6 +32,7 @@ type sqlNavOccurrence struct {
 	isColumn                       bool
 	materialized                   bool // Proven PostgreSQL materialized-view declaration/drop
 	requiresMaterialized           bool // REFRESH/DROP must not resolve to an ordinary table/view
+	lifecycleOnly                  bool // Synthetic SET SCHEMA identity, not a selectable source token
 }
 
 type sqlNavLocation struct {
@@ -207,7 +208,7 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 		case "ALTER", "DROP":
 			materialized := statement[at].keyword() == "MATERIALIZED"
 			if materialized {
-				if operation != "DROP" || (dialect != "postgres" && dialect != "postgresql") ||
+				if (dialect != "postgres" && dialect != "postgresql") ||
 					at+1 >= len(statement) || statement[at+1].keyword() != "VIEW" {
 					return
 				}
@@ -218,6 +219,49 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 				if at+1 < len(statement) && statement[at].keyword() == "IF" &&
 					statement[at+1].keyword() == "EXISTS" {
 					at += 2
+				}
+				if materialized && operation == "ALTER" {
+					// A materialized relation's identity may change across ordered
+					// migrations. Invalidate the old CREATE; a limited parser must
+					// not present a stale definition after an unsupported ALTER.
+					relation, end, valid := sqlNavName(statement, at)
+					if !valid || end >= len(statement) {
+						return
+					}
+					// These known clauses preserve the relation's identity.
+					if end+1 < len(statement) &&
+						(statement[end].keyword() == "OWNER" && statement[end+1].keyword() == "TO" ||
+							statement[end].keyword() == "SET" && (statement[end+1].keyword() == "TABLESPACE" ||
+								statement[end+1].text == "(") ||
+							statement[end].keyword() == "RESET" && statement[end+1].text == "(") {
+						return
+					}
+					relation.drop, relation.materialized, relation.requiresMaterialized = true, true, true
+					result = append(result, relation)
+					if end+2 < len(statement) && (statement[end].keyword() == "RENAME" &&
+						statement[end+1].keyword() == "TO" ||
+						statement[end].keyword() == "SET" && statement[end+1].keyword() == "SCHEMA") {
+						newName, next, ok := sqlNavName(statement, end+2)
+						if ok && next == len(statement) && !strings.Contains(newName.identity, "\x00") {
+							if statement[end].keyword() == "RENAME" {
+								// Schema prefixes are separated in identity, not
+								// by dots inside quoted SQL identifiers.
+								if i := strings.LastIndex(relation.identity, "\x00"); i >= 0 {
+									newName.identity = relation.identity[:i+1] + newName.identity
+								}
+							} else {
+								// SET SCHEMA keeps the old relation's final name.
+								last := strings.LastIndex(relation.identity, "\x00")
+								newName.identity += "\x00" + relation.identity[last+1:]
+								newName.searchTerm = relation.searchTerm
+								newName.lifecycleOnly = true
+							}
+							newName.name = strings.ReplaceAll(newName.identity, "\x00", ".")
+							newName.drop, newName.materialized, newName.requiresMaterialized = true, true, true
+							result = append(result, newName)
+						}
+					}
+					break
 				}
 				if materialized {
 					// Parse the entire DROP list before reporting tombstones.
@@ -395,7 +439,7 @@ func sqlNavSelected(source, dialect string, line, character int) (sqlNavOccurren
 		return sqlNavOccurrence{}, false
 	}
 	for _, occ := range occurrences {
-		if sqlNavAt(occ.span, line, character) {
+		if !occ.lifecycleOnly && sqlNavAt(occ.span, line, character) {
 			return occ, true
 		}
 	}
@@ -541,28 +585,44 @@ func (s *Server) sqlOfflineNavigation(parent context.Context, req Request, sourc
 			return fileError("sql_schema_target_changed", "conflict", errors.New("SQL candidate file changed during navigation")), true
 		}
 	}
-	// A REFRESH or DROP MATERIALIZED VIEW is type-specific. A same-name
-	// ordinary table/view declaration cannot prove the materialized source.
-	// Without a source-backed materialized declaration, return an empty graph
-	// instead of inventing a definition or references to a different kind.
-	if selected.requiresMaterialized {
-		hasMaterialized := false
-		hasOtherDeclaration := false
-		for _, item := range foundItems {
-			if item.declaration {
-				if item.materialized {
-					hasMaterialized = true
-				} else {
-					hasOtherDeclaration = true
-				}
+	// Source-backed relation kinds must agree in *both* directions.
+	// A REFRESH or DROP MATERIALIZED VIEW cannot be a reference to an
+	// ordinary table/view. Untyped SELECT uses can follow either kind.
+	hasMaterialized, hasOrdinary := false, false
+	for _, item := range foundItems {
+		if item.declaration {
+			if item.materialized {
+				hasMaterialized = true
+			} else {
+				hasOrdinary = true
 			}
 		}
-		if hasOtherDeclaration && hasMaterialized {
-			return fileError("sql_schema_history_ambiguous", "validation",
-				errors.New("source defines conflicting relation kinds for materialized view")), true
-		}
-		if !hasMaterialized {
+	}
+	if hasMaterialized && hasOrdinary {
+		return fileError("sql_schema_history_ambiguous", "validation",
+			errors.New("source defines conflicting ordinary and materialized relation declarations")), true
+	}
+	if !hasMaterialized {
+		if selected.materialized || selected.requiresMaterialized {
+			if !hasOrdinary {
+				for _, item := range foundItems {
+					if item.materialized && item.drop {
+						return fileError("sql_schema_history_ambiguous", "validation",
+							errors.New("materialized relation lifecycle has no source-backed active declaration")), true
+					}
+				}
+			}
 			foundItems = nil
+		} else {
+			// A type-specific materialized event does not belong to an
+			// ordinary relation graph when no materialized CREATE exists.
+			filtered := foundItems[:0]
+			for _, item := range foundItems {
+				if !item.materialized {
+					filtered = append(filtered, item)
+				}
+			}
+			foundItems = filtered
 		}
 	}
 	var locations []sqlNavLocation
@@ -592,7 +652,9 @@ func (s *Server) sqlOfflineNavigation(parent context.Context, req Request, sourc
 		}
 	} else {
 		for _, item := range foundItems {
-			locations = append(locations, item.sqlNavLocation)
+			if !item.lifecycleOnly {
+				locations = append(locations, item.sqlNavLocation)
+			}
 		}
 	}
 	if len(locations) == 0 && rollbackMatches {
