@@ -92,7 +92,7 @@ func sqlNavIndexTarget(statement []sqlDDLToken, dialect string) (sqlNavOccurrenc
 		}
 		i++
 	}
-	table, next, ok := sqlNavName(statement, i)
+	table, next, ok := sqlNavRelationName(statement, i, dialect)
 	if !ok {
 		return sqlNavOccurrence{}, 0, false
 	}
@@ -164,7 +164,7 @@ func sqlNavAlterIndexColumns(statement []sqlDDLToken, dialect string, table sqlN
 			j += 2
 		}
 		if j < len(statement) && statement[j].text == "(" {
-			result = append(result, sqlNavColumnList(table, statement, j, false)...)
+			result = append(result, sqlNavColumnList(table, statement, j, false, dialect)...)
 		}
 	}
 	return result

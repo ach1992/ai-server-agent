@@ -154,10 +154,12 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 		return response
 	}
 	files := map[string]string{
-		"migrations/001_accounts.sql":    "CREATE TABLE public.accounts (id BIGINT PRIMARY KEY, name TEXT);\n",
-		"migrations/002_payments.sql":    "CREATE TABLE public.payments (id BIGINT PRIMARY KEY, account_id BIGINT REFERENCES public.accounts(id));\n",
-		"migrations/003_quoted_only.sql": "CREATE TABLE \"only\" (id BIGINT PRIMARY KEY);\n",
-		"queries/list.sql":               "SELECT a.id, p.account_id FROM public.accounts AS a JOIN public.payments p ON p.account_id = a.id WHERE a.id > 0;\n",
+		"migrations/001_accounts.sql":       "CREATE TABLE public.accounts (id BIGINT PRIMARY KEY, name TEXT);\n",
+		"migrations/002_payments.sql":       "CREATE TABLE public.payments (id BIGINT PRIMARY KEY, account_id BIGINT REFERENCES public.accounts(id));\n",
+		"migrations/003_quoted_only.sql":    "CREATE TABLE \"only\" (id BIGINT PRIMARY KEY);\n",
+		"queries/list.sql":                  "SELECT a.id, p.account_id FROM public.accounts AS a JOIN public.payments p ON p.account_id = a.id WHERE a.id > 0;\n",
+		"queries/pg_only_modifier.sql":      "SELECT accounts.id FROM ONLY accounts;\n",
+		"queries/pg_join_only_modifier.sql": "SELECT accounts.id FROM public.payments p JOIN ONLY accounts ON p.account_id=accounts.id;\n",
 	}
 	for name, source := range files {
 		path := filepath.Join(cfg.WorkspaceDir, name)
@@ -279,6 +281,39 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 			}
 		}
 	}
+
+	// N4: validate table-level cursor positions, not just a.id columns.
+	// Both SQL files remain in the workspace when we later resolve the real
+	// quoted "only" migration; neither may pollute its code_references.
+	for _, tc := range []struct{ path, source string }{
+		{"queries/pg_only_modifier.sql", files["queries/pg_only_modifier.sql"]},
+		{"queries/pg_join_only_modifier.sql", files["queries/pg_join_only_modifier.sql"]},
+	} {
+		at := strings.Index(tc.source, "ONLY")
+		if at < 0 {
+			t.Fatal("missing PostgreSQL ONLY modifier")
+		}
+		for _, method := range []string{"definition", "references"} {
+			response := call("code_"+method, map[string]any{
+				"workspace": cfg.WorkspaceDir, "path": tc.path,
+				"file_version": stat(tc.path), "language": "sql", "sql_dialect": "postgres",
+				"line": 0, "character": at + 1,
+			})
+			if response.OK {
+				var targets []struct {
+					URI string `json:"uri"`
+				}
+				if err := json.Unmarshal([]byte(response.Output), &targets); err != nil {
+					t.Fatalf("invalid table-level %s returned unreadable output: %v", method, err)
+				}
+				for _, target := range targets {
+					if strings.HasPrefix(target.URI, "migrations/") {
+						t.Fatalf("PG ONLY modifier became source-backed %s target: %+v", method, response)
+					}
+				}
+			}
+		}
+	}
 	// The function token is distinct from a real qualified column in the
 	// *same* SELECT. The real column still reaches the migration declaration;
 	// references must exclude the function's location.
@@ -341,7 +376,10 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 			t.Fatalf("%s ONLY ordinary table did not resolve to its own migration: %+v %+v", dialect, onlyDef, locs)
 		}
 		onlyRefs := queryDialect("references", dialect, at, onlyVersion)
-		if !onlyRefs.OK || json.Unmarshal([]byte(onlyRefs.Output), &locs) != nil || len(locs) != 2 {
+		// The intentionally invalid PostgreSQL ONLY fixtures are valid
+		// MySQL/MariaDB relation+alias expressions, contributing three
+		// additional source-backed column uses in these dialects.
+		if !onlyRefs.OK || json.Unmarshal([]byte(onlyRefs.Output), &locs) != nil || len(locs) != 5 {
 			t.Fatalf("%s ONLY ordinary table reference mismatch: %+v %+v", dialect, onlyRefs, locs)
 		}
 		// The same unquoted table name must stay physical inside a JOIN.
@@ -357,9 +395,9 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 			t.Fatalf("%s JOIN ONLY source mapped to wrong table: %+v %+v", dialect, joinDef, locs)
 		}
 		joinRefs := queryDialect("references", dialect, joinAt, joinVersion)
-		if !joinRefs.OK || json.Unmarshal([]byte(joinRefs.Output), &locs) != nil || len(locs) != 3 {
+		if !joinRefs.OK || json.Unmarshal([]byte(joinRefs.Output), &locs) != nil || len(locs) != 6 {
 			t.Fatalf("%s JOIN ONLY real references lost: %+v %+v", dialect, joinRefs, locs)
 		}
 	}
-	t.Log("DIRECT_REAL_SQL_ALIAS_MCP_PASS definitions=2 references=5 versions=3 stale_rejected=true no_db=true malformed_on_rejected=true functions_excluded=true source_literals_rejected=true unconsumed_source_gaps_rejected=true pg_on_reserved_rejected=true pg_only_modifier_rejected=true pg_quoted_only_resolved=true mysql_only_resolved=true mariadb_only_resolved=true mysql_mariadb_join_only_resolved=true")
+	t.Log("DIRECT_REAL_SQL_ALIAS_MCP_PASS definitions=2 references=5 versions=3 stale_rejected=true no_db=true malformed_on_rejected=true functions_excluded=true source_literals_rejected=true unconsumed_source_gaps_rejected=true pg_on_reserved_rejected=true pg_only_modifier_rejected=true pg_quoted_only_resolved=true mysql_only_resolved=true mariadb_only_resolved=true mysql_mariadb_join_only_resolved=true n4_table_level_modifier_rejected=true n4_no_false_crossfile_refs=true")
 }

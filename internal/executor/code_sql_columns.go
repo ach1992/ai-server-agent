@@ -20,7 +20,25 @@ func sqlNavColumn(table sqlNavOccurrence, token sqlDDLToken, declaration, drop b
 	}, true
 }
 
-func sqlNavColumnList(table sqlNavOccurrence, tokens []sqlDDLToken, at int, declaration bool) []sqlNavOccurrence {
+// DDL column identifiers are bare ColId positions, unlike a qualified
+// SELECT attribute after a dot. Validate before publishing a physical source
+// occurrence; SQL keyword tokens are not unquoted column declarations/uses.
+func sqlNavDDLColumn(table sqlNavOccurrence, token sqlDDLToken, declaration, drop bool, dialect string) (sqlNavOccurrence, bool) {
+	if token.literalBefore {
+		return sqlNavOccurrence{}, false
+	}
+	if dialect == "postgres" || dialect == "postgresql" {
+		if !sqlNavPostgresBareIdentifierAllowed(token, false) {
+			return sqlNavOccurrence{}, false
+		}
+	} else if (dialect != "mysql" && dialect != "mariadb") ||
+		!sqlNavMySQLBareIdentifierAllowed(token, dialect, false) {
+		return sqlNavOccurrence{}, false
+	}
+	return sqlNavColumn(table, token, declaration, drop)
+}
+
+func sqlNavColumnList(table sqlNavOccurrence, tokens []sqlDDLToken, at int, declaration bool, dialect string) []sqlNavOccurrence {
 	if at >= len(tokens) || tokens[at].text != "(" {
 		return nil
 	}
@@ -45,7 +63,7 @@ func sqlNavColumnList(table sqlNavOccurrence, tokens []sqlDDLToken, at int, decl
 		} else if end != start+1 {
 			return // an explicit one-name list only
 		}
-		if item, ok := sqlNavColumn(table, first, declaration, false); ok {
+		if item, ok := sqlNavDDLColumn(table, first, declaration, false, dialect); ok {
 			result = append(result, item)
 		}
 	}
@@ -80,7 +98,7 @@ func sqlNavColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurrence {
 	switch operation {
 	case "CREATE":
 		if indexTable, at, ok := sqlNavIndexTarget(statement, dialect); ok {
-			return sqlNavColumnList(indexTable, statement, at, false)
+			return sqlNavColumnList(indexTable, statement, at, false, dialect)
 		}
 		at = 1
 		if at+1 < len(statement) && statement[at].keyword() == "OR" && statement[at+1].keyword() == "REPLACE" {
@@ -118,7 +136,8 @@ func sqlNavColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurrence {
 			}
 		}
 	case "SELECT":
-		return sqlNavSelectColumns(statement, dialect)
+		_, columns := sqlNavSelectAnalysis(statement, dialect)
+		return columns
 	case "INSERT":
 		if statement[1].keyword() != "INTO" {
 			return nil
@@ -128,7 +147,7 @@ func sqlNavColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurrence {
 		return nil
 	}
 	var ok bool
-	table, at, ok = sqlNavName(statement, at)
+	table, at, ok = sqlNavRelationName(statement, at, dialect)
 	if !ok {
 		return nil
 	}
@@ -136,14 +155,14 @@ func sqlNavColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurrence {
 		if at >= len(statement) || statement[at].text != "(" {
 			return nil
 		}
-		result = append(result, sqlNavColumnList(table, statement, at, true)...)
+		result = append(result, sqlNavColumnList(table, statement, at, true, dialect)...)
 		result = append(result, sqlNavConstraintColumns(statement, dialect, table, at, false)...)
 	} else if operation == "INSERT" {
 		if at < len(statement) && statement[at].text == "(" {
 			// The names are source-backed column uses of this exact table,
 			// not definitions; INSERT ... SELECT/implicit columns stay
 			// unsupported.
-			result = append(result, sqlNavColumnList(table, statement, at, false)...)
+			result = append(result, sqlNavColumnList(table, statement, at, false, dialect)...)
 		}
 	} else {
 		for i := at; i+1 < len(statement); i++ {
@@ -162,7 +181,7 @@ func sqlNavColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurrence {
 				case "CONSTRAINT", "PRIMARY", "FOREIGN", "UNIQUE", "KEY", "INDEX", "FULLTEXT", "SPATIAL", "VECTOR", "CHECK":
 					continue
 				}
-				if item, valid := sqlNavColumn(table, statement[j], true, false); valid {
+				if item, valid := sqlNavDDLColumn(table, statement[j], true, false, dialect); valid {
 					result = append(result, item)
 				}
 			}
@@ -172,7 +191,7 @@ func sqlNavColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurrence {
 					j += 2
 				}
 				if j < len(statement) {
-					if item, valid := sqlNavColumn(table, statement[j], false, true); valid {
+					if item, valid := sqlNavDDLColumn(table, statement[j], false, true, dialect); valid {
 						result = append(result, item)
 					}
 				}
@@ -180,10 +199,10 @@ func sqlNavColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurrence {
 			if statement[i].keyword() == "RENAME" && statement[i+1].keyword() == "COLUMN" {
 				j := i + 2
 				if j+2 < len(statement) && statement[j+1].keyword() == "TO" {
-					if item, valid := sqlNavColumn(table, statement[j], false, true); valid {
+					if item, valid := sqlNavDDLColumn(table, statement[j], false, true, dialect); valid {
 						result = append(result, item)
 					}
-					if item, valid := sqlNavColumn(table, statement[j+2], false, true); valid {
+					if item, valid := sqlNavDDLColumn(table, statement[j+2], false, true, dialect); valid {
 						result = append(result, item)
 					}
 				}
@@ -194,10 +213,10 @@ func sqlNavColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurrence {
 					j++
 				}
 				if j+1 < len(statement) && (statement[j].kind == 'i' || statement[j].kind == 'q') {
-					if item, valid := sqlNavColumn(table, statement[j], false, true); valid {
+					if item, valid := sqlNavDDLColumn(table, statement[j], false, true, dialect); valid {
 						result = append(result, item)
 					}
-					if item, valid := sqlNavColumn(table, statement[j+1], false, true); valid {
+					if item, valid := sqlNavDDLColumn(table, statement[j+1], false, true, dialect); valid {
 						result = append(result, item)
 					}
 				}
@@ -213,11 +232,11 @@ func sqlNavColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurrence {
 			if statement[i].keyword() != "REFERENCES" {
 				continue
 			}
-			referencedTable, end, valid := sqlNavName(statement, i+1)
+			referencedTable, end, valid := sqlNavRelationName(statement, i+1, dialect)
 			if !valid || end >= len(statement) || statement[end].text != "(" {
 				continue
 			}
-			result = append(result, sqlNavColumnList(referencedTable, statement, end, false)...)
+			result = append(result, sqlNavColumnList(referencedTable, statement, end, false, dialect)...)
 		}
 	}
 	return result

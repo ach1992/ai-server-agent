@@ -190,7 +190,7 @@ func sqlNavOnNameAllowed(token sqlDDLToken, dialect string, afterDot bool) bool 
 		return false
 	}
 	if dialect == "postgres" || dialect == "postgresql" {
-		return sqlNavPostgresSelectIdentifierAllowed(token, false)
+		return sqlNavPostgresBareIdentifierAllowed(token, false)
 	}
 	if dialect == "mysql" || dialect == "mariadb" {
 		return sqlNavMySQLBareIdentifierAllowed(token, dialect, false)

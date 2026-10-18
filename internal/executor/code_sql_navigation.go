@@ -92,6 +92,24 @@ func sqlNavName(tokens []sqlDDLToken, at int) (sqlNavOccurrence, int, bool) {
 	return sqlNavOccurrence{name: strings.Join(parts, "."), identity: strings.Join(parts, "\x00"), searchTerm: term, span: span}, next, true
 }
 
+// sqlNavRelationName is the one dialect-aware gate for *physical relation*
+// occurrences across SELECT, DDL, REFERENCES, DML, and index navigation.
+// sqlNavName alone is deliberately lexical and is also used for columns,
+// aliases, and other names with different grammar; it must not certify a
+// physical source identity by itself.
+func sqlNavRelationName(tokens []sqlDDLToken, at int, dialect string) (sqlNavOccurrence, int, bool) {
+	relation, end, ok := sqlNavName(tokens, at)
+	if !ok || !sqlNavRelationNameAllowed(tokens, at, end, dialect) {
+		return sqlNavOccurrence{}, at, false
+	}
+	for i := at; i < end; i++ {
+		if tokens[i].literalBefore {
+			return sqlNavOccurrence{}, at, false
+		}
+	}
+	return relation, end, true
+}
+
 // In MySQL/MariaDB, ONLY is a nonreserved identifier, not an inheritance
 // modifier. Disambiguate only an unquoted leading ONLY, and require a known
 // next token so invalid PostgreSQL-style ONLY relation syntax never invents
@@ -360,6 +378,17 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 		default:
 			return
 		}
+		if operation == "SELECT" {
+			// A separate FROM/JOIN scanner used to bypass SELECT's
+			// fail-closed source/alias/ON grammar and invent physical table
+			// identities even after the column parser rejected the scope.
+			sources, columns := sqlNavSelectAnalysis(statement, dialect)
+			result = append(result, sources...)
+			if withColumns {
+				result = append(result, columns...)
+			}
+			return
+		}
 		hasWithClause := false
 		for i, token := range statement {
 			if token.keyword() != "WITH" {
@@ -378,7 +407,7 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 			break
 		}
 		appendName := func(at int, declaration, drop bool) int {
-			occ, end, ok := sqlNavName(statement, at)
+			occ, end, ok := sqlNavRelationName(statement, at, dialect)
 			if !ok {
 				return at
 			}
@@ -420,7 +449,7 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 					statement[at+1].keyword() == "NOT" && statement[at+2].keyword() == "EXISTS" {
 					at += 3
 				}
-				occ, next, valid := sqlNavName(statement, at)
+				occ, next, valid := sqlNavRelationName(statement, at, dialect)
 				if valid && (dialect == "mysql" || dialect == "mariadb") &&
 					!sqlNavMySQLNameAllowed(statement, at, next, dialect) {
 					return // invalid bare reserved name is not a source declaration
@@ -476,13 +505,13 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 				// new identifier is emitted.
 				if !materialized && operation == "ALTER" &&
 					(dialect == "postgres" || dialect == "postgresql") {
-					relation, end, valid := sqlNavName(statement, at)
+					relation, end, valid := sqlNavRelationName(statement, at, dialect)
 					if valid && end+1 < len(statement) &&
 						(statement[end].keyword() == "RENAME" && statement[end+1].keyword() == "TO" ||
 							statement[end].keyword() == "SET" && statement[end+1].keyword() == "SCHEMA") {
 						relation.drop = true
 						result = append(result, relation)
-						target, next, ok := sqlNavName(statement, end+2)
+						target, next, ok := sqlNavRelationName(statement, end+2, dialect)
 						if ok && next == len(statement) && !strings.Contains(target.identity, "\x00") {
 							if statement[end].keyword() == "RENAME" {
 								if prefix := strings.LastIndex(relation.identity, "\x00"); prefix >= 0 {
@@ -505,7 +534,7 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 					// A materialized relation's identity may change across ordered
 					// migrations. Invalidate the old CREATE; a limited parser must
 					// not present a stale definition after an unsupported ALTER.
-					relation, end, valid := sqlNavName(statement, at)
+					relation, end, valid := sqlNavRelationName(statement, at, dialect)
 					if !valid || end >= len(statement) {
 						return
 					}
@@ -538,7 +567,7 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 					if end+2 < len(statement) && (statement[end].keyword() == "RENAME" &&
 						statement[end+1].keyword() == "TO" ||
 						statement[end].keyword() == "SET" && statement[end+1].keyword() == "SCHEMA") {
-						newName, next, ok := sqlNavName(statement, end+2)
+						newName, next, ok := sqlNavRelationName(statement, end+2, dialect)
 						if ok && next == len(statement) && !strings.Contains(newName.identity, "\x00") {
 							if statement[end].keyword() == "RENAME" {
 								// Schema prefixes are separated in identity, not
@@ -570,7 +599,7 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 								(statement[at].keyword() == "CASCADE" || statement[at].keyword() == "RESTRICT")) {
 							return // a trailing DROP modifier is not a relation name
 						}
-						occ, end, valid := sqlNavName(statement, at)
+						occ, end, valid := sqlNavRelationName(statement, at, dialect)
 						if !valid {
 							return
 						}
@@ -604,7 +633,7 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 							!sqlNavMySQLBareOnlyName(statement, at, dialect, operation, object) {
 							return
 						}
-						occ, end, valid := sqlNavName(statement, at)
+						occ, end, valid := sqlNavRelationName(statement, at, dialect)
 						if !valid || ((dialect == "mysql" || dialect == "mariadb") &&
 							!sqlNavMySQLNameAllowed(statement, at, end, dialect)) {
 							return // reserved or malformed names must not emit a partial DROP list
@@ -630,13 +659,15 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 				// The relation header must be valid before searching for a
 				// relation-changing clause; RENAME inside a qualified name
 				// is not itself a relation rename.
+				// Keep lexical parsing separate from semantic validation here:
+				// a reserved MySQL/MariaDB ALTER source followed by RENAME
+				// must poison ordered migration history, not merely disappear.
 				relation, end, valid := sqlNavName(statement, at)
 				if !valid || end >= len(statement) || ((dialect == "mysql" || dialect == "mariadb") &&
 					strings.Count(relation.identity, "\x00") > 1) {
 					return // malformed or unsupported relation header
 				}
-				if (dialect == "mysql" || dialect == "mariadb") &&
-					!sqlNavMySQLNameAllowed(statement, at, end, dialect) {
+				if !sqlNavRelationNameAllowed(statement, at, end, dialect) {
 					// An unquoted reserved source table cannot legally be renamed.
 					// Preserve history uncertainty rather than falsely treating an
 					// earlier CREATE as current after an unvalidated move.
@@ -714,7 +745,7 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 			if concurrent {
 				at++
 			}
-			occ, end, valid := sqlNavName(statement, at)
+			occ, end, valid := sqlNavRelationName(statement, at, dialect)
 			if !valid {
 				return
 			}
@@ -740,13 +771,13 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 					// complete names and separators can make tombstones.
 					var pairs []sqlNavOccurrence
 					for at < len(statement) {
-						old, end, oldOK := sqlNavName(statement, at)
+						old, end, oldOK := sqlNavRelationName(statement, at, dialect)
 						if !oldOK || !sqlNavMySQLNameAllowed(statement, at, end, dialect) ||
 							end >= len(statement) || statement[end].keyword() != "TO" {
 							unknownRelationMove = true
 							return
 						}
-						newName, next, newOK := sqlNavName(statement, end+1)
+						newName, next, newOK := sqlNavRelationName(statement, end+1, dialect)
 						if !newOK || !sqlNavMySQLNameAllowed(statement, end+1, next, dialect) {
 							unknownRelationMove = true
 							return
@@ -804,7 +835,7 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 				// or implicit functions. More complex queries use SQLLens.
 				if !hasWithClause && (operation == "SELECT" || operation == "DELETE" ||
 					operation == "CREATE" || operation == "INSERT" || operation == "UPDATE") {
-					_, next, valid := sqlNavName(statement, i+1)
+					_, next, valid := sqlNavRelationName(statement, i+1, dialect)
 					if valid && (next >= len(statement) || statement[next].text != "(") {
 						appendName(i+1, false, false)
 					}
