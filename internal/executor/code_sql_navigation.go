@@ -160,8 +160,7 @@ func sqlNavMySQLAlterAuxColumn(tokens []sqlDDLToken, dialect string) bool {
 	if at < len(tokens) && tokens[at].keyword() == "IF" {
 		return false
 	}
-	if at >= len(tokens) || (tokens[at].kind != 'i' && tokens[at].kind != 'q') ||
-		(tokens[at].kind == 'i' && (tokens[at].keyword() == "RENAME" || tokens[at].keyword() == "TO")) {
+	if at >= len(tokens) || !sqlNavMySQLBareIdentifierAllowed(tokens[at], dialect, false) {
 		return false
 	}
 	at++
@@ -283,7 +282,8 @@ func sqlNavMySQLAlterRename(tokens []sqlDDLToken, at int, dialect string) (sqlNa
 				return sqlNavOccurrence{}, false
 			}
 			name, end, valid := sqlNavName(clause, targetAt)
-			if !valid || end != len(clause) || strings.Count(name.identity, "\x00") > 1 {
+			if !valid || end != len(clause) || strings.Count(name.identity, "\x00") > 1 ||
+				!sqlNavMySQLNameAllowed(clause, targetAt, end, dialect) {
 				return sqlNavOccurrence{}, false
 			}
 			target, found = name, true
@@ -405,6 +405,10 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 					at += 3
 				}
 				occ, next, valid := sqlNavName(statement, at)
+				if valid && (dialect == "mysql" || dialect == "mariadb") &&
+					!sqlNavMySQLNameAllowed(statement, at, next, dialect) {
+					return // invalid bare reserved name is not a source declaration
+				}
 				if valid && next < len(statement) &&
 					((object == "TABLE" && (statement[next].text == "(" ||
 						statement[next].keyword() == "AS" || statement[next].keyword() == "LIKE")) ||
@@ -586,8 +590,8 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 						}
 						occ, end, valid := sqlNavName(statement, at)
 						if !valid || ((dialect == "mysql" || dialect == "mariadb") &&
-							strings.Count(occ.identity, "\x00") > 1) {
-							return // table/view names admit at most one database qualifier
+							!sqlNavMySQLNameAllowed(statement, at, end, dialect)) {
+							return // reserved or malformed names must not emit a partial DROP list
 						}
 						occ.drop = true
 						drops = append(drops, occ)
@@ -614,6 +618,19 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 				if !valid || end >= len(statement) || ((dialect == "mysql" || dialect == "mariadb") &&
 					strings.Count(relation.identity, "\x00") > 1) {
 					return // malformed or unsupported relation header
+				}
+				if (dialect == "mysql" || dialect == "mariadb") &&
+					!sqlNavMySQLNameAllowed(statement, at, end, dialect) {
+					// An unquoted reserved source table cannot legally be renamed.
+					// Preserve history uncertainty rather than falsely treating an
+					// earlier CREATE as current after an unvalidated move.
+					for i := end; i < len(statement); i++ {
+						if statement[i].keyword() == "RENAME" {
+							unknownRelationMove = true
+							break
+						}
+					}
+					return
 				}
 				renameAt := -1
 				for i := end; i < len(statement); i++ {
@@ -702,16 +719,46 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 		case "RENAME":
 			if statement[at].keyword() == "TABLE" {
 				at++
-				for at < len(statement) {
-					end := appendName(at, false, true)
-					if end == at || end >= len(statement) || statement[end].keyword() != "TO" {
-						break
+				if dialect == "mysql" || dialect == "mariadb" {
+					// A multi-pair RENAME TABLE is atomic. Only validated,
+					// complete names and separators can make tombstones.
+					var pairs []sqlNavOccurrence
+					for at < len(statement) {
+						old, end, oldOK := sqlNavName(statement, at)
+						if !oldOK || !sqlNavMySQLNameAllowed(statement, at, end, dialect) ||
+							end >= len(statement) || statement[end].keyword() != "TO" {
+							unknownRelationMove = true
+							return
+						}
+						newName, next, newOK := sqlNavName(statement, end+1)
+						if !newOK || !sqlNavMySQLNameAllowed(statement, end+1, next, dialect) {
+							unknownRelationMove = true
+							return
+						}
+						old.drop, newName.drop = true, true
+						pairs = append(pairs, old, newName)
+						if next == len(statement) {
+							result = append(result, pairs...)
+							return
+						}
+						if statement[next].text != "," || next+1 == len(statement) {
+							unknownRelationMove = true
+							return
+						}
+						at = next + 1
 					}
-					end = appendName(end+1, false, true)
-					if end >= len(statement) || statement[end].text != "," {
-						break
+				} else {
+					for at < len(statement) {
+						end := appendName(at, false, true)
+						if end == at || end >= len(statement) || statement[end].keyword() != "TO" {
+							break
+						}
+						end = appendName(end+1, false, true)
+						if end >= len(statement) || statement[end].text != "," {
+							break
+						}
+						at = end + 1
 					}
-					at = end + 1
 				}
 			}
 		case "INSERT":

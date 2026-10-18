@@ -202,6 +202,55 @@ func TestRealIsolatedMariaDBMigration(t *testing.T) {
 	if err != nil || strings.TrimSpace(compoundResult) != "1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1" {
 		t.Fatalf("real MariaDB compound ALTER / rename parity failed: output=%q err=%v", compoundResult, err)
 	}
+
+	// F5: reject reserved unquoted table rename targets and ADD/DROP column
+	// names against the real private MariaDB parser, not just token slices.
+	if out, err := client("USE acceptance_migration; CREATE TABLE keyword_probe (id INT);"); err != nil {
+		t.Fatalf("real MariaDB keyword probe setup failed: %v; %s", err, out)
+	}
+	for _, invalid := range []string{
+		"ALTER TABLE keyword_probe RENAME SELECT;",
+		"ALTER TABLE keyword_probe ADD COLUMN SELECT INT, RENAME TO renamed_invalid;",
+		"ALTER TABLE keyword_probe RENAME TO renamed_invalid, ADD COLUMN SELECT INT;",
+		"ALTER TABLE keyword_probe DROP COLUMN FROM, RENAME TO renamed_invalid;",
+		"RENAME TABLE keyword_probe TO SELECT;",
+	} {
+		if out, err := client("USE acceptance_migration; " + invalid); err == nil {
+			t.Fatalf("real MariaDB accepted reserved bare identifier in %q: %s", invalid, out)
+		}
+	}
+	body, err = client("USE acceptance_migration; SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='acceptance_migration' AND TABLE_NAME='keyword_probe'; SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='acceptance_migration' AND TABLE_NAME='renamed_invalid';")
+	if err != nil || strings.TrimSpace(body) != "1\n0" {
+		t.Fatalf("invalid reserved-name ALTER mutated table lifecycle: output=%q err=%v", body, err)
+	}
+	// Quoted reserved words, reserved words following a qualification dot,
+	// and the ordinary nonreserved identifier ONLY must all remain legal.
+	validKeywords := "USE acceptance_migration; " +
+		"CREATE TABLE quoted_keyword_source (id INT); " +
+		"ALTER TABLE quoted_keyword_source RENAME `SELECT`; " +
+		"SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='acceptance_migration' AND TABLE_NAME='SELECT'; " +
+		"DROP TABLE `SELECT`; " +
+		"CREATE TABLE qualified_keyword_source (id INT); " +
+		"ALTER TABLE qualified_keyword_source RENAME acceptance_migration.SELECT; " +
+		"SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='acceptance_migration' AND TABLE_NAME='SELECT'; " +
+		"DROP TABLE acceptance_migration.SELECT; " +
+		"CREATE TABLE direct_keyword_source (id INT); " +
+		"RENAME TABLE direct_keyword_source TO `SELECT`; " +
+		"SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='acceptance_migration' AND TABLE_NAME='SELECT'; " +
+		"DROP TABLE `SELECT`; " +
+		"CREATE TABLE aux_keyword_source (id INT); " +
+		"ALTER TABLE aux_keyword_source ADD COLUMN `SELECT` INT, RENAME TO aux_keyword_moved; " +
+		"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='acceptance_migration' AND TABLE_NAME='aux_keyword_moved' AND COLUMN_NAME='SELECT'; " +
+		"DROP TABLE aux_keyword_moved; " +
+		"CREATE TABLE only_keyword_source (id INT); " +
+		"ALTER TABLE only_keyword_source ADD COLUMN ONLY INT, RENAME TO only_keyword_moved; " +
+		"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='acceptance_migration' AND TABLE_NAME='only_keyword_moved' AND COLUMN_NAME='ONLY'; " +
+		"DROP TABLE only_keyword_moved;"
+	keywordResult, err := client(validKeywords)
+	if err != nil || strings.TrimSpace(keywordResult) != "1\n1\n1\n1\n1" {
+		t.Fatalf("real MariaDB rejected legal qualified/quoted/nonreserved names: output=%q err=%v", keywordResult, err)
+	}
+
 	// Invalid type parameters must not be confused with successful DDL.
 	if out, err := client("USE acceptance_migration; CREATE TABLE invalid_decimal_probe (id INT);"); err != nil {
 		t.Fatalf("unable to create disposable precision probe: %v; %s", err, out)

@@ -186,6 +186,36 @@ func TestSQLPostgresOrdinaryMovesRealWorkerDefinition(t *testing.T) {
 			create: "CREATE TABLE jobs (id INT);\n",
 			move:   "ALTER TABLE jobs ADD COLUMN amount DECIMAL(5,6), RENAME TO archived_jobs;\n",
 		},
+		{
+			name: "mysql_reserved_target_uncertain", dialect: "mysql", oldName: "jobs", newName: "archived_jobs", uncertain: true,
+			create: "CREATE TABLE jobs (id INT);\n",
+			move:   "ALTER TABLE jobs RENAME SELECT;\n",
+		},
+		{
+			name: "mysql_reserved_aux_column_uncertain", dialect: "mysql", oldName: "jobs", newName: "archived_jobs", uncertain: true,
+			create: "CREATE TABLE jobs (id INT);\n",
+			move:   "ALTER TABLE jobs ADD COLUMN SELECT INT, RENAME TO archived_jobs;\n",
+		},
+		{
+			name: "mariadb_reserved_target_uncertain", dialect: "mariadb", oldName: "jobs", newName: "archived_jobs", uncertain: true,
+			create: "CREATE TABLE jobs (id INT);\n",
+			move:   "ALTER TABLE jobs RENAME SELECT;\n",
+		},
+		{
+			name: "mariadb_reserved_aux_column_uncertain", dialect: "mariadb", oldName: "jobs", newName: "archived_jobs", uncertain: true,
+			create: "CREATE TABLE jobs (id INT);\n",
+			move:   "ALTER TABLE jobs ADD COLUMN SELECT INT, RENAME TO archived_jobs;\n",
+		},
+		{
+			name: "mysql_direct_rename_reserved_uncertain", dialect: "mysql", oldName: "jobs", newName: "archived_jobs", uncertain: true,
+			create: "CREATE TABLE jobs (id INT);\n",
+			move:   "RENAME TABLE jobs TO SELECT;\n",
+		},
+		{
+			name: "mariadb_direct_rename_partial_uncertain", dialect: "mariadb", oldName: "jobs", newName: "archived_jobs", uncertain: true,
+			create: "CREATE TABLE jobs (id INT);\n",
+			move:   "RENAME TABLE jobs TO archived_jobs, other TO SELECT;\n",
+		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, owner, workspace := testStdioBroker(t)
@@ -351,6 +381,110 @@ func TestSQLMySQLRenameDisambiguation(t *testing.T) {
 		occurrences, valid := sqlNavOccurrences(sql, dialect)
 		if !valid || len(occurrences) != 2 || !occurrences[0].drop || !occurrences[1].drop || occurrences[1].identity != "INDEX" {
 			t.Fatalf("quoted target keyword lost real table rename: %+v valid=%t", occurrences, valid)
+		}
+	}
+}
+
+// Reserved bare SQL words are never sufficient proof of a table move.  A
+// malformed ALTER in a later migration must poison ordered source history,
+// rather than emit fake tombstones or resurrect the earlier CREATE.
+func TestSQLMySQLReservedAlterNamesFailClosed(t *testing.T) {
+	for _, dialect := range []string{"mysql", "mariadb"} {
+		for _, statement := range []string{
+			"ALTER TABLE jobs RENAME SELECT;",
+			"ALTER TABLE jobs RENAME TO SELECT;",
+			"ALTER TABLE jobs ADD COLUMN SELECT INT, RENAME TO archived_jobs;",
+			"ALTER TABLE jobs RENAME TO archived_jobs, ADD COLUMN SELECT INT;",
+			"ALTER TABLE jobs DROP COLUMN FROM, RENAME TO archived_jobs;",
+			"ALTER TABLE jobs RENAME TO archived_jobs, DROP COLUMN GROUP;",
+			"ALTER TABLE SELECT RENAME TO archived_jobs;",
+			"ALTER TABLE jobs RENAME WHERE;",
+		} {
+			t.Run(dialect+"/"+statement, func(t *testing.T) {
+				for _, source := range []string{statement, "CREATE TABLE jobs (id INT);\n" + statement} {
+					items, valid := sqlNavOccurrences(source, dialect)
+					if valid || len(items) != 0 {
+						t.Fatalf("reserved unquoted name certified lifecycle: valid=%t events=%+v", valid, items)
+					}
+					columns, allValid := sqlNavAllOccurrences(source, dialect)
+					if allValid || len(columns) != 0 {
+						t.Fatalf("reserved unquoted name certified column or table history: valid=%t events=%+v", allValid, columns)
+					}
+				}
+			})
+		}
+	}
+}
+
+// Quoting and qualification make reserved words legal identifiers; ONLY and
+// other nonreserved words can also be legal names, subject to the separate
+// conservative statement-tokenizer safety rules. Do not reject valid lifecycle history
+// with a blanket keyword filter.
+func TestSQLMySQLReservedAlterNamesValidContexts(t *testing.T) {
+	for _, dialect := range []string{"mysql", "mariadb"} {
+		for _, tc := range []struct{ statement, target string }{
+			{"ALTER TABLE jobs RENAME `SELECT`;", "SELECT"},
+			{"ALTER TABLE jobs RENAME TO archive.SELECT;", "archive\x00select"},
+			{"ALTER TABLE jobs ADD COLUMN `SELECT` INT, RENAME TO archived_jobs;", "archived_jobs"},
+			{"ALTER TABLE jobs RENAME TO archived_jobs, ADD COLUMN `SELECT` INT;", "archived_jobs"},
+			{"ALTER TABLE jobs RENAME ONLY;", "only"},
+			{"ALTER TABLE jobs ADD COLUMN ONLY INT, RENAME TO archived_jobs;", "archived_jobs"},
+			{"ALTER TABLE archive.SELECT RENAME TO archived_jobs;", "archived_jobs"},
+		} {
+			t.Run(dialect+"/"+tc.statement, func(t *testing.T) {
+				events, valid := sqlNavOccurrences(tc.statement, dialect)
+				if !valid || len(events) != 2 || !events[0].drop || !events[1].drop ||
+					events[1].identity != tc.target {
+					t.Fatalf("legal quoted/qualified/nonreserved identity lost: valid=%t events=%+v", valid, events)
+				}
+			})
+		}
+	}
+}
+
+// The same reserved-name boundary applies to direct RENAME TABLE and CREATE/
+// DROP declarations; a malformed later pair must not leave partial tombstones.
+func TestSQLMySQLReservedDirectLifecycleNames(t *testing.T) {
+	for _, dialect := range []string{"mysql", "mariadb"} {
+		for _, statement := range []string{
+			"RENAME TABLE jobs TO SELECT;",
+			"RENAME TABLE SELECT TO archived_jobs;",
+			"RENAME TABLE jobs TO archived_jobs, extra TO SELECT;",
+			"RENAME TABLE jobs TO archived_jobs, extra TO;",
+		} {
+			t.Run(dialect+"/"+statement, func(t *testing.T) {
+				got, valid := sqlNavOccurrences("CREATE TABLE jobs (id INT);\n"+statement, dialect)
+				if valid || len(got) != 0 {
+					t.Fatalf("invalid RENAME TABLE must poison source graph atomically: valid=%t got=%+v", valid, got)
+				}
+			})
+		}
+		for _, statement := range []string{
+			"CREATE TABLE SELECT (id INT);",
+			"DROP TABLE SELECT;",
+			"DROP TABLE jobs, SELECT;",
+		} {
+			t.Run(dialect+"/"+statement, func(t *testing.T) {
+				got, _ := sqlNavOccurrences(statement, dialect)
+				if len(got) != 0 {
+					t.Fatalf("reserved unquoted name fabricated CREATE/DROP lifecycle: %+v", got)
+				}
+			})
+		}
+		for _, tc := range []struct{ statement, oldName, newName string }{
+			{"RENAME TABLE jobs TO __BT__SELECT__BT__;", "jobs", "SELECT"},
+			{"RENAME TABLE jobs TO archive.SELECT;", "jobs", "archive\x00select"},
+			{"RENAME TABLE ONLY TO archived;", "only", "archived"},
+			{"RENAME TABLE jobs TO archived_jobs, oldtable TO nexttable;", "jobs", "archived_jobs"},
+		} {
+			t.Run(dialect+"/"+tc.statement, func(t *testing.T) {
+				statement := strings.ReplaceAll(tc.statement, "__BT__", string(rune(96)))
+				got, valid := sqlNavOccurrences(statement, dialect)
+				if !valid || len(got) < 2 || got[0].identity != tc.oldName ||
+					got[1].identity != tc.newName || !got[0].drop || !got[1].drop {
+					t.Fatalf("legitimate direct RENAME TABLE lost: valid=%t got=%+v", valid, got)
+				}
+			})
 		}
 	}
 }
