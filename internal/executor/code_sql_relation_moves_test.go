@@ -274,6 +274,8 @@ func TestSQLMySQLOnlyMalformedLifecycleFailClosed(t *testing.T) {
 			{"drop_list_late_three_part_qualifier", "DROP TABLE archive, ONLY.events.archive;"},
 			{"drop_qualified_only_three_part", "DROP TABLE staging.ONLY.extra;"},
 			{"alter_qualified_only_three_part", "ALTER TABLE staging.ONLY.RENAME TO archived;"},
+			{"alter_rename_three_part_target", "ALTER TABLE ONLY RENAME TO archive.events.extra;"},
+			{"alter_qualified_source_three_part_target", "ALTER TABLE staging.ONLY RENAME TO archive.events.extra;"},
 		} {
 			t.Run(dialect+"_"+tc.name, func(t *testing.T) {
 				items, parsed := sqlNavOccurrences(tc.statement, dialect)
@@ -302,6 +304,7 @@ func TestSQLMySQLBareOnlyIdentifiers(t *testing.T) {
 			{"rename_qualified_table", "ALTER TABLE staging.ONLY RENAME TO archived;", []string{"staging\x00only", "archived"}},
 			{"rename_only_schema", "ALTER TABLE ONLY.events RENAME TO archived;", []string{"only\x00events", "archived"}},
 			{"rename_quoted_only", "ALTER TABLE `ONLY` RENAME TO `archived`;", []string{"ONLY", "archived"}},
+			{"rename_qualified_target", "ALTER TABLE ONLY RENAME TO archive.events;", []string{"only", "archive\x00events"}},
 			{"rename_only_schema_quoted_table", "ALTER TABLE ONLY.`events` RENAME TO archived;", []string{"only\x00events", "archived"}},
 			{"drop_table", "DROP TABLE ONLY;", []string{"only"}},
 			{"drop_view", "DROP VIEW ONLY;", []string{"only"}},

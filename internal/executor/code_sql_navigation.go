@@ -470,8 +470,8 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 							return
 						}
 						target, targetEnd, ok := sqlNavName(statement, renameAt+2)
-						if !ok || targetEnd != len(statement) {
-							return
+						if !ok || targetEnd != len(statement) || strings.Count(target.identity, "\x00") > 1 {
+							return // target too is a table name, not a three-part column name
 						}
 						relation.drop, target.drop = true, true
 						result = append(result, relation, target)
