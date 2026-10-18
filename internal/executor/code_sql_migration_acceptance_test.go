@@ -251,7 +251,7 @@ func TestRealIsolatedMariaDBMigration(t *testing.T) {
 		t.Fatalf("real MariaDB rejected legal qualified/quoted/nonreserved names: output=%q err=%v", keywordResult, err)
 	}
 
-	// MariaDB F5-R1/R2: the official default-mode grammar distinguishes
+	// MariaDB F5-R1/R2/R3: the official default-mode grammar distinguishes
 	// unquoted DATABASE/WINDOW from version-reserved identifiers and handles
 	// unquoted SYSTEM specially in ALTER ADD. Exercise a fresh socket-only
 	// MariaDB engine, not a production database or an offline-only simulation.
@@ -263,6 +263,9 @@ func TestRealIsolatedMariaDBMigration(t *testing.T) {
 		"ALTER TABLE keyword_probe ADD COLUMN OFFSET INT, RENAME TO invalid_keyword_move;",
 		"ALTER TABLE keyword_probe ADD SYSTEM VARCHAR(64), RENAME TO invalid_keyword_move;",
 		"ALTER TABLE keyword_probe RENAME TO invalid_keyword_move, ADD SYSTEM VARCHAR(64);",
+		"ALTER TABLE keyword_probe DROP SYSTEM, RENAME TO invalid_keyword_move;",
+		"ALTER TABLE keyword_probe RENAME TO invalid_keyword_move, DROP SYSTEM;",
+		"ALTER TABLE keyword_probe DROP SYSTEM RESTRICT, RENAME TO invalid_keyword_move;",
 		"RENAME TABLE keyword_probe TO ROW_NUMBER;",
 		"RENAME TABLE keyword_probe TO invalid_keyword_move, extra TO OFFSET;",
 	} {
@@ -279,6 +282,10 @@ func TestRealIsolatedMariaDBMigration(t *testing.T) {
 		"ALTER TABLE keyword_probe ADD COLUMN `SYSTEM` VARCHAR(64);",
 		"CREATE TABLE explicit_system_probe (id INT); ALTER TABLE explicit_system_probe ADD COLUMN system VARCHAR(64), RENAME TO explicit_system_moved; DROP TABLE explicit_system_moved;",
 		"CREATE TABLE quoted_system_probe (id INT); ALTER TABLE quoted_system_probe ADD `system` VARCHAR(64), RENAME TO quoted_system_moved; DROP TABLE quoted_system_moved;",
+		"CREATE TABLE explicit_drop_system_probe (id INT, system INT); ALTER TABLE explicit_drop_system_probe DROP COLUMN system, RENAME TO explicit_drop_system_moved; DROP TABLE explicit_drop_system_moved;",
+		"CREATE TABLE quoted_drop_system_probe (id INT, `system` INT); ALTER TABLE quoted_drop_system_probe DROP `system`, RENAME TO quoted_drop_system_moved; DROP TABLE quoted_drop_system_moved;",
+		"CREATE TABLE reverse_explicit_drop_system_probe (id INT, system INT); ALTER TABLE reverse_explicit_drop_system_probe RENAME TO reverse_explicit_drop_system_moved, DROP COLUMN system; DROP TABLE reverse_explicit_drop_system_moved;",
+		"CREATE TABLE reverse_quoted_drop_system_probe (id INT, `system` INT); ALTER TABLE reverse_quoted_drop_system_probe RENAME TO reverse_quoted_drop_system_moved, DROP `system`; DROP TABLE reverse_quoted_drop_system_moved;",
 		"CREATE TABLE legal_db_rename (id INT); ALTER TABLE legal_db_rename RENAME TO DATABASE; DROP TABLE DATABASE;",
 		"CREATE TABLE legal_window_rename (id INT); ALTER TABLE legal_window_rename RENAME TO WINDOW; DROP TABLE WINDOW;",
 		"CREATE TABLE qualified_reserved (id INT); RENAME TABLE qualified_reserved TO acceptance_migration.ROW_NUMBER; DROP TABLE acceptance_migration.ROW_NUMBER;",

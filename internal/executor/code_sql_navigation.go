@@ -150,7 +150,13 @@ func sqlNavMySQLBareOnlyName(tokens []sqlDDLToken, at int, dialect, operation, o
 // deciding whether a comma-separated MySQL/MariaDB ALTER contains a proven
 // table rename. Unknown types/options never justify lifecycle tombstones.
 func sqlNavMySQLAlterAuxColumn(tokens []sqlDDLToken, dialect string) bool {
-	if len(tokens) < 3 {
+	// The existing bounded parser requires 3+ tokens. MariaDB also allows
+	// DROP `quoted_name` without the optional COLUMN keyword. Admit only
+	// that unambiguous two-token form here; keep the MySQL and other
+	// unmodelled short forms conservatively unsupported.
+	if len(tokens) < 3 &&
+		!(dialect == "mariadb" && len(tokens) == 2 &&
+			tokens[0].keyword() == "DROP" && tokens[1].kind == 'q') {
 		return false
 	}
 	at, operation := 1, tokens[0].keyword()
@@ -164,10 +170,12 @@ func sqlNavMySQLAlterAuxColumn(tokens []sqlDDLToken, dialect string) bool {
 	if at >= len(tokens) || !sqlNavMySQLBareIdentifierAllowed(tokens[at], dialect, false) {
 		return false
 	}
-	// MariaDB parses ADD system <type> as SYSTEM VERSIONING, while explicit
-	// ADD COLUMN system <type> disambiguates and is valid. Keep both CREATE
-	// and explicit COLUMN forms legal; quoted bare SYSTEM is legal too.
-	if dialect == "mariadb" && operation == "ADD" && !explicitColumn &&
+	// In MariaDB, bare ADD/DROP SYSTEM selects the SYSTEM VERSIONING
+	// grammar branch, not an auxiliary column called SYSTEM. An explicit
+	// COLUMN keyword or quoted name disambiguates this valid column form.
+	// Keep CREATE identifiers and MySQL handling unchanged.
+	if dialect == "mariadb" && !explicitColumn &&
+		(operation == "ADD" || operation == "DROP") &&
 		tokens[at].kind == 'i' && tokens[at].keyword() == "SYSTEM" {
 		return false
 	}

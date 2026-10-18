@@ -207,6 +207,21 @@ func TestSQLPostgresOrdinaryMovesRealWorkerDefinition(t *testing.T) {
 			move:   "ALTER TABLE jobs ADD SYSTEM VARCHAR(64), RENAME TO archived_jobs;\n",
 		},
 		{
+			name: "mariadb_system_drop_uncertain", dialect: "mariadb", oldName: "jobs", newName: "archived_jobs", uncertain: true,
+			create: "CREATE TABLE jobs (id INT, system INT);\n",
+			move:   "ALTER TABLE jobs DROP SYSTEM RESTRICT, RENAME TO archived_jobs;\n",
+		},
+		{
+			name: "mariadb_system_drop_column_valid", dialect: "mariadb", oldName: "jobs", newName: "archived_jobs",
+			create: "CREATE TABLE jobs (id INT, system INT);\n",
+			move:   "ALTER TABLE jobs DROP COLUMN system, RENAME TO archived_jobs;\n",
+		},
+		{
+			name: "mariadb_system_drop_quoted_valid", dialect: "mariadb", oldName: "jobs", newName: "archived_jobs",
+			create: "CREATE TABLE jobs (id INT, `system` INT);\n",
+			move:   "ALTER TABLE jobs DROP `system`, RENAME TO archived_jobs;\n",
+		},
+		{
 			name: "mariadb_multi_rename_reserved_uncertain", dialect: "mariadb", oldName: "jobs", newName: "archived_jobs", uncertain: true,
 			create: "CREATE TABLE jobs (id INT);\n",
 			move:   "RENAME TABLE jobs TO archived_jobs, extra TO ROW_NUMBER;\n",
@@ -517,6 +532,9 @@ func TestSQLMariaDBReservedAndContextualNames(t *testing.T) {
 		"ALTER TABLE jobs RENAME TO archived_jobs, ADD COLUMN ROW_NUMBER INT;",
 		"ALTER TABLE jobs ADD SYSTEM VARCHAR(64), RENAME TO archived_jobs;",
 		"ALTER TABLE jobs RENAME TO archived_jobs, ADD SYSTEM VARCHAR(64);",
+		"ALTER TABLE jobs DROP SYSTEM, RENAME TO archived_jobs;",
+		"ALTER TABLE jobs RENAME TO archived_jobs, DROP SYSTEM;",
+		"ALTER TABLE jobs DROP SYSTEM RESTRICT, RENAME TO archived_jobs;",
 		"RENAME TABLE jobs TO ROW_NUMBER;",
 		"RENAME TABLE jobs TO archived_jobs, extra TO OFFSET;",
 	} {
@@ -573,6 +591,10 @@ func TestSQLMariaDBReservedAndContextualNames(t *testing.T) {
 		{"ALTER TABLE jobs RENAME TO `ROW_NUMBER`;", "ROW_NUMBER"},
 		{"ALTER TABLE jobs ADD COLUMN `SYSTEM` VARCHAR(64), RENAME TO archived_jobs;", "archived_jobs"},
 		{"ALTER TABLE jobs ADD COLUMN SYSTEM VARCHAR(64), RENAME TO archived_jobs;", "archived_jobs"},
+		{"ALTER TABLE jobs DROP COLUMN SYSTEM, RENAME TO archived_jobs;", "archived_jobs"},
+		{"ALTER TABLE jobs DROP `SYSTEM`, RENAME TO archived_jobs;", "archived_jobs"},
+		{"ALTER TABLE jobs RENAME TO archived_jobs, DROP COLUMN SYSTEM;", "archived_jobs"},
+		{"ALTER TABLE jobs RENAME TO archived_jobs, DROP `SYSTEM`;", "archived_jobs"},
 		{"ALTER TABLE jobs RENAME TO archive.OFFSET;", "archive\x00offset"},
 		{"RENAME TABLE jobs TO archive.ROW_NUMBER;", "archive\x00row_number"},
 	} {
