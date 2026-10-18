@@ -224,6 +224,8 @@ func TestSQLOnlyDialectBoundariesFailClosed(t *testing.T) {
 	}{
 		{"mysql_alter", "ALTER TABLE ONLY reporting.events RENAME TO archived_events;", "mysql"},
 		{"mariadb_alter", "ALTER TABLE ONLY reporting.events RENAME AS archived_events;", "mariadb"},
+		{"mysql_alter_column", "ALTER TABLE ONLY reporting.events ADD COLUMN payload INT;", "mysql"},
+		{"mariadb_alter_column", "ALTER TABLE ONLY reporting.events DROP COLUMN payload;", "mariadb"},
 		{"mysql_drop", "DROP TABLE ONLY reporting.events;", "mysql"},
 		{"mariadb_drop", "DROP VIEW ONLY reporting.events;", "mariadb"},
 		{"postgres_drop", "DROP TABLE ONLY reporting.events;", "postgres"},
@@ -237,6 +239,67 @@ func TestSQLOnlyDialectBoundariesFailClosed(t *testing.T) {
 			if len(items) != 0 {
 				t.Fatalf("unsupported ONLY syntax invented source lifecycle %q: %+v", tc.sql, items)
 			}
+			// Column navigation must not silently recover an invalid table header.
+			columns, ok := sqlNavAllOccurrences(tc.sql, tc.dialect)
+			if ok && len(columns) != 0 {
+				t.Fatalf("unsupported ONLY syntax invented column sources %q: %+v", tc.sql, columns)
+			}
 		})
+	}
+}
+
+// ONLY is not reserved in MySQL/MariaDB; unlike PostgreSQL's inheritance
+// modifier, an unquoted ONLY can be a real schema, table or view identifier.
+// The adjacent invalid modifier spellings above must still fail closed.
+func TestSQLMySQLBareOnlyIdentifiers(t *testing.T) {
+	for _, dialect := range []string{"mysql", "mariadb"} {
+		for _, tc := range []struct {
+			name, source string
+			want         []string
+		}{
+			{"rename_table", "ALTER TABLE ONLY RENAME TO archived;", []string{"only", "archived"}},
+			{"rename_qualified_table", "ALTER TABLE staging.ONLY RENAME TO archived;", []string{"staging\x00only", "archived"}},
+			{"rename_only_schema", "ALTER TABLE ONLY.events RENAME TO archived;", []string{"only\x00events", "archived"}},
+			{"drop_table", "DROP TABLE ONLY;", []string{"only"}},
+			{"drop_view", "DROP VIEW ONLY;", []string{"only"}},
+			{"drop_list", "DROP TABLE ONLY, archive;", []string{"only", "archive"}},
+			{"alter_add_column", "ALTER TABLE ONLY ADD COLUMN value INT;", []string{"only"}},
+			{"alter_rename_column", "ALTER TABLE ONLY RENAME COLUMN value TO next_value;", []string{"only"}},
+		} {
+			t.Run(dialect+"_"+tc.name, func(t *testing.T) {
+				items, ok := sqlNavOccurrences(tc.source, dialect)
+				if !ok || len(items) != len(tc.want) {
+					t.Fatalf("offline identifier navigation invalid: ok=%v items=%+v want=%v", ok, items, tc.want)
+				}
+				for i, want := range tc.want {
+					if items[i].identity != want {
+						t.Fatalf("wrong identifier at %d: %+v; want %q", i, items[i], want)
+					}
+					if (tc.name == "drop_table" || tc.name == "drop_view" || tc.name == "drop_list" ||
+						tc.name == "rename_table" || tc.name == "rename_qualified_table" || tc.name == "rename_only_schema") && !items[i].drop {
+						t.Fatalf("relation lifecycle failed closed incorrectly: %+v", items)
+					}
+				}
+			})
+		}
+		for _, tc := range []struct {
+			source string
+			want   []string
+		}{
+			{"ALTER TABLE ONLY ADD COLUMN value INT;", []string{"only", "only\x00column\x00value"}},
+			{"ALTER TABLE ONLY RENAME COLUMN value TO next_value;", []string{"only", "only\x00column\x00value", "only\x00column\x00next_value"}},
+		} {
+			t.Run(dialect+"_columns_"+tc.source, func(t *testing.T) {
+				items, ok := sqlNavAllOccurrences(tc.source, dialect)
+				if !ok || len(items) != len(tc.want) {
+					t.Fatalf("column identities wrong: ok=%v got=%+v want=%v", ok, items, tc.want)
+				}
+				for i, want := range tc.want {
+					if items[i].identity != want {
+						t.Fatalf("wrong identity %d: %+v; want %q", i, items[i], want)
+					}
+				}
+			})
+		}
 	}
 }

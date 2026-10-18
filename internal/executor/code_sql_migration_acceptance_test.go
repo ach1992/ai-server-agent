@@ -136,5 +136,19 @@ func TestRealIsolatedMariaDBMigration(t *testing.T) {
 	if err != nil || !strings.Contains(schema, "fk_entries_account") || !strings.Contains(schema, "idx_entries_account") {
 		t.Fatalf("foreign key/index missing in real MariaDB: %s (%v)", schema, err)
 	}
-	t.Log("real MariaDB migrations, FK, index, data verification passed on fresh private --skip-networking socket-only instance")
+	// ONLY is a legal unquoted MySQL/MariaDB object identifier, not the
+	// PostgreSQL ALTER TABLE inheritance modifier. Verify this against a
+	// real private MariaDB parser as well as our offline navigation tests.
+	onlySQL := "USE acceptance_migration; " +
+		"CREATE TABLE ONLY (id INT); " +
+		"ALTER TABLE ONLY ADD COLUMN payload INT; " +
+		"ALTER TABLE ONLY RENAME COLUMN payload TO next_payload; " +
+		"ALTER TABLE ONLY RENAME TO renamed_only; " +
+		"DROP TABLE renamed_only; " +
+		"CREATE TABLE ONLY (id INT); DROP TABLE ONLY; " +
+		"CREATE VIEW ONLY AS SELECT 1 AS id; DROP VIEW ONLY;"
+	if out, err := client(onlySQL); err != nil {
+		t.Fatalf("real MariaDB ONLY identifier DDL failed: %v; %s", err, out)
+	}
+	t.Log("real MariaDB migrations, FK/index/data and unquoted ONLY relation lifecycle passed on fresh private --skip-networking socket-only instance")
 }

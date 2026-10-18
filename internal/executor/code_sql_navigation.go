@@ -89,6 +89,46 @@ func sqlNavName(tokens []sqlDDLToken, at int) (sqlNavOccurrence, int, bool) {
 	return sqlNavOccurrence{name: strings.Join(parts, "."), identity: strings.Join(parts, "\x00"), searchTerm: term, span: span}, next, true
 }
 
+// In MySQL/MariaDB, ONLY is a nonreserved identifier, not an inheritance
+// modifier. Disambiguate only an unquoted leading ONLY, and require a known
+// next token so invalid PostgreSQL-style ONLY relation syntax never invents
+// source-backed table or view lifecycle transitions.
+func sqlNavMySQLBareOnlyName(tokens []sqlDDLToken, at int, dialect, operation, object string) bool {
+	if at >= len(tokens) || tokens[at].keyword() != "ONLY" ||
+		(dialect != "mysql" && dialect != "mariadb") {
+		return false
+	}
+	next := at + 1
+	if next < len(tokens) && tokens[next].text == "." {
+		return true // schema named ONLY, followed by a qualified object
+	}
+	if operation == "DROP" {
+		return next == len(tokens) || tokens[next].text == "," ||
+			next+1 == len(tokens) &&
+				(tokens[next].keyword() == "CASCADE" || tokens[next].keyword() == "RESTRICT")
+	}
+	if operation != "ALTER" || next >= len(tokens) {
+		return false
+	}
+	if object == "VIEW" {
+		return tokens[next].keyword() == "AS"
+	}
+	if object != "TABLE" {
+		return false
+	}
+	switch tokens[next].keyword() {
+	case "RENAME":
+		return next+1 < len(tokens) &&
+			(tokens[next+1].keyword() == "TO" || tokens[next+1].keyword() == "AS" ||
+				tokens[next+1].keyword() == "COLUMN")
+	case "ADD", "ALTER", "CHANGE", "MODIFY", "DROP", "CONVERT", "ORDER",
+		"DISCARD", "IMPORT", "ENGINE", "AUTO_INCREMENT", "COMMENT", "DEFAULT",
+		"ALGORITHM", "LOCK", "PARTITION", "REMOVE", "ENABLE", "DISABLE", "FORCE":
+		return true
+	}
+	return false
+}
+
 func sqlNavAt(span sqlDDLRange, line, character int) bool {
 	start, end := span.Start, span.End
 	return (line > start.Line || line == start.Line && character >= start.Character) &&
@@ -222,16 +262,14 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 					at += 2
 				}
 				if at < len(statement) && statement[at].keyword() == "ONLY" {
-					// ONLY applies to PostgreSQL ALTER TABLE's inheritance-
-					// scoped subforms. It is not a supported modifier for
-					// DROP, ALTER VIEW, or MySQL/MariaDB relation moves.
-					// Ignore unsupported spellings entirely rather than
-					// inventing old/new lifecycle tombstones.
-					if operation != "ALTER" || materialized || object != "TABLE" ||
-						(dialect != "postgres" && dialect != "postgresql") {
+					if operation == "ALTER" && !materialized && object == "TABLE" &&
+						(dialect == "postgres" || dialect == "postgresql") {
+						at++ // PostgreSQL inheritance-scoped ALTER TABLE
+					} else if !sqlNavMySQLBareOnlyName(statement, at, dialect, operation, object) {
+						// Unsupported modifier or malformed unquoted identifier
+						// cannot synthesize a relation lifecycle transition.
 						return
 					}
-					at++
 				}
 				// PostgreSQL ordinary TABLE/VIEW RENAME TO and SET SCHEMA
 				// change the relation identity. Never serve the old CREATE as
