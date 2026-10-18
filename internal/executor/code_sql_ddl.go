@@ -39,6 +39,11 @@ type sqlDDLToken struct {
 	text       string
 	kind       byte // 'i' word, 'q' quoted identifier, 'p' punctuation
 	start, end sqlDDLPosition
+	// The structural DDL tokenizer elides literal values. Preserve only the
+	// presence of an elided literal (never its contents) on nearby tokens so
+	// the bounded SELECT/JOIN parser cannot mistake an incomplete, lossy ON
+	// predicate for a valid one. All existing DDL token text/kinds are unchanged.
+	literalBefore, literalAfter bool
 }
 
 func (t sqlDDLToken) keyword() string {
@@ -215,8 +220,11 @@ func sqlDDLTokenize(source, dialect string, rejectExecutableComments bool) ([]sq
 			}
 		}
 	}
+	literalSkipped := false
 	add := func(text string, kind byte, start sqlDDLPosition) {
-		tokens = append(tokens, sqlDDLToken{text: text, kind: kind, start: start, end: position()})
+		tokens = append(tokens, sqlDDLToken{text: text, kind: kind, start: start, end: position(),
+			literalBefore: literalSkipped})
+		literalSkipped = false
 	}
 	for i < len(source) {
 		start := position()
@@ -269,6 +277,7 @@ func sqlDDLTokenize(source, dialect string, rejectExecutableComments bool) ([]sq
 					return nil, false
 				}
 				advance(end + 1 + rest + len(delimiter))
+				literalSkipped = true // PostgreSQL dollar-quoted literal/body
 				continue
 			}
 		}
@@ -322,6 +331,8 @@ func sqlDDLTokenize(source, dialect string, rejectExecutableComments bool) ([]sq
 			advance(end)
 			if quotedIdentifier {
 				add(value.String(), 'q', start)
+			} else {
+				literalSkipped = true // single-quoted SQL literal, not an identifier
 			}
 			continue
 		}
@@ -352,6 +363,11 @@ func sqlDDLTokenize(source, dialect string, rejectExecutableComments bool) ([]sq
 			}
 			advance(end)
 		}
+	}
+	if literalSkipped && len(tokens) > 0 {
+		// No following token at EOF; do not lose the presence of a
+		// literal after an otherwise complete JOIN ON predicate.
+		tokens[len(tokens)-1].literalAfter = true
 	}
 	return tokens, true
 }

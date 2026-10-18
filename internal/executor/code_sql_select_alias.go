@@ -38,6 +38,9 @@ func sqlNavSelectColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurr
 	depth, sourceCount := 0, 0
 	for i := 1; i < len(statement); i++ {
 		token := statement[i]
+		if inFromScope && token.literalBefore {
+			return nil // elided string makes FROM/JOIN scope unprovable
+		}
 		switch token.text {
 		case "(":
 			depth++
@@ -171,8 +174,10 @@ func sqlNavSelectColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurr
 			i = end - 1
 		}
 	}
-	if depth != 0 || !fromSeen || joinModifier != "" || joined && (!onSeen ||
-		onPredicateStart >= 0 && !sqlNavSelectOnPredicateComplete(statement[onPredicateStart:], dialect)) || len(tables) == 0 {
+	if depth != 0 || !fromSeen || joinModifier != "" ||
+		inFromScope && statement[len(statement)-1].literalAfter ||
+		joined && (!onSeen || onPredicateStart >= 0 &&
+			!sqlNavSelectOnPredicateComplete(statement[onPredicateStart:], dialect)) || len(tables) == 0 {
 		return nil
 	}
 
@@ -187,7 +192,7 @@ func sqlNavSelectColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurr
 		}
 		_, end, valid := sqlNavName(statement, i)
 		if !valid || end <= i+1 || end-i != 3 && end-i != 5 ||
-			end < len(statement) && statement[end].text == "." {
+			end < len(statement) && (statement[end].text == "." || statement[end].text == "(") {
 			continue
 		}
 		column := statement[end-1]

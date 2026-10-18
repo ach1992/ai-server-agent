@@ -223,6 +223,10 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 	for _, invalid := range []string{
 		"SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id = AND p.account_id;\n",
 		"SELECT a.id FROM public.accounts a LEFT RIGHT JOIN public.payments p ON a.id=p.account_id;\n",
+		"SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id < > p.account_id;\n",
+		"SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id = 'orphan' p.account_id;\n",
+		"SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id = p.account_id 'orphan';\n",
+		"SELECT a.id() FROM public.accounts a;\n",
 	} {
 		if err := os.WriteFile(filepath.Join(cfg.WorkspaceDir, "queries/list.sql"), []byte(invalid), 0600); err != nil {
 			t.Fatal(err)
@@ -248,5 +252,27 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 			}
 		}
 	}
-	t.Log("DIRECT_REAL_SQL_ALIAS_MCP_PASS definitions=2 references=5 versions=3 stale_rejected=true no_db=true malformed_on_rejected=true")
+	// The function token is distinct from a real qualified column in the
+	// *same* SELECT. The real column still reaches the migration declaration;
+	// references must exclude the function's location.
+	mixed := "SELECT a.id(), a.id FROM public.accounts a;\n"
+	if err := os.WriteFile(filepath.Join(cfg.WorkspaceDir, "queries/list.sql"), []byte(mixed), 0600); err != nil {
+		t.Fatal(err)
+	}
+	mixedVersion := stat("queries/list.sql")
+	functionDef := query("definition", strings.Index(mixed, "a.id")+2, mixedVersion)
+	if functionDef.OK {
+		t.Fatalf("qualified function resolved as a migration column: %+v", functionDef)
+	}
+	realColumnAt := strings.LastIndex(mixed, "a.id") + 2
+	realDef := query("definition", realColumnAt, mixedVersion)
+	if !realDef.OK || json.Unmarshal([]byte(realDef.Output), &locs) != nil || len(locs) != 1 ||
+		locs[0].URI != "migrations/001_accounts.sql" {
+		t.Fatalf("real column adjacent to function lost its definition: %+v %+v", realDef, locs)
+	}
+	realRefs := query("references", realColumnAt, mixedVersion)
+	if !realRefs.OK || json.Unmarshal([]byte(realRefs.Output), &locs) != nil || len(locs) != 3 {
+		t.Fatalf("function polluted source-backed references: %+v %+v", realRefs, locs)
+	}
+	t.Log("DIRECT_REAL_SQL_ALIAS_MCP_PASS definitions=2 references=5 versions=3 stale_rejected=true no_db=true malformed_on_rejected=true functions_excluded=true")
 }

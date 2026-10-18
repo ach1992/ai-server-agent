@@ -108,18 +108,25 @@ func (p *sqlNavOnParser) comparator() bool {
 	if p.punctuation("=") {
 		return true
 	}
-	if p.punctuation("<") {
-		if !p.punctuation(">") {
-			p.punctuation("=")
+	if p.punctuation("<") || p.punctuation(">") {
+		// <=, <>, >= are two lexer punctuation tokens, but they must
+		// be consecutive *in the original SQL*. Whitespace or comments
+		// between the characters do not make a supported compound operator.
+		if p.at < len(p.tokens) && sqlNavOnAdjacent(p.tokens[p.at-1], p.tokens[p.at]) {
+			if p.tokens[p.at].text == "=" || p.tokens[p.at-1].text == "<" && p.tokens[p.at].text == ">" {
+				p.at++
+			}
 		}
 		return true
 	}
-	if p.punctuation(">") {
-		p.punctuation("=")
-		return true
-	}
 	if p.punctuation("!") {
-		return p.punctuation("=")
+		// Exclamation mark is not a standalone comparison operator.
+		if p.at < len(p.tokens) && p.tokens[p.at].text == "=" &&
+			sqlNavOnAdjacent(p.tokens[p.at-1], p.tokens[p.at]) {
+			p.at++
+			return true
+		}
+		return false
 	}
 	return false
 }

@@ -824,6 +824,12 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 			}
 		case ";":
 			if depth == 0 {
+				// Statement boundaries omit the semicolon token. Carry its
+				// literal gap to the final token so a discarded trailing
+				// string cannot turn a malformed JOIN ON into a valid one.
+				if token.literalBefore && i > start {
+					tokens[i-1].literalAfter = true
+				}
 				scan(tokens[start:i])
 				start = i + 1
 			}

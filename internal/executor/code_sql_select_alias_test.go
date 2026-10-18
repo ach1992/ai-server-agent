@@ -209,6 +209,12 @@ func TestSQLSelectAliasSupportedOnGrammar(t *testing.T) {
 		{"postgres", `SELECT a.id FROM accounts a JOIN payments p ON a.id IS NOT NULL;`, 2},
 		{"postgres", `SELECT a.id FROM accounts a JOIN payments p ON a.name ILIKE p.name AND a.id=p.account_id;`, 2},
 		{"postgres", `SELECT a.id FROM accounts a JOIN payments p ON a.id <> p.account_id;`, 2},
+		{"postgres", `SELECT a.id FROM accounts a JOIN payments p ON a.id <= p.account_id;`, 2},
+		{"postgres", `SELECT a.id FROM accounts a JOIN payments p ON a.id != p.account_id;`, 2},
+		{"mysql", "SELECT a.`id` FROM accounts a JOIN payments p ON a.`id` <> p.account_id;", 2},
+		{"mariadb", "SELECT a.`id` FROM accounts a JOIN payments p ON a.`id` <= p.account_id;", 2},
+		{"postgres", `SELECT a.id FROM accounts a JOIN payments p ON a.id /* has ' quote */ = p.account_id;`, 2},
+		{"postgres", `SELECT "A'1"."id" FROM accounts "A'1" JOIN payments p ON "A'1"."id" = p.account_id;`, 2},
 		{"postgres", `SELECT a.id FROM accounts a JOIN payments p ON a.id >= 12.5 AND p.account_id = -2;`, 2},
 		{"postgres", `SELECT a.id FROM accounts a JOIN payments p ON TRUE WHERE a.id>0;`, 2},
 		{"postgres", `SELECT a.id FROM accounts a JOIN payments p ON (TRUE OR a.id = p.account_id);`, 2},
@@ -256,6 +262,14 @@ func TestSQLSelectAliasOnGrammarFailsClosed(t *testing.T) {
 			"a.id=p.account_id AND (a.id = OR p.account_id)",
 			"a.id = p.account_id AND p.id IS", "a.id = p.account_id AND p.id =",
 			"a.id = p.account_id AND p.id = 'example'", // literals removed by the bounded tokenizer
+			"a.id < > p.account_id", "a.id < = p.account_id",
+			"a.id > = p.account_id", "a.id ! = p.account_id",
+			"a.id < /* inserted comment */ > p.account_id",
+			"a.id = 'orphan' p.account_id",
+			"a.id = p.account_id 'orphan'",
+			"a.id = p.account_id /* harmless */ 'orphan'",
+			"a.id = $tag$orphan$tag$ p.account_id",
+			"a.id = p.account_id $tag$orphan$tag$",
 			strings.Repeat("(", sqlNavOnMaxDepth+1) + "a.id=p.account_id" + strings.Repeat(")", sqlNavOnMaxDepth+1),
 		} {
 			source := "SELECT a.id FROM accounts a JOIN payments p ON " + clause + ";"
@@ -303,6 +317,33 @@ func TestSQLSelectAliasOnGrammarFailsClosed(t *testing.T) {
 	}
 }
 
+func TestSQLSelectAliasElidedLiteralAtEOFAndClauseBoundary(t *testing.T) {
+	for _, dialect := range []string{"postgres", "mysql", "mariadb"} {
+		for _, source := range []string{
+			"SELECT a.id FROM accounts a JOIN payments p ON a.id=p.account_id 'orphan'",
+			"SELECT a.id FROM accounts a JOIN payments p ON a.id=p.account_id 'orphan' WHERE a.id=1;",
+			"SELECT a.id FROM accounts a JOIN payments p ON a.id=p.account_id 'orphan' JOIN other o ON o.id=a.id;",
+			"SELECT a.id FROM accounts a JOIN payments p ON a.id='orphan' p.account_id;",
+			"SELECT a.id FROM accounts a 'orphan' JOIN payments p ON a.id=p.account_id;",
+			"SELECT a.id FROM accounts a JOIN payments p 'orphan' ON a.id=p.account_id;",
+			"SELECT a.id FROM accounts a 'orphan'",
+			"SELECT a.id FROM accounts a 'orphan';",
+			"SELECT a.id FROM accounts a JOIN payments p ON a.id = 'orphan' p.account_id;",
+		} {
+			t.Run(dialect+"/"+source, func(t *testing.T) {
+				items, valid := sqlNavAllOccurrences(source, dialect)
+				if valid {
+					for _, item := range items {
+						if item.isColumn {
+							t.Fatalf("elided ON literal made a false column: %+v", item)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestSQLSelectAliasDoesNotConfuseNamesOrStrings(t *testing.T) {
 	cases := []struct {
 		dialect, source string
@@ -331,6 +372,47 @@ func TestSQLSelectAliasDoesNotConfuseNamesOrStrings(t *testing.T) {
 			}
 			if n != tc.want {
 				t.Fatalf("column references %d != %d: %+v", n, tc.want, items)
+			}
+		})
+	}
+}
+
+// An SQL-qualified function identifier is not a physical table column, even
+// if the prefix matches a currently bound table alias. Nearby real columns
+// must remain navigable, including quoted identifiers and whitespace/comments.
+func TestSQLSelectAliasQualifiedFunctionIsNotColumn(t *testing.T) {
+	for _, tc := range []struct {
+		dialect, source, function string
+		want                      int
+	}{
+		{"postgres", `SELECT a.id() FROM public.accounts a;`, "a.id", 0},
+		{"postgres", `SELECT a.id (), a.id FROM public.accounts a;`, "a.id", 1},
+		{"postgres", `SELECT a.id /* comment */ (), a.id FROM public.accounts a;`, "a.id", 1},
+		{"postgres", `SELECT "A"."ID"(), "A"."ID" FROM public.accounts AS "A";`, `"A"."ID"`, 1},
+		{"mysql", "SELECT a.`id`(), a.`id` FROM accounts a;", "a.`id`", 1},
+		{"mariadb", "SELECT a.`id`() FROM accounts a;", "a.`id`", 0},
+	} {
+		t.Run(tc.dialect+"/"+tc.source, func(t *testing.T) {
+			items, ok := sqlNavAllOccurrences(tc.source, tc.dialect)
+			if !ok {
+				t.Fatal("source unexpectedly invalid")
+			}
+			found := 0
+			for _, item := range items {
+				if item.isColumn {
+					found++
+				}
+			}
+			if found != tc.want {
+				t.Fatalf("qualified function captured as table column: got %d want %d in %+v", found, tc.want, items)
+			}
+			colAt := strings.Index(tc.source, tc.function) + len(tc.function) - 1
+			if colAt < 0 {
+				t.Fatal("missing function")
+			}
+			selected, ok := sqlNavSelected(tc.source, tc.dialect, 0, colAt)
+			if ok && selected.isColumn {
+				t.Fatalf("function identifier selected as column: %+v", selected)
 			}
 		})
 	}
@@ -451,6 +533,10 @@ func TestSQLSelectAliasWorkerCrossFileNavigation(t *testing.T) {
 		{"join_empty_parenthesized_on", "SELECT a.id FROM public.accounts AS a JOIN public.payments p ON ();\n", "a.id"},
 		{"join_interior_bad_operand", "SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id = AND p.account_id;\n", "a.id"},
 		{"join_conflicting_modifiers", "SELECT a.id FROM public.accounts a LEFT RIGHT JOIN public.payments p ON a.id=p.account_id;\n", "a.id"},
+		{"join_spaced_comparator", "SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id < > p.account_id;\n", "a.id"},
+		{"join_elided_string_literal", "SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id = 'orphan' p.account_id;\n", "a.id"},
+		{"join_trailing_string_literal", "SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id = p.account_id 'orphan';\n", "a.id"},
+		{"function_qualified_identifier", "SELECT a.id() FROM public.accounts a;\n", "a.id"},
 	}
 	for _, tc := range badQueries {
 		t.Run(tc.name, func(t *testing.T) {
