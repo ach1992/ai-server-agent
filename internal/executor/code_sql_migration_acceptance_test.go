@@ -150,5 +150,33 @@ func TestRealIsolatedMariaDBMigration(t *testing.T) {
 	if out, err := client(onlySQL); err != nil {
 		t.Fatalf("real MariaDB ONLY identifier DDL failed: %v; %s", err, out)
 	}
-	t.Log("real MariaDB migrations, FK/index/data and unquoted ONLY relation lifecycle passed on fresh private --skip-networking socket-only instance")
+	// MariaDB ALTER TABLE permits comma-separated alter_specification entries.
+	// Prove both clause orders, using unquoted ONLY and an ordinary table,
+	// against a real parser before offline source navigation claims support.
+	compound := "USE acceptance_migration; " +
+		"CREATE TABLE ONLY (id INT); " +
+		"ALTER TABLE ONLY ADD COLUMN detail INT, RENAME TO archived_only_first; " +
+		"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='acceptance_migration' AND TABLE_NAME='archived_only_first' AND COLUMN_NAME='detail'; " +
+		"DROP TABLE archived_only_first; " +
+		"CREATE TABLE ONLY (id INT); " +
+		"ALTER TABLE ONLY RENAME TO archived_only_second, ADD COLUMN detail INT; " +
+		"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='acceptance_migration' AND TABLE_NAME='archived_only_second' AND COLUMN_NAME='detail'; " +
+		"DROP TABLE archived_only_second; " +
+		"CREATE TABLE ordinary_jobs (id INT); " +
+		"ALTER TABLE ordinary_jobs ADD COLUMN detail INT, RENAME TO ordinary_archived_first; " +
+		"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='acceptance_migration' AND TABLE_NAME='ordinary_archived_first' AND COLUMN_NAME='detail'; " +
+		"DROP TABLE ordinary_archived_first; " +
+		"CREATE TABLE ordinary_jobs (id INT); " +
+		"ALTER TABLE ordinary_jobs RENAME TO ordinary_archived_second, ADD COLUMN detail INT; " +
+		"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='acceptance_migration' AND TABLE_NAME='ordinary_archived_second' AND COLUMN_NAME='detail'; " +
+		"DROP TABLE ordinary_archived_second; " +
+		"CREATE TABLE ordinary_jobs (id INT); " +
+		"ALTER TABLE ordinary_jobs ADD COLUMN detail INT NOT NULL, RENAME TO ordinary_unmodeled; " +
+		"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='acceptance_migration' AND TABLE_NAME='ordinary_unmodeled' AND COLUMN_NAME='detail'; " +
+		"DROP TABLE ordinary_unmodeled;"
+	compoundResult, err := client(compound)
+	if err != nil || strings.TrimSpace(compoundResult) != "1\n1\n1\n1\n1" {
+		t.Fatalf("real MariaDB compound ALTER / rename parity failed: output=%q err=%v", compoundResult, err)
+	}
+	t.Log("real MariaDB migrations, unquoted ONLY, and both orders of compound ADD COLUMN/RENAME TO passed on disposable socket-only server")
 }

@@ -79,8 +79,9 @@ func TestSQLPostgresOrdinaryRelationMoveOccurrences(t *testing.T) {
 	}
 }
 
-// Prove through the actual unprivileged worker and versioned source search,
-// not only token slices: a move cannot resurrect an obsolete migration.
+// Prove PostgreSQL moves and MySQL/MariaDB compound table renames through
+// the actual unprivileged worker and versioned source search, not token slices:
+// a prior migration CREATE must not survive a later relation move.
 func TestSQLPostgresOrdinaryMovesRealWorkerDefinition(t *testing.T) {
 	// The portable unit suite can skip unavailable optional prerequisites;
 	// the separate trusted-ripgrep CI acceptance must fail instead.
@@ -117,22 +118,48 @@ func TestSQLPostgresOrdinaryMovesRealWorkerDefinition(t *testing.T) {
 	defer cancel()
 
 	for _, tc := range []struct {
-		name, create, move string
+		name, create, move, dialect, oldName, newName string
+		uncertain                                     bool // unsupported compound grammar must not prove an old CREATE
 	}{
 		{
-			name:   "table_set_schema",
+			name: "table_set_schema", dialect: "postgres", oldName: "reporting.events", newName: "archive.events",
 			create: "CREATE TABLE reporting.events (id int PRIMARY KEY);\n",
 			move:   "ALTER TABLE reporting.events SET SCHEMA archive;\n",
 		},
 		{
-			name:   "view_rename",
+			name: "view_rename", dialect: "postgres", oldName: "reporting.events", newName: "reporting.archived_events",
 			create: "CREATE VIEW reporting.events AS SELECT 1 AS id;\n",
 			move:   "ALTER VIEW reporting.events RENAME TO archived_events;\n",
 		},
 		{
-			name:   "table_rename",
+			name: "table_rename", dialect: "postgres", oldName: "reporting.events", newName: "reporting.archived_events",
 			create: "CREATE TABLE reporting.events (id int PRIMARY KEY);\n",
 			move:   "ALTER TABLE reporting.events RENAME TO archived_events;\n",
+		},
+		{
+			name: "mysql_only_add_then_rename", dialect: "mysql", oldName: "ONLY", newName: "archived",
+			create: "CREATE TABLE ONLY (id INT);\n",
+			move:   "ALTER TABLE ONLY ADD COLUMN detail INT, RENAME TO archived;\n",
+		},
+		{
+			name: "mysql_jobs_rename_then_add", dialect: "mysql", oldName: "jobs", newName: "archived_jobs",
+			create: "CREATE TABLE jobs (id INT);\n",
+			move:   "ALTER TABLE jobs RENAME TO archived_jobs, ADD COLUMN detail INT;\n",
+		},
+		{
+			name: "mariadb_only_rename_then_add", dialect: "mariadb", oldName: "ONLY", newName: "archived",
+			create: "CREATE TABLE ONLY (id INT);\n",
+			move:   "ALTER TABLE ONLY RENAME TO archived, ADD COLUMN detail INT;\n",
+		},
+		{
+			name: "mariadb_jobs_add_then_rename", dialect: "mariadb", oldName: "jobs", newName: "archived_jobs",
+			create: "CREATE TABLE jobs (id INT);\n",
+			move:   "ALTER TABLE jobs ADD COLUMN detail INT, RENAME TO archived_jobs;\n",
+		},
+		{
+			name: "mysql_unknown_valid_compound", dialect: "mysql", oldName: "jobs", newName: "archived_jobs", uncertain: true,
+			create: "CREATE TABLE jobs (id INT);\n",
+			move:   "ALTER TABLE jobs ADD COLUMN detail INT NOT NULL, RENAME TO archived_jobs;\n",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -157,7 +184,7 @@ func TestSQLPostgresOrdinaryMovesRealWorkerDefinition(t *testing.T) {
 				}
 			}
 			write(create, tc.create)
-			queryBody := "SELECT * FROM reporting.events;\n"
+			queryBody := "SELECT * FROM " + tc.oldName + ";\n"
 			write(query, queryBody)
 			stat := func(path string) string {
 				t.Helper()
@@ -171,9 +198,9 @@ func TestSQLPostgresOrdinaryMovesRealWorkerDefinition(t *testing.T) {
 				t.Helper()
 				req := owner
 				req.Action, req.Workspace, req.Path = "code_inspect", workspace, query
-				req.Language, req.SQLDialect, req.CodeMethod = "sql", "postgres", "definition"
+				req.Language, req.SQLDialect, req.CodeMethod = "sql", tc.dialect, "definition"
 				req.FileVersion, req.Line = stat(query), 0
-				req.Character = strings.Index(queryBody, "events") + 2
+				req.Character = len(queryBody) - len(";\n") - 1
 				return s.codeInspect(ctx, req)
 			}
 			expectOne := func(want string) {
@@ -192,27 +219,101 @@ func TestSQLPostgresOrdinaryMovesRealWorkerDefinition(t *testing.T) {
 			expectOne(create)
 			write(move, tc.move)
 			stale := definition()
+			if tc.uncertain {
+				if stale.OK || stale.ErrorCode != "sql_schema_unparseable" {
+					t.Fatalf("unknown compound ALTER falsely proved active history: %+v", stale)
+				}
+				return // no defined target or later migration may be inferred
+			}
 			if stale.OK || stale.ErrorCode != "sql_schema_history_ambiguous" {
 				t.Fatalf("old identity resurrected after schema/rename move: %+v", stale)
 			}
 			// The moved name must not be silently connected to the old
 			// qualified CREATE. Its original declaration is no longer a
 			// proven active definition (no SQL migration execution here).
-			newRelation := "reporting.archived_events"
-			if tc.name == "table_set_schema" {
-				newRelation = "archive.events"
-			}
-			queryBody = "SELECT * FROM " + newRelation + ";\n"
+			queryBody = "SELECT * FROM " + tc.newName + ";\n"
 			write(query, queryBody)
 			moved := definition()
 			if moved.OK || moved.ErrorCode != "sql_schema_history_ambiguous" {
 				t.Fatalf("new relation identity was linked to stale CREATE: %+v", moved)
 			}
-			queryBody = "SELECT * FROM reporting.events;\n"
+			queryBody = "SELECT * FROM " + tc.oldName + ";\n"
 			write(query, queryBody)
 			write(recreate, tc.create)
 			expectOne(recreate)
 		})
+	}
+}
+
+// A valid comma-separated ALTER TABLE rename must invalidate ordered source
+// history regardless of clause order. An unsupported non-comma compound must
+// not fabricate a lifecycle event (F1).
+func TestSQLMySQLCompoundAlterTableRenames(t *testing.T) {
+	for _, dialect := range []string{"mysql", "mariadb"} {
+		for _, tc := range []struct {
+			name, source, oldName, newName string
+		}{
+			{"only_add_then_rename", "ALTER TABLE ONLY ADD COLUMN detail INT, RENAME TO archived;", "only", "archived"},
+			{"only_rename_then_add", "ALTER TABLE ONLY RENAME TO archived, ADD COLUMN detail INT;", "only", "archived"},
+			{"only_varchar_add_then_rename", "ALTER TABLE ONLY ADD COLUMN detail VARCHAR(64), RENAME TO archived;", "only", "archived"},
+			{"only_decimal_add_then_rename", "ALTER TABLE ONLY ADD COLUMN price DECIMAL(10,2), RENAME TO archived;", "only", "archived"},
+			{"only_multiple_add_then_rename", "ALTER TABLE ONLY ADD COLUMN detail INT, ADD COLUMN enabled BOOLEAN, RENAME TO archived;", "only", "archived"},
+			{"only_drop_then_rename", "ALTER TABLE ONLY DROP COLUMN detail, RENAME TO archived;", "only", "archived"},
+			{"ordinary_add_then_rename", "ALTER TABLE jobs ADD COLUMN detail INT, RENAME TO archived_jobs;", "jobs", "archived_jobs"},
+			{"ordinary_rename_then_add", "ALTER TABLE jobs RENAME TO archived_jobs, ADD COLUMN detail INT;", "jobs", "archived_jobs"},
+			{"qualified_add_then_rename", "ALTER TABLE staging.ONLY ADD COLUMN detail INT, RENAME TO archived;", "staging\x00only", "archived"},
+			{"qualified_rename_then_add", "ALTER TABLE ONLY.events RENAME TO archive.events, ADD COLUMN detail INT;", "only\x00events", "archive\x00events"},
+			{"quoted_add_then_rename", "ALTER TABLE `ONLY` ADD COLUMN detail INT, RENAME TO `archived`;", "ONLY", "archived"},
+		} {
+			t.Run(dialect+"_"+tc.name, func(t *testing.T) {
+				got, valid := sqlNavOccurrences(tc.source, dialect)
+				if !valid || len(got) != 2 {
+					t.Fatalf("valid compound ALTER lost relation lifecycle: valid=%v occurrences=%+v", valid, got)
+				}
+				if got[0].identity != tc.oldName || got[1].identity != tc.newName ||
+					!got[0].drop || !got[1].drop || got[0].declaration || got[1].declaration {
+					t.Fatalf("incorrect compound move lifecycle: %+v", got)
+				}
+				createSQL := "CREATE TABLE " + strings.ReplaceAll(tc.oldName, "\x00", ".") + " (id INT);"
+				if tc.name == "quoted_add_then_rename" {
+					createSQL = "CREATE TABLE `ONLY` (id INT);"
+				}
+				create, ok := sqlNavOccurrences(createSQL, dialect)
+				if !ok || len(create) != 1 || !create[0].declaration || create[0].identity != tc.oldName {
+					t.Fatalf("matching source declaration unavailable for ordered proof: %+v", create)
+				}
+				items := []sqlNavFound{{sqlNavOccurrence: create[0], sqlNavLocation: sqlNavLocation{URI: "db/migrations/001_create.sql"}}}
+				for _, ev := range got {
+					items = append(items, sqlNavFound{sqlNavOccurrence: ev, sqlNavLocation: sqlNavLocation{URI: "db/migrations/002_move.sql"}})
+				}
+				if location, err := sqlNavResolveOrderedDefinition(items[:2], nil, "db/queries/read.sql"); err == nil {
+					t.Fatalf("obsolete CREATE considered active after compound ALTER: %+v", location)
+				}
+			})
+		}
+	}
+}
+
+// The offline supplement is intentionally not a complete MariaDB/MySQL
+// ALTER grammar. Valid rename-bearing statements beyond its bounded clause
+// support must fail closed instead of resurrecting an earlier migration's
+// CREATE as a proven current table.
+func TestSQLMySQLUnknownCompoundRenameDoesNotProveHistory(t *testing.T) {
+	for _, dialect := range []string{"mysql", "mariadb"} {
+		for _, statement := range []string{
+			"ALTER TABLE jobs ADD COLUMN detail INT NOT NULL, RENAME TO archived_jobs;",
+			"ALTER TABLE ONLY ADD INDEX idx_id (id), RENAME TO archived;",
+			"ALTER TABLE jobs RENAME TO archived_jobs, MODIFY COLUMN id BIGINT;",
+			"ALTER TABLE ONLY RENAME TO archived, ADD COLUMN detail INT NOT NULL;",
+			"ALTER TABLE ONLY ADD COLUMN IF NOT EXISTS detail INT, RENAME TO archived;",
+		} {
+			t.Run(dialect+"_"+statement, func(t *testing.T) {
+				events, valid := sqlNavOccurrences(statement, dialect)
+				if valid || len(events) != 0 {
+					t.Fatalf("unknown compound ALTER should fail closed, not invent partial lifecycle: valid=%t events=%+v", valid, events)
+				}
+			})
+		}
 	}
 }
 
@@ -223,6 +324,7 @@ func TestSQLOnlyDialectBoundariesFailClosed(t *testing.T) {
 		name, sql, dialect string
 	}{
 		{"mysql_alter", "ALTER TABLE ONLY reporting.events RENAME TO archived_events;", "mysql"},
+		{"mysql_alter_if_exists_unsupported", "ALTER TABLE IF EXISTS ONLY ADD COLUMN detail INT, RENAME TO archived;", "mysql"},
 		{"mariadb_alter", "ALTER TABLE ONLY reporting.events RENAME AS archived_events;", "mariadb"},
 		{"mysql_alter_column", "ALTER TABLE ONLY reporting.events ADD COLUMN payload INT;", "mysql"},
 		{"mariadb_alter_column", "ALTER TABLE ONLY reporting.events DROP COLUMN payload;", "mariadb"},
@@ -276,6 +378,8 @@ func TestSQLMySQLOnlyMalformedLifecycleFailClosed(t *testing.T) {
 			{"alter_qualified_only_three_part", "ALTER TABLE staging.ONLY.RENAME TO archived;"},
 			{"alter_rename_three_part_target", "ALTER TABLE ONLY RENAME TO archive.events.extra;"},
 			{"alter_qualified_source_three_part_target", "ALTER TABLE staging.ONLY RENAME TO archive.events.extra;"},
+			{"alter_rename_invalid_varchar_arity", "ALTER TABLE ONLY ADD COLUMN detail VARCHAR(64,2), RENAME TO archived;"},
+			{"alter_rename_invalid_decimal_arity", "ALTER TABLE ONLY ADD COLUMN amount DECIMAL(10,2,3), RENAME TO archived;"},
 		} {
 			t.Run(dialect+"_"+tc.name, func(t *testing.T) {
 				items, parsed := sqlNavOccurrences(tc.statement, dialect)

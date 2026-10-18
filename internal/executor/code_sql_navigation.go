@@ -141,6 +141,133 @@ func sqlNavMySQLBareOnlyName(tokens []sqlDDLToken, at int, dialect, operation, o
 	return false
 }
 
+// Validate only a deliberately bounded set of complete column specs when
+// deciding whether a comma-separated MySQL/MariaDB ALTER contains a proven
+// table rename. Unknown types/options never justify lifecycle tombstones.
+func sqlNavMySQLAlterAuxColumn(tokens []sqlDDLToken) bool {
+	if len(tokens) < 3 {
+		return false
+	}
+	at := 1
+	operation := tokens[0].keyword()
+	if at < len(tokens) && tokens[at].keyword() == "COLUMN" {
+		at++
+	}
+	// Conditional ADD/DROP variants have dialect-dependent syntax. Leave
+	// them to the conservative uncertain-graph fallback, never a proved move.
+	if at < len(tokens) && tokens[at].keyword() == "IF" {
+		return false
+	}
+	if at >= len(tokens) || tokens[at].kind != 'i' && tokens[at].kind != 'q' ||
+		(tokens[at].kind == 'i' && (tokens[at].keyword() == "RENAME" || tokens[at].keyword() == "TO")) {
+		return false
+	}
+	at++
+	if operation == "DROP" {
+		return at == len(tokens) || at+1 == len(tokens) &&
+			(tokens[at].keyword() == "CASCADE" || tokens[at].keyword() == "RESTRICT")
+	}
+	if operation != "ADD" || at >= len(tokens) {
+		return false
+	}
+	switch tokens[at].keyword() {
+	case "INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "MEDIUMINT",
+		"BOOL", "BOOLEAN", "TEXT", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT",
+		"DATE", "DATETIME", "TIME", "TIMESTAMP", "YEAR", "JSON",
+		"BLOB", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB", "FLOAT", "DOUBLE", "REAL",
+		"DECIMAL", "NUMERIC", "VARCHAR", "CHAR", "BINARY", "VARBINARY", "BIT":
+	default:
+		return false
+	}
+	typeName := tokens[at].keyword()
+	needsLength := typeName == "VARCHAR" || typeName == "VARBINARY"
+	maxArgs := 1
+	if typeName == "DECIMAL" || typeName == "NUMERIC" ||
+		typeName == "FLOAT" || typeName == "DOUBLE" || typeName == "REAL" {
+		maxArgs = 2
+	}
+	at++
+	if at < len(tokens) && tokens[at].text == "(" {
+		at++
+		haveDigits, expectDigit, args := false, true, 1
+		for at < len(tokens) && tokens[at].text != ")" {
+			if tokens[at].text == "," && !expectDigit {
+				args++
+				if args > maxArgs {
+					return false // e.g. VARCHAR(64,2) is not a valid type
+				}
+				expectDigit = true
+			} else if len(tokens[at].text) == 1 && tokens[at].text[0] >= '0' &&
+				tokens[at].text[0] <= '9' {
+				haveDigits, expectDigit = true, false
+			} else {
+				return false
+			}
+			at++
+		}
+		if at == len(tokens) || !haveDigits || expectDigit {
+			return false
+		}
+		at++
+		needsLength = false
+	}
+	if needsLength {
+		return false
+	}
+	// The declaration may be correct but beyond this small accepted grammar.
+	// Do not misread stray RENAME tokens as a complete table lifecycle move.
+	return at == len(tokens)
+}
+
+// The caller has already validated the table name. A relation-changing ALTER
+// is recorded only after its entire bounded comma-separated specification list
+// is validated. Commas inside type arguments do not split specifications.
+// Return false for unrecognized/partial grammar instead of inventing a move.
+func sqlNavMySQLAlterRename(tokens []sqlDDLToken, at int) (sqlNavOccurrence, bool) {
+	var target sqlNavOccurrence
+	found := false
+	depth, start := 0, at
+	for i := at; i <= len(tokens); i++ {
+		if i < len(tokens) {
+			switch tokens[i].text {
+			case "(":
+				depth++
+			case ")":
+				depth--
+				if depth < 0 {
+					return sqlNavOccurrence{}, false
+				}
+			}
+		}
+		if i < len(tokens) && (tokens[i].text != "," || depth != 0) {
+			continue
+		}
+		if depth != 0 || start == i {
+			return sqlNavOccurrence{}, false
+		}
+		clause := tokens[start:i]
+		switch clause[0].keyword() {
+		case "RENAME":
+			if len(clause) < 3 || (clause[1].keyword() != "TO" && clause[1].keyword() != "AS") || found {
+				return sqlNavOccurrence{}, false
+			}
+			name, end, valid := sqlNavName(clause, 2)
+			if !valid || end != len(clause) || strings.Count(name.identity, "\x00") > 1 {
+				return sqlNavOccurrence{}, false
+			}
+			target, found = name, true
+		case "ADD", "DROP":
+			if !sqlNavMySQLAlterAuxColumn(clause) {
+				return sqlNavOccurrence{}, false
+			}
+		default:
+			return sqlNavOccurrence{}, false
+		}
+		start = i + 1
+	}
+	return target, found
+}
+
 func sqlNavAt(span sqlDDLRange, line, character int) bool {
 	start, end := span.Start, span.End
 	return (line > start.Line || line == start.Line && character >= start.Character) &&
@@ -170,6 +297,10 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 		}
 	}
 	var result []sqlNavOccurrence
+	// A qualified ALTER with an apparent relation RENAME that this bounded
+	// parser cannot validate must never let earlier CREATE evidence appear
+	// definitively current. Reject the source graph as uncertain instead.
+	unknownRelationMove := false
 	scan := func(statement []sqlDDLToken) {
 		if len(statement) < 2 {
 			return
@@ -271,6 +402,9 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 				at++
 				if at+1 < len(statement) && statement[at].keyword() == "IF" &&
 					statement[at+1].keyword() == "EXISTS" {
+					if operation == "ALTER" && dialect == "mysql" {
+						return // MariaDB supports ALTER TABLE IF EXISTS; MySQL 8.4 does not
+					}
 					at += 2
 				}
 				if at < len(statement) && statement[at].keyword() == "ONLY" {
@@ -463,15 +597,13 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 					// unsupported or incomplete target cannot poison the
 					// original CREATE or invent a renamed relation.
 					if dialect == "mysql" || dialect == "mariadb" {
-						// Compound ALTER clauses need their own grammar: a
-						// RENAME token deep inside a clause is not evidence
-						// of a complete relation move.
-						if renameAt != end {
+						if object != "TABLE" {
 							return
 						}
-						target, targetEnd, ok := sqlNavName(statement, renameAt+2)
-						if !ok || targetEnd != len(statement) || strings.Count(target.identity, "\x00") > 1 {
-							return // target too is a table name, not a three-part column name
+						target, ok := sqlNavMySQLAlterRename(statement, end)
+						if !ok {
+							unknownRelationMove = true
+							return // no tombstones, and no proven active history
 						}
 						relation.drop, target.drop = true, true
 						result = append(result, relation, target)
@@ -585,6 +717,9 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 	}
 	if start < len(tokens) {
 		scan(tokens[start:])
+	}
+	if unknownRelationMove {
+		return nil, false // the source-only graph is not safely interpretable
 	}
 	return result, true
 }
