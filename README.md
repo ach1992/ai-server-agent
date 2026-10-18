@@ -25,7 +25,7 @@ curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/script
 To install a specific published Stable version (example):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | bash -s -- v0.1.16
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | bash -s -- v0.1.17
 ```
 
 The short bootstrap URL intentionally uses the project's **reviewed, mutable `main` branch**; the installed version comes from an **immutable Stable Release**. The release installer is SHA-256-verified before its privileged execution and verified again in protected root staging. On supported systems, the bootstrap may run `sudo apt-get` to install missing `jq` and CA-certificate prerequisites *before* release verification. Review the bootstrap before running it. **Run it as shown, not through `sudo bash`.** Both bootstrap commands are **fresh-install only**: they refuse an existing or partial Agent installation, even with an explicit version. For an installed Agent, use `sudo ai-server-agent-manage update`; see [Operations](docs/OPERATIONS.md) for credential-safe version rollback.
