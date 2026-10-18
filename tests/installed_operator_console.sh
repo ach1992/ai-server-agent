@@ -112,19 +112,27 @@ grep -Fq 'MENU_EXITED' "$tmp/read-only.out" || fail 'Read-only signal exited the
 # runtime acceptance (which deliberately performs several real restarts).
 sleep 12
 
-# Signal test 2: a real Ctrl+C byte after a REAL runtime transaction staged
-# a config change but before a deliberate one-shot systemctl restart failure.
-# The installed menu must not abandon the protected operation; runtime_apply
-# must restore the old config and verify installed health. No secrets or
-# production/Cloudflare resources are touched.
+# Signal test 2: distinguish a genuine in-flight protected Ctrl+C from
+# ordinary restart failure. Both use the real installed runtime_apply,
+# rollback and menu. The first run is a NO-SIGNAL negative control; the
+# second uses the actual controlling PTY and requires the installed INT
+# handler's UI_SIGINT_CAUGHT value to be observed by a test-only pause hook.
+# No production signal handler or privileged runtime function is replaced.
 mkdir "$tmp/bin"
 cat > "$tmp/bin/systemctl" <<'SYSTEMCTL'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 if [ "${1:-}" = restart ] && [ ! -e "$ASA_OPERATOR_RESTART_MARKER" ]; then
   : > "$ASA_OPERATOR_RESTART_MARKER"
-  sleep 2
-  exit 93
+  # Hold the real staged transaction in-flight until the PTY producer has
+  # reached the signal gate. Never wait indefinitely, including CI failures.
+  ready=false
+  for _ in $(seq 1 240); do
+    if [ -e "$ASA_OPERATOR_RELEASE_MARKER" ]; then ready=true; break; fi
+    sleep 0.05
+  done
+  [ "$ready" = true ] || exit 92
+  exit 93 # deterministic restart failure, independent of Ctrl+C
 fi
 exec /usr/bin/systemctl "$@"
 SYSTEMCTL
@@ -134,50 +142,90 @@ cat > "$tmp/protected.sh" <<'PROTECTED'
 set -Eeuo pipefail
 export AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1
 source /usr/local/lib/ai-server-agent/manage.sh
+# Preserve installed menu/INT handler and runtime_apply unchanged.
+# A test-only pause wrapper observes the installed handler's flag just
+# after the protected action returns and before the next interactive input.
+pause(){
+  if [ "${UI_SIGINT_CAUGHT:-0}" = 1 ]; then
+    : > "$ASA_OPERATOR_SIGNAL_MARKER"
+  fi
+  if ui_has_interactive_tty; then read -r -p "Press Enter to continue... " _ </dev/tty || true; fi
+}
 menu
 echo MENU_EXITED
 PROTECTED
 chmod 0700 "$tmp/protected.sh"
-restart_marker="$tmp/restart-attempt"
-set +e
-{
-  printf '11\n3\ncommand_timeout_seconds\n15\ny\n'
-  for _ in $(seq 1 300); do [ -f "$restart_marker" ] && break; sleep 0.1; done
-  printf '\003'
-  # The protected subprocess must complete its restart/rollback/recovery.
-  # Wait for the real installed manager to report verified recovery.
-  for _ in $(seq 1 700); do
-    grep -Fq 'Runtime update failed;' "$tmp/protected.out" 2>/dev/null && break
-    sleep 0.1
+
+# The negative control must complete the same protected restart/rollback
+# without a PTY signal and MUST NOT satisfy the protected-signal witness.
+run_protected_case(){
+  local mode="$1" restart_marker="$tmp/restart-$1" signal_marker="$tmp/signal-$1"
+  local release_marker="$tmp/release-$1" output="$tmp/protected-$1.out"
+  local ready_failure="$tmp/not-ready-$1" protected_rc
+  set +e
+  {
+    printf '11\n3\ncommand_timeout_seconds\n15\ny\n'
+    ready=false
+    for _ in $(seq 1 300); do
+      if [ -e "$restart_marker" ]; then ready=true; break; fi
+      sleep 0.1
+    done
+    if [ "$ready" = true ]; then
+      if [ "$mode" = signal ]; then printf '\003'; fi
+      # The subprocess stays blocked until the signal byte was sent.
+      sleep 0.35
+    else
+      : > "$ready_failure"
+    fi
+    : > "$release_marker"
+    for _ in $(seq 1 700); do
+      grep -Fq 'Runtime update failed;' "$output" 2>/dev/null && break
+      sleep 0.1
+    done
+    printf '\n0\n0\n'
+  } | NO_COLOR=1 TERM=dumb COLUMNS=60 LINES=24 timeout 110 script -qefc \
+    "sudo env NO_COLOR=1 TERM=dumb ASA_OPERATOR_RESTART_MARKER='$restart_marker' ASA_OPERATOR_RELEASE_MARKER='$release_marker' ASA_OPERATOR_SIGNAL_MARKER='$signal_marker' PATH='$tmp/bin:/usr/bin:/bin' bash '$tmp/protected.sh'" \
+    /dev/null > "$output" 2>&1
+  protected_rc=$?
+  set -e
+  case "$protected_rc" in 0|130) ;; *) fail "Installed protected PTY ($mode) exit $protected_rc" ;; esac
+  [ ! -e "$ready_failure" ] && [ -e "$restart_marker" ] ||
+    fail "Protected ($mode) transaction was not in flight before the signal gate"
+  grep -Fq 'Runtime update failed;' "$output" &&
+    grep -Fq 'restored.' "$output" ||
+    fail "Installed protected ($mode) action did not verify rollback"
+  grep -Fq 'Action failed (exit 1)' "$output" ||
+    fail "Enclosing menu hid the protected ($mode) transaction failure"
+  grep -Fq 'MENU_EXITED' "$output" ||
+    fail "Protected ($mode) action abandoned installed menu"
+  if [ "$mode" = signal ]; then
+    [ -e "$signal_marker" ] ||
+      fail 'Real protected Ctrl+C was not witnessed by the installed menu INT handler'
+  else
+    [ ! -e "$signal_marker" ] ||
+      fail 'Negative control recorded an unexpected protected INT'
+    # Identical normal failure/rollback without Ctrl+C lacks the REQUIRED
+    # signal witness. It is not a substitute for the positive signal case.
+    echo 'INSTALLED_OPERATOR_PROTECTED_NO_SIGNAL_NEGATIVE_CONTROL_PASS'
+  fi
+  [ "$(config_hash)" = "$(printf '%s\n' "$before" | sed -n '1p')" ] ||
+    fail "Protected ($mode) failure did not restore exact original config"
+  [ "$(credentials_hash)" = "$(printf '%s\n' "$before" | sed -n '2p')" ] ||
+    fail "Protected ($mode) failure modified credential store"
+  [ "$(managed_hash)" = "$(printf '%s\n' "$before" | sed -n '3p')" ] ||
+    fail "Protected ($mode) failure modified management state"
+  sudo test -z "$(sudo find /etc/ai-server-agent -maxdepth 1 -name '.runtime-old.*' -print)" ||
+    fail "Protected ($mode) rollback left a stale protected snapshot"
+  for service in ai-server-agent.service ai-server-agent-executor.service; do
+    sudo systemctl is-active --quiet "$service" ||
+      fail "Protected ($mode) rollback left $service unhealthy"
   done
-  printf '\n0\n0\n'
-} | NO_COLOR=1 TERM=dumb COLUMNS=60 LINES=24 timeout 110 script -qefc \
-  "sudo env NO_COLOR=1 TERM=dumb ASA_OPERATOR_RESTART_MARKER='$restart_marker' PATH='$tmp/bin:/usr/bin:/bin' bash '$tmp/protected.sh'" \
-  /dev/null > "$tmp/protected.out" 2>&1
-protected_rc=$?
-set -e
-case "$protected_rc" in 0|130) ;; *) fail "Installed protected PTY exit $protected_rc" ;; esac
-[ -e "$restart_marker" ] || fail 'One-shot systemctl fault did not run'
-# The genuine interactive console wraps long errors. Match the two
-# distinctive segments independently, not an impossible one-line literal.
-grep -Fq 'Runtime update failed;' "$tmp/protected.out" &&
-  grep -Fq 'restored.' "$tmp/protected.out" ||
-  fail 'Installed protected action did not verify rollback'
-grep -Fq 'Action failed (exit 1)' "$tmp/protected.out" ||
-  fail 'Enclosing menu hid the protected transaction failure'
-grep -Fq 'MENU_EXITED' "$tmp/protected.out" ||
-  fail 'Ctrl+C abandoned installed protected action/menu'
-[ "$(config_hash)" = "$(printf '%s\n' "$before" | sed -n '1p')" ] ||
-  fail 'Protected failure did not restore exact old config bytes'
-[ "$(credentials_hash)" = "$(printf '%s\n' "$before" | sed -n '2p')" ] ||
-  fail 'Protected failure modified credential store'
-[ "$(managed_hash)" = "$(printf '%s\n' "$before" | sed -n '3p')" ] ||
-  fail 'Protected failure modified management state'
-sudo test -z "$(sudo find /etc/ai-server-agent -maxdepth 1 -name '.runtime-old.*' -print)" ||
-  fail 'Protected rollback left a stale protected snapshot'
-for service in ai-server-agent.service ai-server-agent-executor.service; do
-  sudo systemctl is-active --quiet "$service" || fail "Protected rollback left $service unhealthy"
-done
-sudo cmp -s /tmp/ai-server-agent /usr/local/bin/ai-server-agent ||
-  fail 'Installed binary changed during protected rollback'
-echo 'INSTALLED_OPERATOR_CONSOLE_ACCEPTANCE_PASS real_menu=yes 50col_no_color=yes invalid_retry=yes input_cancel_no_mutation=yes read_only_sigint=recovered protected_sigint=finished_then_verified_rollback credentials=preserved installed_services=healthy'
+  sudo cmp -s /tmp/ai-server-agent /usr/local/bin/ai-server-agent ||
+    fail "Installed binary changed during protected ($mode) rollback"
+}
+
+run_protected_case no-signal
+# Protect systemd start-rate budgets after multiple installed restart tests.
+sleep 12
+run_protected_case signal
+echo 'INSTALLED_OPERATOR_CONSOLE_ACCEPTANCE_PASS real_menu=yes 50col_no_color=yes invalid_retry=yes input_cancel_no_mutation=yes read_only_sigint=recovered protected_sigint=witnessed_in_flight_then_verified_rollback no_signal_negative_control=passed credentials=preserved installed_services=healthy'
