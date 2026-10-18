@@ -63,7 +63,7 @@ func TestSQLColumnSourceGraphAndTombstones(t *testing.T) {
 func TestSQLColumnGraphRejectsUnsafeScope(t *testing.T) {
 	for _, tc := range []struct{ sql, dialect string }{
 		{"SELECT id FROM accounts;", "postgres"},
-		{"SELECT x.id FROM accounts AS x;", "postgres"},
+		{"SELECT x.id FROM (SELECT id FROM accounts) AS x;", "postgres"},
 		{"WITH accounts AS (SELECT 1 AS id) SELECT id FROM accounts;", "postgres"},
 		{"SELECT 'REFERENCES accounts(id)' AS s;", "postgres"},
 		{"DO $tag$ ALTER TABLE accounts ADD COLUMN fake INT; $tag$;", "postgres"},

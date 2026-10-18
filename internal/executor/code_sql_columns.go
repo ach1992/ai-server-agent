@@ -117,6 +117,8 @@ func sqlNavColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurrence {
 				return nil // do not produce column sources for malformed SQL
 			}
 		}
+	case "SELECT":
+		return sqlNavSelectColumns(statement, dialect)
 	case "INSERT":
 		if statement[1].keyword() != "INTO" {
 			return nil
