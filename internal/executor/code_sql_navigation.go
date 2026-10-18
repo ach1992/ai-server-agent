@@ -56,7 +56,10 @@ var (
 
 func sqlNavName(tokens []sqlDDLToken, at int) (sqlNavOccurrence, int, bool) {
 	_, span, next, ok := sqlDDLQualifiedName(tokens, at)
-	if !ok || next-at > 5 {
+	// sqlDDLQualifiedName deliberately permits partial names for other SQL
+	// consumers. Offline navigation must not turn an unmatched dot (or an
+	// unsupported fourth qualifier) into a proved relation identity.
+	if !ok || next-at > 5 || next < len(tokens) && tokens[next].text == "." {
 		return sqlNavOccurrence{}, at, false
 	}
 	parts := make([]string, 0, 3)
@@ -89,6 +92,229 @@ func sqlNavName(tokens []sqlDDLToken, at int) (sqlNavOccurrence, int, bool) {
 	return sqlNavOccurrence{name: strings.Join(parts, "."), identity: strings.Join(parts, "\x00"), searchTerm: term, span: span}, next, true
 }
 
+// In MySQL/MariaDB, ONLY is a nonreserved identifier, not an inheritance
+// modifier. Disambiguate only an unquoted leading ONLY, and require a known
+// next token so invalid PostgreSQL-style ONLY relation syntax never invents
+// source-backed table or view lifecycle transitions.
+func sqlNavMySQLBareOnlyName(tokens []sqlDDLToken, at int, dialect, operation, object string) bool {
+	if at >= len(tokens) || tokens[at].keyword() != "ONLY" ||
+		(dialect != "mysql" && dialect != "mariadb") {
+		return false
+	}
+	next := at + 1
+	if next < len(tokens) && tokens[next].text == "." {
+		// ONLY can also name a schema. Require a complete qualified name
+		// *and* the operation clause after that name; for example,
+		// ONLY. RENAME TO x must not reinterpret RENAME as a table name.
+		_, end, valid := sqlNavName(tokens, at)
+		// MySQL/MariaDB table and view names have at most a database
+		// qualifier; three-part names belong to column references only.
+		if !valid || end != at+3 {
+			return false
+		}
+		next = end
+	}
+	if operation == "DROP" {
+		return next == len(tokens) || tokens[next].text == "," ||
+			next+1 == len(tokens) &&
+				(tokens[next].keyword() == "CASCADE" || tokens[next].keyword() == "RESTRICT")
+	}
+	if operation != "ALTER" || next >= len(tokens) {
+		return false
+	}
+	if object == "VIEW" {
+		return tokens[next].keyword() == "AS"
+	}
+	if object != "TABLE" {
+		return false
+	}
+	switch tokens[next].keyword() {
+	case "RENAME":
+		if next+1 >= len(tokens) {
+			return false
+		}
+		following := tokens[next+1]
+		return following.keyword() == "TO" || following.keyword() == "AS" ||
+			following.keyword() == "COLUMN" ||
+			(following.kind == 'i' || following.kind == 'q') &&
+				following.keyword() != "INDEX" && following.keyword() != "KEY"
+	case "ADD", "ALTER", "CHANGE", "MODIFY", "DROP", "CONVERT", "ORDER",
+		"DISCARD", "IMPORT", "ENGINE", "AUTO_INCREMENT", "COMMENT", "DEFAULT",
+		"ALGORITHM", "LOCK", "PARTITION", "REMOVE", "ENABLE", "DISABLE", "FORCE":
+		return true
+	}
+	return false
+}
+
+// Validate only a deliberately bounded set of complete column specs when
+// deciding whether a comma-separated MySQL/MariaDB ALTER contains a proven
+// table rename. Unknown types/options never justify lifecycle tombstones.
+func sqlNavMySQLAlterAuxColumn(tokens []sqlDDLToken, dialect string) bool {
+	// The existing bounded parser requires 3+ tokens. MariaDB also allows
+	// DROP `quoted_name` without the optional COLUMN keyword. Admit only
+	// that unambiguous two-token form here; keep the MySQL and other
+	// unmodelled short forms conservatively unsupported.
+	if len(tokens) < 3 &&
+		!(dialect == "mariadb" && len(tokens) == 2 &&
+			tokens[0].keyword() == "DROP" && tokens[1].kind == 'q') {
+		return false
+	}
+	at, operation := 1, tokens[0].keyword()
+	explicitColumn := tokens[at].keyword() == "COLUMN"
+	if explicitColumn {
+		at++
+	}
+	if at < len(tokens) && tokens[at].keyword() == "IF" {
+		return false
+	}
+	if at >= len(tokens) || !sqlNavMySQLBareIdentifierAllowed(tokens[at], dialect, false) {
+		return false
+	}
+	// In MariaDB, bare ADD/DROP SYSTEM selects the SYSTEM VERSIONING
+	// grammar branch, not an auxiliary column called SYSTEM. An explicit
+	// COLUMN keyword or quoted name disambiguates this valid column form.
+	// Keep CREATE identifiers and MySQL handling unchanged.
+	if dialect == "mariadb" && !explicitColumn &&
+		(operation == "ADD" || operation == "DROP") &&
+		tokens[at].kind == 'i' && tokens[at].keyword() == "SYSTEM" {
+		return false
+	}
+	at++
+	if operation == "DROP" {
+		return at == len(tokens) || dialect == "mariadb" && at+1 == len(tokens) &&
+			(tokens[at].keyword() == "CASCADE" || tokens[at].keyword() == "RESTRICT")
+	}
+	if operation != "ADD" || at >= len(tokens) {
+		return false
+	}
+	typeName := tokens[at].keyword()
+	switch typeName {
+	case "INT", "INTEGER", "BIGINT", "SMALLINT", "TINYINT", "MEDIUMINT",
+		"BOOL", "BOOLEAN", "TEXT", "TINYTEXT", "MEDIUMTEXT", "LONGTEXT",
+		"DATE", "DATETIME", "TIME", "TIMESTAMP", "YEAR", "JSON",
+		"BLOB", "TINYBLOB", "MEDIUMBLOB", "LONGBLOB", "FLOAT", "DOUBLE", "REAL",
+		"DECIMAL", "NUMERIC", "VARCHAR", "CHAR", "BINARY", "VARBINARY", "BIT":
+	default:
+		return false
+	}
+	at++
+	if at == len(tokens) {
+		return typeName != "VARCHAR" && typeName != "VARBINARY"
+	}
+	// Only these bounded datatype-argument forms are validated. Other valid
+	// forms remain explicitly uncertain rather than creating tombstones.
+	if tokens[at].text != "(" {
+		return false
+	}
+	switch typeName {
+	case "DECIMAL", "NUMERIC", "VARCHAR", "VARBINARY", "CHAR", "BINARY":
+	default:
+		return false
+	}
+	at++
+	args := make([]int, 0, 2)
+	value, haveDigit := 0, false
+	for at < len(tokens) && tokens[at].text != ")" {
+		token := tokens[at].text
+		if token == "," {
+			if !haveDigit || len(args) >= 1 {
+				return false
+			}
+			args = append(args, value)
+			value, haveDigit = 0, false
+		} else {
+			if len(token) != 1 || token[0] < '0' || token[0] > '9' {
+				return false
+			}
+			value = value*10 + int(token[0]-'0')
+			if value > 65535 {
+				return false
+			}
+			haveDigit = true
+		}
+		at++
+	}
+	if at >= len(tokens) || !haveDigit || at+1 != len(tokens) {
+		return false
+	}
+	args = append(args, value)
+	switch typeName {
+	case "DECIMAL", "NUMERIC":
+		// MySQL 8.4/common MariaDB subset: 1<=M<=65, 0<=D<=30, D<=M.
+		return args[0] >= 1 && args[0] <= 65 &&
+			(len(args) == 1 || args[1] <= 30 && args[1] <= args[0])
+	case "VARCHAR", "VARBINARY", "CHAR", "BINARY":
+		// Deliberately conservative cross-dialect length window.
+		return len(args) == 1 && args[0] >= 1 && args[0] <= 255
+	}
+	return false
+}
+
+// The caller has already validated the table name. A relation-changing ALTER
+// is recorded only after its entire bounded comma-separated specification list
+// is validated. Commas inside type arguments do not split specifications.
+// Return false for unrecognized/partial grammar instead of inventing a move.
+func sqlNavMySQLAlterRename(tokens []sqlDDLToken, at int, dialect string) (sqlNavOccurrence, bool) {
+	var target sqlNavOccurrence
+	found := false
+	depth, start := 0, at
+	for i := at; i <= len(tokens); i++ {
+		if i < len(tokens) {
+			switch tokens[i].text {
+			case "(":
+				depth++
+			case ")":
+				depth--
+				if depth < 0 {
+					return sqlNavOccurrence{}, false
+				}
+			}
+		}
+		if i < len(tokens) && (tokens[i].text != "," || depth != 0) {
+			continue
+		}
+		if depth != 0 || start == i {
+			return sqlNavOccurrence{}, false
+		}
+		clause := tokens[start:i]
+		switch clause[0].keyword() {
+		case "RENAME":
+			if len(clause) < 2 || found {
+				return sqlNavOccurrence{}, false
+			}
+			switch clause[1].keyword() {
+			case "COLUMN", "INDEX", "KEY":
+				return sqlNavOccurrence{}, false
+			}
+			targetAt := 1 // TO/AS optional for MySQL, TO optional for MariaDB.
+			if clause[1].keyword() == "TO" || clause[1].keyword() == "AS" {
+				if dialect == "mariadb" && clause[1].keyword() == "AS" {
+					return sqlNavOccurrence{}, false
+				}
+				targetAt++
+			}
+			if targetAt >= len(clause) || clause[targetAt].keyword() == "TO" ||
+				clause[targetAt].keyword() == "AS" || clause[targetAt].keyword() == "COLUMN" {
+				return sqlNavOccurrence{}, false
+			}
+			name, end, valid := sqlNavName(clause, targetAt)
+			if !valid || end != len(clause) || strings.Count(name.identity, "\x00") > 1 ||
+				!sqlNavMySQLNameAllowed(clause, targetAt, end, dialect) {
+				return sqlNavOccurrence{}, false
+			}
+			target, found = name, true
+		case "ADD", "DROP":
+			if !sqlNavMySQLAlterAuxColumn(clause, dialect) {
+				return sqlNavOccurrence{}, false
+			}
+		default:
+			return sqlNavOccurrence{}, false
+		}
+		start = i + 1
+	}
+	return target, found
+}
+
 func sqlNavAt(span sqlDDLRange, line, character int) bool {
 	start, end := span.Start, span.End
 	return (line > start.Line || line == start.Line && character >= start.Character) &&
@@ -118,6 +344,10 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 		}
 	}
 	var result []sqlNavOccurrence
+	// A qualified ALTER with an apparent relation RENAME that this bounded
+	// parser cannot validate must never let earlier CREATE evidence appear
+	// definitively current. Reject the source graph as uncertain instead.
+	unknownRelationMove := false
 	scan := func(statement []sqlDDLToken) {
 		if len(statement) < 2 {
 			return
@@ -191,6 +421,10 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 					at += 3
 				}
 				occ, next, valid := sqlNavName(statement, at)
+				if valid && (dialect == "mysql" || dialect == "mariadb") &&
+					!sqlNavMySQLNameAllowed(statement, at, next, dialect) {
+					return // invalid bare reserved name is not a source declaration
+				}
 				if valid && next < len(statement) &&
 					((object == "TABLE" && (statement[next].text == "(" ||
 						statement[next].keyword() == "AS" || statement[next].keyword() == "LIKE")) ||
@@ -219,19 +453,20 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 				at++
 				if at+1 < len(statement) && statement[at].keyword() == "IF" &&
 					statement[at+1].keyword() == "EXISTS" {
+					if operation == "ALTER" && dialect == "mysql" {
+						return // MariaDB supports ALTER TABLE IF EXISTS; MySQL 8.4 does not
+					}
 					at += 2
 				}
 				if at < len(statement) && statement[at].keyword() == "ONLY" {
-					// ONLY applies to PostgreSQL ALTER TABLE's inheritance-
-					// scoped subforms. It is not a supported modifier for
-					// DROP, ALTER VIEW, or MySQL/MariaDB relation moves.
-					// Ignore unsupported spellings entirely rather than
-					// inventing old/new lifecycle tombstones.
-					if operation != "ALTER" || materialized || object != "TABLE" ||
-						(dialect != "postgres" && dialect != "postgresql") {
+					if operation == "ALTER" && !materialized && object == "TABLE" &&
+						(dialect == "postgres" || dialect == "postgresql") {
+						at++ // PostgreSQL inheritance-scoped ALTER TABLE
+					} else if !sqlNavMySQLBareOnlyName(statement, at, dialect, operation, object) {
+						// Unsupported modifier or malformed unquoted identifier
+						// cannot synthesize a relation lifecycle transition.
 						return
 					}
-					at++
 				}
 				// PostgreSQL ordinary TABLE/VIEW RENAME TO and SET SCHEMA
 				// change the relation identity. Never serve the old CREATE as
@@ -355,36 +590,117 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 					}
 					break
 				}
-				isLifecycleChange := operation == "DROP"
-				if operation == "ALTER" {
-					for i := at; i+1 < len(statement); i++ {
+				if operation == "DROP" {
+					// A malformed later item invalidates the whole DROP statement.
+					// Do not emit earlier tombstones until the entire name list
+					// (and optional trailing modifier) has been verified.
+					var drops []sqlNavOccurrence
+					for {
+						if at >= len(statement) || statement[at].keyword() == "CASCADE" ||
+							statement[at].keyword() == "RESTRICT" {
+							return
+						}
+						if statement[at].keyword() == "ONLY" &&
+							!sqlNavMySQLBareOnlyName(statement, at, dialect, operation, object) {
+							return
+						}
+						occ, end, valid := sqlNavName(statement, at)
+						if !valid || ((dialect == "mysql" || dialect == "mariadb") &&
+							!sqlNavMySQLNameAllowed(statement, at, end, dialect)) {
+							return // reserved or malformed names must not emit a partial DROP list
+						}
+						occ.drop = true
+						drops = append(drops, occ)
+						if end == len(statement) {
+							break
+						}
+						if statement[end].text == "," {
+							at = end + 1
+							continue
+						}
+						if end+1 != len(statement) ||
+							(statement[end].keyword() != "CASCADE" && statement[end].keyword() != "RESTRICT") {
+							return
+						}
+						break
+					}
+					result = append(result, drops...)
+					break
+				}
+				// The relation header must be valid before searching for a
+				// relation-changing clause; RENAME inside a qualified name
+				// is not itself a relation rename.
+				relation, end, valid := sqlNavName(statement, at)
+				if !valid || end >= len(statement) || ((dialect == "mysql" || dialect == "mariadb") &&
+					strings.Count(relation.identity, "\x00") > 1) {
+					return // malformed or unsupported relation header
+				}
+				if (dialect == "mysql" || dialect == "mariadb") &&
+					!sqlNavMySQLNameAllowed(statement, at, end, dialect) {
+					// An unquoted reserved source table cannot legally be renamed.
+					// Preserve history uncertainty rather than falsely treating an
+					// earlier CREATE as current after an unvalidated move.
+					for i := end; i < len(statement); i++ {
+						if statement[i].keyword() == "RENAME" {
+							unknownRelationMove = true
+							break
+						}
+					}
+					return
+				}
+				renameAt := -1
+				for i := end; i < len(statement); i++ {
+					if (dialect == "mysql" || dialect == "mariadb") &&
+						(i == end || statement[i-1].text == ",") && statement[i].keyword() == "RENAME" {
+						// RENAME without TO/AS is a table move too. RENAME COLUMN/INDEX/KEY
+						// must never be treated as a relation rename.
+						if i+1 >= len(statement) ||
+							(statement[i+1].keyword() != "COLUMN" &&
+								statement[i+1].keyword() != "INDEX" && statement[i+1].keyword() != "KEY") {
+							renameAt = i
+							break
+						}
+					} else if (dialect == "postgres" || dialect == "postgresql") &&
+						i+1 < len(statement) && statement[i].keyword() == "RENAME" &&
+						(statement[i+1].keyword() == "TO" || statement[i+1].keyword() == "AS") {
+						renameAt = i
+						break
+					}
+				}
+				if renameAt < 0 && (dialect == "mysql" || dialect == "mariadb") {
+					// A RENAME TO/AS buried inside another clause without the
+					// required separator is not a non-mutating ALTER. Preserve
+					// F1: uncertain text cannot emit even a benign relation use.
+					for i := end + 1; i+1 < len(statement); i++ {
 						if statement[i].keyword() == "RENAME" &&
 							(statement[i+1].keyword() == "TO" || statement[i+1].keyword() == "AS") {
-							isLifecycleChange = true
-							break
+							unknownRelationMove = true
+							return
 						}
 					}
 				}
-				end := appendName(at, false, isLifecycleChange)
-				if operation == "DROP" {
-					// DROP TABLE/VIEW accepts comma-separated object names.
-					for end > at && end < len(statement) && statement[end].text == "," {
-						next := appendName(end+1, false, true)
-						if next == end+1 {
-							break
+				if renameAt >= 0 {
+					// Keep MySQL/MariaDB lifecycle history atomic. An
+					// unsupported or incomplete target cannot poison the
+					// original CREATE or invent a renamed relation.
+					if dialect == "mysql" || dialect == "mariadb" {
+						if object != "TABLE" {
+							return
 						}
-						end = next
-					}
-				} else if isLifecycleChange {
-					// Both the old and new names need lifecycle tombstones: a
-					// prior CREATE for either cannot prove the active schema.
-					for i := end; i+1 < len(statement); i++ {
-						if statement[i].keyword() == "RENAME" &&
-							(statement[i+1].keyword() == "TO" || statement[i+1].keyword() == "AS") {
-							appendName(i+2, false, true)
-							break
+						target, ok := sqlNavMySQLAlterRename(statement, end, dialect)
+						if !ok {
+							unknownRelationMove = true
+							return // no tombstones, and no proven active history
 						}
+						relation.drop, target.drop = true, true
+						result = append(result, relation, target)
+					} else {
+						relation.drop = true
+						result = append(result, relation)
+						appendName(renameAt+2, false, true)
 					}
+				} else {
+					result = append(result, relation)
 				}
 			}
 		case "REFRESH":
@@ -419,16 +735,46 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 		case "RENAME":
 			if statement[at].keyword() == "TABLE" {
 				at++
-				for at < len(statement) {
-					end := appendName(at, false, true)
-					if end == at || end >= len(statement) || statement[end].keyword() != "TO" {
-						break
+				if dialect == "mysql" || dialect == "mariadb" {
+					// A multi-pair RENAME TABLE is atomic. Only validated,
+					// complete names and separators can make tombstones.
+					var pairs []sqlNavOccurrence
+					for at < len(statement) {
+						old, end, oldOK := sqlNavName(statement, at)
+						if !oldOK || !sqlNavMySQLNameAllowed(statement, at, end, dialect) ||
+							end >= len(statement) || statement[end].keyword() != "TO" {
+							unknownRelationMove = true
+							return
+						}
+						newName, next, newOK := sqlNavName(statement, end+1)
+						if !newOK || !sqlNavMySQLNameAllowed(statement, end+1, next, dialect) {
+							unknownRelationMove = true
+							return
+						}
+						old.drop, newName.drop = true, true
+						pairs = append(pairs, old, newName)
+						if next == len(statement) {
+							result = append(result, pairs...)
+							return
+						}
+						if statement[next].text != "," || next+1 == len(statement) {
+							unknownRelationMove = true
+							return
+						}
+						at = next + 1
 					}
-					end = appendName(end+1, false, true)
-					if end >= len(statement) || statement[end].text != "," {
-						break
+				} else {
+					for at < len(statement) {
+						end := appendName(at, false, true)
+						if end == at || end >= len(statement) || statement[end].keyword() != "TO" {
+							break
+						}
+						end = appendName(end+1, false, true)
+						if end >= len(statement) || statement[end].text != "," {
+							break
+						}
+						at = end + 1
 					}
-					at = end + 1
 				}
 			}
 		case "INSERT":
@@ -488,6 +834,9 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 	}
 	if start < len(tokens) {
 		scan(tokens[start:])
+	}
+	if unknownRelationMove {
+		return nil, false // the source-only graph is not safely interpretable
 	}
 	return result, true
 }

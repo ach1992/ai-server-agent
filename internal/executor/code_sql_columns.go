@@ -111,7 +111,11 @@ func sqlNavColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurrence {
 			at += 2
 		}
 		if at < len(statement) && statement[at].keyword() == "ONLY" {
-			at++
+			if dialect == "postgres" || dialect == "postgresql" {
+				at++ // PostgreSQL inheritance modifier
+			} else if !sqlNavMySQLBareOnlyName(statement, at, dialect, operation, "TABLE") {
+				return nil // do not produce column sources for malformed SQL
+			}
 		}
 	case "INSERT":
 		if statement[1].keyword() != "INTO" {
