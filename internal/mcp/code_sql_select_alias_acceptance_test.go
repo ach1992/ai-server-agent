@@ -154,9 +154,10 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 		return response
 	}
 	files := map[string]string{
-		"migrations/001_accounts.sql": "CREATE TABLE public.accounts (id BIGINT PRIMARY KEY, name TEXT);\n",
-		"migrations/002_payments.sql": "CREATE TABLE public.payments (id BIGINT PRIMARY KEY, account_id BIGINT REFERENCES public.accounts(id));\n",
-		"queries/list.sql":            "SELECT a.id, p.account_id FROM public.accounts AS a JOIN public.payments p ON p.account_id = a.id WHERE a.id > 0;\n",
+		"migrations/001_accounts.sql":    "CREATE TABLE public.accounts (id BIGINT PRIMARY KEY, name TEXT);\n",
+		"migrations/002_payments.sql":    "CREATE TABLE public.payments (id BIGINT PRIMARY KEY, account_id BIGINT REFERENCES public.accounts(id));\n",
+		"migrations/003_quoted_only.sql": "CREATE TABLE \"only\" (id BIGINT PRIMARY KEY);\n",
+		"queries/list.sql":               "SELECT a.id, p.account_id FROM public.accounts AS a JOIN public.payments p ON p.account_id = a.id WHERE a.id > 0;\n",
 	}
 	for name, source := range files {
 		path := filepath.Join(cfg.WorkspaceDir, name)
@@ -177,10 +178,13 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 	}
 	sourceVersion := stat("queries/list.sql")
 	accountVersion, paymentVersion := stat("migrations/001_accounts.sql"), stat("migrations/002_payments.sql")
-	query := func(method string, character int, sourceVersion string) executor.Response {
+	queryDialect := func(method, dialect string, character int, sourceVersion string) executor.Response {
 		return call("code_"+method, map[string]any{"workspace": cfg.WorkspaceDir,
 			"path": "queries/list.sql", "file_version": sourceVersion, "language": "sql",
-			"sql_dialect": "postgres", "line": 0, "character": character})
+			"sql_dialect": dialect, "line": 0, "character": character})
+	}
+	query := func(method string, character int, sourceVersion string) executor.Response {
+		return queryDialect(method, "postgres", character, sourceVersion)
 	}
 	first := strings.Index(files["queries/list.sql"], "a.id") + 2
 	definition := query("definition", first, sourceVersion)
@@ -236,13 +240,27 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 		"SELECT a.id FROM public.accounts a JUNK JOIN public.payments p ON p.account_id=a.id;\n",
 		"SELECT a.id FROM public.accounts a JOIN public.payments p NOISE ON p.account_id=a.id;\n",
 		"SELECT a.id FROM public.accounts a LEFT NOISE JOIN public.payments p ON p.account_id=a.id;\n",
+		"SELECT accounts.id FROM ONLY accounts;\n",
+		"SELECT accounts.id FROM public.payments p JOIN ONLY accounts ON p.account_id=accounts.id;\n",
+		"SELECT accounts.id FROM TABLE accounts;\n",
+		"SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id=ONLY;\n",
+		"SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id=TABLE;\n",
 	} {
 		if err := os.WriteFile(filepath.Join(cfg.WorkspaceDir, "queries/list.sql"), []byte(invalid), 0600); err != nil {
 			t.Fatal(err)
 		}
 		invalidVersion := stat("queries/list.sql")
+		selected := "a.id"
+		if strings.Contains(invalid, "accounts.id") {
+			selected = "accounts.id"
+		}
+		at := strings.Index(invalid, selected)
+		if at < 0 {
+			t.Fatalf("missing malformed source selection %q", selected)
+		}
+		at += strings.LastIndex(selected, ".") + 2
 		for _, method := range []string{"definition", "references"} {
-			response := query(method, strings.Index(invalid, "a.id")+2, invalidVersion)
+			response := query(method, at, invalidVersion)
 			if response.OK {
 				var targets []struct {
 					URI string `json:"uri"`
@@ -283,5 +301,65 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 	if !realRefs.OK || json.Unmarshal([]byte(realRefs.Output), &locs) != nil || len(locs) != 3 {
 		t.Fatalf("function polluted source-backed references: %+v %+v", realRefs, locs)
 	}
-	t.Log("DIRECT_REAL_SQL_ALIAS_MCP_PASS definitions=2 references=5 versions=3 stale_rejected=true no_db=true malformed_on_rejected=true functions_excluded=true source_literals_rejected=true unconsumed_source_gaps_rejected=true")
+	// An actual quoted PostgreSQL "only" migration exists beside accounts.
+	// The preceding ONLY modifier negatives must never reach this real table,
+	// while an explicitly quoted relation remains navigable.
+	quotedOnly := "SELECT o.id FROM \"only\" o;\n"
+	if err := os.WriteFile(filepath.Join(cfg.WorkspaceDir, "queries/list.sql"), []byte(quotedOnly), 0600); err != nil {
+		t.Fatal(err)
+	}
+	quotedVersion := stat("queries/list.sql")
+	quotedDef := query("definition", strings.Index(quotedOnly, "o.id")+2, quotedVersion)
+	if !quotedDef.OK || json.Unmarshal([]byte(quotedDef.Output), &locs) != nil || len(locs) != 1 ||
+		locs[0].URI != "migrations/003_quoted_only.sql" ||
+		locs[0].FileVersion != stat(locs[0].URI) {
+		t.Fatalf("quoted PostgreSQL only table mapped to wrong declaration: %+v %+v", quotedDef, locs)
+	}
+	quotedRefs := query("references", strings.Index(quotedOnly, "o.id")+2, quotedVersion)
+	if !quotedRefs.OK || json.Unmarshal([]byte(quotedRefs.Output), &locs) != nil || len(locs) != 2 {
+		t.Fatalf("quoted PostgreSQL only table references lost: %+v %+v", quotedRefs, locs)
+	}
+
+	// ONLY is a nonreserved ordinary table name in MySQL/MariaDB. Reuse the
+	// same real MCP/worker path and test-owned migration with dialect-correct
+	// identifier quoting, rather than generalizing PostgreSQL's ONLY rule.
+	for _, dialect := range []string{"mysql", "mariadb"} {
+		if err := os.WriteFile(filepath.Join(cfg.WorkspaceDir, "migrations/003_quoted_only.sql"),
+			[]byte("CREATE TABLE `only` (id BIGINT PRIMARY KEY);\n"), 0600); err != nil {
+			t.Fatal(err)
+		}
+		onlyQuery := "SELECT accounts.id FROM ONLY accounts;\n"
+		if err := os.WriteFile(filepath.Join(cfg.WorkspaceDir, "queries/list.sql"), []byte(onlyQuery), 0600); err != nil {
+			t.Fatal(err)
+		}
+		onlyVersion := stat("queries/list.sql")
+		at := strings.Index(onlyQuery, "accounts.id") + len("accounts.") + 1
+		onlyDef := queryDialect("definition", dialect, at, onlyVersion)
+		if !onlyDef.OK || json.Unmarshal([]byte(onlyDef.Output), &locs) != nil || len(locs) != 1 ||
+			locs[0].URI != "migrations/003_quoted_only.sql" ||
+			locs[0].FileVersion != stat(locs[0].URI) {
+			t.Fatalf("%s ONLY ordinary table did not resolve to its own migration: %+v %+v", dialect, onlyDef, locs)
+		}
+		onlyRefs := queryDialect("references", dialect, at, onlyVersion)
+		if !onlyRefs.OK || json.Unmarshal([]byte(onlyRefs.Output), &locs) != nil || len(locs) != 2 {
+			t.Fatalf("%s ONLY ordinary table reference mismatch: %+v %+v", dialect, onlyRefs, locs)
+		}
+		// The same unquoted table name must stay physical inside a JOIN.
+		joinQuery := "SELECT o.id FROM public.accounts a JOIN ONLY o ON o.id=a.id;\n"
+		if err := os.WriteFile(filepath.Join(cfg.WorkspaceDir, "queries/list.sql"), []byte(joinQuery), 0600); err != nil {
+			t.Fatal(err)
+		}
+		joinVersion := stat("queries/list.sql")
+		joinAt := strings.Index(joinQuery, "o.id") + 2
+		joinDef := queryDialect("definition", dialect, joinAt, joinVersion)
+		if !joinDef.OK || json.Unmarshal([]byte(joinDef.Output), &locs) != nil || len(locs) != 1 ||
+			locs[0].URI != "migrations/003_quoted_only.sql" {
+			t.Fatalf("%s JOIN ONLY source mapped to wrong table: %+v %+v", dialect, joinDef, locs)
+		}
+		joinRefs := queryDialect("references", dialect, joinAt, joinVersion)
+		if !joinRefs.OK || json.Unmarshal([]byte(joinRefs.Output), &locs) != nil || len(locs) != 3 {
+			t.Fatalf("%s JOIN ONLY real references lost: %+v %+v", dialect, joinRefs, locs)
+		}
+	}
+	t.Log("DIRECT_REAL_SQL_ALIAS_MCP_PASS definitions=2 references=5 versions=3 stale_rejected=true no_db=true malformed_on_rejected=true functions_excluded=true source_literals_rejected=true unconsumed_source_gaps_rejected=true pg_on_reserved_rejected=true pg_only_modifier_rejected=true pg_quoted_only_resolved=true mysql_only_resolved=true mariadb_only_resolved=true mysql_mariadb_join_only_resolved=true")
 }

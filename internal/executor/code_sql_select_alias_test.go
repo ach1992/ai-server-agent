@@ -62,6 +62,118 @@ func TestSQLSelectAliasColumnGraph(t *testing.T) {
 	}
 }
 
+func TestSQLSelectAliasPostgresSourceKeywordGrammarFailsClosed(t *testing.T) {
+	// An unquoted PostgreSQL grammar keyword is not an ordinary FROM/JOIN
+	// relation or alias. The original ONLY bug maps accounts.id to
+	// "only".id when an actual quoted table "only" also exists.
+	cases := []struct {
+		name, source, selected string
+	}{
+		{"pg_only_from", "SELECT accounts.id FROM ONLY accounts;", "accounts.id"},
+		{"pg_only_join", "SELECT accounts.id FROM payments p JOIN ONLY accounts ON p.account_id=accounts.id;", "accounts.id"},
+		{"pg_only_qualified", "SELECT accounts.id FROM ONLY.accounts;", "accounts.id"},
+		{"pg_reserved_table", "SELECT accounts.id FROM TABLE accounts;", "accounts.id"},
+		{"pg_reserved_user", "SELECT accounts.id FROM USER accounts;", "accounts.id"},
+		{"pg_reserved_current_user", "SELECT accounts.id FROM CURRENT_USER accounts;", "accounts.id"},
+		{"pg_type_keyword_left", "SELECT accounts.id FROM LEFT accounts;", "accounts.id"},
+		{"pg_type_keyword_join", "SELECT accounts.id FROM JOIN accounts;", "accounts.id"},
+		{"pg_reserved_alias", "SELECT only.id FROM accounts AS ONLY;", "only.id"},
+		{"pg_reserved_alias_implicit", "SELECT only.id FROM accounts ONLY;", "only.id"},
+		{"pg_type_keyword_alias", "SELECT left.id FROM accounts AS LEFT;", "left.id"},
+		{"pg_only_join_qualified", "SELECT accounts.id FROM payments p JOIN ONLY.accounts ON accounts.id=p.account_id;", "accounts.id"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			events, valid := sqlNavAllOccurrences(tc.source, "postgres")
+			if valid {
+				for _, event := range events {
+					if event.isColumn {
+						t.Fatalf("invalid PostgreSQL binding emitted physical column: %+v", event)
+					}
+				}
+			}
+			start := strings.Index(tc.source, tc.selected)
+			if start < 0 {
+				t.Fatal("bad test selection")
+			}
+			at := start + strings.LastIndex(tc.selected, ".") + 2
+			if column, ok := sqlNavSelected(tc.source, "postgres", 0, at); ok && column.isColumn {
+				t.Fatalf("invalid PostgreSQL binding selectable: %+v", column)
+			}
+		})
+	}
+}
+
+func TestSQLSelectAliasPostgresSourceKeywordClassMutations(t *testing.T) {
+	// Exhaust the pinned PostgreSQL reserved/type-function keyword classes at
+	// each ordinary FROM/JOIN name or alias binding boundary. Testing every
+	// keyword catches the same bug family as ONLY/TABLE/LEFT instead of
+	// creating a new point fix for each independently reported token.
+	for keyword := range sqlNavPostgresSelectDisallowed {
+		for _, source := range []string{
+			"SELECT a.id FROM " + keyword + " a;",
+			"SELECT a.id FROM accounts x JOIN " + keyword + " a ON x.id=a.id;",
+			"SELECT " + keyword + ".id FROM accounts AS " + keyword + ";",
+			"SELECT " + keyword + ".id FROM accounts " + keyword + ";",
+		} {
+			t.Run(keyword+"/"+source, func(t *testing.T) {
+				events, valid := sqlNavAllOccurrences(source, "postgres")
+				if valid {
+					for _, ev := range events {
+						if ev.isColumn {
+							t.Fatalf("PostgreSQL keyword used as unquoted source/alias: %+v", ev)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestSQLSelectAliasSourceKeywordDialectAndQuotingPositives(t *testing.T) {
+	// Reserved syntax is dialect/context-specific. "only" is a valid
+	// quoted PostgreSQL relation and a valid *unquoted* MySQL/MariaDB
+	// relation, but not an unquoted PostgreSQL FROM/JOIN table.
+	cases := []struct {
+		name, dialect, source, selected, identity string
+	}{
+		{"pg_quoted_only", "postgres", "SELECT a.id FROM \"only\" AS a;", "a.id", "only\u0000column\u0000id"},
+		{"pg_quoted_only_alias", "postgres", "SELECT \"only\".id FROM accounts AS \"only\";", "\"only\".id", "accounts\u0000column\u0000id"},
+		{"pg_quoted_schema", "postgres", "SELECT a.id FROM \"ONLY\".accounts AS a;", "a.id", "ONLY\u0000accounts\u0000column\u0000id"},
+		{"pg_unreserved_name", "postgres", "SELECT inherit.id FROM inherit;", "inherit.id", "inherit\u0000column\u0000id"},
+		{"mysql_only_source", "mysql", "SELECT accounts.id FROM ONLY accounts;", "accounts.id", "only\u0000column\u0000id"},
+		{"mariadb_only_source", "mariadb", "SELECT accounts.id FROM ONLY accounts;", "accounts.id", "only\u0000column\u0000id"},
+		{"mysql_only_join", "mysql", "SELECT p.id FROM accounts a JOIN ONLY p ON p.account_id=a.id;", "p.id", "only\u0000column\u0000id"},
+		{"mariadb_only_join", "mariadb", "SELECT p.id FROM accounts a JOIN ONLY p ON p.account_id=a.id;", "p.id", "only\u0000column\u0000id"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			items, valid := sqlNavAllOccurrences(tc.source, tc.dialect)
+			if !valid {
+				t.Fatal("valid dialect SQL source became globally unparseable")
+			}
+			var matched bool
+			for _, item := range items {
+				if item.isColumn && item.identity == tc.identity {
+					matched = true
+				}
+			}
+			if !matched {
+				t.Fatalf("missing exact dialect-aware physical source %q: %+v", tc.identity, items)
+			}
+			at := strings.Index(tc.source, tc.selected)
+			if at < 0 {
+				t.Fatal("bad test selection")
+			}
+			at += strings.LastIndex(tc.selected, ".") + 2
+			if selected, ok := sqlNavSelected(tc.source, tc.dialect, 0, at); !ok ||
+				!selected.isColumn || selected.identity != tc.identity {
+				t.Fatalf("unexpected dialect keyword binding: %+v found=%v", selected, ok)
+			}
+		})
+	}
+}
+
 func TestSQLSelectAliasRefusesAmbiguousScopes(t *testing.T) {
 	cases := []string{
 		`WITH accounts AS (SELECT 1 AS id) SELECT a.id FROM accounts AS a;`,
@@ -236,6 +348,81 @@ func TestSQLSelectAliasSupportedOnGrammar(t *testing.T) {
 			}
 			if got != tc.wantUses {
 				t.Fatalf("proven ON/alias column uses %d != %d: %+v", got, tc.wantUses, occurrences)
+			}
+		})
+	}
+}
+
+func TestSQLSelectAliasPostgresOnReservedOperandFailsClosed(t *testing.T) {
+	// The ON subgrammar must not certify a reserved SQL keyword as a
+	// physical column/expression name. No migration target is justified
+	// when a syntactically invalid operand follows a comparison.
+	for _, tc := range []struct{ name, source string }{
+		{"pg_only_rhs", "SELECT a.id FROM accounts a JOIN payments p ON a.id = ONLY;"},
+		{"pg_table_rhs", "SELECT a.id FROM accounts a JOIN payments p ON a.id = TABLE;"},
+		{"pg_user_rhs", "SELECT a.id FROM accounts a JOIN payments p ON a.id = USER;"},
+		{"pg_left_rhs", "SELECT a.id FROM accounts a JOIN payments p ON a.id = LEFT;"},
+		{"pg_only_lhs", "SELECT a.id FROM accounts a JOIN payments p ON ONLY = p.account_id;"},
+		{"pg_type_keyword_with_and", "SELECT a.id FROM accounts a JOIN payments p ON a.id=p.account_id AND a.id=TABLE;"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			events, valid := sqlNavAllOccurrences(tc.source, "postgres")
+			if valid {
+				for _, ev := range events {
+					if ev.isColumn {
+						t.Fatalf("invalid PostgreSQL ON operand emitted a column: %+v", ev)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestSQLSelectAliasPostgresOnKeywordClassMutations(t *testing.T) {
+	// Bare SQL grammar keywords cannot act as physical ON identifiers,
+	// even if the rest of a JOIN looks structurally complete.
+	for keyword := range sqlNavPostgresSelectDisallowed {
+		switch keyword {
+		case "TRUE", "FALSE", "NULL":
+			continue // supported constant expressions, not identifiers
+		}
+		source := "SELECT a.id FROM accounts a JOIN payments p ON a.id=" + keyword + ";"
+		t.Run(keyword, func(t *testing.T) {
+			items, valid := sqlNavAllOccurrences(source, "postgres")
+			if valid {
+				for _, item := range items {
+					if item.isColumn {
+						t.Fatalf("reserved PostgreSQL ON operand invented a column: %+v", item)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestSQLSelectAliasOnDialectKeywordAndConstantPositives(t *testing.T) {
+	for _, tc := range []struct {
+		name, dialect, source string
+	}{
+		{"pg_quoted_keyword", "postgres", "SELECT a.id FROM accounts a JOIN payments p ON a.id=p.\"only\";"},
+		{"pg_true_constant", "postgres", "SELECT a.id FROM accounts a JOIN payments p ON a.id=TRUE;"},
+		{"pg_null_constant", "postgres", "SELECT a.id FROM accounts a JOIN payments p ON a.id=NULL;"},
+		{"mysql_only_operand", "mysql", "SELECT a.id FROM accounts a JOIN payments p ON a.id=ONLY;"},
+		{"mariadb_only_operand", "mariadb", "SELECT a.id FROM accounts a JOIN payments p ON a.id=ONLY;"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			items, valid := sqlNavAllOccurrences(tc.source, tc.dialect)
+			if !valid {
+				t.Fatal("supported source unparseable")
+			}
+			var references int
+			for _, item := range items {
+				if item.isColumn && item.identity == "accounts\u0000column\u0000id" {
+					references++
+				}
+			}
+			if references != 2 {
+				t.Fatalf("supported ON expression lost expected accounts.id projection and ON references: %d %+v", references, items)
 			}
 		})
 	}
@@ -577,9 +764,10 @@ func TestSQLSelectAliasWorkerCrossFileNavigation(t *testing.T) {
 	}
 	s.workspaceHelperBinary = helper
 	files := map[string]string{
-		"migrations/001_accounts.sql": "CREATE TABLE public.accounts (id BIGINT PRIMARY KEY, name TEXT);\n",
-		"migrations/002_payments.sql": "CREATE TABLE public.payments (id BIGINT PRIMARY KEY, account_id BIGINT REFERENCES public.accounts(id));\n",
-		"queries/list.sql":            "SELECT a.id, p.account_id FROM public.accounts AS a JOIN public.payments p ON p.account_id = a.id WHERE a.id > 0;\n",
+		"migrations/001_accounts.sql":    "CREATE TABLE public.accounts (id BIGINT PRIMARY KEY, name TEXT);\n",
+		"migrations/002_payments.sql":    "CREATE TABLE public.payments (id BIGINT PRIMARY KEY, account_id BIGINT REFERENCES public.accounts(id));\n",
+		"migrations/003_quoted_only.sql": "CREATE TABLE \"only\" (id BIGINT PRIMARY KEY);\n",
+		"queries/list.sql":               "SELECT a.id, p.account_id FROM public.accounts AS a JOIN public.payments p ON p.account_id = a.id WHERE a.id > 0;\n",
 	}
 	for name, body := range files {
 		file := filepath.Join(workspace, name)
@@ -657,6 +845,12 @@ func TestSQLSelectAliasWorkerCrossFileNavigation(t *testing.T) {
 		{"join_unknown_gap_before_on", "SELECT a.id FROM public.accounts a JOIN public.payments p NOISE ON p.account_id=a.id;\n", "a.id"},
 		{"join_unknown_modifier", "SELECT a.id FROM public.accounts a LEFT NOISE JOIN public.payments p ON p.account_id=a.id;\n", "a.id"},
 		{"repeated_as_alias", "SELECT a.id FROM public.accounts AS a AS b;\n", "a.id"},
+		{"pg_only_physical_misbinding", "SELECT accounts.id FROM ONLY accounts;\n", "accounts.id"},
+		{"pg_only_join_misbinding", "SELECT accounts.id FROM public.payments p JOIN ONLY accounts ON p.account_id=accounts.id;\n", "accounts.id"},
+		{"pg_reserved_table_keyword", "SELECT accounts.id FROM TABLE accounts;\n", "accounts.id"},
+		{"pg_typefunc_keyword", "SELECT accounts.id FROM LEFT accounts;\n", "accounts.id"},
+		{"pg_reserved_only_on_operand", "SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id=ONLY;\n", "a.id"},
+		{"pg_reserved_table_on_operand", "SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id=TABLE;\n", "a.id"},
 	}
 	for _, tc := range badQueries {
 		t.Run(tc.name, func(t *testing.T) {
@@ -689,6 +883,28 @@ func TestSQLSelectAliasWorkerCrossFileNavigation(t *testing.T) {
 			}
 		})
 	}
+	// A real table named "only" is present alongside public.accounts.
+	// PostgreSQL's unquoted ONLY modifier above must not bind to it, but
+	// a deliberately quoted table name must remain fully navigable.
+	quotedOnly := "SELECT o.id FROM \"only\" AS o;\n"
+	if err := os.WriteFile(filepath.Join(workspace, owner.Path), []byte(quotedOnly), 0600); err != nil {
+		t.Fatal(err)
+	}
+	owner.FileVersion = version(owner.Path)
+	owner.Character = strings.Index(quotedOnly, "o.id") + 2
+	owner.CodeMethod = "definition"
+	resp = s.codeInspect(ctx, owner)
+	if !resp.OK || json.Unmarshal([]byte(resp.Output), &locs) != nil || len(locs) != 1 ||
+		locs[0].URI != "migrations/003_quoted_only.sql" ||
+		locs[0].FileVersion != version(locs[0].URI) {
+		t.Fatalf("quoted PostgreSQL only table did not resolve to its own declaration: %+v %+v", resp, locs)
+	}
+	owner.CodeMethod = "references"
+	resp = s.codeInspect(ctx, owner)
+	if !resp.OK || json.Unmarshal([]byte(resp.Output), &locs) != nil || len(locs) != 2 {
+		t.Fatalf("quoted PostgreSQL only table references lost: %+v %+v", resp, locs)
+	}
+
 	if err := os.WriteFile(filepath.Join(workspace, owner.Path), []byte(files[owner.Path]), 0600); err != nil {
 		t.Fatal(err)
 	}

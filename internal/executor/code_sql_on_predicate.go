@@ -171,20 +171,31 @@ func (p *sqlNavOnParser) number() bool {
 	return true
 }
 
-func sqlNavOnNameAllowed(token sqlDDLToken) bool {
+func sqlNavOnNameAllowed(token sqlDDLToken, dialect string, afterDot bool) bool {
 	if token.kind == 'q' {
 		return true
 	}
-	if token.kind != 'i' {
+	if token.kind != 'i' || !sqlNavSimpleName.MatchString(token.text) {
 		return false
 	}
-	// A grammar delimiter or SQL clause cannot be an unquoted operand.
-	// SQL names use the existing sqlNavName length, quoting and syntax guards.
+	// A qualified attribute after a dot may use a keyword in supported
+	// dialects; an unquoted *leading* identifier must be legal in its own
+	// dialect. This is the same binding guarantee as FROM/JOIN names.
+	if afterDot {
+		return true
+	}
+	// A grammar delimiter cannot be interpreted as a standalone operand.
 	switch token.keyword() {
 	case "AND", "OR", "ON", "JOIN", "INNER", "LEFT", "RIGHT", "FULL", "OUTER", "FROM", "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "OFFSET", "FETCH", "WINDOW", "FOR", "SELECT", "UNION", "EXCEPT", "INTERSECT", "WITH", "AS", "NOT", "IS", "LIKE", "ILIKE", "IN", "BETWEEN", "CASE", "WHEN", "THEN", "ELSE", "END", "USING", "NATURAL", "LATERAL", "CROSS", "CAST":
 		return false
 	}
-	return true
+	if dialect == "postgres" || dialect == "postgresql" {
+		return sqlNavPostgresSelectIdentifierAllowed(token, false)
+	}
+	if dialect == "mysql" || dialect == "mariadb" {
+		return sqlNavMySQLBareIdentifierAllowed(token, dialect, false)
+	}
+	return false
 }
 
 func (p *sqlNavOnParser) scalar() bool {
@@ -194,7 +205,13 @@ func (p *sqlNavOnParser) scalar() bool {
 	if p.tokens[p.at].kind == 'p' {
 		return p.number()
 	}
-	if !sqlNavOnNameAllowed(p.tokens[p.at]) {
+	// Boolean/NULL constants are expressions, not physical identifiers.
+	// PostgreSQL reserves these words, but valid comparisons still use them.
+	if p.keyword("TRUE") || p.keyword("FALSE") || p.keyword("NULL") {
+		p.at++
+		return true
+	}
+	if !sqlNavOnNameAllowed(p.tokens[p.at], p.dialect, false) {
 		return false
 	}
 	_, next, ok := sqlNavName(p.tokens, p.at)
@@ -202,7 +219,7 @@ func (p *sqlNavOnParser) scalar() bool {
 		return false
 	}
 	for i := p.at; i < next; i += 2 {
-		if !sqlNavOnNameAllowed(p.tokens[i]) {
+		if !sqlNavOnNameAllowed(p.tokens[i], p.dialect, i > p.at) {
 			return false
 		}
 	}

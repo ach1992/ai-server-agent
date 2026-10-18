@@ -2,6 +2,51 @@ package executor
 
 import "strings"
 
+// PostgreSQL 18's RESERVED_KEYWORD and TYPE_FUNC_NAME_KEYWORD token classes
+// cannot be bare relation names or FROM-item aliases (ColId positions).
+// Other PostgreSQL keyword classes are allowed as names. Quoted identifiers
+// and names after a qualification dot remain legal. This is SELECT-only:
+// changing the shared DDL lexer/lifecycle keyword handling is unnecessary.
+//
+// Source: postgres/postgres REL_18_STABLE src/include/parser/kwlist.h
+// https://www.postgresql.org/docs/current/sql-keywords-appendix.html
+var sqlNavPostgresSelectDisallowed = sqlNavKeywordSet(`
+ALL ANALYSE ANALYZE AND ANY ARRAY AS ASC ASYMMETRIC BOTH CASE CAST CHECK COLLATE COLUMN
+CONSTRAINT CREATE CURRENT_CATALOG CURRENT_DATE CURRENT_ROLE CURRENT_TIME CURRENT_TIMESTAMP
+CURRENT_USER DEFAULT DEFERRABLE DESC DISTINCT DO ELSE END EXCEPT FALSE FETCH FOR FOREIGN FROM
+GRANT GROUP HAVING IN INITIALLY INTERSECT INTO LATERAL LEADING LIMIT LOCALTIME LOCALTIMESTAMP
+NOT NULL OFFSET ON ONLY OR ORDER PLACING PRIMARY REFERENCES RETURNING SELECT SESSION_USER SOME
+SYMMETRIC SYSTEM_USER TABLE THEN TO TRAILING TRUE UNION UNIQUE USER USING VARIADIC WHEN WHERE
+WINDOW WITH
+AUTHORIZATION BINARY COLLATION CONCURRENTLY CROSS CURRENT_SCHEMA FREEZE FULL ILIKE INNER IS
+ISNULL JOIN LEFT LIKE NATURAL NOTNULL OUTER OVERLAPS RIGHT SIMILAR TABLESAMPLE VERBOSE
+`)
+
+func sqlNavPostgresSelectIdentifierAllowed(token sqlDDLToken, afterDot bool) bool {
+	if token.kind == 'q' {
+		return true
+	}
+	if token.kind != 'i' || !sqlNavSimpleName.MatchString(token.text) {
+		return false
+	}
+	return afterDot || !sqlNavPostgresSelectDisallowed[token.keyword()]
+}
+
+func sqlNavSelectSourceNameAllowed(tokens []sqlDDLToken, start, end int, dialect string) bool {
+	if dialect == "mysql" || dialect == "mariadb" {
+		return sqlNavMySQLNameAllowed(tokens, start, end, dialect)
+	}
+	if (dialect != "postgres" && dialect != "postgresql") || end <= start || end-start > 5 {
+		return false
+	}
+	for at := start; at < end; at += 2 {
+		if !sqlNavPostgresSelectIdentifierAllowed(tokens[at], at > start) {
+			return false
+		}
+	}
+	return true
+}
+
 // SELECT qualified-column uses supplement the source-backed DDL graph. This is
 // intentionally not a general SQL query analyzer: resolve only a bounded,
 // single SELECT scope with explicit ordinary tables and optional table aliases.
@@ -148,8 +193,7 @@ func sqlNavSelectColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurr
 			start := i + 1
 			table, end, valid := sqlNavName(statement, start)
 			if !valid || strings.Count(table.identity, "\x00") > 1 ||
-				((dialect == "mysql" || dialect == "mariadb") &&
-					!sqlNavMySQLNameAllowed(statement, start, end, dialect)) {
+				!sqlNavSelectSourceNameAllowed(statement, start, end, dialect) {
 				return nil
 			}
 			if end < len(statement) && (statement[end].text == "(" || statement[end].text == ".") {
@@ -269,5 +313,6 @@ func sqlNavSelectAliasAllowed(token sqlDDLToken, dialect string) bool {
 	if dialect == "mysql" || dialect == "mariadb" {
 		return sqlNavMySQLBareIdentifierAllowed(token, dialect, false)
 	}
-	return true
+	return (dialect == "postgres" || dialect == "postgresql") &&
+		sqlNavPostgresSelectIdentifierAllowed(token, false)
 }
