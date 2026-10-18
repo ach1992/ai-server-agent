@@ -56,7 +56,10 @@ var (
 
 func sqlNavName(tokens []sqlDDLToken, at int) (sqlNavOccurrence, int, bool) {
 	_, span, next, ok := sqlDDLQualifiedName(tokens, at)
-	if !ok || next-at > 5 {
+	// sqlDDLQualifiedName deliberately permits partial names for other SQL
+	// consumers. Offline navigation must not turn an unmatched dot (or an
+	// unsupported fourth qualifier) into a proved relation identity.
+	if !ok || next-at > 5 || next < len(tokens) && tokens[next].text == "." {
 		return sqlNavOccurrence{}, at, false
 	}
 	parts := make([]string, 0, 3)
@@ -100,7 +103,16 @@ func sqlNavMySQLBareOnlyName(tokens []sqlDDLToken, at int, dialect, operation, o
 	}
 	next := at + 1
 	if next < len(tokens) && tokens[next].text == "." {
-		return true // schema named ONLY, followed by a qualified object
+		// ONLY can also name a schema. Require a complete qualified name
+		// *and* the operation clause after that name; for example,
+		// ONLY. RENAME TO x must not reinterpret RENAME as a table name.
+		_, end, valid := sqlNavName(tokens, at)
+		// MySQL/MariaDB table and view names have at most a database
+		// qualifier; three-part names belong to column references only.
+		if !valid || end != at+3 {
+			return false
+		}
+		next = end
 	}
 	if operation == "DROP" {
 		return next == len(tokens) || tokens[next].text == "," ||
@@ -393,36 +405,83 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 					}
 					break
 				}
-				isLifecycleChange := operation == "DROP"
-				if operation == "ALTER" {
-					for i := at; i+1 < len(statement); i++ {
-						if statement[i].keyword() == "RENAME" &&
-							(statement[i+1].keyword() == "TO" || statement[i+1].keyword() == "AS") {
-							isLifecycleChange = true
+				if operation == "DROP" {
+					// A malformed later item invalidates the whole DROP statement.
+					// Do not emit earlier tombstones until the entire name list
+					// (and optional trailing modifier) has been verified.
+					var drops []sqlNavOccurrence
+					for {
+						if at >= len(statement) || statement[at].keyword() == "CASCADE" ||
+							statement[at].keyword() == "RESTRICT" {
+							return
+						}
+						if statement[at].keyword() == "ONLY" &&
+							!sqlNavMySQLBareOnlyName(statement, at, dialect, operation, object) {
+							return
+						}
+						occ, end, valid := sqlNavName(statement, at)
+						if !valid || ((dialect == "mysql" || dialect == "mariadb") &&
+							strings.Count(occ.identity, "\x00") > 1) {
+							return // table/view names admit at most one database qualifier
+						}
+						occ.drop = true
+						drops = append(drops, occ)
+						if end == len(statement) {
 							break
 						}
+						if statement[end].text == "," {
+							at = end + 1
+							continue
+						}
+						if end+1 != len(statement) ||
+							(statement[end].keyword() != "CASCADE" && statement[end].keyword() != "RESTRICT") {
+							return
+						}
+						break
+					}
+					result = append(result, drops...)
+					break
+				}
+				// The relation header must be valid before searching for a
+				// relation-changing clause; RENAME inside a qualified name
+				// is not itself a relation rename.
+				relation, end, valid := sqlNavName(statement, at)
+				if !valid || end >= len(statement) || ((dialect == "mysql" || dialect == "mariadb") &&
+					strings.Count(relation.identity, "\x00") > 1) {
+					return // malformed or unsupported relation header
+				}
+				renameAt := -1
+				for i := end; i+1 < len(statement); i++ {
+					if statement[i].keyword() == "RENAME" &&
+						(statement[i+1].keyword() == "TO" || statement[i+1].keyword() == "AS") {
+						renameAt = i
+						break
 					}
 				}
-				end := appendName(at, false, isLifecycleChange)
-				if operation == "DROP" {
-					// DROP TABLE/VIEW accepts comma-separated object names.
-					for end > at && end < len(statement) && statement[end].text == "," {
-						next := appendName(end+1, false, true)
-						if next == end+1 {
-							break
+				if renameAt >= 0 {
+					// Keep MySQL/MariaDB lifecycle history atomic. An
+					// unsupported or incomplete target cannot poison the
+					// original CREATE or invent a renamed relation.
+					if dialect == "mysql" || dialect == "mariadb" {
+						// Compound ALTER clauses need their own grammar: a
+						// RENAME token deep inside a clause is not evidence
+						// of a complete relation move.
+						if renameAt != end {
+							return
 						}
-						end = next
-					}
-				} else if isLifecycleChange {
-					// Both the old and new names need lifecycle tombstones: a
-					// prior CREATE for either cannot prove the active schema.
-					for i := end; i+1 < len(statement); i++ {
-						if statement[i].keyword() == "RENAME" &&
-							(statement[i+1].keyword() == "TO" || statement[i+1].keyword() == "AS") {
-							appendName(i+2, false, true)
-							break
+						target, targetEnd, ok := sqlNavName(statement, renameAt+2)
+						if !ok || targetEnd != len(statement) {
+							return
 						}
+						relation.drop, target.drop = true, true
+						result = append(result, relation, target)
+					} else {
+						relation.drop = true
+						result = append(result, relation)
+						appendName(renameAt+2, false, true)
 					}
+				} else {
+					result = append(result, relation)
 				}
 			}
 		case "REFRESH":

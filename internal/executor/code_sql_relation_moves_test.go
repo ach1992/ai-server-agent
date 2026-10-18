@@ -248,6 +248,47 @@ func TestSQLOnlyDialectBoundariesFailClosed(t *testing.T) {
 	}
 }
 
+// Malformed qualified ONLY must not be silently reduced to the unqualified
+// table name, nor may an invalid later item leave earlier DROP tombstones.
+// This is a source-navigation correctness boundary: no SQL is executed.
+func TestSQLMySQLOnlyMalformedLifecycleFailClosed(t *testing.T) {
+	for _, dialect := range []string{"mysql", "mariadb"} {
+		for _, tc := range []struct {
+			name, statement string
+		}{
+			{"drop_table_missing_qualifier", "DROP TABLE ONLY.;"},
+			{"drop_view_missing_qualifier", "DROP VIEW ONLY.;"},
+			{"alter_rename_missing_source_qualifier", "ALTER TABLE ONLY. RENAME TO archived;"},
+			{"drop_list_late_invalid_only_modifier", "DROP TABLE ONLY, archive, ONLY reporting.events;"},
+			{"drop_list_late_incomplete_qualifier", "DROP TABLE ONLY, archive, ONLY.;"},
+			{"drop_list_late_trailing_comma", "DROP TABLE ONLY, archive,;"},
+			{"alter_rename_missing_target", "ALTER TABLE ONLY RENAME TO;"},
+			{"alter_rename_incomplete_target", "ALTER TABLE ONLY RENAME TO archived.;"},
+			{"alter_rename_extra_tokens", "ALTER TABLE ONLY RENAME TO archived garbage;"},
+			{"alter_rename_embedded_unvalidated_spec", "ALTER TABLE ONLY ADD COLUMN detail INT RENAME TO archived;"},
+			{"alter_rename_qualified_source_trailing_dot", "ALTER TABLE ONLY.events. RENAME TO archived;"},
+			{"drop_list_malformed_second_only", "DROP TABLE archive, ONLY reporting.events;"},
+			{"drop_list_malformed_qualified", "DROP TABLE archive, ONLY.events.;"},
+			{"drop_only_three_part_qualifier", "DROP TABLE ONLY.events.archive;"},
+			{"alter_only_three_part_qualifier", "ALTER TABLE ONLY.events.archive RENAME TO archived;"},
+			{"drop_list_late_three_part_qualifier", "DROP TABLE archive, ONLY.events.archive;"},
+			{"drop_qualified_only_three_part", "DROP TABLE staging.ONLY.extra;"},
+			{"alter_qualified_only_three_part", "ALTER TABLE staging.ONLY.RENAME TO archived;"},
+		} {
+			t.Run(dialect+"_"+tc.name, func(t *testing.T) {
+				items, parsed := sqlNavOccurrences(tc.statement, dialect)
+				if parsed && len(items) != 0 {
+					t.Fatalf("malformed lifecycle fabricated relation occurrences: %q: %+v", tc.statement, items)
+				}
+				all, parsed := sqlNavAllOccurrences(tc.statement, dialect)
+				if parsed && len(all) != 0 {
+					t.Fatalf("malformed lifecycle fabricated navigation/columns: %q: %+v", tc.statement, all)
+				}
+			})
+		}
+	}
+}
+
 // ONLY is not reserved in MySQL/MariaDB; unlike PostgreSQL's inheritance
 // modifier, an unquoted ONLY can be a real schema, table or view identifier.
 // The adjacent invalid modifier spellings above must still fail closed.
@@ -260,9 +301,16 @@ func TestSQLMySQLBareOnlyIdentifiers(t *testing.T) {
 			{"rename_table", "ALTER TABLE ONLY RENAME TO archived;", []string{"only", "archived"}},
 			{"rename_qualified_table", "ALTER TABLE staging.ONLY RENAME TO archived;", []string{"staging\x00only", "archived"}},
 			{"rename_only_schema", "ALTER TABLE ONLY.events RENAME TO archived;", []string{"only\x00events", "archived"}},
+			{"rename_quoted_only", "ALTER TABLE `ONLY` RENAME TO `archived`;", []string{"ONLY", "archived"}},
+			{"rename_only_schema_quoted_table", "ALTER TABLE ONLY.`events` RENAME TO archived;", []string{"only\x00events", "archived"}},
 			{"drop_table", "DROP TABLE ONLY;", []string{"only"}},
 			{"drop_view", "DROP VIEW ONLY;", []string{"only"}},
+			{"drop_only_schema", "DROP TABLE ONLY.events;", []string{"only\x00events"}},
+			{"drop_qualified_view", "DROP VIEW ONLY.events;", []string{"only\x00events"}},
 			{"drop_list", "DROP TABLE ONLY, archive;", []string{"only", "archive"}},
+			{"drop_list_qualified", "DROP TABLE ONLY, archive, ONLY.events;", []string{"only", "archive", "only\x00events"}},
+			{"drop_list_restrict", "DROP TABLE ONLY, archive RESTRICT;", []string{"only", "archive"}},
+			{"drop_quoted_only", "DROP TABLE `ONLY`, archive;", []string{"ONLY", "archive"}},
 			{"alter_add_column", "ALTER TABLE ONLY ADD COLUMN value INT;", []string{"only"}},
 			{"alter_rename_column", "ALTER TABLE ONLY RENAME COLUMN value TO next_value;", []string{"only"}},
 		} {
@@ -275,8 +323,7 @@ func TestSQLMySQLBareOnlyIdentifiers(t *testing.T) {
 					if items[i].identity != want {
 						t.Fatalf("wrong identifier at %d: %+v; want %q", i, items[i], want)
 					}
-					if (tc.name == "drop_table" || tc.name == "drop_view" || tc.name == "drop_list" ||
-						tc.name == "rename_table" || tc.name == "rename_qualified_table" || tc.name == "rename_only_schema") && !items[i].drop {
+					if (tc.name != "alter_add_column" && tc.name != "alter_rename_column") && !items[i].drop {
 						t.Fatalf("relation lifecycle failed closed incorrectly: %+v", items)
 					}
 				}
