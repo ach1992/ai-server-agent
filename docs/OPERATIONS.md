@@ -378,6 +378,8 @@ Key boundaries:
 - optional browser binaries are root-owned and browser profile/session data is isolated under Agent state;
 - secrets such as an issued Agent bearer and Cloudflare token must never be persisted in repository content, issue comments, screenshots, chat transcripts or ordinary shell history; the installed MCP credential store contains verifier digests and non-secret principal metadata only.
 
+The authenticated `agent_environment` tool and `/agent-environment.json` endpoint rebuild their self-preservation manifest for each request. The optional LSP/DAP adapter `installed` flags still require fresh, complete, root-provenance and pinned-content integrity validation. To avoid serial multi-tree verification delaying the manifest, these independent readiness checks overlap with **at most two concurrent probes per request**; results are collected before responding, never cached or inferred from path existence. This speeds up the advisory environment view without changing authentication, privileged action policy, or the separate adapter validation/containment requirements at `code_*` and `debug_*` use.
+
 See [docs/ARCHITECTURE.md](ARCHITECTURE.md) for details.
 
 ## Release model
