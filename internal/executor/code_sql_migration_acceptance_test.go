@@ -173,10 +173,53 @@ func TestRealIsolatedMariaDBMigration(t *testing.T) {
 		"CREATE TABLE ordinary_jobs (id INT); " +
 		"ALTER TABLE ordinary_jobs ADD COLUMN detail INT NOT NULL, RENAME TO ordinary_unmodeled; " +
 		"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='acceptance_migration' AND TABLE_NAME='ordinary_unmodeled' AND COLUMN_NAME='detail'; " +
-		"DROP TABLE ordinary_unmodeled;"
+		"DROP TABLE ordinary_unmodeled; " +
+		"CREATE TABLE ONLY (id INT); " +
+		"ALTER TABLE ONLY RENAME archived_only_direct; " +
+		"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='acceptance_migration' AND TABLE_NAME='archived_only_direct' AND COLUMN_NAME='id'; " +
+		"DROP TABLE archived_only_direct; " +
+		"CREATE TABLE ONLY (id INT); " +
+		"ALTER TABLE ONLY ADD COLUMN detail INT, RENAME archived_only_optional_first; " +
+		"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='acceptance_migration' AND TABLE_NAME='archived_only_optional_first' AND COLUMN_NAME='detail'; " +
+		"DROP TABLE archived_only_optional_first; " +
+		"CREATE TABLE ONLY (id INT); " +
+		"ALTER TABLE ONLY RENAME archived_only_optional_second, ADD COLUMN detail INT; " +
+		"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='acceptance_migration' AND TABLE_NAME='archived_only_optional_second' AND COLUMN_NAME='detail'; " +
+		"DROP TABLE archived_only_optional_second; " +
+		"CREATE TABLE ordinary_jobs (id INT); " +
+		"ALTER TABLE ordinary_jobs RENAME archived_ordinary_direct; " +
+		"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='acceptance_migration' AND TABLE_NAME='archived_ordinary_direct' AND COLUMN_NAME='id'; " +
+		"DROP TABLE archived_ordinary_direct; " +
+		"CREATE TABLE ordinary_jobs (id INT); " +
+		"ALTER TABLE ordinary_jobs ADD COLUMN detail INT, RENAME archived_ordinary_optional_first; " +
+		"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='acceptance_migration' AND TABLE_NAME='archived_ordinary_optional_first' AND COLUMN_NAME='detail'; " +
+		"DROP TABLE archived_ordinary_optional_first; " +
+		"CREATE TABLE ordinary_jobs (id INT); " +
+		"ALTER TABLE ordinary_jobs RENAME archived_ordinary_optional_second, ADD COLUMN detail INT; " +
+		"SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA='acceptance_migration' AND TABLE_NAME='archived_ordinary_optional_second' AND COLUMN_NAME='detail'; " +
+		"DROP TABLE archived_ordinary_optional_second;"
 	compoundResult, err := client(compound)
-	if err != nil || strings.TrimSpace(compoundResult) != "1\n1\n1\n1\n1" {
+	if err != nil || strings.TrimSpace(compoundResult) != "1\n1\n1\n1\n1\n1\n1\n1\n1\n1\n1" {
 		t.Fatalf("real MariaDB compound ALTER / rename parity failed: output=%q err=%v", compoundResult, err)
 	}
-	t.Log("real MariaDB migrations, unquoted ONLY, and both orders of compound ADD COLUMN/RENAME TO passed on disposable socket-only server")
+	// Invalid type parameters must not be confused with successful DDL.
+	if out, err := client("USE acceptance_migration; CREATE TABLE invalid_decimal_probe (id INT);"); err != nil {
+		t.Fatalf("unable to create disposable precision probe: %v; %s", err, out)
+	}
+	// This MariaDB version accepts DECIMAL(0,0), unlike MySQL 8.4's
+	// documented precision minimum. The source-only common subset still
+	// declines to certify it; do not claim the engine rejected it.
+	for _, invalid := range []string{
+		"DECIMAL(5,6)",
+		"DECIMAL(66,1)",
+	} {
+		ddl := "USE acceptance_migration; ALTER TABLE invalid_decimal_probe ADD COLUMN amount " + invalid + ", RENAME invalid_moved;"
+		if out, err := client(ddl); err == nil {
+			t.Fatalf("real MariaDB unexpectedly accepted invalid decimal parameters %s: %s", invalid, out)
+		}
+	}
+	if out, err := client("USE acceptance_migration; SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='acceptance_migration' AND TABLE_NAME='invalid_decimal_probe';"); err != nil || strings.TrimSpace(out) != "1" {
+		t.Fatalf("invalid DECIMAL attempt incorrectly moved disposable source: %q (%v)", out, err)
+	}
+	t.Log("real private MariaDB grammar acceptance: TO and optional-TO rename, both clause orders, ONLY and ordinary identifiers, invalid DECIMAL rejected")
 }

@@ -147,6 +147,26 @@ func TestSQLPostgresOrdinaryMovesRealWorkerDefinition(t *testing.T) {
 			move:   "ALTER TABLE jobs RENAME TO archived_jobs, ADD COLUMN detail INT;\n",
 		},
 		{
+			name: "mysql_optional_direct_ordinary", dialect: "mysql", oldName: "jobs", newName: "archived_jobs",
+			create: "CREATE TABLE jobs (id INT);\n",
+			move:   "ALTER TABLE jobs RENAME archived_jobs;\n",
+		},
+		{
+			name: "mysql_optional_add_then_rename", dialect: "mysql", oldName: "jobs", newName: "archived_jobs",
+			create: "CREATE TABLE jobs (id INT);\n",
+			move:   "ALTER TABLE jobs ADD COLUMN detail INT, RENAME archived_jobs;\n",
+		},
+		{
+			name: "mariadb_optional_direct_only", dialect: "mariadb", oldName: "ONLY", newName: "archived",
+			create: "CREATE TABLE ONLY (id INT);\n",
+			move:   "ALTER TABLE ONLY RENAME archived;\n",
+		},
+		{
+			name: "mariadb_optional_rename_then_add", dialect: "mariadb", oldName: "ONLY", newName: "archived",
+			create: "CREATE TABLE ONLY (id INT);\n",
+			move:   "ALTER TABLE ONLY RENAME archived, ADD COLUMN detail INT;\n",
+		},
+		{
 			name: "mariadb_only_rename_then_add", dialect: "mariadb", oldName: "ONLY", newName: "archived",
 			create: "CREATE TABLE ONLY (id INT);\n",
 			move:   "ALTER TABLE ONLY RENAME TO archived, ADD COLUMN detail INT;\n",
@@ -160,6 +180,11 @@ func TestSQLPostgresOrdinaryMovesRealWorkerDefinition(t *testing.T) {
 			name: "mysql_unknown_valid_compound", dialect: "mysql", oldName: "jobs", newName: "archived_jobs", uncertain: true,
 			create: "CREATE TABLE jobs (id INT);\n",
 			move:   "ALTER TABLE jobs ADD COLUMN detail INT NOT NULL, RENAME TO archived_jobs;\n",
+		},
+		{
+			name: "mysql_decimal_invalid_uncertain", dialect: "mysql", oldName: "jobs", newName: "archived_jobs", uncertain: true,
+			create: "CREATE TABLE jobs (id INT);\n",
+			move:   "ALTER TABLE jobs ADD COLUMN amount DECIMAL(5,6), RENAME TO archived_jobs;\n",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -257,10 +282,22 @@ func TestSQLMySQLCompoundAlterTableRenames(t *testing.T) {
 			{"only_rename_then_add", "ALTER TABLE ONLY RENAME TO archived, ADD COLUMN detail INT;", "only", "archived"},
 			{"only_varchar_add_then_rename", "ALTER TABLE ONLY ADD COLUMN detail VARCHAR(64), RENAME TO archived;", "only", "archived"},
 			{"only_decimal_add_then_rename", "ALTER TABLE ONLY ADD COLUMN price DECIMAL(10,2), RENAME TO archived;", "only", "archived"},
+			{"only_decimal_one_arg", "ALTER TABLE ONLY ADD COLUMN price DECIMAL(65), RENAME TO archived;", "only", "archived"},
+			{"only_decimal_max_scale", "ALTER TABLE ONLY ADD COLUMN price DECIMAL(65,30), RENAME TO archived;", "only", "archived"},
+			{"only_numeric_add_then_rename", "ALTER TABLE ONLY ADD COLUMN price NUMERIC(10,2), RENAME TO archived;", "only", "archived"},
 			{"only_multiple_add_then_rename", "ALTER TABLE ONLY ADD COLUMN detail INT, ADD COLUMN enabled BOOLEAN, RENAME TO archived;", "only", "archived"},
 			{"only_drop_then_rename", "ALTER TABLE ONLY DROP COLUMN detail, RENAME TO archived;", "only", "archived"},
 			{"ordinary_add_then_rename", "ALTER TABLE jobs ADD COLUMN detail INT, RENAME TO archived_jobs;", "jobs", "archived_jobs"},
 			{"ordinary_rename_then_add", "ALTER TABLE jobs RENAME TO archived_jobs, ADD COLUMN detail INT;", "jobs", "archived_jobs"},
+			{"optional_direct_ordinary", "ALTER TABLE jobs RENAME archived_jobs;", "jobs", "archived_jobs"},
+			{"optional_direct_only", "ALTER TABLE ONLY RENAME archived;", "only", "archived"},
+			{"optional_add_then_rename_ordinary", "ALTER TABLE jobs ADD COLUMN detail INT, RENAME archived_jobs;", "jobs", "archived_jobs"},
+			{"optional_rename_then_add_ordinary", "ALTER TABLE jobs RENAME archived_jobs, ADD COLUMN detail INT;", "jobs", "archived_jobs"},
+			{"optional_add_then_rename_only", "ALTER TABLE ONLY ADD COLUMN detail INT, RENAME archived;", "only", "archived"},
+			{"optional_rename_then_add_only", "ALTER TABLE ONLY RENAME archived, ADD COLUMN detail INT;", "only", "archived"},
+			{"optional_qualified_only", "ALTER TABLE staging.ONLY RENAME archived;", "staging\x00only", "archived"},
+			{"optional_quoted_only", "ALTER TABLE `ONLY` RENAME `archived`;", "ONLY", "archived"},
+			{"optional_quoted_keyword_target", "ALTER TABLE jobs RENAME `INDEX`;", "jobs", "INDEX"},
 			{"qualified_add_then_rename", "ALTER TABLE staging.ONLY ADD COLUMN detail INT, RENAME TO archived;", "staging\x00only", "archived"},
 			{"qualified_rename_then_add", "ALTER TABLE ONLY.events RENAME TO archive.events, ADD COLUMN detail INT;", "only\x00events", "archive\x00events"},
 			{"quoted_add_then_rename", "ALTER TABLE `ONLY` ADD COLUMN detail INT, RENAME TO `archived`;", "ONLY", "archived"},
@@ -275,7 +312,7 @@ func TestSQLMySQLCompoundAlterTableRenames(t *testing.T) {
 					t.Fatalf("incorrect compound move lifecycle: %+v", got)
 				}
 				createSQL := "CREATE TABLE " + strings.ReplaceAll(tc.oldName, "\x00", ".") + " (id INT);"
-				if tc.name == "quoted_add_then_rename" {
+				if tc.oldName == "ONLY" {
 					createSQL = "CREATE TABLE `ONLY` (id INT);"
 				}
 				create, ok := sqlNavOccurrences(createSQL, dialect)
@@ -291,6 +328,56 @@ func TestSQLMySQLCompoundAlterTableRenames(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// RENAME COLUMN and RENAME INDEX/KEY never move the containing table.
+// Quoted target names that spell grammar keywords are still identifiers.
+func TestSQLMySQLRenameDisambiguation(t *testing.T) {
+	for _, dialect := range []string{"mysql", "mariadb"} {
+		for _, source := range []string{
+			"ALTER TABLE jobs RENAME COLUMN old_name TO new_name;",
+			"ALTER TABLE jobs RENAME INDEX old_index TO new_index;",
+			"ALTER TABLE jobs RENAME KEY old_index TO new_index;",
+		} {
+			t.Run(dialect+"_"+source, func(t *testing.T) {
+				occurrences, valid := sqlNavOccurrences(source, dialect)
+				if !valid || len(occurrences) != 1 || occurrences[0].drop || occurrences[0].identity != "jobs" {
+					t.Fatalf("column/index rename invented table move: %+v valid=%t", occurrences, valid)
+				}
+			})
+		}
+		sql := "ALTER TABLE jobs RENAME `INDEX`;"
+		occurrences, valid := sqlNavOccurrences(sql, dialect)
+		if !valid || len(occurrences) != 2 || !occurrences[0].drop || !occurrences[1].drop || occurrences[1].identity != "INDEX" {
+			t.Fatalf("quoted target keyword lost real table rename: %+v valid=%t", occurrences, valid)
+		}
+	}
+}
+
+// MySQL's optional AS and MariaDB's optional TO are not interchangeable.
+// Likewise MariaDB DROP COLUMN RESTRICT is not a MySQL ALTER TABLE clause.
+func TestSQLMySQLMariaDBRenameGrammarBoundaries(t *testing.T) {
+	for _, tc := range []struct {
+		dialect, source string
+		validMove       bool
+	}{
+		{"mysql", "ALTER TABLE jobs RENAME AS archived_jobs;", true},
+		{"mariadb", "ALTER TABLE jobs RENAME AS archived_jobs;", false},
+		{"mysql", "ALTER TABLE jobs DROP COLUMN detail RESTRICT, RENAME archived_jobs;", false},
+		{"mariadb", "ALTER TABLE jobs DROP COLUMN detail RESTRICT, RENAME archived_jobs;", true},
+	} {
+		t.Run(tc.dialect+"_"+tc.source, func(t *testing.T) {
+			occurrences, valid := sqlNavOccurrences(tc.source, tc.dialect)
+			if tc.validMove {
+				if !valid || len(occurrences) != 2 || !occurrences[0].drop || !occurrences[1].drop ||
+					occurrences[0].identity != "jobs" || occurrences[1].identity != "archived_jobs" {
+					t.Fatalf("valid dialect-specific move missing: valid=%t occurrences=%+v", valid, occurrences)
+				}
+			} else if valid || len(occurrences) != 0 {
+				t.Fatalf("unsupported dialect-specific syntax fabricated lifecycle: valid=%t occurrences=%+v", valid, occurrences)
+			}
+		})
 	}
 }
 
@@ -380,6 +467,15 @@ func TestSQLMySQLOnlyMalformedLifecycleFailClosed(t *testing.T) {
 			{"alter_qualified_source_three_part_target", "ALTER TABLE staging.ONLY RENAME TO archive.events.extra;"},
 			{"alter_rename_invalid_varchar_arity", "ALTER TABLE ONLY ADD COLUMN detail VARCHAR(64,2), RENAME TO archived;"},
 			{"alter_rename_invalid_decimal_arity", "ALTER TABLE ONLY ADD COLUMN amount DECIMAL(10,2,3), RENAME TO archived;"},
+			{"invalid_decimal_scale_gt_precision", "ALTER TABLE jobs ADD COLUMN amount DECIMAL(5,6), RENAME TO archive;"},
+			{"invalid_decimal_precision_zero", "ALTER TABLE jobs ADD COLUMN amount DECIMAL(0,0), RENAME TO archive;"},
+			{"invalid_decimal_precision_over_max", "ALTER TABLE jobs ADD COLUMN amount DECIMAL(66,1), RENAME TO archive;"},
+			{"invalid_decimal_scale_over_max", "ALTER TABLE jobs ADD COLUMN amount DECIMAL(65,31), RENAME TO archive;"},
+			{"invalid_numeric_scale", "ALTER TABLE jobs ADD COLUMN amount NUMERIC(5,6), RENAME TO archive;"},
+			{"invalid_varchar_zero", "ALTER TABLE jobs ADD COLUMN detail VARCHAR(0), RENAME TO archive;"},
+			{"invalid_char_length", "ALTER TABLE jobs ADD COLUMN detail CHAR(256), RENAME TO archive;"},
+			{"invalid_binary_length", "ALTER TABLE jobs ADD COLUMN detail BINARY(256), RENAME TO archive;"},
+			{"invalid_float_args_unverified", "ALTER TABLE jobs ADD COLUMN detail FLOAT(999999,999), RENAME TO archive;"},
 		} {
 			t.Run(dialect+"_"+tc.name, func(t *testing.T) {
 				items, parsed := sqlNavOccurrences(tc.statement, dialect)
