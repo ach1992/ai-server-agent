@@ -41,6 +41,32 @@ func sqlNavSelectColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurr
 		if inFromScope && token.literalBefore {
 			return nil // elided string makes FROM/JOIN scope unprovable
 		}
+		// Every top-level token between ordinary table bindings is part of
+		// the bounded FROM/JOIN grammar; unknown gaps are not harmless.
+		// While an ON expression is pending, its separate grammar owns the
+		// tokens until JOIN/clause/EOF. Do not mistake them for table syntax.
+		if inFromScope && onPredicateStart < 0 {
+			keyword := token.keyword()
+			switch {
+			case joined && !onSeen:
+				if keyword != "ON" {
+					return nil // a JOIN source must be followed by ON
+				}
+			case joinModifier != "":
+				if keyword != "JOIN" && !(keyword == "OUTER" &&
+					(joinModifier == "LEFT" || joinModifier == "RIGHT" || joinModifier == "FULL")) {
+					return nil // modifier can only be followed by OUTER/JOIN
+				}
+			default:
+				switch keyword {
+				case "JOIN", "INNER", "LEFT", "RIGHT", "FULL",
+					"WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "OFFSET", "FETCH", "WINDOW", "FOR":
+					// Complete ordinary table reference, supported next construct.
+				default:
+					return nil // unconsumed source/alias/punctuation
+				}
+			}
+		}
 		switch token.text {
 		case "(":
 			depth++
@@ -158,6 +184,15 @@ func sqlNavSelectColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurr
 			// SELECT until precise positional remapping is supported.
 			if alias != "" && end < len(statement) && statement[end].text == "(" {
 				return nil
+			}
+			// sqlNavName and alias parsing advance past whole token ranges.
+			// The outer loop never visits these tokens: inspect every
+			// consumed name, qualification dot, optional AS and alias for
+			// skipped SQL strings before certifying a physical table binding.
+			for at := start; at < end; at++ {
+				if statement[at].literalBefore {
+					return nil
+				}
 			}
 			keys := []string{table.identity}
 			if alias != "" {

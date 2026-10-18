@@ -217,8 +217,9 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 	if stale.OK || stale.ErrorCode != "file_changed" {
 		t.Fatalf("stale SQL source accepted: %+v", stale)
 	}
-	// A malformed JOIN predicate must not create a migration definition or
-	// reference through the public, authenticated MCP path. This is a real
+	// An invalid FROM/JOIN source scope, skipped SQL literal or malformed
+	// ON predicate must not create a migration definition or reference through
+	// the public, authenticated MCP path. This is a real
 	// Agent -> Executor -> Worker fixture; it never executes SQL or opens a DB.
 	for _, invalid := range []string{
 		"SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id = AND p.account_id;\n",
@@ -227,6 +228,14 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 		"SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id = 'orphan' p.account_id;\n",
 		"SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id = p.account_id 'orphan';\n",
 		"SELECT a.id() FROM public.accounts a;\n",
+		"SELECT a.id FROM public.'orphan'accounts a;\n",
+		"SELECT a.id FROM public.accounts 'orphan' a;\n",
+		"SELECT a.id FROM public.accounts AS 'orphan' a;\n",
+		"SELECT a.id FROM public.accounts a JOIN public.payments 'orphan' p ON p.account_id=a.id;\n",
+		"SELECT a.id FROM public.accounts a JUNK;\n",
+		"SELECT a.id FROM public.accounts a JUNK JOIN public.payments p ON p.account_id=a.id;\n",
+		"SELECT a.id FROM public.accounts a JOIN public.payments p NOISE ON p.account_id=a.id;\n",
+		"SELECT a.id FROM public.accounts a LEFT NOISE JOIN public.payments p ON p.account_id=a.id;\n",
 	} {
 		if err := os.WriteFile(filepath.Join(cfg.WorkspaceDir, "queries/list.sql"), []byte(invalid), 0600); err != nil {
 			t.Fatal(err)
@@ -274,5 +283,5 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 	if !realRefs.OK || json.Unmarshal([]byte(realRefs.Output), &locs) != nil || len(locs) != 3 {
 		t.Fatalf("function polluted source-backed references: %+v %+v", realRefs, locs)
 	}
-	t.Log("DIRECT_REAL_SQL_ALIAS_MCP_PASS definitions=2 references=5 versions=3 stale_rejected=true no_db=true malformed_on_rejected=true functions_excluded=true")
+	t.Log("DIRECT_REAL_SQL_ALIAS_MCP_PASS definitions=2 references=5 versions=3 stale_rejected=true no_db=true malformed_on_rejected=true functions_excluded=true source_literals_rejected=true unconsumed_source_gaps_rejected=true")
 }

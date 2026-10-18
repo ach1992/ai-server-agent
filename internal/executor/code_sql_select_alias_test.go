@@ -344,6 +344,116 @@ func TestSQLSelectAliasElidedLiteralAtEOFAndClauseBoundary(t *testing.T) {
 	}
 }
 
+func TestSQLSelectAliasConsumedLiteralMarkersFailClosed(t *testing.T) {
+	// In the tokenizer, SQL string contents are elided, but their presence
+	// must invalidate every source/alias token consumed by sqlNavName.
+	// An invalid FROM/JOIN must never acquire a physical column identity.
+	cases := []struct {
+		name, source string
+	}{
+		{"before_source", "SELECT a.id FROM 'orphan' public.accounts a;"},
+		{"inside_qualified_name", "SELECT a.id FROM public.'orphan'accounts a;"},
+		{"between_source_and_alias", "SELECT a.id FROM public.accounts 'orphan' a;"},
+		{"before_explicit_as", "SELECT a.id FROM public.accounts 'orphan' AS a;"},
+		{"after_explicit_as", "SELECT a.id FROM public.accounts AS 'orphan' a;"},
+		{"before_quoted_alias", "SELECT \"a\".id FROM public.accounts AS 'orphan' \"a\";"},
+		{"join_before_source", "SELECT a.id FROM public.accounts a JOIN 'orphan' public.payments p ON p.account_id=a.id;"},
+		{"join_inside_name", "SELECT a.id FROM public.accounts a JOIN public.'orphan'payments p ON p.account_id=a.id;"},
+		{"join_before_alias", "SELECT a.id FROM public.accounts a JOIN public.payments 'orphan' p ON p.account_id=a.id;"},
+		{"join_after_as", "SELECT a.id FROM public.accounts a JOIN public.payments AS 'orphan' p ON p.account_id=a.id;"},
+		{"without_semicolon", "SELECT a.id FROM public.accounts 'orphan' a"},
+		{"before_alias_then_clause", "SELECT a.id FROM public.accounts 'orphan' a WHERE a.id>0;"},
+	}
+	for _, dialect := range []string{"postgres", "mysql", "mariadb"} {
+		for _, tc := range cases {
+			t.Run(dialect+"/"+tc.name, func(t *testing.T) {
+				events, valid := sqlNavAllOccurrences(tc.source, dialect)
+				if valid {
+					for _, ev := range events {
+						if ev.isColumn {
+							t.Fatalf("elided literal invented a %s column: %+v", dialect, ev)
+						}
+					}
+				}
+				if at := strings.Index(tc.source, "a.id"); at >= 0 {
+					if chosen, ok := sqlNavSelected(tc.source, dialect, 0, at+2); ok && chosen.isColumn {
+						t.Fatalf("elided literal exposed a selectable %s column: %+v", dialect, chosen)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestSQLSelectAliasUnrecognizedSourceGapsFailClosed(t *testing.T) {
+	// Do not interpret a valid-looking table binding from an incomplete or
+	// unconsumed FROM/JOIN grammar. ON has its own bounded expression grammar.
+	cases := []struct {
+		name, source string
+	}{
+		{"unknown_at_end", "SELECT a.id FROM public.accounts a JUNK;"},
+		{"unknown_before_join", "SELECT a.id FROM public.accounts a JUNK JOIN public.payments p ON p.account_id=a.id;"},
+		{"extra_alias", "SELECT a.id FROM public.accounts a b;"},
+		{"repeated_as", "SELECT a.id FROM public.accounts AS a AS b;"},
+		{"extra_explicit_alias", "SELECT a.id FROM public.accounts AS a b;"},
+		{"unexpected_period", "SELECT a.id FROM public.accounts a . other;"},
+		{"unexpected_punctuation", "SELECT a.id FROM public.accounts a ! JOIN public.payments p ON p.account_id=a.id;"},
+		{"junk_between_join_kind", "SELECT a.id FROM public.accounts a LEFT NOISE JOIN public.payments p ON p.account_id=a.id;"},
+		{"junk_after_outer", "SELECT a.id FROM public.accounts a LEFT OUTER NOISE JOIN public.payments p ON p.account_id=a.id;"},
+		{"junk_before_on", "SELECT a.id FROM public.accounts a JOIN public.payments p NOISE ON p.account_id=a.id;"},
+		{"second_join_without_on", "SELECT a.id FROM public.accounts a JOIN public.payments p JOIN more m ON m.id=a.id;"},
+		{"junk_between_chained_joins", "SELECT a.id FROM public.accounts a JOIN public.payments p ON p.account_id=a.id INNER NOISE JOIN public.payments q ON q.account_id=a.id;"},
+		{"dangling_join_modifier", "SELECT a.id FROM public.accounts a RIGHT NOISE;"},
+		{"invalid_no_semicolon", "SELECT a.id FROM public.accounts a JUNK"},
+	}
+	for _, dialect := range []string{"postgres", "mysql", "mariadb"} {
+		for _, tc := range cases {
+			t.Run(dialect+"/"+tc.name, func(t *testing.T) {
+				events, valid := sqlNavAllOccurrences(tc.source, dialect)
+				if valid {
+					for _, ev := range events {
+						if ev.isColumn {
+							t.Fatalf("unconsumed %s source grammar invented a column: %+v", dialect, ev)
+						}
+					}
+				}
+				if at := strings.Index(tc.source, "a.id"); at >= 0 {
+					if chosen, ok := sqlNavSelected(tc.source, dialect, 0, at+2); ok && chosen.isColumn {
+						t.Fatalf("invalid %s source gave selectable column: %+v", dialect, chosen)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestSQLSelectAliasProjectionLiteralsAndQuotedSources(t *testing.T) {
+	cases := []struct {
+		dialect, source, columnIdentity string
+	}{
+		{"postgres", `SELECT 'a.id' AS msg, "A".id FROM "public"."accounts" /* quote ' only in comment */ AS "A" JOIN public.payments p ON ("A".id = p.account_id);`, "public\x00accounts\x00column\x00id"},
+		{"mysql", "SELECT 'a.id' AS msg, a.`id` FROM `accounts` /* quote ' only in comment */ AS a JOIN payments p ON (a.`id` = p.account_id);", "accounts\x00column\x00id"},
+		{"mariadb", "SELECT 'a.id' AS msg, a.`id` FROM `accounts` /* quote ' only in comment */ AS a JOIN payments p ON (a.`id` = p.account_id);", "accounts\x00column\x00id"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.dialect, func(t *testing.T) {
+			events, valid := sqlNavAllOccurrences(tc.source, tc.dialect)
+			if !valid {
+				t.Fatal("supported source became unparseable")
+			}
+			count := 0
+			for _, ev := range events {
+				if ev.isColumn && ev.identity == tc.columnIdentity {
+					count++
+				}
+			}
+			if count != 2 {
+				t.Fatalf("legitimate source-backed projection/ON references = %d, want 2: %+v", count, events)
+			}
+		})
+	}
+}
+
 func TestSQLSelectAliasDoesNotConfuseNamesOrStrings(t *testing.T) {
 	cases := []struct {
 		dialect, source string
@@ -537,6 +647,16 @@ func TestSQLSelectAliasWorkerCrossFileNavigation(t *testing.T) {
 		{"join_elided_string_literal", "SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id = 'orphan' p.account_id;\n", "a.id"},
 		{"join_trailing_string_literal", "SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id = p.account_id 'orphan';\n", "a.id"},
 		{"function_qualified_identifier", "SELECT a.id() FROM public.accounts a;\n", "a.id"},
+		{"from_literal_inside_name", "SELECT a.id FROM public.'orphan'accounts AS a;\n", "a.id"},
+		{"from_literal_before_source", "SELECT a.id FROM 'orphan' public.accounts a;\n", "a.id"},
+		{"from_literal_before_alias", "SELECT a.id FROM public.accounts 'orphan' a;\n", "a.id"},
+		{"from_literal_after_as", "SELECT a.id FROM public.accounts AS 'orphan' a;\n", "a.id"},
+		{"join_literal_before_alias", "SELECT a.id FROM public.accounts a JOIN public.payments 'orphan' p ON p.account_id=a.id;\n", "a.id"},
+		{"from_unknown_gap_single", "SELECT a.id FROM public.accounts a JUNK;\n", "a.id"},
+		{"from_unknown_gap_before_join", "SELECT a.id FROM public.accounts a JUNK JOIN public.payments p ON p.account_id=a.id;\n", "a.id"},
+		{"join_unknown_gap_before_on", "SELECT a.id FROM public.accounts a JOIN public.payments p NOISE ON p.account_id=a.id;\n", "a.id"},
+		{"join_unknown_modifier", "SELECT a.id FROM public.accounts a LEFT NOISE JOIN public.payments p ON p.account_id=a.id;\n", "a.id"},
+		{"repeated_as_alias", "SELECT a.id FROM public.accounts AS a AS b;\n", "a.id"},
 	}
 	for _, tc := range badQueries {
 		t.Run(tc.name, func(t *testing.T) {
