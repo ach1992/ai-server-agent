@@ -5,8 +5,9 @@ import "strings"
 // SELECT qualified-column uses supplement the source-backed DDL graph. This is
 // intentionally not a general SQL query analyzer: resolve only a bounded,
 // single SELECT scope with explicit ordinary tables and optional table aliases.
-// No CTE/subquery/derived-table, implicit comma join, NATURAL/LATERAL/USING or
-// set operation can lend a fabricated column identity to another table.
+// No CTE/subquery/derived-table, implicit comma join, NATURAL/LATERAL/USING,
+// positional table column-alias list or incomplete JOIN predicate can lend
+// a fabricated column identity to another table.
 // SQL execution, implicit database access, unqualified columns and projection
 // alias inference are never part of this path.
 func sqlNavSelectColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurrence {
@@ -31,7 +32,8 @@ func sqlNavSelectColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurr
 	// accept both table.column and schema.table.column spellings.
 	tables := make(map[string]sqlNavOccurrence)
 	tableTokens := make(map[int]bool)
-	var fromSeen, joined, onSeen, inFromScope bool
+	var fromSeen, joined, onSeen, inFromScope, joinModifierPending bool
+	onPredicateStart := -1 // current ON start, or -1 after validated boundary
 	depth, sourceCount := 0, 0
 	for i := 1; i < len(statement); i++ {
 		token := statement[i]
@@ -57,16 +59,39 @@ func sqlNavSelectColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurr
 		}
 		switch token.keyword() {
 		case "WHERE", "GROUP", "ORDER", "HAVING", "LIMIT", "OFFSET", "FETCH", "WINDOW", "FOR":
-			if joined && !onSeen {
-				return nil // incomplete JOIN cannot prove the column context
+			if joinModifierPending || joined && (!onSeen || onPredicateStart >= 0 &&
+				!sqlNavSelectOnPredicateComplete(statement[onPredicateStart:i])) {
+				return nil // an ON keyword alone cannot prove a JOIN predicate
 			}
+			onPredicateStart = -1
 			inFromScope = false
+		case "INNER", "LEFT", "RIGHT", "FULL", "OUTER":
+			// JOIN modifiers terminate the preceding ON predicate, but
+			// an unpaired LEFT/INNER/... at EOF or another clause is also
+			// incomplete and cannot prove any column scope.
+			if !fromSeen || !inFromScope {
+				return nil
+			}
+			if joined && onPredicateStart >= 0 {
+				if !sqlNavSelectOnPredicateComplete(statement[onPredicateStart:i]) {
+					return nil
+				}
+				onPredicateStart = -1
+			}
+			joinModifierPending = true
 		case "ON":
-			if !joined || onSeen {
+			if !joined || onSeen || joinModifierPending {
 				return nil
 			}
 			onSeen = true
+			onPredicateStart = i + 1
 		case "FROM", "JOIN":
+			if token.keyword() == "FROM" && joinModifierPending {
+				return nil
+			}
+			if token.keyword() == "JOIN" {
+				joinModifierPending = false
+			}
 			sourceCount++
 			if sourceCount > 8 {
 				return nil // bounded ordinary SELECT source set
@@ -77,10 +102,12 @@ func sqlNavSelectColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurr
 				}
 				fromSeen, inFromScope = true, true
 			} else {
-				if !fromSeen || (joined && !onSeen) || !inFromScope {
+				if !fromSeen || !inFromScope || joined && (!onSeen ||
+					onPredicateStart >= 0 && !sqlNavSelectOnPredicateComplete(statement[onPredicateStart:i])) {
 					return nil
 				}
 				joined, onSeen = true, false
+				onPredicateStart = -1
 			}
 			start := i + 1
 			table, end, valid := sqlNavName(statement, start)
@@ -115,6 +142,13 @@ func sqlNavSelectColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurr
 			} else if explicit {
 				return nil // AS requires one valid alias
 			}
+			// PostgreSQL FROM table AS alias (new_col, ...) renames the
+			// table columns positionally. Binding alias.new_col directly
+			// to table.new_col is semantically wrong. Reject the *whole*
+			// SELECT until precise positional remapping is supported.
+			if alias != "" && end < len(statement) && statement[end].text == "(" {
+				return nil
+			}
 			keys := []string{table.identity}
 			if alias != "" {
 				keys = []string{alias}
@@ -130,7 +164,8 @@ func sqlNavSelectColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurr
 			i = end - 1
 		}
 	}
-	if depth != 0 || !fromSeen || (joined && !onSeen) || len(tables) == 0 {
+	if depth != 0 || !fromSeen || joinModifierPending || joined && (!onSeen ||
+		onPredicateStart >= 0 && !sqlNavSelectOnPredicateComplete(statement[onPredicateStart:])) || len(tables) == 0 {
 		return nil
 	}
 
@@ -168,6 +203,77 @@ func sqlNavSelectColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurr
 		}
 	}
 	return result
+}
+
+// The bounded SELECT graph does not infer general SQL expressions. At a
+// minimum each explicit JOIN ... ON must contain a nonempty, balanced and
+// syntactically complete predicate before a clause, next JOIN or EOF. An ON
+// keyword, empty parentheses, or a dangling operator/boolean connector is
+// not evidence of a proven join scope. Unsupported expressions simply have
+// no offline column graph; SQLLens can handle richer SQL independently.
+func sqlNavSelectOnPredicateComplete(tokens []sqlDDLToken) bool {
+	if len(tokens) == 0 {
+		return false
+	}
+	depth, operands := 0, 0
+	for i, token := range tokens {
+		switch token.text {
+		case "(":
+			if i+1 < len(tokens) && tokens[i+1].text == ")" {
+				return false
+			}
+			depth++
+		case ")":
+			if depth == 0 || i > 0 && !sqlNavSelectOnOperand(tokens[i-1]) && tokens[i-1].text != ")" {
+				return false
+			}
+			depth--
+		default:
+			if token.keyword() == "FROM" || token.keyword() == "JOIN" || token.keyword() == "ON" ||
+				token.keyword() == "WHERE" || token.keyword() == "GROUP" || token.keyword() == "ORDER" ||
+				token.keyword() == "HAVING" || token.keyword() == "LIMIT" || token.keyword() == "OFFSET" ||
+				token.keyword() == "INNER" || token.keyword() == "LEFT" || token.keyword() == "RIGHT" ||
+				token.keyword() == "FULL" || token.keyword() == "OUTER" || token.keyword() == "SELECT" {
+				return false
+			}
+			if token.kind == 'i' || token.kind == 'q' {
+				if sqlNavSelectOnOperand(token) {
+					operands++
+				}
+			}
+		}
+	}
+	if depth != 0 || operands == 0 {
+		return false
+	}
+	// Strip balanced closing parentheses: the token immediately before
+	// them must still be a completed operand, never an operator or AND.
+	last := len(tokens) - 1
+	for last >= 0 && tokens[last].text == ")" {
+		last--
+	}
+	if last < 0 || !sqlNavSelectOnOperand(tokens[last]) {
+		return false
+	}
+	first := 0
+	for first < len(tokens) && tokens[first].text == "(" {
+		first++
+	}
+	return first < len(tokens) && sqlNavSelectOnOperand(tokens[first])
+}
+
+func sqlNavSelectOnOperand(token sqlDDLToken) bool {
+	if token.kind == 'q' {
+		return true
+	}
+	if token.kind != 'i' {
+		return false
+	}
+	switch token.keyword() {
+	case "AND", "OR", "IS", "IN", "LIKE", "BETWEEN", "AS", "NOT", "END", "THEN", "ELSE", "WHEN":
+		return false
+	}
+	return true
 }
 
 // Restrict bare aliases to ordinary identifiers rather than interpreting SQL

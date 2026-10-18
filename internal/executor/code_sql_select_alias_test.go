@@ -21,11 +21,15 @@ func TestSQLSelectAliasColumnGraph(t *testing.T) {
 	}{
 		{"postgres", `SELECT a.id, p.account_id FROM public.accounts AS a JOIN public.payments p ON p.account_id = a.id WHERE a.id > 0;`, "a.id", "public\x00accounts\x00column\x00id", "public\x00accounts", 3},
 		{"postgres", `SELECT a.id, p.account_id FROM public.accounts AS a JOIN public.payments p ON p.account_id = a.id WHERE a.id > 0;`, "p.account_id", "public\x00payments\x00column\x00account_id", "public\x00payments", 2},
+		{"postgres", `SELECT a.id FROM public.accounts a JOIN public.payments p ON (a.id=p.account_id) WHERE a.id > 0;`, "a.id", "public\x00accounts\x00column\x00id", "public\x00accounts", 3},
+		{"postgres", `SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id=p.account_id LEFT JOIN public.payments q ON q.account_id = a.id WHERE a.id > 0;`, "a.id", "public\x00accounts\x00column\x00id", "public\x00accounts", 4},
 		{"postgres", `SELECT accounts.id FROM public.accounts WHERE accounts.id = 1;`, "accounts.id", "public\x00accounts\x00column\x00id", "public\x00accounts", 2},
 		{"postgres", `SELECT public.accounts.id FROM public.accounts WHERE public.accounts.id > 1;`, "public.accounts.id", "public\x00accounts\x00column\x00id", "public\x00accounts", 2},
 		{"postgres", `SELECT "A"."AccountId" FROM "Public"."Accounts" AS "A";`, `"A"."AccountId"`, "Public\x00Accounts\x00column\x00AccountId", "Public\x00Accounts", 1},
 		{"mysql", "SELECT a.`user_id` FROM `accounts` a WHERE a.`user_id` > 0;", "a.`user_id`", "accounts\x00column\x00user_id", "accounts", 2},
 		{"mariadb", "SELECT a.`user_id` FROM `accounts` AS a WHERE a.`user_id` > 0;", "a.`user_id`", "accounts\x00column\x00user_id", "accounts", 2},
+		{"mysql", "SELECT a.`user_id` FROM `accounts` AS a JOIN `payments` p ON p.`account_id` = a.`user_id` WHERE a.`user_id`>0;", "a.`user_id`", "accounts\x00column\x00user_id", "accounts", 3},
+		{"mariadb", "SELECT a.`user_id` FROM `accounts` a JOIN `payments` p ON p.`account_id` = a.`user_id` WHERE a.`user_id`>0;", "a.`user_id`", "accounts\x00column\x00user_id", "accounts", 3},
 	}
 	for _, tc := range cases {
 		t.Run(tc.dialect+"/"+tc.picked, func(t *testing.T) {
@@ -87,6 +91,90 @@ func TestSQLSelectAliasRefusesAmbiguousScopes(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// The migration column identity must never be inferred for PostgreSQL's
+// positional table column-alias lists or incomplete JOIN predicates.
+// Such forms are outside this bounded single-scope parser.
+func TestSQLSelectAliasRejectsRenamingAndIncompleteJoins(t *testing.T) {
+	cases := []struct{ name, source string }{
+		{"from_single_alias_column", `SELECT a.name FROM public.accounts AS a (name);`},
+		{"from_multiple_alias_columns", `SELECT a.name FROM public.accounts AS a (name, id);`},
+		{"from_implicit_alias_column", `SELECT a.name FROM public.accounts a (name, id);`},
+		{"from_quoted_alias_column", `SELECT a."Name" FROM public.accounts AS a ("Name", "Id");`},
+		{"from_mixed_quoted_alias_column", `SELECT a.name FROM public.accounts AS a ("name", id);`},
+		{"join_positional_alias_column", `SELECT p.account_id FROM public.accounts a JOIN public.payments AS p (account_id, id) ON p.account_id = a.id;`},
+		{"join_unadorned_alias_column", `SELECT p.account_id FROM public.accounts a JOIN public.payments p (account_id) ON p.account_id = a.id;`},
+		{"alias_list_before_following_join", `SELECT a.name FROM public.accounts AS a (name, id) JOIN payments p ON a.name=p.id;`},
+		{"empty_on_end", `SELECT a.id FROM public.accounts AS a JOIN public.payments p ON;`},
+		{"empty_on_where", `SELECT a.id FROM public.accounts AS a JOIN public.payments p ON WHERE a.id > 0;`},
+		{"empty_on_order", `SELECT a.id FROM public.accounts AS a JOIN public.payments p ON ORDER BY a.id;`},
+		{"empty_on_group", `SELECT a.id FROM public.accounts AS a JOIN public.payments p ON GROUP BY a.id;`},
+		{"empty_on_next_join", `SELECT a.id FROM public.accounts AS a JOIN public.payments p ON JOIN archive z ON a.id=z.id;`},
+		{"empty_parenthesized_on", `SELECT a.id FROM public.accounts AS a JOIN public.payments p ON ();`},
+		{"nested_empty_parenthesized_on", `SELECT a.id FROM public.accounts AS a JOIN public.payments p ON (());`},
+		{"empty_parenthesized_and_other", `SELECT a.id FROM public.accounts AS a JOIN public.payments p ON () AND a.id=p.id;`},
+		{"truncated_equality", `SELECT a.id FROM public.accounts AS a JOIN public.payments p ON a.id =;`},
+		{"truncated_parenthesized_equality", `SELECT a.id FROM public.accounts AS a JOIN public.payments p ON (a.id =);`},
+		{"truncated_boolean", `SELECT a.id FROM public.accounts AS a JOIN public.payments p ON a.id=p.id AND;`},
+		{"truncated_second_join", `SELECT a.id FROM public.accounts AS a JOIN public.payments p ON a.id=p.id JOIN archive z ON;`},
+		{"truncated_left_join", `SELECT a.id FROM public.accounts AS a JOIN public.payments p ON a.id=p.id LEFT JOIN archive z ON;`},
+		{"truncated_second_join_where", `SELECT a.id FROM public.accounts AS a JOIN public.payments p ON a.id=p.id JOIN archive z ON WHERE z.id=a.id;`},
+		{"truncated_on_left_modifier", `SELECT a.id FROM public.accounts a JOIN payments p ON a.id = p.id LEFT;`},
+		{"truncated_on_left_outer", `SELECT a.id FROM public.accounts a JOIN payments p ON a.id=p.id LEFT OUTER;`},
+		{"truncated_from_left", `SELECT a.id FROM public.accounts a LEFT;`},
+		{"on_only_connector", `SELECT a.id FROM public.accounts a JOIN payments p ON AND;`},
+		{"on_only_operator", `SELECT a.id FROM public.accounts a JOIN payments p ON =;`},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			occurrences, valid := sqlNavAllOccurrences(tc.source, "postgres")
+			if valid {
+				for _, item := range occurrences {
+					if item.isColumn {
+						t.Fatalf("unsupported SQL invented a table-column identity: %+v", item)
+					}
+				}
+			}
+			// No cursor position in this unsupported SELECT may start
+			// source-backed column navigation to an unrelated declaration.
+			for _, qualifier := range []string{"a.name", `a."Name"`, "p.account_id", "a.id"} {
+				start := strings.Index(tc.source, qualifier)
+				if start < 0 {
+					continue
+				}
+				pos := start + strings.Index(qualifier, ".") + 2
+				if selected, ok := sqlNavSelected(tc.source, "postgres", 0, pos); ok && selected.isColumn {
+					t.Fatalf("unsupported SQL yielded offline selectable column %q: %+v", qualifier, selected)
+				}
+			}
+		})
+	}
+}
+
+// The ON completeness rule is dialect-neutral, while positional table
+// column-alias lists are deliberately tested under PostgreSQL syntax above.
+func TestSQLSelectAliasIncompleteOnAcrossDialects(t *testing.T) {
+	for _, dialect := range []string{"postgres", "mysql", "mariadb"} {
+		for _, source := range []string{
+			`SELECT a.id FROM accounts a JOIN payments p ON;`,
+			`SELECT a.id FROM accounts a JOIN payments p ON WHERE a.id=1;`,
+			`SELECT a.id FROM accounts a JOIN payments p ON ();`,
+			`SELECT a.id FROM accounts a JOIN payments p ON a.id=;`,
+			`SELECT a.id FROM accounts a JOIN payments p ON a.id=p.account_id INNER JOIN reports r ON;`,
+		} {
+			t.Run(dialect+"/"+source, func(t *testing.T) {
+				items, valid := sqlNavAllOccurrences(source, dialect)
+				if valid {
+					for _, item := range items {
+						if item.isColumn {
+							t.Fatalf("incomplete ON created a %s column: %+v", dialect, item)
+						}
+					}
+				}
+			})
+		}
 	}
 }
 
@@ -222,6 +310,58 @@ func TestSQLSelectAliasWorkerCrossFileNavigation(t *testing.T) {
 		locs[0].URI != "migrations/002_payments.sql" {
 		t.Fatalf("wrong joined alias column definition: %+v %+v", resp, locs)
 	}
+	// Regression for the author-separated review: even when a real
+	// source-backed accounts.name exists in a distinct migration, SQL
+	// table-column aliases rename physical columns positionally. A query
+	// that says a.name after AS a (name, id) cannot navigate as if
+	// accounts.name were its declaration. Likewise an incomplete JOIN ON
+	// must not produce source-backed definitions or references.
+	badQueries := []struct {
+		name, source, selected string
+	}{
+		{"pg_positional_alias", "SELECT a.name FROM public.accounts AS a (name, id);\n", "a.name"},
+		{"pg_quoted_positional_alias", `SELECT a."name" FROM public.accounts AS a ("name", "id");` + "\n", `a."name"`},
+		{"join_positional_alias", "SELECT p.account_id FROM public.accounts a JOIN public.payments AS p (account_id, id) ON p.account_id = a.id;\n", "p.account_id"},
+		{"join_missing_on_predicate", "SELECT a.id FROM public.accounts AS a JOIN public.payments p ON;\n", "a.id"},
+		{"join_empty_parenthesized_on", "SELECT a.id FROM public.accounts AS a JOIN public.payments p ON ();\n", "a.id"},
+	}
+	for _, tc := range badQueries {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(filepath.Join(workspace, owner.Path), []byte(tc.source), 0600); err != nil {
+				t.Fatal(err)
+			}
+			owner.FileVersion = version(owner.Path)
+			owner.Character = strings.Index(tc.source, tc.selected) + strings.LastIndex(tc.selected, ".") + 2
+			if owner.Character < 2 {
+				t.Fatalf("missing selected token: %q", tc.selected)
+			}
+			for _, method := range []string{"definition", "references"} {
+				owner.CodeMethod = method
+				if selected, ok := sqlNavSelected(tc.source, owner.SQLDialect, 0, owner.Character); ok && selected.isColumn {
+					t.Fatalf("unsupported SQL exposed a fake %s column binding: %+v", method, selected)
+				}
+				response, handled := s.sqlOfflineNavigation(ctx, owner, owner.Path, tc.source)
+				if handled || response.OK {
+					t.Fatalf("unsupported %s SQL produced a source-backed target from migration: %+v", method, response)
+				}
+				// If no independent optional SQL language server is installed,
+				// the public entrypoint must also reject, not return the wrong
+				// migration target. An installed SQLLens remains independent.
+				if _, sqlErr := systemexec.SQLLens(); sqlErr != nil {
+					public := s.codeInspect(ctx, owner)
+					if public.OK {
+						t.Fatalf("unsupported %s SQL navigated to a fabricated migration target: %+v", method, public)
+					}
+				}
+			}
+		})
+	}
+	if err := os.WriteFile(filepath.Join(workspace, owner.Path), []byte(files[owner.Path]), 0600); err != nil {
+		t.Fatal(err)
+	}
+	owner.FileVersion = version(owner.Path)
+	owner.CodeMethod = "definition"
+	owner.Character = strings.Index(files[owner.Path], "a.id") + 2
 	// A later source-backed table DROP must not yield a stale live column
 	// definition. The migration is test-owned and leaves no installed state.
 	dropped := filepath.Join(workspace, "migrations/003_drop.sql")
