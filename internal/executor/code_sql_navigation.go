@@ -154,7 +154,8 @@ func sqlNavMySQLAlterAuxColumn(tokens []sqlDDLToken, dialect string) bool {
 		return false
 	}
 	at, operation := 1, tokens[0].keyword()
-	if tokens[at].keyword() == "COLUMN" {
+	explicitColumn := tokens[at].keyword() == "COLUMN"
+	if explicitColumn {
 		at++
 	}
 	if at < len(tokens) && tokens[at].keyword() == "IF" {
@@ -163,10 +164,10 @@ func sqlNavMySQLAlterAuxColumn(tokens []sqlDDLToken, dialect string) bool {
 	if at >= len(tokens) || !sqlNavMySQLBareIdentifierAllowed(tokens[at], dialect, false) {
 		return false
 	}
-	// SYSTEM is a legal MariaDB CREATE column identifier but activates the
-	// SYSTEM VERSIONING parser in ALTER TABLE ... ADD system <type>.
-	// Reject this bounded ADD form without making SYSTEM globally reserved.
-	if dialect == "mariadb" && operation == "ADD" &&
+	// MariaDB parses ADD system <type> as SYSTEM VERSIONING, while explicit
+	// ADD COLUMN system <type> disambiguates and is valid. Keep both CREATE
+	// and explicit COLUMN forms legal; quoted bare SYSTEM is legal too.
+	if dialect == "mariadb" && operation == "ADD" && !explicitColumn &&
 		tokens[at].kind == 'i' && tokens[at].keyword() == "SYSTEM" {
 		return false
 	}

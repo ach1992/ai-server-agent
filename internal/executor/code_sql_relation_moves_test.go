@@ -572,6 +572,7 @@ func TestSQLMariaDBReservedAndContextualNames(t *testing.T) {
 		{"ALTER TABLE jobs ADD COLUMN WINDOW INT, RENAME TO archived_jobs;", "archived_jobs"},
 		{"ALTER TABLE jobs RENAME TO `ROW_NUMBER`;", "ROW_NUMBER"},
 		{"ALTER TABLE jobs ADD COLUMN `SYSTEM` VARCHAR(64), RENAME TO archived_jobs;", "archived_jobs"},
+		{"ALTER TABLE jobs ADD COLUMN SYSTEM VARCHAR(64), RENAME TO archived_jobs;", "archived_jobs"},
 		{"ALTER TABLE jobs RENAME TO archive.OFFSET;", "archive\x00offset"},
 		{"RENAME TABLE jobs TO archive.ROW_NUMBER;", "archive\x00row_number"},
 	} {

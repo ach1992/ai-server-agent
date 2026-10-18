@@ -277,6 +277,8 @@ func TestRealIsolatedMariaDBMigration(t *testing.T) {
 		"ALTER TABLE keyword_probe ADD COLUMN DATABASE INT;",
 		"ALTER TABLE keyword_probe ADD COLUMN WINDOW INT;",
 		"ALTER TABLE keyword_probe ADD COLUMN `SYSTEM` VARCHAR(64);",
+		"CREATE TABLE explicit_system_probe (id INT); ALTER TABLE explicit_system_probe ADD COLUMN system VARCHAR(64), RENAME TO explicit_system_moved; DROP TABLE explicit_system_moved;",
+		"CREATE TABLE quoted_system_probe (id INT); ALTER TABLE quoted_system_probe ADD `system` VARCHAR(64), RENAME TO quoted_system_moved; DROP TABLE quoted_system_moved;",
 		"CREATE TABLE legal_db_rename (id INT); ALTER TABLE legal_db_rename RENAME TO DATABASE; DROP TABLE DATABASE;",
 		"CREATE TABLE legal_window_rename (id INT); ALTER TABLE legal_window_rename RENAME TO WINDOW; DROP TABLE WINDOW;",
 		"CREATE TABLE qualified_reserved (id INT); RENAME TABLE qualified_reserved TO acceptance_migration.ROW_NUMBER; DROP TABLE acceptance_migration.ROW_NUMBER;",
