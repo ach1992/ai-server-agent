@@ -217,5 +217,36 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 	if stale.OK || stale.ErrorCode != "file_changed" {
 		t.Fatalf("stale SQL source accepted: %+v", stale)
 	}
-	t.Log("DIRECT_REAL_SQL_ALIAS_MCP_PASS definitions=2 references=5 versions=3 stale_rejected=true no_db=true")
+	// A malformed JOIN predicate must not create a migration definition or
+	// reference through the public, authenticated MCP path. This is a real
+	// Agent -> Executor -> Worker fixture; it never executes SQL or opens a DB.
+	for _, invalid := range []string{
+		"SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id = AND p.account_id;\n",
+		"SELECT a.id FROM public.accounts a LEFT RIGHT JOIN public.payments p ON a.id=p.account_id;\n",
+	} {
+		if err := os.WriteFile(filepath.Join(cfg.WorkspaceDir, "queries/list.sql"), []byte(invalid), 0600); err != nil {
+			t.Fatal(err)
+		}
+		invalidVersion := stat("queries/list.sql")
+		for _, method := range []string{"definition", "references"} {
+			response := query(method, strings.Index(invalid, "a.id")+2, invalidVersion)
+			if response.OK {
+				var targets []struct {
+					URI string `json:"uri"`
+				}
+				if err := json.Unmarshal([]byte(response.Output), &targets); err != nil {
+					t.Fatalf("malformed SQL yielded malformed %s output: %v %+v", method, err, response)
+				}
+				for _, target := range targets {
+					if strings.HasPrefix(target.URI, "migrations/") {
+						t.Fatalf("malformed SQL fabricated source-backed MCP %s: %+v", method, target)
+					}
+				}
+				if _, err := systemexec.SQLLens(); err != nil {
+					t.Fatalf("malformed SQL unexpectedly produced offline MCP %s: %+v", method, response)
+				}
+			}
+		}
+	}
+	t.Log("DIRECT_REAL_SQL_ALIAS_MCP_PASS definitions=2 references=5 versions=3 stale_rejected=true no_db=true malformed_on_rejected=true")
 }

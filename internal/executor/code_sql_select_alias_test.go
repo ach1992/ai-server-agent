@@ -122,10 +122,25 @@ func TestSQLSelectAliasRejectsRenamingAndIncompleteJoins(t *testing.T) {
 		{"truncated_left_join", `SELECT a.id FROM public.accounts AS a JOIN public.payments p ON a.id=p.id LEFT JOIN archive z ON;`},
 		{"truncated_second_join_where", `SELECT a.id FROM public.accounts AS a JOIN public.payments p ON a.id=p.id JOIN archive z ON WHERE z.id=a.id;`},
 		{"truncated_on_left_modifier", `SELECT a.id FROM public.accounts a JOIN payments p ON a.id = p.id LEFT;`},
+		{"malformed_on_next_join", `SELECT a.id FROM public.accounts a JOIN payments p ON a.id=AND p.account_id LEFT JOIN reports r ON r.id=a.id;`},
 		{"truncated_on_left_outer", `SELECT a.id FROM public.accounts a JOIN payments p ON a.id=p.id LEFT OUTER;`},
 		{"truncated_from_left", `SELECT a.id FROM public.accounts a LEFT;`},
 		{"on_only_connector", `SELECT a.id FROM public.accounts a JOIN payments p ON AND;`},
 		{"on_only_operator", `SELECT a.id FROM public.accounts a JOIN payments p ON =;`},
+		{"interior_and_as_rhs", `SELECT a.id FROM public.accounts a JOIN payments p ON a.id = AND p.account_id;`},
+		{"interior_or_as_rhs", `SELECT a.id FROM public.accounts a JOIN payments p ON a.id = OR p.account_id;`},
+		{"interior_and_as_lhs", `SELECT a.id FROM public.accounts a JOIN payments p ON a.id AND = p.account_id;`},
+		{"interior_repeated_operator", `SELECT a.id FROM public.accounts a JOIN payments p ON a.id == p.account_id;`},
+		{"interior_unterminated_rhs", `SELECT a.id FROM public.accounts a JOIN payments p ON a.id = p.account_id AND p.id = OR a.id;`},
+		{"interior_broken_parenthesis", `SELECT a.id FROM public.accounts a JOIN payments p ON (a.id = AND p.account_id) OR (a.id=p.account_id);`},
+		{"interior_multiple_connector", `SELECT a.id FROM public.accounts a JOIN payments p ON a.id=p.account_id AND OR a.id=p.account_id;`},
+		{"interior_missing_operator", `SELECT a.id FROM public.accounts a JOIN payments p ON a.id p.account_id;`},
+		{"interior_unmatched_parenthesis", `SELECT a.id FROM public.accounts a JOIN payments p ON (a.id=p.account_id));`},
+		{"join_left_right", `SELECT a.id FROM public.accounts a LEFT RIGHT JOIN payments p ON a.id=p.account_id;`},
+		{"join_inner_left", `SELECT a.id FROM public.accounts a INNER LEFT JOIN payments p ON a.id=p.account_id;`},
+		{"join_outer_alone", `SELECT a.id FROM public.accounts a OUTER JOIN payments p ON a.id=p.account_id;`},
+		{"join_left_inner", `SELECT a.id FROM public.accounts a LEFT INNER JOIN payments p ON a.id=p.account_id;`},
+		{"join_double_left", `SELECT a.id FROM public.accounts a LEFT LEFT JOIN payments p ON a.id=p.account_id;`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -170,6 +185,116 @@ func TestSQLSelectAliasIncompleteOnAcrossDialects(t *testing.T) {
 					for _, item := range items {
 						if item.isColumn {
 							t.Fatalf("incomplete ON created a %s column: %+v", dialect, item)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
+// Validate the deliberately small proven ON grammar instead of accepting
+// arbitrary balanced token streams as a trustworthy SQL scope. These positive
+// cases also guard the existing supported boolean/outer-join behavior.
+func TestSQLSelectAliasSupportedOnGrammar(t *testing.T) {
+	cases := []struct {
+		dialect, source string
+		wantUses        int
+	}{
+		{"postgres", `SELECT a.id FROM accounts a JOIN payments p ON a.id=p.account_id AND p.id=a.id;`, 3},
+		{"postgres", `SELECT a.id FROM accounts a JOIN payments p ON (a.id=p.account_id OR a.id=p.id) AND p.id>0;`, 3},
+		{"postgres", `SELECT a.id FROM accounts a LEFT OUTER JOIN payments p ON (a.id=p.account_id);`, 2},
+		{"postgres", `SELECT a.id FROM accounts a FULL OUTER JOIN payments p ON a.id=p.account_id;`, 2},
+		{"postgres", `SELECT a.id FROM accounts a INNER JOIN payments p ON NOT (a.id != p.account_id);`, 2},
+		{"postgres", `SELECT a.id FROM accounts a JOIN payments p ON a.id IS NOT NULL;`, 2},
+		{"postgres", `SELECT a.id FROM accounts a JOIN payments p ON a.name ILIKE p.name AND a.id=p.account_id;`, 2},
+		{"postgres", `SELECT a.id FROM accounts a JOIN payments p ON a.id <> p.account_id;`, 2},
+		{"postgres", `SELECT a.id FROM accounts a JOIN payments p ON a.id >= 12.5 AND p.account_id = -2;`, 2},
+		{"postgres", `SELECT a.id FROM accounts a JOIN payments p ON TRUE WHERE a.id>0;`, 2},
+		{"postgres", `SELECT a.id FROM accounts a JOIN payments p ON (TRUE OR a.id = p.account_id);`, 2},
+		{"mysql", "SELECT a.`id` FROM `accounts` a LEFT JOIN payments p ON (a.`id` = p.account_id AND p.id >= 15);", 2},
+		{"mariadb", "SELECT a.`id` FROM `accounts` a RIGHT OUTER JOIN payments p ON a.`id`=p.account_id OR p.account_id = a.`id`;", 3},
+	}
+	for _, tc := range cases {
+		t.Run(tc.dialect+"/"+tc.source, func(t *testing.T) {
+			occurrences, valid := sqlNavAllOccurrences(tc.source, tc.dialect)
+			if !valid {
+				t.Fatal("supported SQL source became globally unparseable")
+			}
+			got := 0
+			for _, item := range occurrences {
+				if item.isColumn && strings.HasSuffix(item.identity, "\x00column\x00id") &&
+					(item.tableIdentity == "accounts" || item.tableIdentity == "public\x00accounts") {
+					got++
+				}
+			}
+			if got != tc.wantUses {
+				t.Fatalf("proven ON/alias column uses %d != %d: %+v", got, tc.wantUses, occurrences)
+			}
+		})
+	}
+}
+
+func TestSQLSelectAliasOnGrammarFailsClosed(t *testing.T) {
+	for _, dialect := range []string{"postgres", "mysql", "mariadb"} {
+		// The ON budget is independent of the general SQL document limit.
+		// A too-long expression must fail atomically, never emit partial refs.
+		overbudget := "SELECT a.id FROM accounts a JOIN payments p ON " +
+			strings.Repeat("TRUE AND ", sqlNavOnMaxTokens/2) + "TRUE;"
+		items, valid := sqlNavAllOccurrences(overbudget, dialect)
+		if valid {
+			for _, item := range items {
+				if item.isColumn {
+					t.Fatalf("over-budget %s ON returned partial column graph: %+v", dialect, item)
+				}
+			}
+		}
+		for _, clause := range []string{
+			"a.id = AND p.account_id", "a.id = OR p.account_id",
+			"a.id == p.account_id", "a.id AND = p.account_id",
+			"a.id = p.account_id AND OR p.account_id = a.id",
+			"a.id=p.account_id AND (a.id = OR p.account_id)",
+			"a.id = p.account_id AND p.id IS", "a.id = p.account_id AND p.id =",
+			"a.id = p.account_id AND p.id = 'example'", // literals removed by the bounded tokenizer
+			strings.Repeat("(", sqlNavOnMaxDepth+1) + "a.id=p.account_id" + strings.Repeat(")", sqlNavOnMaxDepth+1),
+		} {
+			source := "SELECT a.id FROM accounts a JOIN payments p ON " + clause + ";"
+			t.Run(dialect+"/"+clause, func(t *testing.T) {
+				items, valid := sqlNavAllOccurrences(source, dialect)
+				if valid {
+					for _, item := range items {
+						if item.isColumn {
+							t.Fatalf("unsupported ON generated fabricated column: %+v", item)
+						}
+					}
+				}
+			})
+		}
+		if dialect == "mysql" || dialect == "mariadb" {
+			for _, source := range []string{
+				`SELECT a.id FROM accounts a FULL JOIN payments p ON a.id=p.account_id;`,
+				`SELECT a.id FROM accounts a JOIN payments p ON a.name ILIKE p.name;`,
+			} {
+				t.Run(dialect+"/unsupported_dialect/"+source, func(t *testing.T) {
+					items, valid := sqlNavAllOccurrences(source, dialect)
+					if valid {
+						for _, item := range items {
+							if item.isColumn {
+								t.Fatalf("unsupported dialect grammar created column: %+v", item)
+							}
+						}
+					}
+				})
+			}
+		}
+		for _, prefix := range []string{"LEFT RIGHT", "INNER LEFT", "OUTER", "FULL INNER", "LEFT OUTER RIGHT", "RIGHT OUTER OUTER"} {
+			source := "SELECT a.id FROM accounts a " + prefix + " JOIN payments p ON a.id=p.account_id;"
+			t.Run(dialect+"/"+prefix, func(t *testing.T) {
+				items, valid := sqlNavAllOccurrences(source, dialect)
+				if valid {
+					for _, item := range items {
+						if item.isColumn {
+							t.Fatalf("invalid JOIN modifier created column: %+v", item)
 						}
 					}
 				}
@@ -324,6 +449,8 @@ func TestSQLSelectAliasWorkerCrossFileNavigation(t *testing.T) {
 		{"join_positional_alias", "SELECT p.account_id FROM public.accounts a JOIN public.payments AS p (account_id, id) ON p.account_id = a.id;\n", "p.account_id"},
 		{"join_missing_on_predicate", "SELECT a.id FROM public.accounts AS a JOIN public.payments p ON;\n", "a.id"},
 		{"join_empty_parenthesized_on", "SELECT a.id FROM public.accounts AS a JOIN public.payments p ON ();\n", "a.id"},
+		{"join_interior_bad_operand", "SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id = AND p.account_id;\n", "a.id"},
+		{"join_conflicting_modifiers", "SELECT a.id FROM public.accounts a LEFT RIGHT JOIN public.payments p ON a.id=p.account_id;\n", "a.id"},
 	}
 	for _, tc := range badQueries {
 		t.Run(tc.name, func(t *testing.T) {
