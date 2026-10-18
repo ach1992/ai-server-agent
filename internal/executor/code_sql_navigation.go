@@ -215,13 +215,22 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 				at++
 			}
 			if statement[at].keyword() == "TABLE" || statement[at].keyword() == "VIEW" {
+				object := statement[at].keyword()
 				at++
 				if at+1 < len(statement) && statement[at].keyword() == "IF" &&
 					statement[at+1].keyword() == "EXISTS" {
 					at += 2
 				}
-				if !materialized && operation == "ALTER" && at < len(statement) &&
-					statement[at].keyword() == "ONLY" {
+				if at < len(statement) && statement[at].keyword() == "ONLY" {
+					// ONLY applies to PostgreSQL ALTER TABLE's inheritance-
+					// scoped subforms. It is not a supported modifier for
+					// DROP, ALTER VIEW, or MySQL/MariaDB relation moves.
+					// Ignore unsupported spellings entirely rather than
+					// inventing old/new lifecycle tombstones.
+					if operation != "ALTER" || materialized || object != "TABLE" ||
+						(dialect != "postgres" && dialect != "postgresql") {
+						return
+					}
 					at++
 				}
 				// PostgreSQL ordinary TABLE/VIEW RENAME TO and SET SCHEMA
@@ -345,9 +354,6 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 						break
 					}
 					break
-				}
-				if at < len(statement) && statement[at].keyword() == "ONLY" {
-					at++
 				}
 				isLifecycleChange := operation == "DROP"
 				if operation == "ALTER" {

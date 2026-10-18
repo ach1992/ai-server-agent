@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/ach1992/ai-server-agent/internal/systemexec"
+	"golang.org/x/sys/unix"
 )
 
 // A relation move is a lifecycle transition, not a new CREATE or a harmless
@@ -27,8 +28,14 @@ func TestSQLPostgresOrdinaryRelationMoveOccurrences(t *testing.T) {
 		{"schema_move", "ALTER TABLE reporting.events SET SCHEMA archive;", "postgres", "archive\x00events", false, true},
 		{"view_schema_move", "ALTER VIEW reporting.events SET SCHEMA archive;", "postgresql", "archive\x00events", false, true},
 		{"if_exists_schema_move", "ALTER TABLE IF EXISTS reporting.events SET SCHEMA archive;", "postgres", "archive\x00events", false, true},
-		{"only_schema_move", "ALTER TABLE ONLY reporting.events SET SCHEMA archive;", "postgres", "archive\x00events", false, true},
-		{"if_exists_only_schema_move", "ALTER TABLE IF EXISTS ONLY reporting.events SET SCHEMA archive;", "postgres", "archive\x00events", false, true},
+		// PostgreSQL requires RENAME TO and SET SCHEMA without ONLY;
+		// these deliberately malformed inputs are handled conservatively,
+		// not asserted as PostgreSQL grammar acceptance.
+		{"malformed_only_set_schema_conservative", "ALTER TABLE ONLY reporting.events SET SCHEMA archive;", "postgres", "archive\x00events", false, true},
+		{"malformed_if_exists_only_set_schema_conservative", "ALTER TABLE IF EXISTS ONLY reporting.events SET SCHEMA archive;", "postgres", "archive\x00events", false, true},
+		// Valid PostgreSQL ONLY subforms preserve the relation identity.
+		{"valid_only_add_column", "ALTER TABLE ONLY reporting.events ADD COLUMN detail text;", "postgres", "", false, false},
+		{"valid_if_exists_only_rename_column", "ALTER TABLE IF EXISTS ONLY reporting.events RENAME COLUMN old TO new;", "postgres", "", false, false},
 		{"quoted_rename", `ALTER VIEW "reporting.data"."old.view" RENAME TO "new.view";`, "postgres", "reporting.data\x00new.view", true, true},
 		{"quoted_schema_move", `ALTER TABLE "reporting.data"."old.view" SET SCHEMA "archive.data";`, "postgres", "archive.data\x00old.view", false, true},
 		{"invalid_qualified_target", "ALTER TABLE reporting.events SET SCHEMA archive.other;", "postgres", "", false, true},
@@ -75,14 +82,29 @@ func TestSQLPostgresOrdinaryRelationMoveOccurrences(t *testing.T) {
 // Prove through the actual unprivileged worker and versioned source search,
 // not only token slices: a move cannot resurrect an obsolete migration.
 func TestSQLPostgresOrdinaryMovesRealWorkerDefinition(t *testing.T) {
+	// The portable unit suite can skip unavailable optional prerequisites;
+	// the separate trusted-ripgrep CI acceptance must fail instead.
+	required := os.Getenv("ASA_REQUIRE_SQL_ORDINARY_WORKER") == "1"
 	if os.Geteuid() == 0 {
+		if required {
+			t.Fatal("required ordinary SQL worker acceptance must run unprivileged")
+		}
 		t.Skip("worker-only SQL integration requires an ordinary UID")
 	}
-	requireWorkerLandlockV2(t)
-	// The real worker uses the operator-provisioned trusted ripgrep
-	// binary. Native CI runners without this optional search dependency
-	// still exercise all pure SQL lifecycle/identity regressions above.
+	if required {
+		abi, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, 0, 0,
+			uintptr(unix.LANDLOCK_CREATE_RULESET_VERSION))
+		if errno != 0 || abi < 2 {
+			t.Fatalf("required ordinary SQL worker acceptance needs Landlock ABI v2: abi=%d errno=%v", abi, errno)
+		}
+	} else {
+		requireWorkerLandlockV2(t)
+	}
+	// Real source search uses the operator-provisioned trusted ripgrep.
 	if !systemexec.Trusted("/usr/bin/rg") {
+		if required {
+			t.Fatal("required ordinary SQL worker acceptance needs trusted /usr/bin/rg")
+		}
 		t.Skip("trusted worker ripgrep unavailable")
 	}
 	helper := filepath.Join(t.TempDir(), "agent-file-helper")
@@ -190,6 +212,31 @@ func TestSQLPostgresOrdinaryMovesRealWorkerDefinition(t *testing.T) {
 			write(query, queryBody)
 			write(recreate, tc.create)
 			expectOne(recreate)
+		})
+	}
+}
+
+// An unsupported dialect/action must not turn PostgreSQL-specific ONLY into
+// a fictitious ALTER/DROP of an unrelated source-backed relation.
+func TestSQLOnlyDialectBoundariesFailClosed(t *testing.T) {
+	for _, tc := range []struct {
+		name, sql, dialect string
+	}{
+		{"mysql_alter", "ALTER TABLE ONLY reporting.events RENAME TO archived_events;", "mysql"},
+		{"mariadb_alter", "ALTER TABLE ONLY reporting.events RENAME AS archived_events;", "mariadb"},
+		{"mysql_drop", "DROP TABLE ONLY reporting.events;", "mysql"},
+		{"mariadb_drop", "DROP VIEW ONLY reporting.events;", "mariadb"},
+		{"postgres_drop", "DROP TABLE ONLY reporting.events;", "postgres"},
+		{"postgres_view_only", "ALTER VIEW ONLY reporting.events RENAME TO archive;", "postgres"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			items, ok := sqlNavOccurrences(tc.sql, tc.dialect)
+			if !ok {
+				return // safe parse rejection is acceptable
+			}
+			if len(items) != 0 {
+				t.Fatalf("unsupported ONLY syntax invented source lifecycle %q: %+v", tc.sql, items)
+			}
 		})
 	}
 }
