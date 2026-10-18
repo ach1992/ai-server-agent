@@ -197,6 +197,21 @@ func TestSQLPostgresOrdinaryMovesRealWorkerDefinition(t *testing.T) {
 			move:   "ALTER TABLE jobs ADD COLUMN SELECT INT, RENAME TO archived_jobs;\n",
 		},
 		{
+			name: "mariadb_offset_target_uncertain", dialect: "mariadb", oldName: "jobs", newName: "archived_jobs", uncertain: true,
+			create: "CREATE TABLE jobs (id INT);\n",
+			move:   "ALTER TABLE jobs RENAME TO OFFSET;\n",
+		},
+		{
+			name: "mariadb_system_add_uncertain", dialect: "mariadb", oldName: "jobs", newName: "archived_jobs", uncertain: true,
+			create: "CREATE TABLE jobs (id INT);\n",
+			move:   "ALTER TABLE jobs ADD SYSTEM VARCHAR(64), RENAME TO archived_jobs;\n",
+		},
+		{
+			name: "mariadb_multi_rename_reserved_uncertain", dialect: "mariadb", oldName: "jobs", newName: "archived_jobs", uncertain: true,
+			create: "CREATE TABLE jobs (id INT);\n",
+			move:   "RENAME TABLE jobs TO archived_jobs, extra TO ROW_NUMBER;\n",
+		},
+		{
 			name: "mariadb_reserved_target_uncertain", dialect: "mariadb", oldName: "jobs", newName: "archived_jobs", uncertain: true,
 			create: "CREATE TABLE jobs (id INT);\n",
 			move:   "ALTER TABLE jobs RENAME SELECT;\n",
@@ -486,6 +501,99 @@ func TestSQLMySQLReservedDirectLifecycleNames(t *testing.T) {
 				}
 			})
 		}
+	}
+}
+
+// MariaDB's default-mode reserved set differs from MySQL 8.4 and contains
+// version-qualified tokens. The offline parser uses the conservative modern
+// MariaDB subset: never certify an invalid later rename or DROP as a move.
+func TestSQLMariaDBReservedAndContextualNames(t *testing.T) {
+	for _, statement := range []string{
+		"ALTER TABLE jobs RENAME TO OFFSET;",
+		"ALTER TABLE jobs RENAME TO ROW_NUMBER;",
+		"ALTER TABLE jobs RENAME TO SQL_AFTER_GTIDS;",
+		"ALTER TABLE jobs RENAME TO SQL_BEFORE_GTIDS;",
+		"ALTER TABLE jobs ADD COLUMN OFFSET INT, RENAME TO archived_jobs;",
+		"ALTER TABLE jobs RENAME TO archived_jobs, ADD COLUMN ROW_NUMBER INT;",
+		"ALTER TABLE jobs ADD SYSTEM VARCHAR(64), RENAME TO archived_jobs;",
+		"ALTER TABLE jobs RENAME TO archived_jobs, ADD SYSTEM VARCHAR(64);",
+		"RENAME TABLE jobs TO ROW_NUMBER;",
+		"RENAME TABLE jobs TO archived_jobs, extra TO OFFSET;",
+	} {
+		t.Run("invalid/"+statement, func(t *testing.T) {
+			for _, source := range []string{statement, "CREATE TABLE jobs (id INT);\n" + statement} {
+				items, valid := sqlNavOccurrences(source, "mariadb")
+				if valid || len(items) != 0 {
+					t.Fatalf("invalid MariaDB statement certified source history: valid=%t events=%+v", valid, items)
+				}
+			}
+		})
+	}
+	for _, statement := range []string{
+		"DROP TABLE ROW_NUMBER;",
+		"DROP TABLE jobs, OFFSET;",
+		"CREATE TABLE OFFSET (id INT);",
+	} {
+		t.Run("invalid_direct/"+statement, func(t *testing.T) {
+			items, _ := sqlNavOccurrences(statement, "mariadb")
+			if len(items) != 0 {
+				t.Fatalf("invalid MariaDB direct identifier fabricated lifecycle: %+v", items)
+			}
+		})
+	}
+	for _, tc := range []struct{ source, identity string }{
+		{"CREATE TABLE jobs (id INT);\nDROP TABLE jobs, OFFSET;", "jobs"},
+		{"CREATE TABLE `ROW_NUMBER` (id INT);\nDROP TABLE ROW_NUMBER;", "ROW_NUMBER"},
+	} {
+		t.Run("invalid_drop_preserves_create/"+tc.identity, func(t *testing.T) {
+			items, valid := sqlNavOccurrences(tc.source, "mariadb")
+			if !valid || len(items) != 1 || !items[0].declaration || items[0].drop ||
+				items[0].identity != tc.identity {
+				t.Fatalf("invalid DROP poisoned a previous legal CREATE: valid=%t events=%+v", valid, items)
+			}
+		})
+	}
+	for _, statement := range []string{
+		"ALTER TABLE jobs RENAME TO DATABASE;",
+		"ALTER TABLE jobs RENAME TO WINDOW;",
+		"ALTER TABLE jobs ADD COLUMN SYSTEM INT, RENAME TO archived_jobs;",
+	} {
+		t.Run("mysql_reserved_unchanged/"+statement, func(t *testing.T) {
+			items, valid := sqlNavOccurrences(statement, "mysql")
+			if valid || len(items) != 0 {
+				t.Fatalf("MySQL 8.4 must keep rejecting its reserved names: valid=%t events=%+v", valid, items)
+			}
+		})
+	}
+	for _, tc := range []struct{ statement, target string }{
+		{"ALTER TABLE jobs RENAME TO DATABASE;", "database"},
+		{"ALTER TABLE jobs RENAME TO WINDOW;", "window"},
+		{"ALTER TABLE jobs ADD COLUMN DATABASE INT, RENAME TO archived_jobs;", "archived_jobs"},
+		{"ALTER TABLE jobs ADD COLUMN WINDOW INT, RENAME TO archived_jobs;", "archived_jobs"},
+		{"ALTER TABLE jobs RENAME TO `ROW_NUMBER`;", "ROW_NUMBER"},
+		{"ALTER TABLE jobs ADD COLUMN `SYSTEM` VARCHAR(64), RENAME TO archived_jobs;", "archived_jobs"},
+		{"ALTER TABLE jobs RENAME TO archive.OFFSET;", "archive\x00offset"},
+		{"RENAME TABLE jobs TO archive.ROW_NUMBER;", "archive\x00row_number"},
+	} {
+		t.Run("valid/"+tc.statement, func(t *testing.T) {
+			items, valid := sqlNavOccurrences(tc.statement, "mariadb")
+			if !valid || len(items) != 2 || !items[0].drop || !items[1].drop || items[1].identity != tc.target {
+				t.Fatalf("legal MariaDB identity was rejected: valid=%t events=%+v", valid, items)
+			}
+		})
+	}
+	for _, statement := range []string{
+		"CREATE TABLE DATABASE (id INT);",
+		"CREATE TABLE WINDOW (id INT);",
+		"CREATE TABLE jobs (system INT);",
+		"DROP TABLE WINDOW;",
+	} {
+		t.Run("valid_direct/"+statement, func(t *testing.T) {
+			items, valid := sqlNavOccurrences(statement, "mariadb")
+			if !valid || len(items) != 1 {
+				t.Fatalf("legal MariaDB declaration lost: valid=%t events=%+v", valid, items)
+			}
+		})
 	}
 }
 

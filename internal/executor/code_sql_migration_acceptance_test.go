@@ -251,6 +251,44 @@ func TestRealIsolatedMariaDBMigration(t *testing.T) {
 		t.Fatalf("real MariaDB rejected legal qualified/quoted/nonreserved names: output=%q err=%v", keywordResult, err)
 	}
 
+	// MariaDB F5-R1/R2: the official default-mode grammar distinguishes
+	// unquoted DATABASE/WINDOW from version-reserved identifiers and handles
+	// unquoted SYSTEM specially in ALTER ADD. Exercise a fresh socket-only
+	// MariaDB engine, not a production database or an offline-only simulation.
+	for _, invalid := range []string{
+		"ALTER TABLE keyword_probe RENAME TO OFFSET;",
+		"ALTER TABLE keyword_probe RENAME TO ROW_NUMBER;",
+		"ALTER TABLE keyword_probe RENAME TO SQL_AFTER_GTIDS;",
+		"ALTER TABLE keyword_probe RENAME TO SQL_BEFORE_GTIDS;",
+		"ALTER TABLE keyword_probe ADD COLUMN OFFSET INT, RENAME TO invalid_keyword_move;",
+		"ALTER TABLE keyword_probe ADD SYSTEM VARCHAR(64), RENAME TO invalid_keyword_move;",
+		"ALTER TABLE keyword_probe RENAME TO invalid_keyword_move, ADD SYSTEM VARCHAR(64);",
+		"RENAME TABLE keyword_probe TO ROW_NUMBER;",
+		"RENAME TABLE keyword_probe TO invalid_keyword_move, extra TO OFFSET;",
+	} {
+		if out, err := client("USE acceptance_migration; " + invalid); err == nil {
+			t.Fatalf("real MariaDB accepted an invalid reserved/contextual name %q: %s", invalid, out)
+		}
+	}
+	for _, valid := range []string{
+		"CREATE TABLE DATABASE (id INT); DROP TABLE DATABASE;",
+		"CREATE TABLE WINDOW (id INT); DROP TABLE WINDOW;",
+		"CREATE TABLE has_system_column (system INT); DROP TABLE has_system_column;",
+		"ALTER TABLE keyword_probe ADD COLUMN DATABASE INT;",
+		"ALTER TABLE keyword_probe ADD COLUMN WINDOW INT;",
+		"ALTER TABLE keyword_probe ADD COLUMN `SYSTEM` VARCHAR(64);",
+		"CREATE TABLE legal_db_rename (id INT); ALTER TABLE legal_db_rename RENAME TO DATABASE; DROP TABLE DATABASE;",
+		"CREATE TABLE legal_window_rename (id INT); ALTER TABLE legal_window_rename RENAME TO WINDOW; DROP TABLE WINDOW;",
+		"CREATE TABLE qualified_reserved (id INT); RENAME TABLE qualified_reserved TO acceptance_migration.ROW_NUMBER; DROP TABLE acceptance_migration.ROW_NUMBER;",
+	} {
+		if out, err := client("USE acceptance_migration; " + valid); err != nil {
+			t.Fatalf("real MariaDB rejected a legal unquoted/quoted/qualified name %q: %s (%v)", valid, out, err)
+		}
+	}
+	if out, err := client("USE acceptance_migration; SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='acceptance_migration' AND TABLE_NAME='keyword_probe'; SELECT COUNT(*) FROM information_schema.TABLES WHERE TABLE_SCHEMA='acceptance_migration' AND TABLE_NAME='invalid_keyword_move';"); err != nil || strings.TrimSpace(out) != "1\n0" {
+		t.Fatalf("MariaDB reserved/contextual probes changed table lifecycle: output=%q err=%v", out, err)
+	}
+
 	// Invalid type parameters must not be confused with successful DDL.
 	if out, err := client("USE acceptance_migration; CREATE TABLE invalid_decimal_probe (id INT);"); err != nil {
 		t.Fatalf("unable to create disposable precision probe: %v; %s", err, out)
