@@ -123,6 +123,37 @@ func TestSQLSelectAliasDoesNotConfuseNamesOrStrings(t *testing.T) {
 	}
 }
 
+func TestSQLSelectAliasNeverReturnsPartialOutput(t *testing.T) {
+	// A capped SELECT must not quietly return a subset of references. The
+	// wider source graph treats an unsupported excessive result as unknown.
+	over := "SELECT " + strings.Repeat("a.id, ", sqlNavigationMaxLocations) +
+		"a.id FROM accounts a;"
+	got, valid := sqlNavAllOccurrences(over, "postgres")
+	if !valid {
+		t.Fatal("ordinary SQL source became unparseable")
+	}
+	for _, item := range got {
+		if item.isColumn {
+			t.Fatalf("large SELECT returned misleading partial refs: %+v", item)
+		}
+	}
+	allowed := "SELECT " + strings.Repeat("a.id, ", sqlNavigationMaxLocations-1) +
+		"a.id FROM accounts a;"
+	items, ok := sqlNavAllOccurrences(allowed, "postgres")
+	if !ok {
+		t.Fatal("boundary SQL source became unparseable")
+	}
+	found := 0
+	for _, item := range items {
+		if item.isColumn {
+			found++
+		}
+	}
+	if found != sqlNavigationMaxLocations {
+		t.Fatalf("at-cap references lost: %d", found)
+	}
+}
+
 func TestSQLSelectAliasWorkerCrossFileNavigation(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("worker-only fixture")

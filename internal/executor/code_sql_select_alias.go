@@ -138,7 +138,7 @@ func sqlNavSelectColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurr
 	// expressions. Select only the actual column token, so a schema prefix
 	// or alias declaration cannot masquerade as the column at the cursor.
 	result := make([]sqlNavOccurrence, 0, 8)
-	for i := 1; i+2 < len(statement) && len(result) < sqlNavigationMaxLocations; i++ {
+	for i := 1; i+2 < len(statement); i++ {
 		if tableTokens[i] || i > 0 && statement[i-1].text == "." ||
 			(statement[i].kind != 'i' && statement[i].kind != 'q') || statement[i+1].text != "." {
 			continue
@@ -161,6 +161,9 @@ func sqlNavSelectColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurr
 			continue
 		}
 		if item, ok := sqlNavColumn(table, column, false, false); ok {
+			if len(result) >= sqlNavigationMaxLocations {
+				return nil // no silent partial column graph on output cap
+			}
 			result = append(result, item)
 		}
 	}
