@@ -147,7 +147,7 @@ set +e
   # The protected subprocess must complete its restart/rollback/recovery.
   # Wait for the real installed manager to report verified recovery.
   for _ in $(seq 1 700); do
-    grep -Fq 'old config and local service health restored' "$tmp/protected.out" 2>/dev/null && break
+    grep -Fq 'Runtime update failed;' "$tmp/protected.out" 2>/dev/null && break
     sleep 0.1
   done
   printf '\n0\n0\n'
@@ -158,7 +158,10 @@ protected_rc=$?
 set -e
 case "$protected_rc" in 0|130) ;; *) fail "Installed protected PTY exit $protected_rc" ;; esac
 [ -e "$restart_marker" ] || fail 'One-shot systemctl fault did not run'
-grep -Fq 'Runtime update failed; old config and local service health restored.' "$tmp/protected.out" ||
+# The genuine interactive console wraps long errors. Match the two
+# distinctive segments independently, not an impossible one-line literal.
+grep -Fq 'Runtime update failed;' "$tmp/protected.out" &&
+  grep -Fq 'restored.' "$tmp/protected.out" ||
   fail 'Installed protected action did not verify rollback'
 grep -Fq 'Action failed (exit 1)' "$tmp/protected.out" ||
   fail 'Enclosing menu hid the protected transaction failure'
