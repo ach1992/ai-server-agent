@@ -48,6 +48,19 @@ func sqlNavRelationNameAllowed(tokens []sqlDDLToken, start, end int, dialect str
 	return true
 }
 
+// sqlNavQualifiedColumnHeadAllowed checks the ColId *before* the first dot.
+// Later components are SQL attributes, with different dialect keyword rules.
+func sqlNavQualifiedColumnHeadAllowed(token sqlDDLToken, dialect string) bool {
+	switch dialect {
+	case "postgres", "postgresql":
+		return sqlNavPostgresBareIdentifierAllowed(token, false)
+	case "mysql", "mariadb":
+		return sqlNavMySQLBareIdentifierAllowed(token, dialect, false)
+	default:
+		return false
+	}
+}
+
 // SELECT qualified-column uses supplement the source-backed DDL graph. This is
 // intentionally not a general SQL query analyzer: resolve only a bounded,
 // single SELECT scope with explicit ordinary tables and optional table aliases.
@@ -288,6 +301,17 @@ func sqlNavSelectAnalysis(statement []sqlDDLToken, dialect string) (sources, col
 		if tableTokens[i] || i > 0 && statement[i-1].text == "." ||
 			(statement[i].kind != 'i' && statement[i].kind != 'q') || statement[i+1].text != "." {
 			continue
+		}
+		// A columnref begins with ColId, not a context-free SQL name.
+		// Post-dot attributes can be reserved keywords (a.select), while
+		// an unquoted RESERVED/TYPE_FUNC_NAME keyword cannot start the
+		// reference (ONLY.id), even when a real quoted "only" table exists.
+		if !sqlNavQualifiedColumnHeadAllowed(statement[i], dialect) {
+			// This is an invalid top-level ColId indirection, not an
+			// unknown isolated expression. Reject the entire SELECT so
+			// other real column occurrences cannot certify an invalid
+			// source statement as navigable.
+			return nil, nil
 		}
 		_, end, valid := sqlNavName(statement, i)
 		if !valid || end <= i+1 || end-i != 3 && end-i != 5 ||

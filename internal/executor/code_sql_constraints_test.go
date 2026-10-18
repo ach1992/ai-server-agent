@@ -25,7 +25,9 @@ func TestSQLConstraintColumnSourceReferences(t *testing.T) {
 		{"foreign_expression", "CREATE TABLE orders (id INT, FOREIGN KEY ((id+1)) REFERENCES accounts(id));", "mysql", []string{"orders.id", "accounts.id"}},
 		{"mysql_create_key", "CREATE TABLE orders (id BIGINT, account_id INT, KEY ix_id (id), FULLTEXT INDEX ix_text (account_id));", "mysql", []string{"orders.id", "orders.account_id", "orders.id", "orders.account_id"}},
 		{"mysql_key_expression_ignored", "CREATE TABLE orders (id BIGINT, KEY ix_id ((id+1)));", "mysql", []string{"orders.id"}},
-		{"postgres_fake_mysql_key_ignored", "CREATE TABLE orders (id BIGINT, KEY ix_id (id));", "postgres", []string{"orders.id"}},
+		// PostgreSQL has no MySQL-style KEY table constraint. Its whole
+		// CREATE TABLE is invalid, so even id must not become a declaration.
+		{"postgres_fake_mysql_key_ignored", "CREATE TABLE orders (id BIGINT, KEY ix_id (id));", "postgres", nil},
 		{"column_inline_key_no_duplicate", "CREATE TABLE orders (id BIGINT PRIMARY KEY, account_id INT UNIQUE);", "mysql", []string{"orders.id", "orders.account_id"}},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -40,6 +42,10 @@ func TestSQLConstraintColumnSourceReferences(t *testing.T) {
 					if item.drop {
 						t.Fatalf("constraint column recorded as tombstone: %+v", item)
 					}
+				}
+				if tc.name == "postgres_fake_mysql_key_ignored" &&
+					(item.declaration || item.identity == "orders") {
+					t.Fatalf("invalid PostgreSQL CREATE declared a physical table: %+v", item)
 				}
 			}
 			if len(got) != len(tc.want) {

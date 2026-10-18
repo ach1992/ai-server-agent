@@ -399,5 +399,94 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 			t.Fatalf("%s JOIN ONLY real references lost: %+v %+v", dialect, joinRefs, locs)
 		}
 	}
-	t.Log("DIRECT_REAL_SQL_ALIAS_MCP_PASS definitions=2 references=5 versions=3 stale_rejected=true no_db=true malformed_on_rejected=true functions_excluded=true source_literals_rejected=true unconsumed_source_gaps_rejected=true pg_on_reserved_rejected=true pg_only_modifier_rejected=true pg_quoted_only_resolved=true mysql_only_resolved=true mariadb_only_resolved=true mysql_mariadb_join_only_resolved=true n4_table_level_modifier_rejected=true n4_no_false_crossfile_refs=true")
+
+	// Independent-review R1/R2/R3: production-like cross-file navigation
+	// after all positive reference-count assertions above. Test-owned SQL
+	// is deliberately added late to avoid altering their fixture baselines.
+	writeSQL := func(path, source string) {
+		t.Helper()
+		name := filepath.Join(cfg.WorkspaceDir, path)
+		if err := os.MkdirAll(filepath.Dir(name), 0700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(name, []byte(source), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	invalidMigration := "migrations/004_invalid_partial.sql"
+	writeSQL(invalidMigration, "CREATE TABLE impossible (id BIGINT, ONLY BIGINT);\n")
+	for _, tc := range []struct{ name, source, selected string }{
+		{"r1_pg_qualified_only", `SELECT ONLY.id FROM "only";` + "\n", "ONLY.id"},
+		{"r2_view_invalid_on", "CREATE VIEW invalid_view AS SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id = ONLY;\n", "public.accounts"},
+		{"r2_view_unknown_gap", "CREATE VIEW invalid_view AS SELECT a.id FROM public.accounts a JUNK JOIN public.payments p ON a.id=p.id;\n", "public.accounts"},
+		{"r2_insert_invalid_on", "INSERT INTO archive (id) SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id = ONLY;\n", "public.accounts"},
+		{"r3_invalid_ddl_column", "SELECT i.id FROM impossible i;\n", "i.id"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			path := "queries/r123.sql"
+			writeSQL(path, tc.source)
+			start := strings.Index(tc.source, tc.selected)
+			if start < 0 {
+				t.Fatal("selection missing")
+			}
+			at := start + len(tc.selected) - 1
+			for _, method := range []string{"definition", "references"} {
+				response := call("code_"+method, map[string]any{
+					"workspace": cfg.WorkspaceDir, "path": path, "file_version": stat(path),
+					"language": "sql", "sql_dialect": "postgres",
+					"line": 0, "character": at,
+				})
+				if response.OK {
+					var targets []struct {
+						URI string `json:"uri"`
+					}
+					if err := json.Unmarshal([]byte(response.Output), &targets); err != nil {
+						t.Fatalf("%s returned invalid locations: %v", method, err)
+					}
+					for _, target := range targets {
+						if strings.HasPrefix(target.URI, "migrations/") {
+							t.Fatalf("%s fabricated migration navigation from %s: %+v", method, tc.name, response)
+						}
+					}
+				}
+			}
+		})
+	}
+	// A valid nested JOIN remains navigable through real authenticated MCP.
+	// The fail-closed R2 correction must not discard a provable contained
+	// SELECT just because its enclosing operation is CREATE VIEW.
+	embeddedPath := "queries/valid_embedded.sql"
+	embedded := "CREATE VIEW valid_view AS SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id=p.account_id;\n"
+	writeSQL(embeddedPath, embedded)
+	embeddedAt := strings.Index(embedded, "FROM public.accounts") + len("FROM public.") + 1
+	for _, method := range []string{"definition", "references"} {
+		response := call("code_"+method, map[string]any{
+			"workspace": cfg.WorkspaceDir, "path": embeddedPath, "file_version": stat(embeddedPath),
+			"language": "sql", "sql_dialect": "postgres", "line": 0, "character": embeddedAt,
+		})
+		if !response.OK {
+			t.Fatalf("valid embedded %s lost physical reference: %+v", method, response)
+		}
+		var targets []struct {
+			URI         string `json:"uri"`
+			FileVersion string `json:"file_version"`
+		}
+		if err := json.Unmarshal([]byte(response.Output), &targets); err != nil {
+			t.Fatal(err)
+		}
+		want := "migrations/001_accounts.sql"
+		if method == "references" {
+			want = embeddedPath
+		}
+		found := false
+		for _, loc := range targets {
+			if loc.URI == want && loc.FileVersion == stat(want) {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("valid contained %s missing %s: %+v", method, want, response)
+		}
+	}
+	t.Log("DIRECT_REAL_SQL_ALIAS_MCP_PASS definitions=2 references=5 versions=3 stale_rejected=true no_db=true malformed_on_rejected=true functions_excluded=true source_literals_rejected=true unconsumed_source_gaps_rejected=true pg_on_reserved_rejected=true pg_only_modifier_rejected=true pg_quoted_only_resolved=true mysql_only_resolved=true mariadb_only_resolved=true mysql_mariadb_join_only_resolved=true r1_r2_r3_crossfile_rejected=true n4_table_level_modifier_rejected=true n4_no_false_crossfile_refs=true")
 }

@@ -854,6 +854,10 @@ func TestSQLSelectAliasWorkerCrossFileNavigation(t *testing.T) {
 		{"pg_typefunc_keyword", "SELECT accounts.id FROM LEFT accounts;\n", "accounts.id"},
 		{"pg_reserved_only_on_operand", "SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id=ONLY;\n", "a.id"},
 		{"pg_reserved_table_on_operand", "SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id=TABLE;\n", "a.id"},
+		{"r1_reserved_leading_column", `SELECT ONLY.id FROM "only";` + "\n", "ONLY.id"},
+		{"r2_invalid_create_view_on", "CREATE VIEW bad AS SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id=ONLY;\n", "public.accounts"},
+		{"r2_invalid_create_view_gap", "CREATE VIEW bad AS SELECT a.id FROM public.accounts a JUNK JOIN public.payments p ON a.id=p.id;\n", "public.accounts"},
+		{"r2_invalid_insert_select", "INSERT INTO archive (id) SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id=ONLY;\n", "public.accounts"},
 	}
 	for _, tc := range badQueries {
 		t.Run(tc.name, func(t *testing.T) {
@@ -906,6 +910,38 @@ func TestSQLSelectAliasWorkerCrossFileNavigation(t *testing.T) {
 	resp = s.codeInspect(ctx, owner)
 	if !resp.OK || json.Unmarshal([]byte(resp.Output), &locs) != nil || len(locs) != 2 {
 		t.Fatalf("quoted PostgreSQL only table references lost: %+v %+v", resp, locs)
+	}
+
+	// R3 real Worker/Landlock: an otherwise plausible migration with a
+	// later invalid column must not declare either its table or id column.
+	invalidDDLPath := filepath.Join(workspace, "migrations/004_invalid_partial.sql")
+	if err := os.WriteFile(invalidDDLPath,
+		[]byte("CREATE TABLE impossible (id BIGINT, ONLY BIGINT);\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	r3Query := "SELECT i.id FROM impossible i;\n"
+	if err := os.WriteFile(filepath.Join(workspace, owner.Path), []byte(r3Query), 0600); err != nil {
+		t.Fatal(err)
+	}
+	owner.FileVersion = version(owner.Path)
+	owner.Character = strings.Index(r3Query, "i.id") + 2
+	for _, method := range []string{"definition", "references"} {
+		owner.CodeMethod = method
+		response := s.codeInspect(ctx, owner)
+		if response.OK {
+			var targets []sqlNavLocation
+			if err := json.Unmarshal([]byte(response.Output), &targets); err != nil {
+				t.Fatalf("R3 malformed %s locations: %v", method, err)
+			}
+			for _, target := range targets {
+				if target.URI == "migrations/004_invalid_partial.sql" {
+					t.Fatalf("invalid migration certified a physical %s target: %+v", method, response)
+				}
+			}
+		}
+	}
+	if err := os.Remove(invalidDDLPath); err != nil {
+		t.Fatal(err)
 	}
 
 	if err := os.WriteFile(filepath.Join(workspace, owner.Path), []byte(files[owner.Path]), 0600); err != nil {

@@ -389,23 +389,10 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 			}
 			return
 		}
-		hasWithClause := false
-		for i, token := range statement {
-			if token.keyword() != "WITH" {
-				continue
-			}
-			// PostgreSQL CREATE MATERIALIZED VIEW ... AS SELECT ... WITH
-			// [NO] DATA ends in a population clause, not a scoped CTE.
-			// Keep the conservative CTE guard for every other WITH form.
-			if operation == "CREATE" && statement[1].keyword() == "MATERIALIZED" &&
-				(i+2 == len(statement) && statement[i+1].keyword() == "DATA" ||
-					i+3 == len(statement) && statement[i+1].keyword() == "NO" &&
-						statement[i+2].keyword() == "DATA") {
-				continue
-			}
-			hasWithClause = true
-			break
-		}
+		// The grammar-owning statement branch decides which occurrences
+		// may be emitted. In particular, a FROM/JOIN token in an arbitrary
+		// CREATE/INSERT/UPDATE body is not itself evidence of a table use.
+		scanReferences, referencesEnd := false, len(statement)
 		appendName := func(at int, declaration, drop bool) int {
 			occ, end, ok := sqlNavRelationName(statement, at, dialect)
 			if !ok {
@@ -450,6 +437,14 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 					at += 3
 				}
 				occ, next, valid := sqlNavRelationName(statement, at, dialect)
+				// A malformed column entry invalidates the entire CREATE
+				// TABLE source: do not publish its table header, an earlier
+				// good column, or any FK/constraint use from the same SQL.
+				if valid && object == "TABLE" && next < len(statement) &&
+					statement[next].text == "(" &&
+					!sqlNavCreateTableColumnsValid(statement, next, dialect) {
+					return
+				}
 				if valid && (dialect == "mysql" || dialect == "mariadb") &&
 					!sqlNavMySQLNameAllowed(statement, at, next, dialect) {
 					return // invalid bare reserved name is not a source declaration
@@ -459,9 +454,41 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 						statement[next].keyword() == "AS" || statement[next].keyword() == "LIKE")) ||
 						(object == "VIEW" && (materialized && sqlDDLMaterializedQuery(statement, next) ||
 							!materialized && statement[next].keyword() == "AS"))) {
+					var querySources, queryColumns []sqlNavOccurrence
+					if selectAt := sqlNavCreateQueryStart(statement, next, materialized); selectAt >= 0 {
+						var invalid bool
+						querySources, queryColumns, invalid = sqlNavNestedSelectScope(statement, selectAt, dialect, materialized)
+						if invalid {
+							return // do not publish a declaration from an invalid ordinary query body
+						}
+					}
 					occ.declaration = true
 					occ.materialized = materialized
 					result = append(result, occ)
+					result = append(result, querySources...)
+					if withColumns {
+						result = append(result, queryColumns...)
+					}
+					if object == "TABLE" && statement[next].text == "(" {
+						scanReferences = true
+						// REFERENCES inside the CREATE list are DDL; a later
+						// AS SELECT is not an independent FK parsing context.
+						depth := 0
+						for i := next; i < len(statement); i++ {
+							switch statement[i].text {
+							case "(":
+								depth++
+							case ")":
+								depth--
+								if depth == 0 {
+									referencesEnd = i
+								}
+							}
+							if referencesEnd != len(statement) {
+								break
+							}
+						}
+					}
 				} else if materialized {
 					return // malformed/unsupported header cannot supply query references
 				}
@@ -494,6 +521,28 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 					} else if !sqlNavMySQLBareOnlyName(statement, at, dialect, operation, object) {
 						// Unsupported modifier or malformed unquoted identifier
 						// cannot synthesize a relation lifecycle transition.
+						return
+					}
+				}
+				if operation == "ALTER" && object == "TABLE" {
+					if _, end, ok := sqlNavRelationName(statement, at, dialect); ok &&
+						!sqlNavAlterColumnActionsValid(statement, end, dialect) {
+						// Invalid auxiliary columns cannot coexist with
+						// a proven table rename. Preserve the existing
+						// ordered-history uncertainty rather than issuing
+						// a false tombstone or partial column declarations.
+						for j := end; j+1 < len(statement); j++ {
+							if statement[j].keyword() == "RENAME" &&
+								(statement[j+1].keyword() == "TO" ||
+									statement[j+1].keyword() == "AS" ||
+									(j == end || statement[j-1].text == ",") &&
+										statement[j+1].keyword() != "COLUMN" &&
+										statement[j+1].keyword() != "INDEX" &&
+										statement[j+1].keyword() != "KEY") {
+								unknownRelationMove = true
+								break
+							}
+						}
 						return
 					}
 				}
@@ -809,11 +858,44 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 				}
 			}
 		case "INSERT":
-			if statement[at].keyword() == "INTO" {
-				appendName(at+1, false, false)
+			if statement[at].keyword() != "INTO" {
+				return
+			}
+			table, next, valid := sqlNavRelationName(statement, at+1, dialect)
+			if !valid {
+				return
+			}
+			next, valid = sqlNavInsertColumnListEnd(statement, next, dialect)
+			if !valid {
+				return // do not accept an incomplete/invalid target column list
+			}
+			if next < len(statement) && statement[next].keyword() == "SELECT" {
+				sources, columns, invalid := sqlNavNestedSelectScope(statement, next, dialect, false)
+				if invalid {
+					return
+				}
+				result = append(result, table)
+				result = append(result, sources...)
+				if withColumns {
+					result = append(result, columns...)
+				}
+			} else {
+				result = append(result, table)
 			}
 		case "UPDATE":
-			appendName(at, false, false)
+			next := at
+			if (dialect == "postgres" || dialect == "postgresql") && statement[next].keyword() == "ONLY" {
+				next++
+			}
+			appendName(next, false, false)
+		case "DELETE":
+			if statement[at].keyword() == "FROM" {
+				next := at + 1
+				if (dialect == "postgres" || dialect == "postgresql") && statement[next].keyword() == "ONLY" {
+					next++
+				}
+				appendName(next, false, false)
+			}
 		case "TRUNCATE":
 			if statement[at].keyword() == "TABLE" {
 				at++
@@ -823,20 +905,16 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 		if withColumns {
 			result = append(result, sqlNavColumns(statement, dialect)...)
 		}
-		for i := 1; i+1 < len(statement); i++ {
-			keyword := statement[i].keyword()
-			switch keyword {
-			case "REFERENCES":
-				if operation == "CREATE" || operation == "ALTER" {
-					appendName(i+1, false, false)
-				}
-			case "FROM", "JOIN":
-				// Only source-backed ordinary query references, not CTE names
-				// or implicit functions. More complex queries use SQLLens.
-				if !hasWithClause && (operation == "SELECT" || operation == "DELETE" ||
-					operation == "CREATE" || operation == "INSERT" || operation == "UPDATE") {
-					_, next, valid := sqlNavRelationName(statement, i+1, dialect)
-					if valid && (next >= len(statement) || statement[next].text != "(") {
+		// Only a proven FK context may emit REFERENCES table uses.
+		// An unvalidated FROM/JOIN token is never interpreted here.
+		allowRefs := scanReferences || operation == "ALTER" &&
+			len(statement) > 1 && statement[1].keyword() == "TABLE"
+		if allowRefs {
+			for i := 1; i+1 < referencesEnd; i++ {
+				if statement[i].keyword() == "REFERENCES" &&
+					(i == 0 || statement[i-1].text != ".") {
+					_, next, ok := sqlNavRelationName(statement, i+1, dialect)
+					if ok && next < referencesEnd && statement[next].text == "(" {
 						appendName(i+1, false, false)
 					}
 				}
