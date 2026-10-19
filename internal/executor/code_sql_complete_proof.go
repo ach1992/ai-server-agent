@@ -507,18 +507,29 @@ func sqlNavProofCreateTableEntry(tokens []sqlDDLToken, dialect string) bool {
 	return sqlNavProofColumnDef(tokens, dialect)
 }
 
-// A PostgreSQL CREATE TABLE "(...)" grammar must be fully consumed.
-// MySQL/MariaDB's ordinary ENGINE=name option is permitted as a compact
-// known suffix; other table options stay with the SQL language server.
-func sqlNavCreateTableWholeProof(tokens []sqlDDLToken, open int, dialect string) bool {
-	if open >= len(tokens) || tokens[open].text != "(" {
+// CREATE TABLE has one whole-statement proof owner: a column list with an
+// optional bounded ENGINE suffix, or MySQL/MariaDB's standalone LIKE source.
+// Other table options remain unsupported by offline physical navigation.
+func sqlNavCreateTableWholeProof(tokens []sqlDDLToken, at int, dialect string) bool {
+	if at >= len(tokens) {
 		return false
 	}
-	end, ok := sqlNavProofParenEnd(tokens, open, len(tokens))
+	if tokens[at].keyword() == "LIKE" {
+		if (dialect != "mysql" && dialect != "mariadb") ||
+			!sqlNavNoLiteralGaps(tokens[at:]) {
+			return false
+		}
+		_, end, ok := sqlNavRelationName(tokens, at+1, dialect)
+		return ok && end == len(tokens)
+	}
+	if tokens[at].text != "(" {
+		return false
+	}
+	end, ok := sqlNavProofParenEnd(tokens, at, len(tokens))
 	if !ok {
 		return false
 	}
-	entries, ok := sqlNavProofSegments(tokens, open+1, end-1)
+	entries, ok := sqlNavProofSegments(tokens, at+1, end-1)
 	if !ok {
 		return false
 	}
@@ -531,6 +542,7 @@ func sqlNavCreateTableWholeProof(tokens []sqlDDLToken, open int, dialect string)
 		return true
 	}
 	if (dialect == "mysql" || dialect == "mariadb") && end+3 == len(tokens) &&
+		sqlNavNoLiteralGaps(tokens[end:]) &&
 		tokens[end].keyword() == "ENGINE" && tokens[end+1].text == "=" &&
 		sqlNavQualifiedColumnHeadAllowed(tokens[end+2], dialect) {
 		return true

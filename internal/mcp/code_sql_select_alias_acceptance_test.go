@@ -511,6 +511,114 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 			}
 		})
 	}
+	// Specialized emission boundaries must not turn invalid migrations
+	// into cross-file physical declarations. Reuse the authenticated MCP
+	// client and Worker fixture, not a second parser or test harness.
+	for _, tc := range []struct {
+		name, dialect, ddl, relation string
+		valid                        bool
+	}{
+		{"mysql_like_gap", "mysql", "CREATE TABLE phantom 'discarded' LIKE parent;", "phantom", false},
+		{"mariadb_like_gap", "mariadb", "CREATE TABLE phantom 'discarded' LIKE parent;", "phantom", false},
+		{"mysql_engine_gap", "mysql", "CREATE TABLE phantom (id INT) ENGINE='discarded'InnoDB;", "phantom", false},
+		{"mariadb_engine_gap", "mariadb", "CREATE TABLE phantom (id INT) 'discarded' ENGINE=InnoDB;", "phantom", false},
+		{"pg_constant_alias_gap", "postgres", "CREATE VIEW phantom AS SELECT 1 'discarded' AS id;", "phantom", false},
+		{"pg_materialized_alias_gap", "postgres", "CREATE MATERIALIZED VIEW phantom AS SELECT 1 'discarded' AS id WITH NO DATA;", "phantom", false},
+		{"mysql_like_valid", "mysql", "CREATE TABLE verified_like LIKE parent;", "verified_like", true},
+		{"mariadb_engine_valid", "mariadb", "CREATE TABLE verified_engine (id INT) ENGINE=InnoDB;", "verified_engine", true},
+		{"pg_view_valid", "postgres", "CREATE VIEW verified_view AS SELECT 1 AS id;", "verified_view", true},
+		{"pg_materialized_valid", "postgres", "CREATE MATERIALIZED VIEW verified_mv AS SELECT 1 AS id WITH NO DATA;", "verified_mv", true},
+	} {
+		t.Run("review_lexical_crossfile_"+tc.name, func(t *testing.T) {
+			writeSQL(invalidMigration, tc.ddl+"\n")
+			query := "SELECT * FROM " + tc.relation + ";\n"
+			path := "queries/r123.sql"
+			writeSQL(path, query)
+			cursor := strings.Index(query, tc.relation) + 1
+			for _, method := range []string{"definition", "references"} {
+				response := call("code_"+method, map[string]any{
+					"workspace": cfg.WorkspaceDir, "path": path,
+					"file_version": stat(path), "language": "sql",
+					"sql_dialect": tc.dialect, "line": 0, "character": cursor,
+				})
+				if tc.valid && !response.OK {
+					t.Fatalf("valid %s %s not navigable: %+v", tc.dialect, method, response)
+				}
+				if !response.OK {
+					continue
+				}
+				var locations []struct {
+					URI         string `json:"uri"`
+					FileVersion string `json:"file_version"`
+				}
+				if err := json.Unmarshal([]byte(response.Output), &locations); err != nil {
+					t.Fatal(err)
+				}
+				found := false
+				for _, loc := range locations {
+					if loc.URI != invalidMigration {
+						continue
+					}
+					if !tc.valid {
+						t.Fatalf("invalid %s migration returned %s: %+v", tc.dialect, method, response)
+					}
+					if loc.FileVersion != stat(invalidMigration) {
+						t.Fatalf("stale %s migration source version: %+v", method, loc)
+					}
+					found = true
+				}
+				if tc.valid && !found {
+					t.Fatalf("valid %s declaration absent from %s: %+v", tc.dialect, method, response)
+				}
+			}
+		})
+	}
+	// An invalid MATERIALIZED header must not falsify migration history
+	// for an otherwise genuine declared view.
+	writeSQL("migrations/007_mv_create.sql",
+		"CREATE MATERIALIZED VIEW reporting.review_mv AS SELECT 1 AS id;\n")
+	for _, malformed := range []string{
+		"ALTER MATERIALIZED 'discarded' VIEW reporting.review_mv RENAME TO renamed;",
+		"ALTER MATERIALIZED VIEW reporting.review_mv 'discarded' RENAME TO renamed;",
+	} {
+		t.Run("review_materialized_history_"+malformed, func(t *testing.T) {
+			writeSQL("migrations/008_mv_alter.sql", malformed+"\n")
+			path, query := "queries/r123.sql", "SELECT * FROM reporting.review_mv;\n"
+			writeSQL(path, query)
+			cursor := strings.Index(query, "review_mv") + 2
+			for _, method := range []string{"definition", "references"} {
+				response := call("code_"+method, map[string]any{
+					"workspace": cfg.WorkspaceDir, "path": path, "file_version": stat(path),
+					"language": "sql", "sql_dialect": "postgres", "line": 0, "character": cursor,
+				})
+				if !response.OK {
+					t.Fatalf("invalid ALTER poisoned valid %s: %+v", method, response)
+				}
+				var locations []struct {
+					URI         string `json:"uri"`
+					FileVersion string `json:"file_version"`
+				}
+				if err := json.Unmarshal([]byte(response.Output), &locations); err != nil {
+					t.Fatal(err)
+				}
+				hasCreate := false
+				for _, loc := range locations {
+					if loc.URI == "migrations/008_mv_alter.sql" {
+						t.Fatalf("invalid ALTER fabricated %s lifecycle: %+v", method, response)
+					}
+					if loc.URI == "migrations/007_mv_create.sql" {
+						if loc.FileVersion != stat(loc.URI) {
+							t.Fatalf("invalid %s source file_version: %+v", method, loc)
+						}
+						hasCreate = true
+					}
+				}
+				if !hasCreate {
+					t.Fatalf("valid materialized declaration missing from %s: %+v", method, response)
+				}
+			}
+		})
+	}
 	// A malformed INDEX suffix or ALTER action must not contaminate
 	// code_references for a real, independently declared accounts table.
 	badIndexPath := "migrations/005_bad_index.sql"

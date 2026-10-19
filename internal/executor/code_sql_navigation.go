@@ -511,24 +511,11 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 					at += 3
 				}
 				occ, next, valid := sqlNavRelationName(statement, at, dialect)
+				// The entire supported TABLE body is proven in one place:
+				// MySQL/MariaDB LIKE, parenthesized column definitions and
+				// their optional ENGINE suffix share this emission gate.
 				if valid && object == "TABLE" && next < len(statement) &&
-					statement[next].keyword() == "LIKE" {
-					// MySQL/MariaDB CREATE TABLE dst LIKE src is a complete
-					// alternative to the column-list grammar. PostgreSQL
-					// instead requires LIKE inside CREATE TABLE (...).
-					if dialect != "mysql" && dialect != "mariadb" {
-						return
-					}
-					_, end, ok := sqlNavRelationName(statement, next+1, dialect)
-					if !ok || end != len(statement) {
-						return
-					}
-				}
-				// A malformed column entry invalidates the entire CREATE
-				// TABLE source: do not publish its table header, an earlier
-				// good column, or any FK/constraint use from the same SQL.
-				if valid && object == "TABLE" && next < len(statement) &&
-					statement[next].text == "(" &&
+					(statement[next].text == "(" || statement[next].keyword() == "LIKE") &&
 					!sqlNavCreateTableWholeProof(statement, next, dialect) {
 					return
 				}
@@ -623,6 +610,13 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 						return
 					}
 				}
+				// Validate the entire structural header once, including
+				// MATERIALIZED VIEW, optional IF EXISTS, and a supported
+				// inheritance ONLY modifier. Relation/column proofs own
+				// their own subsequent lexical regions.
+				if !sqlNavNoLiteralGaps(statement[1:at]) {
+					return
+				}
 				if operation == "ALTER" && object == "VIEW" && !materialized {
 					// The supported PostgreSQL VIEW alteration subset is
 					// solely a whole relation RENAME TO or SET SCHEMA.
@@ -709,8 +703,9 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 					// migrations. Invalidate the old CREATE; a limited parser must
 					// not present a stale definition after an unsupported ALTER.
 					relation, end, valid := sqlNavRelationName(statement, at, dialect)
-					if !valid || end >= len(statement) {
-						return
+					if !valid || end >= len(statement) ||
+						!sqlNavNoLiteralGaps(statement[end:]) {
+						return // unconsumed SQL cannot prove a lifecycle change
 					}
 					// These known clauses preserve the relation's identity.
 					if end+1 < len(statement) &&

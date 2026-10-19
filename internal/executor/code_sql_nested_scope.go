@@ -119,12 +119,14 @@ func sqlNavSelectConstantProjection(tokens []sqlDDLToken, dialect string) bool {
 			return false
 		}
 		if at < len(tokens) && tokens[at].keyword() == "AS" {
-			at++
-			if at >= len(tokens) || !sqlNavSelectAliasAllowed(tokens[at], dialect) ||
-				tokens[at].literalBefore {
+			// AS and ColLabel are structural tokens; an intervening
+			// elided literal cannot be part of the proven scalar.
+			if at+1 >= len(tokens) ||
+				!sqlNavNoLiteralGaps(tokens[at:at+2]) ||
+				!sqlNavSelectAliasAllowed(tokens[at+1], dialect) {
 				return false
 			}
-			at++
+			at += 2
 		}
 		count++
 		if at == len(tokens) {

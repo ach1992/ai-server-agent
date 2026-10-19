@@ -505,6 +505,10 @@ func TestSQLMaterializedAlterInvalidatesSourceIdentity(t *testing.T) {
 			[]string{"reporting.old_mv"}},
 		{"ALTER MATERIALIZED VIEW reporting.old_mv RENAME old_id TO new_id EXTRA;",
 			[]string{"reporting.old_mv"}},
+		// A removed SQL string between the object-type header tokens cannot
+		// introduce false rename/drop history for an existing declaration.
+		{"ALTER MATERIALIZED 'discarded' VIEW reporting.old_mv RENAME TO new_mv;", nil},
+		{"ALTER MATERIALIZED VIEW 'discarded' reporting.old_mv RENAME TO new_mv;", nil},
 		{"ALTER MATERIALIZED VIEW reporting.old_mv OWNER TO custodian;", nil},
 		{"ALTER MATERIALIZED VIEW reporting.old_mv SET TABLESPACE fast_space;", nil},
 		{"ALTER MATERIALIZED VIEW reporting.old_mv SET (fillfactor = 70);", nil},
