@@ -715,6 +715,24 @@ jobs:
           sudo /tmp/ai-server-agent-start-job-probe
           rm -f /tmp/ai-server-agent-start-job-probe
 
+          # Distinct from the pre-install root-owned IPC-only test: this
+          # exercises the genuine installed Root Executor -> original
+          # worker Bash DAP -> private cgroup/PIDFD -> verified stop path.
+          # Only this disposable GitHub VM is eligible; never change Yama
+          # sysctl or run this against an occupied Agent.
+          shell_ci_dir="$(mktemp -d)"
+          go test -c -o "$shell_ci_dir/executor.test" ./internal/executor
+          sudo env GITHUB_ACTIONS=true ASA_REQUIRE_SHELL_DAP_INSTALLED_CI=1 \
+            "$shell_ci_dir/executor.test" -test.run '^TestShellDAPInstalledPrivateCgroupLifecycleCI$' \
+            -test.v -test.timeout=75s 2>&1 | tee "$shell_ci_dir/proof.log"
+          grep -Fq -- '--- PASS: TestShellDAPInstalledPrivateCgroupLifecycleCI' "$shell_ci_dir/proof.log"
+          if grep -Fq -- '--- SKIP: TestShellDAPInstalledPrivateCgroupLifecycleCI' "$shell_ci_dir/proof.log"; then
+            echo 'Installed root Shell DAP private-cgroup acceptance was skipped' >&2
+            exit 1
+          fi
+          echo 'ROOT_SHELL_DAP_INSTALLED_PRIVATE_CGROUP_PASS'
+          rm -rf -- "$shell_ci_dir"
+
           audit_log=/var/log/ai-server-agent/audit.jsonl
           sudo test -s "$audit_log"
           test "$(sudo stat -c '%U:%G:%a' "$audit_log")" = "root:aiagent:640"
