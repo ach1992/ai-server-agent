@@ -305,6 +305,30 @@ func sqlNavProofConstraint(tokens []sqlDDLToken, dialect string) bool {
 	}
 }
 
+// A bare datatype may also be a user-defined type, which offline code
+// navigation cannot verify against a database. But SQL structural keywords
+// in the datatype slot are provably not datatype names. This distinction
+// stops CREATE TABLE x (id PRIMARY) from publishing a false declaration
+// without rejecting arbitrary valid custom type names.
+func sqlNavDDLTypeNameAllowed(token sqlDDLToken) bool {
+	if token.kind == 'q' {
+		return true
+	}
+	if token.kind != 'i' || !sqlNavSimpleName.MatchString(token.text) {
+		return false
+	}
+	switch token.keyword() {
+	case "SELECT", "FROM", "WHERE", "JOIN", "ON", "ORDER", "GROUP",
+		"BY", "HAVING", "LIMIT", "OFFSET", "PRIMARY", "FOREIGN",
+		"UNIQUE", "REFERENCES", "CONSTRAINT", "CHECK", "DEFAULT",
+		"NOT", "NULL", "KEY", "INDEX", "TABLE", "CREATE", "ALTER",
+		"DROP", "AS", "INTO", "VALUES", "RENAME", "TO", "COLUMN",
+		"ADD", "UPDATE", "DELETE":
+		return false
+	}
+	return true
+}
+
 // A supported column definition has a bare name, a datatype, and only
 // explicitly recognised inline modifiers. A DEFAULT string or a complex
 // expression that the lossy lexer cannot prove is intentionally unsupported.
@@ -315,7 +339,7 @@ func sqlNavProofColumnDef(tokens []sqlDDLToken, dialect string) bool {
 	}
 	if len(tokens) < 2 || !sqlNavQualifiedColumnHeadAllowed(tokens[0], dialect) ||
 		tokens[0].literalBefore || tokens[1].literalBefore ||
-		(tokens[1].kind != 'i' && tokens[1].kind != 'q') {
+		!sqlNavDDLTypeNameAllowed(tokens[1]) {
 		return false
 	}
 	at := 2
@@ -360,21 +384,27 @@ func sqlNavProofColumnDef(tokens []sqlDDLToken, dialect string) bool {
 			}
 			at += 2
 		case "DEFAULT":
-			// String DEFAULT values are elided by the tokenizer.
-			// The closing comma or ')' marks their exact presence;
-			// absent that evidence, a dangling DEFAULT is invalid.
+			// A standalone quoted string default is elided, but its
+			// presence at the end of the field remains explicit. For
+			// visible values, require an entire numeric or boolean/NULL
+			// scalar; punctuation alone (DEFAULT +, DEFAULT *) is not
+			// a scalar and must not publish a CREATE declaration.
 			if at+1 == len(tokens) {
 				return tokens[at].literalAfter
 			}
 			if tokens[at+1].literalBefore {
 				return false
 			}
-			value := tokens[at+1]
-			if value.kind != 'p' && value.keyword() != "TRUE" && value.keyword() != "FALSE" &&
-				value.keyword() != "NULL" {
-				return false
+			switch tokens[at+1].keyword() {
+			case "TRUE", "FALSE", "NULL":
+				at += 2
+			default:
+				number := sqlNavOnParser{tokens: tokens[at+1:], dialect: dialect}
+				if !number.number() || number.at == 0 {
+					return false
+				}
+				at += 1 + number.at
 			}
-			at += 2
 		case "REFERENCES":
 			next, ok := sqlNavProofReference(tokens, at, len(tokens), dialect)
 			if !ok {

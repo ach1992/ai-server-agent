@@ -864,6 +864,8 @@ func TestSQLSelectAliasWorkerCrossFileNavigation(t *testing.T) {
 		{"f2_function_source_with_bad_on", "CREATE VIEW invalid_view AS SELECT a.id FROM generate_series(1,2) g JOIN public.accounts a ON a.id=ONLY;\n", "public.accounts"},
 		{"f3_unproven_index_suffix", "CREATE INDEX ix_bad ON public.accounts (id) ONLY;\n", "public.accounts"},
 		{"f3_unproven_alter_action", "ALTER TABLE public.accounts ADD COLUMN okay INT, BOGUS REFERENCES public.payments(id);\n", "public.accounts"},
+		{"f4_projection_double_alias", "SELECT a.id AS uid EXTRA FROM public.accounts a;\n", "a.id"},
+		{"f4_projection_unknown_tokens", "SELECT a.id JUNK EXTRA FROM public.accounts a;\n", "a.id"},
 	}
 	for _, tc := range badQueries {
 		t.Run(tc.name, func(t *testing.T) {
@@ -925,6 +927,8 @@ func TestSQLSelectAliasWorkerCrossFileNavigation(t *testing.T) {
 	for _, tc := range []struct{ name, ddl, table string }{
 		{"reserved_column", "CREATE TABLE impossible (id BIGINT, ONLY BIGINT);\n", "impossible"},
 		{"incomplete_primary", "CREATE TABLE impossible (id BIGINT, PRIMARY KEY ONLY);\n", "impossible"},
+		{"f5_structural_datatype", "CREATE TABLE impossible (id SELECT);\n", "impossible"},
+		{"f5_incomplete_default", "CREATE TABLE impossible (id INT DEFAULT +);\n", "impossible"},
 		{"unknown_alter_like_ddl", "CREATE TABLE impossible (id BIGINT, UNIQUE x);\n", "impossible"},
 		{"bad_view_body", "CREATE VIEW impossible AS FROBNICATE;\n", "impossible"},
 		{"bad_view_function_join", "CREATE VIEW impossible AS SELECT * FROM generate_series(1,2) g JOIN public.accounts a ON a.id=ONLY;\n", "impossible"},

@@ -33,17 +33,82 @@ func sqlNavNestedBoundedBodyProof(tokens []sqlDDLToken, dialect string) bool {
 	if depth != 0 || from <= 1 {
 		return false
 	}
-	items, ok := sqlNavProofSegments(tokens, 1, from)
-	if !ok {
+	return sqlNavSelectProjectionProven(tokens, from, dialect) &&
+		sqlNavSelectTailProven(tokens, from, dialect)
+}
+
+// A SELECT projection is an emission scope too: a syntactically valid
+// FROM/JOIN header must not certify an invalid "a.id AS alias JUNK"
+// expression. The lexer removes SQL string values; a whole independent
+// projected string is provable only at its own comma/FROM boundary,
+// optionally followed by one explicit AS alias. An elided literal inside
+// an identifier or adjacent to a real expression remains unsupported.
+func sqlNavSelectProjectionProven(tokens []sqlDDLToken, from int, dialect string) bool {
+	if from <= 1 || from >= len(tokens) {
 		return false
 	}
-	for _, item := range items {
-		if !sqlNavNestedProjectionItemProven(item, dialect) {
+	start := 1
+	if tokens[start].keyword() == "DISTINCT" || tokens[start].keyword() == "ALL" {
+		start++
+		if start >= from {
 			return false
 		}
 	}
+	depth, count := 0, 0
+	for i := start; i <= from; i++ {
+		if i < from {
+			switch tokens[i].text {
+			case "(":
+				depth++
+				if depth > 16 {
+					return false
+				}
+			case ")":
+				depth--
+				if depth < 0 {
+					return false
+				}
+			}
+		}
+		if i != from && (tokens[i].text != "," || depth != 0) {
+			continue
+		}
+		if count >= 64 || !sqlNavProjectionItemProven(tokens[start:i], dialect, tokens[i].literalBefore) {
+			return false
+		}
+		count++
+		start = i + 1
+	}
+	return depth == 0 && count > 0
+}
 
-	return sqlNavSelectTailProven(tokens, from, dialect)
+func sqlNavProjectionItemProven(tokens []sqlDDLToken, dialect string, trailingLiteral bool) bool {
+	if len(tokens) == 0 {
+		return trailingLiteral // a whole, separately elided string scalar
+	}
+	if trailingLiteral {
+		return false // a literal was merged into a visible expression
+	}
+	if len(tokens) == 2 && tokens[0].keyword() == "AS" &&
+		tokens[0].literalBefore && !tokens[1].literalBefore &&
+		sqlNavSelectAliasAllowed(tokens[1], dialect) {
+		return true // separately elided string AS output_name
+	}
+	if sqlNavNestedProjectionItemProven(tokens, dialect) {
+		return true
+	}
+	// PostgreSQL/MySQL/MariaDB permit a single implicit projection alias
+	// after a complete scalar. Two aliases remain unprovable.
+	if len(tokens) > 1 && !tokens[len(tokens)-1].literalBefore &&
+		sqlNavSelectAliasAllowed(tokens[len(tokens)-1], dialect) {
+		for i := 0; i < len(tokens)-1; i++ {
+			if tokens[i].keyword() == "AS" && (i == 0 || tokens[i-1].text != ".") {
+				return false // an explicit AS alias cannot take a second alias
+			}
+		}
+		return sqlNavNestedProjectionItemProven(tokens[:len(tokens)-1], dialect)
+	}
+	return false
 }
 
 // The same clause proof is shared by standalone SELECT navigation and
@@ -165,20 +230,28 @@ func sqlNavNestedProjectionItemProven(tokens []sqlDDLToken, dialect string) bool
 	if sqlNavProofNumber(value, dialect) {
 		return true
 	}
+	// Preserve the previously navigable simple qualified column arithmetic
+	// while still requiring every projection token to belong to one proven
+	// scalar. More complex expression grammars remain unsupported.
+	if sqlNavIndexExpressionProven(value, dialect) {
+		return true
+	}
 	if (value[0].kind == 'i' || value[0].kind == 'q') &&
 		sqlNavQualifiedColumnHeadAllowed(value[0], dialect) {
 		_, at, ok := sqlNavName(value, 0)
 		if ok && at == len(value) {
 			return true
 		}
-		// Single simple SQL function expression: count(*), max(a.id)
-		// and coalesce-like expressions with one bare argument only.
-		if len(value) >= 3 && value[1].text == "(" {
-			next, ok := sqlNavProofParenEnd(value, 1, len(value))
-			if !ok || next != len(value) {
+		// A simple function name may be qualified (a.id()) rather than
+		// a physical column. Prove its complete bounded argument list
+		// without binding the function identifier to a table column.
+		// An independent real a.id in the same projection remains eligible.
+		if ok && at < len(value) && value[at].text == "(" {
+			next, closed := sqlNavProofParenEnd(value, at, len(value))
+			if !closed || next != len(value) {
 				return false
 			}
-			arg := value[2 : len(value)-1]
+			arg := value[at+1 : next-1]
 			if len(arg) == 0 || len(arg) == 1 && arg[0].text == "*" {
 				return true
 			}
@@ -186,8 +259,8 @@ func sqlNavNestedProjectionItemProven(tokens []sqlDDLToken, dialect string) bool
 				return true
 			}
 			if len(arg) > 0 && sqlNavQualifiedColumnHeadAllowed(arg[0], dialect) {
-				_, count, ok := sqlNavName(arg, 0)
-				return ok && count == len(arg)
+				_, count, valid := sqlNavName(arg, 0)
+				return valid && count == len(arg)
 			}
 		}
 	}

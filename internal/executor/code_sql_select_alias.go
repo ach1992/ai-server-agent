@@ -294,8 +294,11 @@ func sqlNavSelectAnalysis(statement []sqlDDLToken, dialect string) (sources, col
 			!sqlNavSelectOnPredicateComplete(statement[onPredicateStart:], dialect)) || len(tables) == 0 {
 		return nil, nil
 	}
-	if !sqlNavSelectTailProven(statement, fromToken, dialect) {
-		return nil, nil // unsupported/malformed trailing clause, no graph
+	if !sqlNavSelectProjectionProven(statement, fromToken, dialect) ||
+		!sqlNavSelectTailProven(statement, fromToken, dialect) {
+		// A validated FROM/JOIN prefix does not make an unknown projection
+		// or trailing clause a physical source-backed SQL statement.
+		return nil, nil
 	}
 
 	// Qualified spelling is proven by FROM/JOIN, not guessed from SELECT

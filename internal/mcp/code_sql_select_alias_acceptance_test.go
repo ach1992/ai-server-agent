@@ -428,6 +428,8 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 		{"f2_where_bad_operand", "CREATE VIEW bogus AS SELECT a.id FROM public.accounts a WHERE ONLY;\n", "public.accounts"},
 		{"f3_index_bad_suffix", "CREATE INDEX bogus ON public.accounts (id) ONLY;\n", "public.accounts"},
 		{"f3_alter_unknown_action", "ALTER TABLE public.accounts ADD COLUMN okay INT, BOGUS REFERENCES public.payments(id);\n", "public.payments"},
+		{"f4_projection_double_alias", "SELECT a.id AS uid EXTRA FROM public.accounts a;\n", "a.id"},
+		{"f4_projection_unknown_tokens", "SELECT a.id JUNK EXTRA FROM public.accounts a;\n", "a.id"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := "queries/r123.sql"
@@ -463,6 +465,8 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 	// migration declaration even when the querying SQL itself is valid.
 	for _, tc := range []struct{ name, ddl string }{
 		{"incomplete_primary", "CREATE TABLE impossible (id BIGINT, PRIMARY KEY ONLY);\n"},
+		{"f5_structural_datatype", "CREATE TABLE impossible (id SELECT);\n"},
+		{"f5_incomplete_default", "CREATE TABLE impossible (id INT DEFAULT +);\n"},
 		{"incomplete_unique", "CREATE TABLE impossible (id BIGINT, UNIQUE wrong);\n"},
 		{"invalid_create_view_body", "CREATE VIEW impossible AS FROBNICATE;\n"},
 		{"invalid_function_join", "CREATE VIEW impossible AS SELECT * FROM generate_series(1,2) g JOIN public.accounts a ON a.id=ONLY;\n"},
@@ -559,5 +563,5 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 			t.Fatalf("valid contained %s missing %s: %+v", method, want, response)
 		}
 	}
-	t.Log("DIRECT_REAL_SQL_ALIAS_MCP_PASS definitions=2 references=5 versions=3 stale_rejected=true no_db=true malformed_on_rejected=true functions_excluded=true source_literals_rejected=true unconsumed_source_gaps_rejected=true pg_on_reserved_rejected=true pg_only_modifier_rejected=true pg_quoted_only_resolved=true mysql_only_resolved=true mariadb_only_resolved=true mysql_mariadb_join_only_resolved=true r1_r2_r3_crossfile_rejected=true f1_f2_f3_proven_emission_rejected=true n4_table_level_modifier_rejected=true n4_no_false_crossfile_refs=true")
+	t.Log("DIRECT_REAL_SQL_ALIAS_MCP_PASS definitions=2 references=5 versions=3 stale_rejected=true no_db=true malformed_on_rejected=true functions_excluded=true source_literals_rejected=true unconsumed_source_gaps_rejected=true pg_on_reserved_rejected=true pg_only_modifier_rejected=true pg_quoted_only_resolved=true mysql_only_resolved=true mariadb_only_resolved=true mysql_mariadb_join_only_resolved=true r1_r2_r3_crossfile_rejected=true f1_f2_f3_proven_emission_rejected=true f4_f5_pre_review_invariants=true n4_table_level_modifier_rejected=true n4_no_false_crossfile_refs=true")
 }
