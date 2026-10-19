@@ -735,7 +735,15 @@ jobs:
           go test -c -o "$shell_ci_dir/executor.test" ./internal/executor
           # Reproduce the real unit's euid=0 / egid=aiagent. The earlier
           # root:root-only IPC test cannot detect group inheritance bugs.
-          sudo -g aiagent env ASA_REQUIRE_ROOT_SHELL_IPC=1 \
+          # sudo -g alone can request a different sudoers Runas identity
+          # and a password on GitHub runners. Start as root normally and
+          # change only the disposable test subprocess GID via setpriv.
+          aiagent_gid="$(getent group aiagent | cut -d: -f3)"
+          [[ "$aiagent_gid" =~ ^[0-9]+$ ]]
+          test "$(sudo /usr/bin/setpriv --reuid 0 --regid "$aiagent_gid" --clear-groups /usr/bin/id -u)" = '0'
+          test "$(sudo /usr/bin/setpriv --reuid 0 --regid "$aiagent_gid" --clear-groups /usr/bin/id -g)" = "$aiagent_gid"
+          sudo /usr/bin/setpriv --reuid 0 --regid "$aiagent_gid" --clear-groups \
+            /usr/bin/env ASA_REQUIRE_ROOT_SHELL_IPC=1 \
             "$shell_ci_dir/executor.test" -test.run '^TestShellDAPRootOwnedIPCRejectsSameUIDPeerAndPreservesActivation$' \
             -test.v -test.timeout=60s 2>&1 | tee "$shell_ci_dir/group-proof.log"
           grep -Fq -- '--- PASS: TestShellDAPRootOwnedIPCRejectsSameUIDPeerAndPreservesActivation' "$shell_ci_dir/group-proof.log"
