@@ -135,6 +135,22 @@ func TestShellDAPInstalledPrivateCgroupLifecycleCI(t *testing.T) {
 	}
 	start := call(launch)
 	if !start.OK || start.SessionID == "" {
+		if !systemexec.Trusted("/usr/local/bin/ai-server-agent") {
+			// Diagnostic metadata only; no change to original root-executable checks.
+			for _, path := range []string{"/", "/usr", "/usr/local", "/usr/local/bin", "/usr/local/bin/ai-server-agent"} {
+				info, statErr := os.Lstat(path)
+				if statErr != nil {
+					t.Logf("untrusted Agent path %q: %v", path, statErr)
+					continue
+				}
+				meta, ok := info.Sys().(*syscall.Stat_t)
+				if !ok {
+					t.Logf("untrusted Agent path %q: metadata unavailable", path)
+					continue
+				}
+				t.Logf("untrusted Agent component path=%q mode=%s uid=%d gid=%d", path, info.Mode(), meta.Uid, meta.Gid)
+			}
+		}
 		t.Fatalf("real installed Shell DAP launch failed: code=%s class=%s reason=%q trusted_bash=%t trusted_installed_agent=%t", start.ErrorCode, start.ErrorClass, start.Error, systemexec.Trusted("/usr/bin/bash"), systemexec.Trusted("/usr/local/bin/ai-server-agent"))
 	}
 	id := start.SessionID
