@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/ach1992/ai-server-agent/internal/config"
 	"time"
 )
 
@@ -291,6 +293,113 @@ func TestWorkerTmuxRealExecutorRestartReconnect(t *testing.T) {
 	if _, err := os.Stat(socket); !os.IsNotExist(err) {
 		t.Fatalf("tmux socket survived close: %v", err)
 	}
+}
+
+// Optional genuine tmux Control Mode evidence for the source-only shared
+// capacity invariant. Two original backends survive Executor reconstruction;
+// downscaling to one must not prevent either original owner from reattaching
+// and closing, nor permit a third process to take that occupied budget.
+func TestWorkerTmuxRecoveredTerminalsDownscaleIndependentCapacity(t *testing.T) {
+	bin := os.Getenv("ASA_TEST_TMUX_BIN")
+	if bin == "" {
+		t.Skip("isolated optional real-tmux fixture not supplied")
+	}
+	s, owner, _ := testStdioBroker(t)
+	// The real tmux fixture needs a short sockaddr_un path; do not weaken
+	// production socket length or symlink ownership validation for tests.
+	workspace, err := os.MkdirTemp("/tmp", "asa-r1-")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.RemoveAll(workspace) })
+	s.cfg.WorkspaceDir = workspace
+	owner.Workspace = workspace
+	runtime := config.DefaultRuntimeSettings()
+	runtime.StdioSessionSlots = 2
+	s.cfg.Runtime = &runtime
+	s.sessions = newStdioSessionBrokerForSlots(2)
+	s.terminalBinary = bin
+	owner.Action, owner.Columns, owner.Rows = "terminal_open", 80, 24
+	type surviving struct{ id, epoch, socket string }
+	saved := make([]surviving, 0, 2)
+	for i := 0; i < 2; i++ {
+		got := s.terminalAction(owner)
+		if !got.OK {
+			t.Fatalf("original scoped terminal %d: %+v", i, got)
+		}
+		request := owner
+		request.SessionID = got.SessionID
+		e, err := s.sessions.get(request, request.SessionID)
+		if err != nil {
+			t.Fatal(err)
+		}
+		socket := e.terminal.socket
+		t.Cleanup(func() { _ = exec.Command(bin, "-S", socket, "kill-server").Run() })
+		saved = append(saved, surviving{id: got.SessionID, epoch: got.SessionEpoch, socket: socket})
+		if err := s.sessions.removeAndStop(e); err != nil {
+			t.Fatalf("detach original control client: %v", err)
+		}
+	}
+	runtime.StdioSessionSlots = 1
+	fresh := &Server{cfg: s.cfg, workerUID: s.workerUID, workerGID: s.workerGID,
+		sessions: newStdioSessionBrokerForSlots(1), terminalBinary: bin}
+	if _, err := fresh.workerStdioSession(owner, "lsp", workspace, "/bin/cat"); !errors.Is(err, errSessionBusy) {
+		t.Fatalf("downscaled broker admitted new worker despite original terminals: %v", err)
+	}
+	for i, original := range saved {
+		reconnect := owner
+		reconnect.Action, reconnect.SessionID = "terminal_reconnect", original.id
+		badOwner := reconnect
+		badOwner.PrincipalID = "not-the-original-owner"
+		if got := fresh.terminalAction(badOwner); got.OK {
+			t.Fatalf("foreign owner recovered original terminal %d: %+v", i, got)
+		}
+		badWorkspace := reconnect
+		badWorkspace.Workspace = workspace + "-wrong"
+		if got := fresh.terminalAction(badWorkspace); got.OK {
+			t.Fatalf("workspace mismatch recovered original terminal %d: %+v", i, got)
+		}
+		badRoot := reconnect
+		badRoot.Root, badRoot.Approval = true, true
+		if got := fresh.terminalAction(badRoot); got.OK {
+			t.Fatalf("wrong root authority recovered original terminal %d: %+v", i, got)
+		}
+		got := fresh.terminalAction(reconnect)
+		if !got.OK || got.SessionID != original.id || got.SessionEpoch == original.epoch ||
+			!got.RetentionTruncated {
+			t.Fatalf("reconnection %d failed after downscale: %+v", i, got)
+		}
+		oldEpoch := reconnect
+		oldEpoch.Action, oldEpoch.SessionEpoch = "terminal_close", original.epoch
+		if denied := fresh.terminalAction(oldEpoch); denied.OK || denied.ErrorCode != "terminal_epoch_changed" {
+			t.Fatalf("original output epoch incorrectly authorized close: %+v", denied)
+		}
+		// Leave both reconnected clients admitted simultaneously even though
+		// the NEW admission limit is now 1. Both occupy old durable records.
+	}
+	if _, err := fresh.workerStdioSession(owner, "dap", workspace, "/bin/cat"); !errors.Is(err, errSessionBusy) {
+		t.Fatalf("fresh DAP admitted while two old terminal clients remain: %v", err)
+	}
+	for _, original := range saved {
+		closing := owner
+		closing.Action, closing.SessionID = "terminal_reconnect", original.id
+		current := fresh.terminalAction(closing)
+		if !current.OK || current.Status != "already_connected" {
+			t.Fatalf("reconnected original identity disappeared: %+v", current)
+		}
+		closing.Action, closing.SessionEpoch = "terminal_close", current.SessionEpoch
+		if closed := fresh.terminalAction(closing); !closed.OK {
+			t.Fatalf("cannot close original terminal after downscale: %+v", closed)
+		}
+		if _, err := os.Stat(original.socket); !os.IsNotExist(err) {
+			t.Fatalf("verified close left original socket: %v", err)
+		}
+	}
+	lsp, err := fresh.workerStdioSession(owner, "lsp", workspace, "/bin/cat")
+	if err != nil {
+		t.Fatalf("capacity unavailable after both verified closes: %v", err)
+	}
+	_ = fresh.sessions.close(owner, lsp)
 }
 
 func TestWorkerTmuxRealOutputFloodIsBounded(t *testing.T) {

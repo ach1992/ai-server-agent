@@ -237,11 +237,11 @@ func (s *Server) withTerminalAdmission(open func() Response) Response {
 func (s *Server) withTerminalAdmissionStop(open func() Response, stop func(string) error) Response {
 	s.terminalAdmissionMu.Lock()
 	defer s.terminalAdmissionMu.Unlock()
-	count, admissionErr := s.terminalRecordCountWithStop(stop)
+	registry, admissionErr := s.terminalReservationsWithStop(stop)
 	if admissionErr != nil {
 		return terminalError("terminal_registry_unavailable", admissionErr)
 	}
-	if count+s.sessions.unpersistedTerminalCount() >= s.stdioSessionCapacity() {
+	if s.sessions == nil || s.sessions.occupiedAgainstRegistry(registry) >= s.stdioSessionCapacity() {
 		return terminalError("terminal_resource_limit", errSessionBusy)
 	}
 	return open()

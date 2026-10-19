@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -181,7 +182,7 @@ func TestReviewR2FullRecoveredCapacityRejectsBeforeLaunch(t *testing.T) {
 }
 
 func TestConfigured64TerminalRecoveredAdmissionAndDownscale(t *testing.T) {
-	s, _, _ := testStdioBroker(t)
+	s, owner, workspace := testStdioBroker(t)
 	runtime := config.DefaultRuntimeSettings()
 	runtime.StdioSessionSlots = 64
 	s.cfg.Runtime = &runtime
@@ -201,6 +202,11 @@ func TestConfigured64TerminalRecoveredAdmissionAndDownscale(t *testing.T) {
 	for n := maxStdioSessions + 1; n <= 64; n++ {
 		admissionRecordForTest(t, s, n, now)
 	}
+	fresh := &Server{cfg: s.cfg, sessions: newStdioSessionBrokerForSlots(64),
+		workerUID: s.workerUID, workerGID: s.workerGID}
+	if _, err := fresh.workerStdioSession(owner, "lsp", workspace, "/bin/cat"); !errors.Is(err, errSessionBusy) {
+		t.Fatalf("full 64-terminal recovery overadmitted a new LSP: %v", err)
+	}
 	if r := s.withTerminalAdmissionStop(open, func(string) error { return errors.New("unexpected cleanup") }); r.OK || r.ErrorCode != "terminal_resource_limit" || admitted != 1 {
 		t.Fatalf("65th terminal was admitted or callback invoked: %+v", r)
 	}
@@ -210,6 +216,148 @@ func TestConfigured64TerminalRecoveredAdmissionAndDownscale(t *testing.T) {
 	}
 	if count, err := s.terminalRecordCountWithStop(func(string) error { return errors.New("unexpected cleanup") }); err != nil || count != 64 {
 		t.Fatalf("downscale changed recovered terminal identity count: %d (%v)", count, err)
+	}
+}
+
+// R1 review counterexample: protected ACTIVE scopes outlive an Executor
+// restart. New nonterminal admission must share the same durable capacity.
+func TestRecoveredTerminalScopesChargeNewLSPAndDAPAdmission(t *testing.T) {
+	s, owner, workspace := testStdioBroker(t)
+	runtime := config.DefaultRuntimeSettings()
+	runtime.StdioSessionSlots = 3
+	s.cfg.Runtime = &runtime
+	s.sessions = newStdioSessionBrokerForSlots(3)
+	for n := 1; n <= 2; n++ {
+		admissionRecordForTest(t, s, n, time.Now().Add(time.Hour))
+	}
+	lsp, err := s.workerStdioSession(owner, "lsp", workspace, "/bin/cat")
+	if err != nil {
+		t.Fatalf("the last shared slot was not available: %v", err)
+	}
+	defer s.sessions.close(owner, lsp)
+	if _, err = s.workerStdioSession(owner, "dap", workspace, "/bin/cat"); !errors.Is(err, errSessionBusy) {
+		t.Fatalf("new DAP over-admitted with two recovered terminals and one LSP: %v", err)
+	}
+	fresh := &Server{cfg: s.cfg, sessions: newStdioSessionBrokerForSlots(3), workerUID: s.workerUID, workerGID: s.workerGID}
+	freshID, err := fresh.workerStdioSession(owner, "lsp", workspace, "/bin/cat")
+	if err != nil {
+		t.Fatalf("first fresh LSP should be allowed with two old terminals: %v", err)
+	}
+	defer fresh.sessions.close(owner, freshID)
+	// The first admission is already charged: the second must not overbook.
+	if _, err = fresh.workerStdioSession(owner, "dap", workspace, "/bin/cat"); !errors.Is(err, errSessionBusy) {
+		t.Fatalf("reconstructed broker forgot two durable sessions: %v", err)
+	}
+}
+
+// A downscale must block NEW work but not a previously owned terminal's
+// Control Mode reattachment. The durable record, not an available broker slot,
+// is that terminal's preexisting reservation.
+func TestRecoveredTerminalReservationSurvivesTwoToOneDownscale(t *testing.T) {
+	s, owner, workspace := testStdioBroker(t)
+	runtime := config.DefaultRuntimeSettings()
+	runtime.StdioSessionSlots = 1
+	s.cfg.Runtime = &runtime
+	s.sessions = newStdioSessionBrokerForSlots(1)
+	s.terminalBinary = "/bin/cat" // test-only worker fixture; no real privileged scope
+	for n := 1; n <= 2; n++ {
+		admissionRecordForTest(t, s, n, time.Now().Add(time.Hour))
+	}
+	if _, err := s.workerStdioSession(owner, "lsp", workspace, "/bin/cat"); !errors.Is(err, errSessionBusy) {
+		t.Fatalf("downscaled new LSP admitted through surviving terminals: %v", err)
+	}
+	for n := 1; n <= 2; n++ {
+		id := fmt.Sprintf("stdio_%032x", n)
+		tstate := &tmuxTerminalState{recovered: true, scoped: false,
+			name: fmt.Sprintf("asa_%024x", n), epoch: fmt.Sprintf("%024x", n)}
+		// Exercise the same reservation path that terminalReconnect uses,
+		// without relying on any real tmux/backend running in this fixture.
+		attached, err := s.startProcessSessionWithID(owner, "terminal", workspace,
+			"/bin/cat", tstate, id)
+		if err != nil {
+			t.Fatalf("surviving terminal %d could not reserve original ID: %v", n, err)
+		}
+		req := owner
+		req.SessionID = attached
+		entry, err := s.sessions.get(req, attached)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := s.sessions.removeAndStop(entry); err != nil {
+			t.Fatalf("recovered client detach: %v", err)
+		}
+	}
+}
+
+// A new LSP must wait for a concurrent terminal-open's entire protected
+// reservation publication. The reverse order is likewise serialized by the
+// single shared admission lock, not by two independent capacity counters.
+func TestConcurrentNewLSPAdmissionWaitsForDurableTerminalPublication(t *testing.T) {
+	s, owner, workspace := testStdioBroker(t)
+	runtime := config.DefaultRuntimeSettings()
+	runtime.StdioSessionSlots = 1
+	s.cfg.Runtime = &runtime
+	s.sessions = newStdioSessionBrokerForSlots(1)
+	dir, err := s.terminalRecordsDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec := terminalRecord{Version: 1, ID: fmt.Sprintf("stdio_%032x", 1),
+		Name: fmt.Sprintf("asa_%024x", 1), Scoped: true,
+		ExpiresAt: time.Now().Add(time.Hour)}
+	body, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entered, release := make(chan struct{}), make(chan struct{})
+	terminalDone := make(chan Response, 1)
+	go func() {
+		terminalDone <- s.withTerminalAdmissionStop(func() Response {
+			close(entered)
+			<-release
+			if err := os.WriteFile(filepath.Join(dir, rec.ID+".json"), body, 0600); err != nil {
+				return Response{Error: err.Error()}
+			}
+			return Response{OK: true}
+		}, func(string) error { return errors.New("unexpected expiry") })
+	}()
+	<-entered
+	admitted := make(chan error, 1)
+	go func() {
+		id, err := s.workerStdioSession(owner, "lsp", workspace, "/bin/cat")
+		if err == nil {
+			_ = s.sessions.close(owner, id)
+		}
+		admitted <- err
+	}()
+	close(release)
+	if got := <-terminalDone; !got.OK {
+		t.Fatalf("original protected terminal failed to publish: %+v", got)
+	}
+	if err := <-admitted; !errors.Is(err, errSessionBusy) {
+		t.Fatalf("overadmitted fresh LSP while original terminal was publishing: %v", err)
+	}
+	if n, err := s.terminalRecordCount(); err != nil || n != 1 {
+		t.Fatalf("concurrent admission damaged surviving reservation: count=%d err=%v", n, err)
+	}
+}
+
+func TestUntrustedTerminalRecordFailsClosedForNewSessionKinds(t *testing.T) {
+	s, owner, workspace := testStdioBroker(t)
+	dir, err := s.terminalRecordsDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	bogus := filepath.Join(dir, fmt.Sprintf("stdio_%032x.json", 1))
+	if err := os.Symlink(filepath.Join(t.TempDir(), "unknown"), bogus); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.workerStdioSession(owner, "lsp", workspace, "/bin/cat"); err == nil ||
+		!strings.Contains(err.Error(), "terminal_registry_unavailable") {
+		t.Fatalf("untrusted persisted identity was ignored: %v", err)
+	}
+	if info, err := os.Lstat(bogus); err != nil || info.Mode()&os.ModeSymlink == 0 {
+		t.Fatalf("admission mutated an untrusted record: info=%v err=%v", info, err)
 	}
 }
 
