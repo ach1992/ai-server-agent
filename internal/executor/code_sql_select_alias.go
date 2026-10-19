@@ -82,8 +82,8 @@ func sqlNavQualifiedColumnHeadAllowed(token sqlDDLToken, dialect string) bool {
 // SELECT qualified-column uses supplement the source-backed DDL graph. This is
 // intentionally not a general SQL query analyzer: resolve only a bounded,
 // single SELECT scope with explicit ordinary tables and optional table aliases.
-// No CTE/subquery/derived-table, implicit comma join, NATURAL/LATERAL/USING,
-// positional table column-alias list or incomplete JOIN predicate can lend
+// No CTE/subquery/derived-table, implicit comma join, NATURAL/LATERAL,
+// positional table column-alias list or incomplete JOIN condition can lend
 // a fabricated column identity to another table.
 // SQL execution, implicit database access, unqualified columns and projection
 // alias inference are never part of this path.
@@ -105,7 +105,7 @@ func sqlNavSelectAnalysis(statement []sqlDDLToken, dialect string) (sources, col
 			continue
 		}
 		switch token.keyword() {
-		case "WITH", "UNION", "INTERSECT", "EXCEPT", "LATERAL", "NATURAL", "USING", "CROSS", "TABLESAMPLE", "STRAIGHT_JOIN", "QUALIFY":
+		case "WITH", "UNION", "INTERSECT", "EXCEPT", "LATERAL", "NATURAL", "CROSS", "TABLESAMPLE", "STRAIGHT_JOIN", "QUALIFY":
 			return nil, nil
 		case "SELECT":
 			if i != 0 {
@@ -146,8 +146,8 @@ func sqlNavSelectAnalysis(statement []sqlDDLToken, dialect string) (sources, col
 			keyword := token.keyword()
 			switch {
 			case joined && !onSeen:
-				if keyword != "ON" {
-					return nil, nil // a JOIN source must be followed by ON
+				if keyword != "ON" && keyword != "USING" {
+					return nil, nil // a JOIN needs a complete ON or USING condition
 				}
 			case joinModifier != "":
 				if keyword != "JOIN" && !(keyword == "OUTER" &&
@@ -218,6 +218,19 @@ func sqlNavSelectAnalysis(statement []sqlDDLToken, dialect string) (sources, col
 			}
 			onSeen = true
 			onPredicateStart = i + 1
+		case "USING":
+			if !joined || onSeen || joinModifier != "" {
+				return nil, nil
+			}
+			end, ok := sqlNavSelectUsingColumnsEnd(statement, i+1, dialect)
+			if !ok {
+				return nil, nil
+			}
+			// USING merges an unqualified join column; it can never be
+			// attributed to one physical table in the offline graph.
+			// Skipping the validated members preserves qualified a.id/p.id.
+			onSeen = true
+			i = end - 1
 		case "FROM", "JOIN":
 			if token.keyword() == "FROM" && joinModifier != "" {
 				return nil, nil
@@ -375,6 +388,41 @@ func sqlNavSelectAnalysis(statement []sqlDDLToken, dialect string) (sources, col
 		}
 	}
 	return sources, result
+}
+
+// Prove a complete, ordinary JOIN USING (col [, ...]) list. No attributes,
+// expressions, elided strings, duplicate entries, nested scopes or an empty
+// list may create physical bindings. The column list has no unambiguous single
+// table identity and is deliberately not emitted as a column occurrence.
+func sqlNavSelectUsingColumnsEnd(tokens []sqlDDLToken, at int, dialect string) (int, bool) {
+	if at >= len(tokens) || tokens[at].text != "(" || tokens[at].literalBefore {
+		return 0, false
+	}
+	start := at - 1 // include USING in the no-literal proof
+	at++
+	seen := make(map[string]bool)
+	for len(seen) < 64 && at < len(tokens) {
+		if tokens[at].literalBefore || !sqlNavQualifiedColumnHeadAllowed(tokens[at], dialect) {
+			return 0, false
+		}
+		name, end, ok := sqlNavName(tokens, at)
+		if !ok || end != at+1 || seen[name.identity] {
+			return 0, false
+		}
+		seen[name.identity] = true
+		at++
+		if at >= len(tokens) || tokens[at].literalBefore {
+			return 0, false
+		}
+		if tokens[at].text == ")" {
+			return at + 1, sqlNavNoLiteralGaps(tokens[start : at+1])
+		}
+		if tokens[at].text != "," {
+			return 0, false
+		}
+		at++
+	}
+	return 0, false
 }
 
 // Restrict bare aliases to ordinary identifiers rather than interpreting SQL

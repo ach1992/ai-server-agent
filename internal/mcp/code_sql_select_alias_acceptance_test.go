@@ -244,6 +244,9 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 		"SELECT a.id FROM public.accounts a JUNK;\n",
 		"SELECT a.id FROM public.accounts a JUNK JOIN public.payments p ON p.account_id=a.id;\n",
 		"SELECT a.id FROM public.accounts a JOIN public.payments p NOISE ON p.account_id=a.id;\n",
+		"SELECT a.id FROM public.accounts a JOIN public.payments p USING (id,);\n",
+		"SELECT a.id FROM public.accounts a JOIN public.payments p USING (id) ON a.id=p.account_id;\n",
+		"SELECT a.id FROM public.accounts a JOIN public.payments p USING ('id');\n",
 		"SELECT a.id FROM public.accounts a LEFT NOISE JOIN public.payments p ON p.account_id=a.id;\n",
 		"SELECT accounts.id FROM ONLY accounts;\n",
 		"SELECT accounts.id FROM public.payments p JOIN ONLY accounts ON p.account_id=accounts.id;\n",
@@ -728,5 +731,64 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 			}
 		}
 	}
-	t.Log("DIRECT_REAL_SQL_ALIAS_MCP_PASS r1_r2_r3_r4_r5_root_emission_proved=true definitions=2 references=5 versions=3 stale_rejected=true no_db=true malformed_on_rejected=true functions_excluded=true source_literals_rejected=true unconsumed_source_gaps_rejected=true pg_on_reserved_rejected=true pg_only_modifier_rejected=true pg_quoted_only_resolved=true mysql_only_resolved=true mariadb_only_resolved=true mysql_mariadb_join_only_resolved=true r1_r2_r3_crossfile_rejected=true f1_f2_f3_proven_emission_rejected=true f4_f5_pre_review_invariants=true n4_table_level_modifier_rejected=true n4_no_false_crossfile_refs=true")
+	// A separate USING query is introduced only after the fixed-count base
+	// cases. It must preserve source-backed qualified identifiers while
+	// refusing to attribute an unqualified USING member to one table.
+	usingPath := "queries/using.sql"
+	usingSQL := "SELECT a.id, p.account_id FROM public.accounts a JOIN public.payments p USING (id) WHERE p.account_id > 0;\n"
+	writeSQL(usingPath, usingSQL)
+	for _, method := range []string{"definition", "references"} {
+		res := call("code_"+method, map[string]any{
+			"workspace": cfg.WorkspaceDir, "path": usingPath,
+			"file_version": stat(usingPath), "language": "sql", "sql_dialect": "postgres",
+			"line": 0, "character": strings.Index(usingSQL, "p.account_id") + 2,
+		})
+		if !res.OK {
+			t.Fatalf("JOIN USING lost authenticated %s: %+v", method, res)
+		}
+		var targets []struct {
+			URI string `json:"uri"`
+		}
+		if err := json.Unmarshal([]byte(res.Output), &targets); err != nil {
+			t.Fatal(err)
+		}
+		want := "migrations/002_payments.sql"
+		if method == "references" {
+			want = usingPath
+		}
+		found := false
+		for _, target := range targets {
+			if target.URI == want {
+				found = true
+			}
+		}
+		if !found {
+			t.Fatalf("JOIN USING %s lacks %s: %+v", method, want, targets)
+		}
+	}
+	// The unqualified USING member is a join constraint, not a physical
+	// source-backed column owned by one side. Neither API may fabricate
+	// a migration navigation target for that token.
+	usingMemberAt := strings.Index(usingSQL, "USING (id)") + len("USING (") + 1
+	for _, method := range []string{"definition", "references"} {
+		res := call("code_"+method, map[string]any{
+			"workspace": cfg.WorkspaceDir, "path": usingPath,
+			"file_version": stat(usingPath), "language": "sql", "sql_dialect": "postgres",
+			"line": 0, "character": usingMemberAt,
+		})
+		if res.OK {
+			var targets []struct {
+				URI string `json:"uri"`
+			}
+			if err := json.Unmarshal([]byte(res.Output), &targets); err != nil {
+				t.Fatal(err)
+			}
+			for _, target := range targets {
+				if strings.HasPrefix(target.URI, "migrations/") {
+					t.Fatalf("unqualified USING token created fabricated %s target: %+v", method, targets)
+				}
+			}
+		}
+	}
+	t.Log("DIRECT_REAL_SQL_ALIAS_MCP_PASS using_qualified=true r1_r2_r3_r4_r5_root_emission_proved=true definitions=2 references=5 versions=3 stale_rejected=true no_db=true malformed_on_rejected=true functions_excluded=true source_literals_rejected=true unconsumed_source_gaps_rejected=true pg_on_reserved_rejected=true pg_only_modifier_rejected=true pg_quoted_only_resolved=true mysql_only_resolved=true mariadb_only_resolved=true mysql_mariadb_join_only_resolved=true r1_r2_r3_crossfile_rejected=true f1_f2_f3_proven_emission_rejected=true f4_f5_pre_review_invariants=true n4_table_level_modifier_rejected=true n4_no_false_crossfile_refs=true")
 }
