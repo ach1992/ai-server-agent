@@ -27,6 +27,22 @@ func (s *Server) debugAction(ctx context.Context, req Request) Response {
 	}
 	switch req.Action {
 	case "debug_adapter_status":
+		if req.Language == "shell" {
+			_, _, err := shellDAPTrustedRuntime()
+			available := err == nil
+			payload, _ := json.Marshal(map[string]any{
+				"adapter": "shell/bash-trap", "installed": available,
+				"modes": []string{"bash"}, "attach_supported": false, "privileged": false,
+				"evaluation_supported": false, "subshell_stepping": false,
+				"provisioning": "bundled_verified_agent_and_system_bash",
+				"containment":  "executor_owned_private_cgroup_v2_required",
+			})
+			state := "unavailable"
+			if available {
+				state = "installed_containment_unverified"
+			}
+			return Response{OK: true, Status: state, Output: string(payload), OutputEncoding: "json", BytesSeen: int64(len(payload)), BytesReturned: int64(len(payload))}
+		}
 		if req.Language == "javascript" || req.Language == "typescript" {
 			_, _, trustErr := systemexec.JavaScriptDAP()
 			available := trustErr == nil
@@ -102,7 +118,7 @@ func (s *Server) debugAction(ctx context.Context, req Request) Response {
 			return Response{OK: true, Status: status, Output: string(body), OutputEncoding: "json", BytesSeen: int64(len(body)), BytesReturned: int64(len(body))}
 		}
 		if req.Language != "" && req.Language != "go" {
-			return fileError("unsupported_debug_language", "validation", errors.New("debugger readiness supports go, rust, php, python, javascript and typescript only"))
+			return fileError("unsupported_debug_language", "validation", errors.New("debugger readiness supports go, rust, php, python, shell, javascript and typescript only"))
 		}
 		_, err := s.debugBinary()
 		available := err == nil
@@ -237,6 +253,9 @@ func peerIsWorkerDelve(conn *net.UnixConn, uid uint32, pid int) bool {
 }
 
 func (s *Server) debugLaunch(ctx context.Context, req Request) (response Response) {
+	if req.Language == "shell" {
+		return s.debugLaunchShell(ctx, req)
+	}
 	if req.Language == "javascript" || req.Language == "typescript" {
 		return s.debugLaunchNode(ctx, req)
 	}
@@ -547,6 +566,15 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 		return fileError("debug_session_uncertain", "state", errors.New("DAP state or target identity unverified; only debug_status and debug_stop are permitted"))
 	}
 	method := req.DebugMethod
+	// The Bash adapter uses an instrumentation trap, not a shell command
+	// evaluator or a process-signal attachment. Unsupported operations are
+	// refused before any wire send; they cannot poison a healthy session.
+	if d.adapter == "shell/bash-trap" {
+		switch method {
+		case "pause", "evaluate", "exceptionInfo":
+			return fileError("shell_dap_method_unsupported", "validation", errors.New("Bash v1 does not support asynchronous pause, arbitrary evaluation or exception introspection"))
+		}
+	}
 	// The executable is compiled at an exact file_version; any source
 	// changed after breakpoint registration must be surfaced, not silently
 	// paired with stale symbol/line assumptions.
@@ -583,6 +611,12 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 			extension = ".php"
 		}
 		sourceExt := filepath.Ext(relative)
+		if d.adapter == "shell/bash-trap" {
+			if relative != d.program || sourceExt != ".sh" && sourceExt != ".bash" {
+				return fileError("shell_dap_source_mismatch", "validation", errors.New("Bash v1 only accepts breakpoints in its original script"))
+			}
+			extension = sourceExt
+		}
 		validJS := d.adapter == "javascript/js-debug" && (sourceExt == ".js" || sourceExt == ".mjs" || sourceExt == ".cjs" || (d.sourceLanguage == "typescript" && (sourceExt == ".ts" || sourceExt == ".tsx")))
 		if err != nil || (d.adapter == "javascript/js-debug" && !validJS) ||
 			(d.adapter != "javascript/js-debug" && sourceExt != extension) || len(req.DebugLines) > 32 || req.FileVersion == "" {
@@ -695,6 +729,26 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 		d.sourceVersions[breakpointStat.Path] = req.FileVersion
 	}
 	if method == "configure" {
+		if d.adapter == "shell/bash-trap" {
+			// The Bash first-command trap blocks until this root-mediated
+			// activation. configurationDone emitted and pinned the real Bash
+			// child before any worker script command is allowed to run.
+			if err := d.pinnedDebuggeeError(); err != nil {
+				return fileError("shell_dap_debuggee_identity_unverified", "state", err)
+			}
+			// The original Bash PID is now kernel-pinned but blocked
+			// *before its first script command*. Check the exact current
+			// source once more before granting the private activation.
+			if err := s.checkDAPBreakpointSources(ctx, req, d); err != nil {
+				d.mu.Lock()
+				d.uncertain, d.stage = true, "uncertain"
+				d.mu.Unlock()
+				return fileError("debug_source_changed", "conflict", err)
+			}
+			if _, err := d.call(callCtx, "asaActivate", map[string]any{}); err != nil {
+				return fileError("shell_dap_activation_uncertain", "state", err)
+			}
+		}
 		if d.phpHTTP != nil {
 			if err := d.phpProxy.terminalFailure(); err != nil {
 				return fileError("php_http_dbgp_provenance_failed", "state", err)
