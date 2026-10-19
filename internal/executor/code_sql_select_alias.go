@@ -11,7 +11,7 @@ import "strings"
 //
 // Source: postgres/postgres REL_18_STABLE src/include/parser/kwlist.h
 // https://www.postgresql.org/docs/current/sql-keywords-appendix.html
-var sqlNavPostgresSelectDisallowed = sqlNavKeywordSet(`
+var sqlNavPostgresReservedKeywords = sqlNavKeywordSet(`
 ALL ANALYSE ANALYZE AND ANY ARRAY AS ASC ASYMMETRIC BOTH CASE CAST CHECK COLLATE COLUMN
 CONSTRAINT CREATE CURRENT_CATALOG CURRENT_DATE CURRENT_ROLE CURRENT_TIME CURRENT_TIMESTAMP
 CURRENT_USER DEFAULT DEFERRABLE DESC DISTINCT DO ELSE END EXCEPT FALSE FETCH FOR FOREIGN FROM
@@ -19,9 +19,27 @@ GRANT GROUP HAVING IN INITIALLY INTERSECT INTO LATERAL LEADING LIMIT LOCALTIME L
 NOT NULL OFFSET ON ONLY OR ORDER PLACING PRIMARY REFERENCES RETURNING SELECT SESSION_USER SOME
 SYMMETRIC SYSTEM_USER TABLE THEN TO TRAILING TRUE UNION UNIQUE USER USING VARIADIC WHEN WHERE
 WINDOW WITH
+`)
+
+// TYPE_FUNC_NAME_KEYWORD is legal as the head of a PostgreSQL generic
+// type, but not in a ColId (relation/column/index-name) position.
+var sqlNavPostgresTypeFunctionKeywords = sqlNavKeywordSet(`
 AUTHORIZATION BINARY COLLATION CONCURRENTLY CROSS CURRENT_SCHEMA FREEZE FULL ILIKE INNER IS
 ISNULL JOIN LEFT LIKE NATURAL NOTNULL OUTER OVERLAPS RIGHT SIMILAR TABLESAMPLE VERBOSE
 `)
+
+// Keep the union for physical ColId checks, while datatype heads use the
+// distinct PostgreSQL token classes. Both lists are pinned to PG 18 kwlist.h.
+var sqlNavPostgresSelectDisallowed = func() map[string]bool {
+	names := make(map[string]bool, len(sqlNavPostgresReservedKeywords)+len(sqlNavPostgresTypeFunctionKeywords))
+	for name := range sqlNavPostgresReservedKeywords {
+		names[name] = true
+	}
+	for name := range sqlNavPostgresTypeFunctionKeywords {
+		names[name] = true
+	}
+	return names
+}()
 
 func sqlNavPostgresBareIdentifierAllowed(token sqlDDLToken, afterDot bool) bool {
 	if token.kind == 'q' {

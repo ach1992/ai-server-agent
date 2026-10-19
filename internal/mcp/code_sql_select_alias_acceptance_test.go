@@ -430,6 +430,11 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 		{"f3_alter_unknown_action", "ALTER TABLE public.accounts ADD COLUMN okay INT, BOGUS REFERENCES public.payments(id);\n", "public.payments"},
 		{"f4_projection_double_alias", "SELECT a.id AS uid EXTRA FROM public.accounts a;\n", "a.id"},
 		{"f4_projection_unknown_tokens", "SELECT a.id JUNK EXTRA FROM public.accounts a;\n", "a.id"},
+		{"r1_trailing_where_literal", "SELECT a.id FROM public.accounts a WHERE a.id=1 'discarded';\n", "a.id"},
+		{"r3_invalid_insert_body", "INSERT INTO public.accounts (id) FROBNICATE;\n", "public.accounts"},
+		{"r3_invalid_update_body", "UPDATE public.accounts FROBNICATE;\n", "public.accounts"},
+		{"r5_reserved_index_name", "CREATE INDEX ONLY ON public.accounts (id);\n", "public.accounts"},
+		{"r5_invalid_pg_alter_rename_index", "ALTER TABLE public.accounts RENAME INDEX ix TO new_ix;\n", "public.accounts"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := "queries/r123.sql"
@@ -470,6 +475,11 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 		{"incomplete_unique", "CREATE TABLE impossible (id BIGINT, UNIQUE wrong);\n"},
 		{"invalid_create_view_body", "CREATE VIEW impossible AS FROBNICATE;\n"},
 		{"invalid_function_join", "CREATE VIEW impossible AS SELECT * FROM generate_series(1,2) g JOIN public.accounts a ON a.id=ONLY;\n"},
+		{"r1_ignored_constraint_literal", "CREATE TABLE impossible (id BIGINT, PRIMARY KEY (id) 'discarded');\n"},
+		{"r2_scalar_operator_view", "CREATE VIEW impossible AS SELECT +;\n"},
+		{"r4_type_keyword_with", "CREATE TABLE impossible (id WITH);\n"},
+		{"r4_type_keyword_only", "CREATE TABLE impossible (id ONLY);\n"},
+		{"extra_materialized_suffix_literal", "CREATE MATERIALIZED VIEW impossible AS SELECT 1 'discarded' WITH NO DATA;\n"},
 	} {
 		t.Run("f2_f3_declaration_"+tc.name, func(t *testing.T) {
 			writeSQL(invalidMigration, tc.ddl)
@@ -563,5 +573,49 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 			t.Fatalf("valid contained %s missing %s: %+v", method, want, response)
 		}
 	}
-	t.Log("DIRECT_REAL_SQL_ALIAS_MCP_PASS definitions=2 references=5 versions=3 stale_rejected=true no_db=true malformed_on_rejected=true functions_excluded=true source_literals_rejected=true unconsumed_source_gaps_rejected=true pg_on_reserved_rejected=true pg_only_modifier_rejected=true pg_quoted_only_resolved=true mysql_only_resolved=true mariadb_only_resolved=true mysql_mariadb_join_only_resolved=true r1_r2_r3_crossfile_rejected=true f1_f2_f3_proven_emission_rejected=true f4_f5_pre_review_invariants=true n4_table_level_modifier_rejected=true n4_no_false_crossfile_refs=true")
+	// R1-R5: a complete supported direct DML is still a navigable
+	// table use, including VALUES containing a separately elided string.
+	// Check real bearer-authenticated definition and references with
+	// exact target file_version after the negative cases.
+	for _, sql := range []string{
+		"INSERT INTO public.accounts (id,name) VALUES (1,'owned');\n",
+		"INSERT INTO public.accounts (id) SELECT a.id FROM public.accounts a;\n",
+		"UPDATE public.accounts SET id=2, name='owned' WHERE id=1;\n",
+		"DELETE FROM public.accounts WHERE id=1;\n",
+		"TRUNCATE TABLE public.accounts;\n",
+	} {
+		path := "queries/r123.sql"
+		writeSQL(path, sql)
+		pos := strings.Index(sql, "public.accounts") + len("public.") + 1
+		for _, method := range []string{"definition", "references"} {
+			response := call("code_"+method, map[string]any{
+				"workspace": cfg.WorkspaceDir, "path": path, "file_version": stat(path),
+				"language": "sql", "sql_dialect": "postgres", "line": 0, "character": pos,
+			})
+			if !response.OK {
+				t.Fatalf("valid DML %s lost %s: %+v", sql, method, response)
+			}
+			var targets []struct {
+				URI         string `json:"uri"`
+				FileVersion string `json:"file_version"`
+			}
+			if err := json.Unmarshal([]byte(response.Output), &targets); err != nil {
+				t.Fatal(err)
+			}
+			want := "migrations/001_accounts.sql"
+			if method == "references" {
+				want = path
+			}
+			matched := false
+			for _, target := range targets {
+				if target.URI == want && target.FileVersion == stat(want) {
+					matched = true
+				}
+			}
+			if !matched {
+				t.Fatalf("valid DML %s missing versioned %s %s: %+v", sql, method, want, response)
+			}
+		}
+	}
+	t.Log("DIRECT_REAL_SQL_ALIAS_MCP_PASS r1_r2_r3_r4_r5_root_emission_proved=true definitions=2 references=5 versions=3 stale_rejected=true no_db=true malformed_on_rejected=true functions_excluded=true source_literals_rejected=true unconsumed_source_gaps_rejected=true pg_on_reserved_rejected=true pg_only_modifier_rejected=true pg_quoted_only_resolved=true mysql_only_resolved=true mariadb_only_resolved=true mysql_mariadb_join_only_resolved=true r1_r2_r3_crossfile_rejected=true f1_f2_f3_proven_emission_rejected=true f4_f5_pre_review_invariants=true n4_table_level_modifier_rejected=true n4_no_false_crossfile_refs=true")
 }

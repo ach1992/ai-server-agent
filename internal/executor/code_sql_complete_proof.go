@@ -6,7 +6,8 @@ package executor
 // They are intentionally not general PostgreSQL/MySQL parsers.
 
 func sqlNavProofParenEnd(tokens []sqlDDLToken, at, limit int) (int, bool) {
-	if at >= limit || tokens[at].text != "(" {
+	if at >= limit || tokens[at].text != "(" ||
+		tokens[at].literalBefore || tokens[at].literalAfter {
 		return 0, false
 	}
 	depth := 0
@@ -28,6 +29,17 @@ func sqlNavProofParenEnd(tokens []sqlDDLToken, at, limit int) (int, bool) {
 		}
 	}
 	return 0, false
+}
+
+// Fail closed when a lossy SQL literal is not explicitly consumed by the
+// owning bounded scalar/projection/default grammar.
+func sqlNavNoLiteralGaps(tokens []sqlDDLToken) bool {
+	for _, token := range tokens {
+		if token.literalBefore || token.literalAfter {
+			return false
+		}
+	}
+	return true
 }
 
 func sqlNavProofSegments(tokens []sqlDDLToken, start, end int) ([][]sqlDDLToken, bool) {
@@ -59,6 +71,7 @@ func sqlNavProofSegments(tokens []sqlDDLToken, start, end int) ([][]sqlDDLToken,
 				segment := append([]sqlDDLToken(nil), tokens[first:i]...)
 				if tokens[i].literalBefore {
 					segment[len(segment)-1].literalAfter = true
+					segment[len(segment)-1].literalAfterCount = tokens[i].literalBeforeCount
 				}
 				segments = append(segments, segment)
 				first = i + 1
@@ -71,6 +84,7 @@ func sqlNavProofSegments(tokens []sqlDDLToken, start, end int) ([][]sqlDDLToken,
 	segment := append([]sqlDDLToken(nil), tokens[first:end]...)
 	if end < len(tokens) && tokens[end].literalBefore {
 		segment[len(segment)-1].literalAfter = true
+		segment[len(segment)-1].literalAfterCount = tokens[end].literalBeforeCount
 	}
 	return append(segments, segment), true
 }
@@ -83,7 +97,7 @@ func sqlNavIndexExpressionProven(tokens []sqlDDLToken, dialect string) bool {
 		return false
 	}
 	for _, tok := range tokens {
-		if tok.literalBefore {
+		if tok.literalBefore || tok.literalAfter {
 			return false
 		}
 	}
@@ -117,7 +131,7 @@ func sqlNavProofKeyList(tokens []sqlDDLToken, at, limit int, dialect string, ind
 	// Elided literals cannot be invisible key-list members or operands.
 	// In particular: PRIMARY KEY (id 'ignored') is not PRIMARY KEY(id).
 	for i := at + 1; i < end; i++ {
-		if tokens[i].literalBefore {
+		if tokens[i].literalBefore || tokens[i].literalAfter {
 			return 0, false
 		}
 	}
@@ -214,7 +228,7 @@ func sqlNavProofReference(tokens []sqlDDLToken, at, limit int, dialect string) (
 }
 
 func sqlNavProofConstraint(tokens []sqlDDLToken, dialect string) bool {
-	if len(tokens) == 0 || tokens[0].literalBefore {
+	if len(tokens) == 0 || !sqlNavNoLiteralGaps(tokens) {
 		return false
 	}
 	at := 0
@@ -310,54 +324,109 @@ func sqlNavProofConstraint(tokens []sqlDDLToken, dialect string) bool {
 // in the datatype slot are provably not datatype names. This distinction
 // stops CREATE TABLE x (id PRIMARY) from publishing a false declaration
 // without rejecting arbitrary valid custom type names.
-func sqlNavDDLTypeNameAllowed(token sqlDDLToken) bool {
-	if token.kind == 'q' {
-		return true
+// The type name has its own dialect grammar: PostgreSQL GenericType starts
+// with type_function_name (not ColId). Quoted/user-defined types and ordinary
+// schema qualification remain possible without pretending to resolve a DB
+// catalog. Builtin type names use distinct numeric/character productions.
+func sqlNavDDLTypeNameAllowed(tokens []sqlDDLToken, at int, dialect string) (int, bool) {
+	if at >= len(tokens) || tokens[at].literalBefore {
+		return 0, false
 	}
-	if token.kind != 'i' || !sqlNavSimpleName.MatchString(token.text) {
-		return false
+	first := tokens[at]
+	if first.kind != 'q' && (first.kind != 'i' || !sqlNavSimpleName.MatchString(first.text)) {
+		return 0, false
 	}
-	switch token.keyword() {
-	case "SELECT", "FROM", "WHERE", "JOIN", "ON", "ORDER", "GROUP",
-		"BY", "HAVING", "LIMIT", "OFFSET", "PRIMARY", "FOREIGN",
-		"UNIQUE", "REFERENCES", "CONSTRAINT", "CHECK", "DEFAULT",
-		"NOT", "NULL", "KEY", "INDEX", "TABLE", "CREATE", "ALTER",
-		"DROP", "AS", "INTO", "VALUES", "RENAME", "TO", "COLUMN",
-		"ADD", "UPDATE", "DELETE":
-		return false
+	if first.kind == 'i' {
+		if dialect == "postgres" || dialect == "postgresql" {
+			if sqlNavPostgresReservedKeywords[first.keyword()] {
+				return 0, false
+			}
+		} else if dialect == "mysql" || dialect == "mariadb" {
+			// MySQL datatype tokens may themselves be reserved. Structural
+			// SQL command words are not datatype names.
+			switch first.keyword() {
+			case "SELECT", "FROM", "WHERE", "JOIN", "ON", "ORDER", "GROUP", "HAVING",
+				"PRIMARY", "FOREIGN", "REFERENCES", "CONSTRAINT", "CHECK", "DEFAULT",
+				"NOT", "NULL", "KEY", "INDEX", "TABLE", "CREATE", "ALTER", "DROP",
+				"AS", "INTO", "VALUES", "RENAME", "TO", "COLUMN", "ADD", "UPDATE", "DELETE":
+				return 0, false
+			}
+		} else {
+			return 0, false
+		}
 	}
-	return true
+	end := at + 1
+	// PostgreSQL GenericType accepts type_function_name attrs. Later names
+	// are attributes (not an independently reserved leading identifier).
+	if end < len(tokens) && tokens[end].text == "." {
+		if dialect != "postgres" && dialect != "postgresql" {
+			return 0, false
+		}
+		_, next, ok := sqlNavName(tokens, at)
+		if !ok || next-at < 3 || next > len(tokens) {
+			return 0, false
+		}
+		for i := at; i < next; i++ {
+			if tokens[i].literalBefore || tokens[i].literalAfter {
+				return 0, false
+			}
+		}
+		end = next
+	}
+	return end, true
 }
 
 // A supported column definition has a bare name, a datatype, and only
 // explicitly recognised inline modifiers. A DEFAULT string or a complex
 // expression that the lossy lexer cannot prove is intentionally unsupported.
 func sqlNavProofColumnDef(tokens []sqlDDLToken, dialect string) bool {
-	if len(tokens) > 0 && tokens[len(tokens)-1].literalAfter &&
-		tokens[len(tokens)-1].keyword() != "DEFAULT" {
-		return false // unrelated trailing SQL literal after a declaration
+	// Column definitions are an atomic bounded grammar. Every missing
+	// lexical span must be consumed by the *one* supported standalone
+	// DEFAULT string scalar, never ignored inside PRIMARY KEY, a type or
+	// a constraint modifier.
+	for i, tok := range tokens {
+		if tok.literalBefore {
+			return false
+		}
+		if tok.literalAfter && !(i == len(tokens)-1 && tok.keyword() == "DEFAULT" &&
+			tok.literalAfterCount == 1) {
+			return false
+		}
 	}
 	if len(tokens) < 2 || !sqlNavQualifiedColumnHeadAllowed(tokens[0], dialect) ||
-		tokens[0].literalBefore || tokens[1].literalBefore ||
-		!sqlNavDDLTypeNameAllowed(tokens[1]) {
+		tokens[0].literalBefore {
 		return false
 	}
-	at := 2
-	switch tokens[1].keyword() {
-	case "DOUBLE", "CHARACTER":
-		if at < len(tokens) && (tokens[at].keyword() == "PRECISION" || tokens[at].keyword() == "VARYING") {
-			at++
-		}
-	case "TIMESTAMP", "TIME":
-		if at+2 < len(tokens) && tokens[at].keyword() == "WITH" &&
-			tokens[at+1].keyword() == "TIME" && tokens[at+2].keyword() == "ZONE" {
-			at += 3
+	at, allowed := sqlNavDDLTypeNameAllowed(tokens, 1, dialect)
+	if !allowed {
+		return false
+	}
+	if at == 2 {
+		switch tokens[1].keyword() {
+		case "DOUBLE", "CHARACTER":
+			if at < len(tokens) && (tokens[at].keyword() == "PRECISION" || tokens[at].keyword() == "VARYING") {
+				at++
+			}
+		case "TIMESTAMP", "TIME":
+			if at+2 < len(tokens) && tokens[at].keyword() == "WITH" &&
+				tokens[at+1].keyword() == "TIME" && tokens[at+2].keyword() == "ZONE" {
+				at += 3
+			}
 		}
 	}
 	if at < len(tokens) && tokens[at].text == "(" {
 		next, ok := sqlNavProofParenEnd(tokens, at, len(tokens))
 		if !ok {
 			return false
+		}
+		args, separated := sqlNavProofSegments(tokens, at+1, next-1)
+		if !separated {
+			return false
+		}
+		for _, arg := range args {
+			if !sqlNavNoLiteralGaps(arg) || !sqlNavProofNumber(arg, dialect) {
+				return false
+			}
 		}
 		at = next
 	}
@@ -390,7 +459,7 @@ func sqlNavProofColumnDef(tokens []sqlDDLToken, dialect string) bool {
 			// scalar; punctuation alone (DEFAULT +, DEFAULT *) is not
 			// a scalar and must not publish a CREATE declaration.
 			if at+1 == len(tokens) {
-				return tokens[at].literalAfter
+				return tokens[at].literalAfter && tokens[at].literalAfterCount == 1
 			}
 			if tokens[at+1].literalBefore {
 				return false
@@ -499,6 +568,22 @@ func sqlNavProofAlterAction(tokens []sqlDDLToken, dialect string) bool {
 	if len(tokens) < 2 || tokens[0].literalBefore {
 		return false
 	}
+	// The only opaque scalar this ALTER subset supports is one quoted
+	// DEFAULT value owned by an ADD/CHANGE/MODIFY column definition.
+	for i, tok := range tokens {
+		if tok.literalBefore {
+			return false
+		}
+		if !tok.literalAfter {
+			continue
+		}
+		if i != len(tokens)-1 || tok.keyword() != "DEFAULT" ||
+			tok.literalAfterCount != 1 ||
+			(tokens[0].keyword() != "ADD" && tokens[0].keyword() != "CHANGE" &&
+				tokens[0].keyword() != "MODIFY") {
+			return false
+		}
+	}
 	switch tokens[0].keyword() {
 	case "ADD":
 		at := 1
@@ -548,6 +633,11 @@ func sqlNavProofAlterAction(tokens []sqlDDLToken, dialect string) bool {
 		return at+1 == len(tokens) && (tokens[at].keyword() == "RESTRICT" || tokens[at].keyword() == "CASCADE")
 	case "RENAME":
 		at := 1
+		if tokens[at].keyword() == "INDEX" || tokens[at].keyword() == "KEY" {
+			if dialect != "mysql" && dialect != "mariadb" {
+				return false
+			}
+		}
 		if tokens[at].keyword() == "COLUMN" || tokens[at].keyword() == "INDEX" || tokens[at].keyword() == "KEY" {
 			at++
 			if at+2 >= len(tokens) || !sqlNavQualifiedColumnHeadAllowed(tokens[at], dialect) ||
@@ -598,6 +688,9 @@ func sqlNavProofAlterAction(tokens []sqlDDLToken, dialect string) bool {
 }
 
 func sqlNavIndexWholeProof(tokens []sqlDDLToken, open int, dialect string) bool {
+	if len(tokens) == 0 || tokens[len(tokens)-1].literalAfter {
+		return false
+	}
 	end, ok := sqlNavProofKeyList(tokens, open, len(tokens), dialect, true)
 	if !ok {
 		return false

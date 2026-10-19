@@ -35,7 +35,8 @@ const (
 )
 
 func sqlNavSelectOnPredicateComplete(tokens []sqlDDLToken, dialect string) bool {
-	if len(tokens) == 0 || len(tokens) > sqlNavOnMaxTokens {
+	if len(tokens) == 0 || len(tokens) > sqlNavOnMaxTokens ||
+		!sqlNavNoLiteralGaps(tokens) {
 		return false
 	}
 	p := sqlNavOnParser{tokens: tokens, dialect: dialect}

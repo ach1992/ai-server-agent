@@ -8,7 +8,7 @@ package executor
 // index does not declare a table or a column.
 func sqlNavIndexMethod(method, dialect string, spatial bool) bool {
 	switch dialect {
-	case "postgres":
+	case "postgres", "postgresql":
 		switch method {
 		case "BTREE", "HASH", "GIST", "GIN", "SPGIST", "BRIN":
 			return true
@@ -20,7 +20,8 @@ func sqlNavIndexMethod(method, dialect string, spatial bool) bool {
 }
 
 func sqlNavIndexTarget(statement []sqlDDLToken, dialect string) (sqlNavOccurrence, int, bool) {
-	if len(statement) < 6 || statement[0].keyword() != "CREATE" {
+	if len(statement) < 6 || statement[0].keyword() != "CREATE" ||
+		!sqlNavNoLiteralGaps(statement) {
 		return sqlNavOccurrence{}, 0, false
 	}
 	i := 1
@@ -47,7 +48,7 @@ func sqlNavIndexTarget(statement []sqlDDLToken, dialect string) (sqlNavOccurrenc
 	}
 	i++
 	if i < len(statement) && statement[i].keyword() == "CONCURRENTLY" {
-		if dialect != "postgres" {
+		if dialect != "postgres" && dialect != "postgresql" {
 			return sqlNavOccurrence{}, 0, false
 		}
 		i++
@@ -67,17 +68,18 @@ func sqlNavIndexTarget(statement []sqlDDLToken, dialect string) (sqlNavOccurrenc
 		// The optional index name is a normal or qualified identifier, never a
 		// user-provided expression or an implicit table name.
 		_, next, ok := sqlNavName(statement, i)
-		if !ok {
+		if !ok || next != i+1 || statement[i].literalBefore ||
+			!sqlNavQualifiedColumnHeadAllowed(statement[i], dialect) {
 			return sqlNavOccurrence{}, 0, false
 		}
 		i = next
-	} else if dialect != "postgres" || ifNotExists {
+	} else if (dialect != "postgres" && dialect != "postgresql") || ifNotExists {
 		// Only PostgreSQL permits an unnamed CREATE INDEX, and its IF NOT
 		// EXISTS clause requires an explicit index name.
 		return sqlNavOccurrence{}, 0, false
 	}
 	if i+1 < len(statement) && statement[i].keyword() == "USING" {
-		if dialect == "postgres" || !sqlNavIndexMethod(statement[i+1].keyword(), dialect, spatial) {
+		if (dialect == "postgres" || dialect == "postgresql") || !sqlNavIndexMethod(statement[i+1].keyword(), dialect, spatial) {
 			return sqlNavOccurrence{}, 0, false
 		}
 		i += 2 // MySQL and MariaDB index type is before ON.
@@ -87,7 +89,7 @@ func sqlNavIndexTarget(statement []sqlDDLToken, dialect string) (sqlNavOccurrenc
 	}
 	i++
 	if i < len(statement) && statement[i].keyword() == "ONLY" {
-		if dialect != "postgres" {
+		if dialect != "postgres" && dialect != "postgresql" {
 			return sqlNavOccurrence{}, 0, false
 		}
 		i++
@@ -98,7 +100,7 @@ func sqlNavIndexTarget(statement []sqlDDLToken, dialect string) (sqlNavOccurrenc
 	}
 	i = next
 	if i+1 < len(statement) && statement[i].keyword() == "USING" {
-		if dialect != "postgres" || !sqlNavIndexMethod(statement[i+1].keyword(), dialect, spatial) {
+		if (dialect != "postgres" && dialect != "postgresql") || !sqlNavIndexMethod(statement[i+1].keyword(), dialect, spatial) {
 			return sqlNavOccurrence{}, 0, false
 		}
 		i += 2

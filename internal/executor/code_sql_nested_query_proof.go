@@ -73,7 +73,8 @@ func sqlNavSelectProjectionProven(tokens []sqlDDLToken, from int, dialect string
 		if i != from && (tokens[i].text != "," || depth != 0) {
 			continue
 		}
-		if count >= 64 || !sqlNavProjectionItemProven(tokens[start:i], dialect, tokens[i].literalBefore) {
+		if count >= 64 || tokens[i].literalBeforeCount > 1 ||
+			!sqlNavProjectionItemProven(tokens[start:i], dialect, tokens[i].literalBefore) {
 			return false
 		}
 		count++
@@ -90,7 +91,8 @@ func sqlNavProjectionItemProven(tokens []sqlDDLToken, dialect string, trailingLi
 		return false // a literal was merged into a visible expression
 	}
 	if len(tokens) == 2 && tokens[0].keyword() == "AS" &&
-		tokens[0].literalBefore && !tokens[1].literalBefore &&
+		tokens[0].literalBefore && tokens[0].literalBeforeCount == 1 &&
+		!tokens[1].literalBefore &&
 		sqlNavSelectAliasAllowed(tokens[1], dialect) {
 		return true // separately elided string AS output_name
 	}
@@ -115,7 +117,8 @@ func sqlNavProjectionItemProven(tokens []sqlDDLToken, dialect string, trailingLi
 // nested CREATE/INSERT SELECT. Rich valid SQL with unsupported clauses is
 // conservatively omitted, never treated as evidence from a parsed prefix.
 func sqlNavSelectTailProven(tokens []sqlDDLToken, from int, dialect string) bool {
-	if from < 1 || from >= len(tokens) {
+	if from < 1 || from >= len(tokens) ||
+		tokens[len(tokens)-1].literalAfter {
 		return false
 	}
 	depth, at := 0, len(tokens)

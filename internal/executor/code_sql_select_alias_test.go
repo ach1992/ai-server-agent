@@ -866,6 +866,13 @@ func TestSQLSelectAliasWorkerCrossFileNavigation(t *testing.T) {
 		{"f3_unproven_alter_action", "ALTER TABLE public.accounts ADD COLUMN okay INT, BOGUS REFERENCES public.payments(id);\n", "public.accounts"},
 		{"f4_projection_double_alias", "SELECT a.id AS uid EXTRA FROM public.accounts a;\n", "a.id"},
 		{"f4_projection_unknown_tokens", "SELECT a.id JUNK EXTRA FROM public.accounts a;\n", "a.id"},
+		{"r1_predicate_discarded_literal", "SELECT a.id FROM public.accounts a WHERE a.id=1 'discarded';\n", "a.id"},
+		{"r1_bad_index_predicate_literal", "CREATE INDEX ix_bad ON public.accounts (id) WHERE id=1 'discarded';\n", "public.accounts"},
+		{"r3_insert_partial_body", "INSERT INTO public.accounts (id) FROBNICATE;\n", "public.accounts"},
+		{"r3_update_partial_body", "UPDATE public.accounts FROBNICATE;\n", "public.accounts"},
+		{"r3_delete_partial_body", "DELETE FROM public.accounts FROBNICATE;\n", "public.accounts"},
+		{"r5_invalid_index_name", "CREATE INDEX ONLY ON public.accounts (id);\n", "public.accounts"},
+		{"r5_invalid_pg_index_rename", "ALTER TABLE public.accounts RENAME INDEX old TO newer;\n", "public.accounts"},
 	}
 	for _, tc := range badQueries {
 		t.Run(tc.name, func(t *testing.T) {
@@ -932,6 +939,11 @@ func TestSQLSelectAliasWorkerCrossFileNavigation(t *testing.T) {
 		{"unknown_alter_like_ddl", "CREATE TABLE impossible (id BIGINT, UNIQUE x);\n", "impossible"},
 		{"bad_view_body", "CREATE VIEW impossible AS FROBNICATE;\n", "impossible"},
 		{"bad_view_function_join", "CREATE VIEW impossible AS SELECT * FROM generate_series(1,2) g JOIN public.accounts a ON a.id=ONLY;\n", "impossible"},
+		{"r1_literal_after_constraint", "CREATE TABLE impossible (id BIGINT, PRIMARY KEY (id) 'discarded');\n", "impossible"},
+		{"r2_invalid_scalar_view", "CREATE VIEW impossible AS SELECT +;\n", "impossible"},
+		{"r4_reserved_datatype_with", "CREATE TABLE impossible (id WITH);\n", "impossible"},
+		{"r4_reserved_datatype_only", "CREATE TABLE impossible (id ONLY);\n", "impossible"},
+		{"extra_materialized_suffix_literal", "CREATE MATERIALIZED VIEW impossible AS SELECT 1 'discarded' WITH DATA;\n", "impossible"},
 	} {
 		t.Run("f2_f3_crossfile_"+tc.name, func(t *testing.T) {
 			if err := os.WriteFile(invalidDDLPath, []byte(tc.ddl), 0600); err != nil {

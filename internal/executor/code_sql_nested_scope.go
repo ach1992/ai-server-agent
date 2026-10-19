@@ -7,12 +7,16 @@ func sqlNavCreateQueryStart(tokens []sqlDDLToken, at int, materialized bool) int
 	if materialized && at < len(tokens) && tokens[at].text == "(" {
 		i, count := at+1, 0
 		for i < len(tokens) {
-			if count >= 64 || !sqlNavPostgresBareIdentifierAllowed(tokens[i], false) {
+			if count >= 64 || tokens[i].literalBefore ||
+				!sqlNavPostgresBareIdentifierAllowed(tokens[i], false) {
 				return -1
 			}
 			count++
 			i++
 			if i >= len(tokens) {
+				return -1
+			}
+			if tokens[i].literalBefore {
 				return -1
 			}
 			if tokens[i].text == ")" {
@@ -26,7 +30,8 @@ func sqlNavCreateQueryStart(tokens []sqlDDLToken, at int, materialized bool) int
 		}
 	}
 	if at+1 < len(tokens) && tokens[at].keyword() == "AS" &&
-		tokens[at+1].keyword() == "SELECT" {
+		tokens[at+1].keyword() == "SELECT" &&
+		!tokens[at].literalBefore && !tokens[at+1].literalBefore {
 		return at + 1
 	}
 	return -1
@@ -59,6 +64,15 @@ func sqlNavNestedSelectScope(tokens []sqlDDLToken, start int, dialect string, ma
 	if end <= start+1 {
 		return nil, nil, false
 	}
+	// The PostgreSQL materialized-view population suffix is a separate
+	// grammar boundary. No opaque literal may be silently discarded between
+	// the proven SELECT body and WITH [NO] DATA.
+	if end < len(tokens) {
+		if tokens[end].literalBefore || tokens[end].literalAfter ||
+			!sqlNavNoLiteralGaps(tokens[end:]) {
+			return nil, nil, false
+		}
+	}
 	body := tokens[start:end]
 	sources, columns = sqlNavSelectAnalysis(body, dialect)
 	if len(sources) > 0 {
@@ -79,24 +93,31 @@ func sqlNavNestedSelectScope(tokens []sqlDDLToken, start int, dialect string, ma
 }
 
 func sqlNavSelectConstantProjection(tokens []sqlDDLToken, dialect string) bool {
-	if len(tokens) < 2 || tokens[0].keyword() != "SELECT" {
+	if len(tokens) < 2 || tokens[0].keyword() != "SELECT" ||
+		tokens[len(tokens)-1].literalAfter {
 		return false
 	}
 	// SELECT <numeric|TRUE|FALSE|NULL> [AS alias] [, ...]
-	// Optional numeric unary sign is intentionally not supported. A quoted
-	// SQL string has been elided by the lexer, so it cannot be proved here.
+	// Signed and unsigned numeric tokens are proved as complete scalars.
+	// A quoted SQL string has been elided by the lexer, so it cannot be proved here.
 	for at, count := 1, 0; at < len(tokens); {
 		if count >= 64 || tokens[at].literalBefore {
 			return false
 		}
-		scalar := tokens[at].kind == 'p' ||
-			tokens[at].keyword() == "TRUE" ||
-			tokens[at].keyword() == "FALSE" ||
-			tokens[at].keyword() == "NULL"
-		if !scalar {
+		// A punctuation token is not a scalar: '+', '*' or '(' alone
+		// cannot certify a CREATE AS SELECT declaration.
+		if tokens[at].kind == 'p' {
+			number := sqlNavOnParser{tokens: tokens[at:], dialect: dialect}
+			if !number.number() {
+				return false
+			}
+			at += number.at
+		} else if tokens[at].keyword() == "TRUE" ||
+			tokens[at].keyword() == "FALSE" || tokens[at].keyword() == "NULL" {
+			at++
+		} else {
 			return false
 		}
-		at++
 		if at < len(tokens) && tokens[at].keyword() == "AS" {
 			at++
 			if at >= len(tokens) || !sqlNavSelectAliasAllowed(tokens[at], dialect) ||
@@ -140,9 +161,12 @@ func sqlNavInsertColumnListEnd(tokens []sqlDDLToken, at int, dialect string) (in
 			return 0, false
 		}
 		if tokens[at].text == ")" {
+			if tokens[at].literalBefore {
+				return 0, false
+			}
 			return at + 1, true
 		}
-		if tokens[at].text != "," {
+		if tokens[at].text != "," || tokens[at].literalBefore {
 			return 0, false
 		}
 		at++

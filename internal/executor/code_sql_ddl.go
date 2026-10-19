@@ -44,6 +44,9 @@ type sqlDDLToken struct {
 	// the bounded SELECT/JOIN parser cannot mistake an incomplete, lossy ON
 	// predicate for a valid one. All existing DDL token text/kinds are unchanged.
 	literalBefore, literalAfter bool
+	// Saturated at two: a single elided string can be a complete scalar,
+	// but two invisible literals must never masquerade as one.
+	literalBeforeCount, literalAfterCount uint8
 }
 
 func (t sqlDDLToken) keyword() string {
@@ -220,11 +223,16 @@ func sqlDDLTokenize(source, dialect string, rejectExecutableComments bool) ([]sq
 			}
 		}
 	}
-	literalSkipped := false
+	var literalSkipped uint8
+	markLiteral := func() {
+		if literalSkipped < 2 {
+			literalSkipped++
+		}
+	}
 	add := func(text string, kind byte, start sqlDDLPosition) {
 		tokens = append(tokens, sqlDDLToken{text: text, kind: kind, start: start, end: position(),
-			literalBefore: literalSkipped})
-		literalSkipped = false
+			literalBefore: literalSkipped > 0, literalBeforeCount: literalSkipped})
+		literalSkipped = 0
 	}
 	for i < len(source) {
 		start := position()
@@ -277,7 +285,7 @@ func sqlDDLTokenize(source, dialect string, rejectExecutableComments bool) ([]sq
 					return nil, false
 				}
 				advance(end + 1 + rest + len(delimiter))
-				literalSkipped = true // PostgreSQL dollar-quoted literal/body
+				markLiteral() // PostgreSQL dollar-quoted literal/body
 				continue
 			}
 		}
@@ -332,7 +340,7 @@ func sqlDDLTokenize(source, dialect string, rejectExecutableComments bool) ([]sq
 			if quotedIdentifier {
 				add(value.String(), 'q', start)
 			} else {
-				literalSkipped = true // single-quoted SQL literal, not an identifier
+				markLiteral() // single-quoted SQL literal, not an identifier
 			}
 			continue
 		}
@@ -364,10 +372,11 @@ func sqlDDLTokenize(source, dialect string, rejectExecutableComments bool) ([]sq
 			advance(end)
 		}
 	}
-	if literalSkipped && len(tokens) > 0 {
+	if literalSkipped > 0 && len(tokens) > 0 {
 		// No following token at EOF; do not lose the presence of a
 		// literal after an otherwise complete JOIN ON predicate.
 		tokens[len(tokens)-1].literalAfter = true
+		tokens[len(tokens)-1].literalAfterCount = literalSkipped
 	}
 	return tokens, true
 }
