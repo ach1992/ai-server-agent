@@ -29,6 +29,9 @@ func (s *Server) debugAction(ctx context.Context, req Request) Response {
 	case "debug_adapter_status":
 		if req.Language == "shell" {
 			_, _, err := shellDAPTrustedRuntime()
+			if err == nil {
+				err = shellDAPIPCPrerequisite()
+			}
 			available := err == nil
 			payload, _ := json.Marshal(map[string]any{
 				"adapter": "shell/bash-trap", "installed": available,
@@ -570,6 +573,12 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 	// evaluator or a process-signal attachment. Unsupported operations are
 	// refused before any wire send; they cannot poison a healthy session.
 	if d.adapter == "shell/bash-trap" {
+		// This kernel setting is external to the Agent and can be changed
+		// by a host administrator. Never continue a previously authenticated
+		// Bash session once its same-UID IPC boundary becomes unprovable.
+		if err := shellDAPIPCPrerequisite(); err != nil {
+			return shellDAPUncertain(d, "shell_dap_ipc_unavailable", err)
+		}
 		switch method {
 		case "pause", "evaluate", "exceptionInfo":
 			return fileError("shell_dap_method_unsupported", "validation", errors.New("Bash v1 does not support asynchronous pause, arbitrary evaluation or exception introspection"))
@@ -652,6 +661,11 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 		args = map[string]any{"source": map[string]string{"path": filepath.Join(d.workspace, relative)}, "breakpoints": points, "sourceModified": false}
 	case "configure":
 		command = "configurationDone"
+		if d.adapter == "shell/bash-trap" {
+			if err := shellDAPIPCPrerequisite(); err != nil {
+				return shellDAPUncertain(d, "shell_dap_ipc_unavailable", err)
+			}
+		}
 		if d.configured {
 			return fileError("debug_already_configured", "validation", errors.New("debug configuration already completed"))
 		}
@@ -733,6 +747,9 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 	}
 	if method == "configure" {
 		if d.adapter == "shell/bash-trap" {
+			if err := shellDAPIPCPrerequisite(); err != nil {
+				return shellDAPUncertain(d, "shell_dap_ipc_unavailable", err)
+			}
 			// The immutable Bash wrapper waits for root-mediated START
 			// before reading ANY script bytes. configurationDone emitted
 			// and pinned the original Bash child in its private cgroup.

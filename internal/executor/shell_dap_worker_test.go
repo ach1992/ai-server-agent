@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"io"
 	"net"
 	"os"
 	"path/filepath"
@@ -79,6 +80,28 @@ func (c *shellDAPTestClient) event(name string) dapPacket {
 		}
 		c.pending = append(c.pending, p)
 	}
+}
+
+// Unit-only DAP protocol/Bash fixture. The production binary never
+// creates worker-owned control/event pipes: only the existing root broker
+// provisions them and RunShellDAPHelper requires inherited root descriptors.
+func serveShellDAP(input io.Reader, output io.Writer) error {
+	traceRead, traceWrite, err := os.Pipe()
+	if err != nil {
+		return err
+	}
+	commandRead, commandWrite, err := os.Pipe()
+	if err != nil {
+		_ = traceRead.Close()
+		_ = traceWrite.Close()
+		return err
+	}
+	w := &shellDAPWorker{
+		reader: bufio.NewReaderSize(input, 4096), out: output,
+		ipc: &shellDAPIPC{traceRead: traceRead, traceWrite: traceWrite,
+			commandRead: commandRead, commandWrite: commandWrite},
+	}
+	return w.serve()
 }
 
 func shellDAPTestVersion(t *testing.T, path string) string {

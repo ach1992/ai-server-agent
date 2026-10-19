@@ -26,7 +26,12 @@ import (
 // The root executor owns its cgroup, pidfd, session, audit and authorization;
 // this helper cannot connect to the Agent's privileged socket.
 func RunShellDAPHelper() int {
-	if err := serveShellDAP(os.Stdin, os.Stdout); err != nil {
+	ipc, err := inheritRootShellDAPIPC()
+	if err != nil {
+		fmt.Fprintln(os.Stderr, "shell DAP adapter: protected broker IPC unavailable:", err)
+		return 1
+	}
+	if err := serveShellDAPProtected(os.Stdin, os.Stdout, ipc); err != nil {
 		fmt.Fprintln(os.Stderr, "shell DAP adapter:", err)
 		return 1
 	}
@@ -123,6 +128,7 @@ type shellDAPWorker struct {
 	program       string
 	workspace     string
 	snapshot      *os.File
+	ipc           *shellDAPIPC // root-provisioned in production; nil in Go-only tests
 	stopEntry     bool
 	points        []int
 	initialized   bool
@@ -323,16 +329,14 @@ func (w *shellDAPWorker) startBash() error {
 	if _, err = unix.FcntlInt(file.Fd(), unix.F_ADD_SEALS, unix.F_SEAL_SEAL|unix.F_SEAL_SHRINK|unix.F_SEAL_GROW|unix.F_SEAL_WRITE); err != nil {
 		return err
 	}
-	eventReader, eventWriter, err := os.Pipe()
-	if err != nil {
-		return err
+	// Production permits only the root broker's original protected pipe
+	// capabilities. Unprotected disposable pipes belong to the Go test
+	// fixture, not an alternate adapter launch path.
+	if w.ipc == nil {
+		return errors.New("shell_dap_root_ipc_missing")
 	}
-	commandReader, commandWriter, err := os.Pipe()
-	if err != nil {
-		eventReader.Close()
-		eventWriter.Close()
-		return err
-	}
+	eventReader, eventWriter := w.ipc.traceRead, w.ipc.traceWrite
+	commandReader, commandWriter := w.ipc.commandRead, w.ipc.commandWrite
 	// Bash only opens inherited sealed fd 6, never a mutable workspace
 	// pathname. DAP still reports the exact original source path and lines.
 	cmd := exec.Command("/usr/bin/bash", "--noprofile", "--norc", "-c",
@@ -452,12 +456,18 @@ func (o *shellDAPOutput) Write(p []byte) (int, error) {
 	return original, nil
 }
 
-func serveShellDAP(input io.Reader, output io.Writer) error {
-	return (&shellDAPWorker{reader: bufio.NewReaderSize(input, 4096), out: output}).serve()
+func serveShellDAPProtected(input io.Reader, output io.Writer, ipc *shellDAPIPC) error {
+	if err := ipc.validate(); err != nil {
+		return err
+	}
+	return (&shellDAPWorker{reader: bufio.NewReaderSize(input, 4096), out: output, ipc: ipc}).serve()
 }
 
 func (w *shellDAPWorker) serve() error {
 	defer func() {
+		if w.ipc != nil {
+			w.ipc.close()
+		}
 		if w.command != nil {
 			_ = w.command.Close()
 		}

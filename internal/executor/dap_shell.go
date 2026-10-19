@@ -74,6 +74,9 @@ func (s *Server) debugLaunchShell(ctx context.Context, req Request) (response Re
 	if err != nil {
 		return fileError("shell_dap_runtime_unavailable", "dependency", err)
 	}
+	if err := shellDAPIPCPrerequisite(); err != nil {
+		return fileError("shell_dap_ipc_unavailable", "dependency", err)
+	}
 	auditObject := workspace + "\x00" + relative + "\x00shell/bash"
 	if blocked := s.beginActionAudit(req, "debug_launch", "worker", auditObject, "developer_debugger"); blocked != nil {
 		return *blocked
