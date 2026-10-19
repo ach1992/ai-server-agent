@@ -32,7 +32,7 @@ func TestPublicDebugMCPPrincipalAndBoundedTypedArguments(t *testing.T) {
 	received := make(chan executor.Request, 12)
 	errs := make(chan error, 1)
 	go func() {
-		for i := 0; i < 11; i++ {
+		for i := 0; i < 13; i++ {
 			conn, err := ln.Accept()
 			if err != nil {
 				errs <- err
@@ -93,8 +93,10 @@ func TestPublicDebugMCPPrincipalAndBoundedTypedArguments(t *testing.T) {
 		{"debug_adapter_status", "debug_adapter_status", "", map[string]any{"language": "python"}},
 		{"debug_adapter_status", "debug_adapter_status", "", map[string]any{"language": "javascript"}},
 		{"debug_adapter_status", "debug_adapter_status", "", map[string]any{"language": "typescript"}},
+		{"debug_adapter_status", "debug_adapter_status", "", map[string]any{"language": "shell"}},
 		{"debug_launch", "debug_launch", "", map[string]any{"workspace": "/srv/ai-workspace/worktree", "program": "bin/demo", "file_version": "exact-binary-version", "stop_on_entry": true}},
 		{"debug_launch", "debug_launch", "", map[string]any{"workspace": "/srv/ai-workspace/worktree", "program": "src/example.py", "file_version": "exact-python-version", "language": "python", "mode": "script", "stop_on_entry": true}},
+		{"debug_launch", "debug_launch", "", map[string]any{"workspace": "/srv/ai-workspace/worktree", "program": "src/example.sh", "file_version": "exact-shell-version", "language": "shell", "mode": "bash", "stop_on_entry": true}},
 		{"debug_launch", "debug_launch", "", map[string]any{"workspace": "/srv/ai-workspace/worktree", "program": "src/example.js", "file_version": "exact-javascript-version", "language": "javascript", "mode": "node", "stop_on_entry": true}},
 		{"debug_launch", "debug_launch", "", map[string]any{"workspace": "/srv/ai-workspace/worktree", "program": "build/example.js", "file_version": "exact-compiled-version", "language": "typescript", "mode": "node", "stop_on_entry": true}},
 		{"debug_breakpoints", "debug_action", "breakpoints", map[string]any{"workspace": "/srv/ai-workspace/worktree", "session_id": "stdio_abc", "path": "main.go", "file_version": "exact-source-version", "lines": []int{4, 8}}},
@@ -115,6 +117,10 @@ func TestPublicDebugMCPPrincipalAndBoundedTypedArguments(t *testing.T) {
 				if task.args["language"] == "python" {
 					if req.DebugProgram != "src/example.py" || req.FileVersion != "exact-python-version" || req.Language != "python" || req.DebugMode != "script" || !req.DebugStopOnEntry {
 						t.Fatalf("Python launch did not preserve exact source/mode/principal: %+v", req)
+					}
+				} else if task.args["language"] == "shell" {
+					if req.DebugProgram != "src/example.sh" || req.FileVersion != "exact-shell-version" || req.Language != "shell" || req.DebugMode != "bash" || !req.DebugStopOnEntry {
+						t.Fatalf("Shell launch did not preserve exact source/mode/principal: %+v", req)
 					}
 				} else if task.args["language"] == "javascript" {
 					if req.DebugProgram != "src/example.js" || req.FileVersion != "exact-javascript-version" || req.Language != "javascript" || req.DebugMode != "node" || !req.DebugStopOnEntry {

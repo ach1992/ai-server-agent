@@ -490,6 +490,19 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 		cmd.SysProcAttr.CgroupFD = fd
 	}
 	cmd.WaitDelay = processGroupTerminateGrace
+	// Shell's protected event/command pipes are created by the original
+	// root broker *before* credential drop. No worker-created IPC endpoint
+	// can substitute for this root-owned capability. The mandatory ptrace
+	// prerequisite closes the pidfd_getfd bypass of pipe inode permissions.
+	if kind == "dap" && directDAP && containment != nil &&
+		len(args) == 1 && args[0] == "shell-dap-helper" {
+		ipc, ipcErr := newRootShellDAPIPC()
+		if ipcErr != nil {
+			return "", ipcErr
+		}
+		defer ipc.close()
+		cmd.ExtraFiles = ipc.descriptors()
+	}
 	if os.Geteuid() == 0 {
 		if req.Root || rootControlledWorkerTmux {
 			cmd.SysProcAttr.Credential = &syscall.Credential{Uid: 0, Gid: 0, Groups: []uint32{0}}

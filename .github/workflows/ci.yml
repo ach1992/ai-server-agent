@@ -123,6 +123,21 @@ jobs:
       - name: Unit tests
         if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
         run: go test -race -vet=off ./...
+      - name: Shell DAP root-provisioned IPC same-UID denial
+        if: ${{ needs.change-scope.outputs.root_trust_security_changed != 'false' }}
+        run: |
+          set -Eeuo pipefail
+          printf 'SHELL_IPC_PROOF_HEAD=%s\nSHELL_IPC_PROOF_TREE=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
+          fixture="$(mktemp -d)"
+          trap 'rm -rf -- "$fixture"' EXIT
+          go test -c -o "$fixture/executor.test" ./internal/executor
+          sudo env ASA_REQUIRE_ROOT_SHELL_IPC=1 "$fixture/executor.test" -test.run '^TestShellDAPRootOwnedIPCRejectsSameUIDPeerAndPreservesActivation$' -test.v -test.timeout=60s 2>&1 | tee "$fixture/results.log"
+          grep -Fq -- '--- PASS: TestShellDAPRootOwnedIPCRejectsSameUIDPeerAndPreservesActivation' "$fixture/results.log"
+          if grep -Fq -- '--- SKIP: TestShellDAPRootOwnedIPCRejectsSameUIDPeerAndPreservesActivation' "$fixture/results.log"; then
+            echo 'Mandatory real root-owned Shell IPC peer-denial test was skipped' >&2
+            exit 1
+          fi
+          echo 'ROOT_SHELL_DAP_IPC_PEER_DENIAL_PASS'
       - name: Non-skipped real worker/Landlock transfer acceptance
         if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
         env:

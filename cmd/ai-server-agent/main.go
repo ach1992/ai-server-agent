@@ -19,6 +19,9 @@ func main() {
 	if len(os.Args) > 1 && os.Args[1] == "job-runner" {
 		os.Exit(executor.RunJobHelper(os.Args[2:]))
 	}
+	if len(os.Args) > 1 && os.Args[1] == "shell-dap-helper" {
+		os.Exit(executor.RunShellDAPHelper())
+	}
 	if len(os.Args) > 1 && os.Args[1] == "workspace-helper" {
 		os.Exit(executor.RunWorkspaceFileHelper())
 	}
