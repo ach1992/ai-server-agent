@@ -109,7 +109,10 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 	}
 	web := httptest.NewServer(agent.Handler())
 	defer web.Close()
-	ctx, cancel := context.WithTimeout(context.Background(), 90*time.Second)
+	// Many real authenticated MCP calls share this acceptance context.
+	// Individual Agent/Executor/Worker bounds remain unchanged; the
+	// aggregate deadline must allow a slower occupied validation host.
+	ctx, cancel := context.WithTimeout(context.Background(), 240*time.Second)
 	defer cancel()
 	httpClient := web.Client()
 	httpClient.Transport = bearerRoundTripper{base: httpClient.Transport, token: "mcp-token"}

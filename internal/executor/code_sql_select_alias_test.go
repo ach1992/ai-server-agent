@@ -790,7 +790,11 @@ func TestSQLSelectAliasWorkerCrossFileNavigation(t *testing.T) {
 	owner.CodeMethod, owner.Path = "definition", "queries/list.sql"
 	owner.Character = strings.Index(files[owner.Path], "a.id") + 2
 	owner.FileVersion = version(owner.Path)
-	ctx, cancel := context.WithTimeout(t.Context(), 90*time.Second)
+	// This context spans the entire cross-file matrix, not one Worker call.
+	// Keep the independently bounded production search/read deadlines intact;
+	// avoid converting cumulative validation-host latency into a false
+	// source-navigation failure as the matrix grows.
+	ctx, cancel := context.WithTimeout(t.Context(), 240*time.Second)
 	defer cancel()
 	resp := s.codeInspect(ctx, owner)
 	var locs []sqlNavLocation
