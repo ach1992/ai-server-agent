@@ -49,6 +49,23 @@ func TestSQLPostgresOrdinaryRelationMoveOccurrences(t *testing.T) {
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			occurrences, valid := sqlNavOccurrences(tc.source, tc.dialect)
+			// A missing RENAME target is an unproven migration move:
+			// fail closed at the ordered-history boundary, rather than
+			// exposing an old table as definitely current.
+			if tc.name == "missing_target" {
+				if valid || len(occurrences) != 0 {
+					t.Fatalf("incomplete relation move was accepted: %+v valid=%v", occurrences, valid)
+				}
+				return
+			}
+			// MySQL does not support SET SCHEMA for ALTER TABLE. The
+			// older table-header-only reference was a false proof.
+			if tc.name == "mysql_unrecognized_schema_no_new_contract" {
+				if valid && len(occurrences) != 0 {
+					t.Fatalf("unsupported MySQL ALTER emitted a relation: %+v", occurrences)
+				}
+				return
+			}
 			if !valid {
 				t.Fatalf("SQL tokenization refused ordinary statement %q", tc.source)
 			}

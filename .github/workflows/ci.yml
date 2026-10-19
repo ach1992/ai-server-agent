@@ -123,6 +123,21 @@ jobs:
       - name: Unit tests
         if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
         run: go test -race -vet=off ./...
+      - name: Shell DAP root-provisioned IPC same-UID denial
+        if: ${{ needs.change-scope.outputs.root_trust_security_changed != 'false' }}
+        run: |
+          set -Eeuo pipefail
+          printf 'SHELL_IPC_PROOF_HEAD=%s\nSHELL_IPC_PROOF_TREE=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
+          fixture="$(mktemp -d)"
+          trap 'rm -rf -- "$fixture"' EXIT
+          go test -c -o "$fixture/executor.test" ./internal/executor
+          sudo env ASA_REQUIRE_ROOT_SHELL_IPC=1 "$fixture/executor.test" -test.run '^TestShellDAPRootOwnedIPCRejectsSameUIDPeerAndPreservesActivation$' -test.v -test.timeout=60s 2>&1 | tee "$fixture/results.log"
+          grep -Fq -- '--- PASS: TestShellDAPRootOwnedIPCRejectsSameUIDPeerAndPreservesActivation' "$fixture/results.log"
+          if grep -Fq -- '--- SKIP: TestShellDAPRootOwnedIPCRejectsSameUIDPeerAndPreservesActivation' "$fixture/results.log"; then
+            echo 'Mandatory real root-owned Shell IPC peer-denial test was skipped' >&2
+            exit 1
+          fi
+          echo 'ROOT_SHELL_DAP_IPC_PEER_DENIAL_PASS'
       - name: Non-skipped real worker/Landlock transfer acceptance
         if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
         env:
@@ -204,6 +219,31 @@ jobs:
             exit 1
           fi
           echo 'REAL_SQL_ORDINARY_WORKER_LANDLOCK_PROOF_PASS'
+      - name: Non-skipped SQL SELECT alias worker and direct MCP acceptance
+        if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
+        run: |
+          set -Eeuo pipefail
+          # Runs after trusted ripgrep setup, with no database or installed
+          # Agent mutation. The exact candidate is built for the direct MCP
+          # client in an isolated per-test workspace and Unix Executor.
+          printf 'SQL_ALIAS_PROOF_HEAD=%s\nSQL_ALIAS_PROOF_TREE=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
+          worker_log="$(mktemp)"
+          mcp_log="$(mktemp)"
+          trap 'rm -f -- "$worker_log" "$mcp_log"' EXIT
+          go test -v ./internal/executor -run '^TestSQLSelectAliasWorkerCrossFileNavigation$' -count=1 -timeout 240s 2>&1 | tee "$worker_log"
+          grep -Fq -- '--- PASS: TestSQLSelectAliasWorkerCrossFileNavigation (' "$worker_log"
+          if grep -Fq -- '--- SKIP: TestSQLSelectAliasWorkerCrossFileNavigation' "$worker_log"; then
+            echo 'Required SQL alias worker proof was skipped' >&2
+            exit 1
+          fi
+          ASA_MCP_SQL_ALIAS_ACCEPTANCE=1 go test -v ./internal/mcp -run '^TestDirectMCPSQLSelectAliasClientAcceptance$' -count=1 -timeout 240s 2>&1 | tee "$mcp_log"
+          grep -Fq -- '--- PASS: TestDirectMCPSQLSelectAliasClientAcceptance (' "$mcp_log"
+          if grep -Fq -- '--- SKIP: TestDirectMCPSQLSelectAliasClientAcceptance' "$mcp_log"; then
+            echo 'Required SQL alias direct MCP proof was skipped' >&2
+            exit 1
+          fi
+          grep -Fq 'DIRECT_REAL_SQL_ALIAS_MCP_PASS' "$mcp_log"
+          echo 'REAL_SQL_SELECT_ALIAS_WORKER_AND_DIRECT_MCP_PROOF_PASS'
       - name: Real pinned gopls large-Go semantic acceptance
         if: ${{ needs.change-scope.outputs.lsp_changed == 'true' }}
         run: |

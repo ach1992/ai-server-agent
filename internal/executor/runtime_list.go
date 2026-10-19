@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	maxRuntimeListEntries         = 32
+	maxRuntimeListEntries         = maxPersistentJobClaims + maxFailedJobClaims + maxConfigurableStdioSessions
 	runtimeListObservationTimeout = 5 * time.Second
 )
 
@@ -33,6 +33,7 @@ type RuntimeEntry struct {
 type RuntimeCapacity struct {
 	TaskLimit          int  `json:"task_limit"`
 	ServiceLimit       int  `json:"service_limit"`
+	SessionLimit       int  `json:"session_limit"`
 	TasksActive        int  `json:"tasks_active"`
 	ServicesActive     int  `json:"services_active"`
 	UnclassifiedActive int  `json:"unclassified_active"`
@@ -83,7 +84,7 @@ func (s *Server) runtimeListContext(parent context.Context, req Request) Respons
 		Status:          "observed",
 		GeneratedAt:     now,
 		RuntimeEntries:  []RuntimeEntry{},
-		RuntimeCapacity: &RuntimeCapacity{TaskLimit: s.persistentTaskCapacity(), ServiceLimit: maxActivePersistentServices},
+		RuntimeCapacity: &RuntimeCapacity{TaskLimit: s.persistentTaskCapacity(), ServiceLimit: s.persistentServiceCapacity(), SessionLimit: s.stdioSessionCapacity()},
 	}
 	cap := response.RuntimeCapacity
 	// A passive inspection never creates directories, claims, markers or units.
@@ -209,7 +210,7 @@ func (s *Server) runtimeListContext(parent context.Context, req Request) Respons
 	if req.Kind == "" || req.Kind == "terminal" {
 		recordsDir := filepath.Join(s.cfg.StateDir, "terminal-sessions")
 		if err := trustedDir(recordsDir); err == nil {
-			entries, overflow, readErr := readDirBounded(recordsDir, maxRuntimeListEntries*4)
+			entries, overflow, readErr := readDirBounded(recordsDir, maxConfigurableStdioSessions*4)
 			if readErr != nil {
 				response.Truncated = true
 			} else if overflow {

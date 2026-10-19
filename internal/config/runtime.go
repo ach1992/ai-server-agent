@@ -21,6 +21,8 @@ type RuntimeSettings struct {
 	TransferActiveSessions       int `json:"transfer_active_sessions"`
 	WorkerCommandSlots           int `json:"worker_command_slots"`
 	PersistentTaskSlots          int `json:"persistent_task_slots"`
+	PersistentServiceSlots       int `json:"persistent_service_slots"`
+	StdioSessionSlots            int `json:"stdio_session_slots"`
 }
 
 type RuntimeSettingSpec struct {
@@ -41,8 +43,10 @@ var runtimeSettingSpecs = []RuntimeSettingSpec{
 	{Key: "transfer_staging_mib", Default: 512, Minimum: 16, Maximum: 1048576, Unit: "MiB", Description: "Cumulative declared bytes for concurrent staged worker transfers; not a permanent file-size limit"},
 	{Key: "transfer_session_ttl_seconds", Default: 3600, Minimum: 60, Maximum: 86400, Unit: "seconds", Description: "Idle lifetime for resumable worker transfers, including final status receipts"},
 	{Key: "transfer_active_sessions", Default: 8, Minimum: 1, Maximum: 64, Unit: "sessions", Description: "Maximum simultaneous durable worker transfer sessions"},
-	{Key: "worker_command_slots", Default: 0, Minimum: 0, Maximum: 8, Unit: "slots", Description: "Parallel unprivileged run_command capacity; 0=automatic min(CPU,4), 1..8=operator override; root stays at one slot"},
-	{Key: "persistent_task_slots", Default: 4, Minimum: 1, Maximum: 8, Unit: "tasks", Description: "Simultaneous persistent task jobs; independent from two service slots and worker command slots"},
+	{Key: "worker_command_slots", Default: 0, Minimum: 0, Maximum: 64, Unit: "slots", Description: "Parallel unprivileged run_command capacity; 0=automatic min(CPU,4), 1..64=operator override; root stays at one slot"},
+	{Key: "persistent_task_slots", Default: 4, Minimum: 1, Maximum: 64, Unit: "tasks", Description: "Simultaneous persistent task jobs; independent from service and worker command slots"},
+	{Key: "persistent_service_slots", Default: 2, Minimum: 1, Maximum: 64, Unit: "services", Description: "Simultaneous persistent service jobs; independent from task and worker command slots"},
+	{Key: "stdio_session_slots", Default: 8, Minimum: 1, Maximum: 64, Unit: "sessions", Description: "Shared private LSP/DAP/terminal/browser process-session admission; does not remove any consumer-specific exclusive lease"},
 }
 
 func RuntimeSettingSpecs() []RuntimeSettingSpec {
@@ -63,6 +67,8 @@ func DefaultRuntimeSettings() RuntimeSettings {
 		TransferActiveSessions:       8,
 		WorkerCommandSlots:           0,
 		PersistentTaskSlots:          4,
+		PersistentServiceSlots:       2,
+		StdioSessionSlots:            8,
 	}
 }
 
@@ -78,6 +84,8 @@ func (r RuntimeSettings) Validate() error {
 		"transfer_active_sessions":         r.TransferActiveSessions,
 		"worker_command_slots":             r.WorkerCommandSlots,
 		"persistent_task_slots":            r.PersistentTaskSlots,
+		"persistent_service_slots":         r.PersistentServiceSlots,
+		"stdio_session_slots":              r.StdioSessionSlots,
 	}
 	for _, spec := range runtimeSettingSpecs {
 		got := values[spec.Key]

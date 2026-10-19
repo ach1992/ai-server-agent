@@ -46,7 +46,7 @@ func TestRunLimiterConfigurableCommandSlotsAndRootSeparation(t *testing.T) {
 	if got := cap(automatic.worker); got < 1 || got > maxWorkerRunConcurrency {
 		t.Fatalf("auto command capacity = %d", got)
 	}
-	for _, wanted := range []int{1, 4, 8} {
+	for _, wanted := range []int{1, 4, 8, 64} {
 		limiter := newRunLimiterForSlots(wanted)
 		if cap(limiter.worker) != wanted || cap(limiter.root) != 1 {
 			t.Fatalf("configured capacity %d: worker=%d root=%d", wanted, cap(limiter.worker), cap(limiter.root))

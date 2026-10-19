@@ -96,16 +96,35 @@ func (s *Server) terminalRecordCount() (int, error) {
 	return s.terminalRecordCountWithStop(stopScopedTerminalBackend)
 }
 
+// The protected on-disk terminal registry and the process broker are one
+// admission budget. IDs deduplicate reattached Control Mode clients; ambiguous
+// file names still occupy a slot but must never authorize reattachment.
+type terminalReservations struct {
+	ids          map[string]struct{}
+	unclassified int
+}
+
+func (r terminalReservations) count() int { return len(r.ids) + r.unclassified }
+
 func (s *Server) terminalRecordCountWithStop(stop func(string) error) (int, error) {
+	reservations, err := s.terminalReservationsWithStop(stop)
+	return reservations.count(), err
+}
+
+// Caller owns terminalAdmissionMu. The existing bounded, root-only lifecycle
+// scanner also supplies the identities needed by shared broker admission.
+// No untrusted file contents authorize a recovered session: terminalReconnect
+// independently checks the original owner and backend before reserving.
+func (s *Server) terminalReservationsWithStop(stop func(string) error) (terminalReservations, error) {
+	reservations := terminalReservations{ids: make(map[string]struct{})}
 	dir, err := s.terminalRecordsDir()
 	if err != nil {
-		return 0, err
+		return reservations, err
 	}
 	files, err := os.ReadDir(dir)
 	if err != nil {
-		return 0, err
+		return reservations, err
 	}
-	count := 0
 	now := time.Now()
 	for _, entry := range files {
 		if entry.IsDir() || !strings.HasSuffix(entry.Name(), ".json") {
@@ -113,13 +132,13 @@ func (s *Server) terminalRecordCountWithStop(stop func(string) error) (int, erro
 		}
 		id := strings.TrimSuffix(entry.Name(), ".json")
 		if !validTerminalID(id) {
-			count++ // ambiguous root-only state must never be deleted on guesswork
+			reservations.unclassified++ // do not guess identity or delete
 			continue
 		}
 		path := filepath.Join(dir, entry.Name())
 		f, openErr := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 		if openErr != nil {
-			return 0, fmt.Errorf("terminal_record_cleanup_unverified: %w", openErr)
+			return reservations, fmt.Errorf("terminal_record_cleanup_unverified: %w", openErr)
 		}
 		info, statErr := f.Stat()
 		var rec terminalRecord
@@ -141,27 +160,27 @@ func (s *Server) terminalRecordCountWithStop(stop func(string) error) (int, erro
 		}
 		closeErr := f.Close()
 		if closeErr != nil {
-			return 0, fmt.Errorf("terminal_record_close_unverified: %w", closeErr)
+			return reservations, fmt.Errorf("terminal_record_close_unverified: %w", closeErr)
 		}
 		if parseErr != nil || rec.Version != 1 || rec.ID != id ||
 			!rec.Scoped || !validTmuxSessionName(rec.Name) ||
 			(rec.Lifecycle != "" && rec.Lifecycle != "active" && rec.Lifecycle != "pending") ||
 			(rec.Lifecycle == "pending" && (!validTerminalEpoch(rec.Epoch) || !validTerminalPendingSocket(rec, s.cfg.StateDir))) ||
 			rec.ExpiresAt.IsZero() || !now.After(rec.ExpiresAt) {
-			count++
+			reservations.ids[id] = struct{}{} // ambiguous record still charges
 			continue
 		}
 		// A dead Executor cannot fire its in-memory expiry timer. PID1's
 		// one-hour limit still owns the backend. Stop only the exact, random
 		// scoped unit from this trusted expired record, then fsync deletion.
 		if err := stop(rec.Name); err != nil {
-			return 0, fmt.Errorf("expired terminal backend not cleaned: %w", err)
+			return reservations, fmt.Errorf("expired terminal backend not cleaned: %w", err)
 		}
 		if err := s.deleteTerminalRecord(rec.ID); err != nil {
-			return 0, fmt.Errorf("expired terminal record not deleted: %w", err)
+			return reservations, fmt.Errorf("expired terminal record not deleted: %w", err)
 		}
 	}
-	return count, nil
+	return reservations, nil
 }
 
 // A pending reservation is linked and directory-fsynced before systemd-run
@@ -480,7 +499,15 @@ func (s *Server) terminalReconnect(req Request) Response {
 	if !validTerminalID(req.SessionID) {
 		return terminalError("session_not_found", errSessionNotFound)
 	}
+	// Existing-session reattachment and its verified backend generation are
+	// serialized against new-session admission, expiry, and pending close.
+	// Recovery consumes the original persisted reservation even after downscale.
+	s.terminalAdmissionMu.Lock()
+	defer s.terminalAdmissionMu.Unlock()
 	if current, err := s.sessions.get(req, req.SessionID); err == nil {
+		if current.kind != "terminal" || current.terminal == nil {
+			return terminalError("session_not_found", errSessionNotFound)
+		}
 		current.mu.Lock()
 		if current.terminal != nil && current.terminal.scopeUncertain {
 			epoch := current.terminal.epoch

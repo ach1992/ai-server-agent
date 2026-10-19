@@ -43,8 +43,8 @@ func newRunLimiter() *runLimiter {
 // changes the separately protected root command capacity.
 func newRunLimiterForSlots(configured int) *runLimiter {
 	if configured > 0 {
-		if configured > 8 {
-			configured = 8
+		if configured > 64 {
+			configured = 64
 		}
 		return newRunLimiterWith(configured, rootRunConcurrency)
 	}
