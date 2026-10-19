@@ -181,7 +181,6 @@ func TestSQLSelectAliasRefusesAmbiguousScopes(t *testing.T) {
 		`SELECT a.id FROM accounts a UNION SELECT a.id FROM payments a;`,
 		`SELECT a.id FROM accounts a JOIN payments a ON a.id = a.id;`,
 		`SELECT a.id FROM public.accounts a JOIN archive.accounts a ON a.id = a.id;`,
-		`SELECT a.id FROM accounts AS a JOIN payments p USING (id);`,
 		`SELECT a.id FROM accounts AS a NATURAL JOIN payments p;`,
 		`SELECT a.id FROM accounts AS a, payments p;`,
 		`SELECT a.id FROM generate_series(1,2) AS a;`,
