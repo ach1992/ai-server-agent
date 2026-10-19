@@ -193,8 +193,11 @@ func TestShellDAPInstalledPrivateCgroupLifecycleCI(t *testing.T) {
 		t.Fatal(err)
 	}
 	st, ok := fi.Sys().(*syscall.Stat_t)
-	if !ok || st.Uid != 0 || st.Gid != 0 || fi.Mode().Perm() != 0700 {
-		t.Fatalf("private DAP cgroup lacks original root ownership/mode: %v", fi.Mode())
+	if !ok {
+		t.Fatal("private DAP cgroup lacks inspectable inode owner metadata")
+	}
+	if st.Uid != 0 || st.Gid != 0 || fi.Mode().Perm() != 0700 {
+		t.Fatalf("private DAP cgroup lacks original root ownership/mode: uid=%d gid=%d mode=%s", st.Uid, st.Gid, fi.Mode())
 	}
 	if _, err := os.Stat(witness); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("script executed before Root Executor activation: %v", err)
