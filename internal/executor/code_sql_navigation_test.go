@@ -25,7 +25,7 @@ func TestSQLNavigationSelectSourceIdentityFailClosedAcrossConsumers(t *testing.T
 		{"pg_malformed_source", "postgres", "SELECT a.id FROM accounts a JUNK JOIN payments p ON a.id=p.id;", "accounts"},
 		{"pg_malformed_on", "postgres", "SELECT a.id FROM accounts a JOIN payments p ON a.id=ONLY;", "accounts"},
 		{"pg_missing_on", "postgres", "SELECT a.id FROM accounts a JOIN payments p ON;", "accounts"},
-		{"pg_unsupported_using", "postgres", "SELECT a.id FROM accounts a JOIN payments p USING(id);", "accounts"},
+		{"pg_malformed_using", "postgres", "SELECT a.id FROM accounts a JOIN payments p USING(id,);", "accounts"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			for _, withColumns := range []bool{false, true} {
@@ -60,6 +60,7 @@ func TestSQLNavigationSelectSourceIdentityPositiveAcrossConsumers(t *testing.T) 
 		{"pg_quoted_only", "postgres", `SELECT * FROM "only";`, "only", "only", 1},
 		{"pg_quoted_source_alias", "postgres", `SELECT a.id FROM "only" a;`, "only", "only", 1},
 		{"pg_qualified", "postgres", "SELECT a.id FROM public.accounts a JOIN payments p ON a.id=p.account_id;", "accounts", "public\x00accounts", 2},
+		{"pg_using", "postgres", "SELECT a.id FROM public.accounts a JOIN payments p USING (id);", "accounts", "public\x00accounts", 2},
 		{"mysql_only", "mysql", "SELECT * FROM ONLY accounts;", "ONLY", "only", 1},
 		{"mariadb_only", "mariadb", "SELECT * FROM ONLY accounts;", "ONLY", "only", 1},
 	}
