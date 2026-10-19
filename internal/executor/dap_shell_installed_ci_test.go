@@ -15,6 +15,7 @@ import (
 
 	"github.com/ach1992/ai-server-agent/internal/config"
 	"github.com/ach1992/ai-server-agent/internal/credential"
+	"github.com/ach1992/ai-server-agent/internal/systemexec"
 )
 
 // This opt-in test runs ONLY inside the disposable GitHub-hosted CI runner,
@@ -134,7 +135,7 @@ func TestShellDAPInstalledPrivateCgroupLifecycleCI(t *testing.T) {
 	}
 	start := call(launch)
 	if !start.OK || start.SessionID == "" {
-		t.Fatalf("real installed Shell DAP launch failed: code=%s class=%s", start.ErrorCode, start.ErrorClass)
+		t.Fatalf("real installed Shell DAP launch failed: code=%s class=%s reason=%q trusted_bash=%t trusted_installed_agent=%t", start.ErrorCode, start.ErrorClass, start.Error, systemexec.Trusted("/usr/bin/bash"), systemexec.Trusted("/usr/local/bin/ai-server-agent"))
 	}
 	id := start.SessionID
 	cleanupAllowed = false // Retain the fixture if verified process cleanup fails.
