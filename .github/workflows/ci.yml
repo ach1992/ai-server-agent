@@ -733,6 +733,17 @@ jobs:
           # sysctl or run this against an occupied Agent.
           shell_ci_dir="$(mktemp -d)"
           go test -c -o "$shell_ci_dir/executor.test" ./internal/executor
+          # Reproduce the real unit's euid=0 / egid=aiagent. The earlier
+          # root:root-only IPC test cannot detect group inheritance bugs.
+          sudo -g aiagent env ASA_REQUIRE_ROOT_SHELL_IPC=1 \
+            "$shell_ci_dir/executor.test" -test.run '^TestShellDAPRootOwnedIPCRejectsSameUIDPeerAndPreservesActivation$' \
+            -test.v -test.timeout=60s 2>&1 | tee "$shell_ci_dir/group-proof.log"
+          grep -Fq -- '--- PASS: TestShellDAPRootOwnedIPCRejectsSameUIDPeerAndPreservesActivation' "$shell_ci_dir/group-proof.log"
+          if grep -Fq -- '--- SKIP: TestShellDAPRootOwnedIPCRejectsSameUIDPeerAndPreservesActivation' "$shell_ci_dir/group-proof.log"; then
+            echo 'Original root-owned IPC under executor service group was skipped' >&2
+            exit 1
+          fi
+          echo 'ROOT_SHELL_DAP_SERVICE_GROUP_IPC_PASS'
           sudo env GITHUB_ACTIONS=true ASA_REQUIRE_SHELL_DAP_INSTALLED_CI=1 \
             "$shell_ci_dir/executor.test" -test.run '^TestShellDAPInstalledPrivateCgroupLifecycleCI$' \
             -test.v -test.timeout=75s 2>&1 | tee "$shell_ci_dir/proof.log"

@@ -82,7 +82,14 @@ func newRootShellDAPIPC() (_ *shellDAPIPC, err error) {
 	if err != nil {
 		return nil, err
 	}
+	// The installed Executor runs with euid=0 but systemd Group=aiagent.
+	// Pipe inodes inherit that effective group unless the original root
+	// broker explicitly pins both owners before descriptor inheritance.
+	// No child/worker path is allowed to repair or weaken this invariant.
 	for _, f := range p.descriptors() {
+		if err = unix.Fchown(int(f.Fd()), 0, 0); err != nil {
+			return nil, fmt.Errorf("shell_dap_ipc_root_ownership_unavailable: %w", err)
+		}
 		if err = unix.Fchmod(int(f.Fd()), 0600); err != nil {
 			return nil, fmt.Errorf("shell_dap_ipc_pipe_permission_unavailable: %w", err)
 		}
