@@ -2,14 +2,19 @@ package executor
 
 import (
 	"bufio"
+	"bytes"
+	"context"
 	"encoding/json"
 	"net"
 	"os"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+
+	"golang.org/x/sys/unix"
 )
 
 type shellDAPTestClient struct {
@@ -76,6 +81,15 @@ func (c *shellDAPTestClient) event(name string) dapPacket {
 	}
 }
 
+func shellDAPTestVersion(t *testing.T, path string) string {
+	t.Helper()
+	var st unix.Stat_t
+	if err := unix.Stat(path, &st); err != nil {
+		t.Fatal(err)
+	}
+	return fileVersion(st)
+}
+
 func TestShellDAPWorkerRealBashBreakpointStepScalarsAndExit(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "demo.sh")
@@ -90,7 +104,7 @@ func TestShellDAPWorkerRealBashBreakpointStepScalarsAndExit(t *testing.T) {
 	c := &shellDAPTestClient{t: t, conn: client, parser: &dapState{conn: client}}
 	c.success("initialize", map[string]any{"adapterID": "shell"})
 	c.event("initialized")
-	c.success("launch", map[string]any{"program": script, "cwd": dir, "stopOnEntry": true})
+	c.success("launch", map[string]any{"program": script, "cwd": dir, "fileVersion": shellDAPTestVersion(t, script), "stopOnEntry": true})
 	reply := c.success("setBreakpoints", map[string]any{"source": map[string]any{"path": script}, "breakpoints": []any{map[string]any{"line": 5}}})
 	if !strings.Contains(string(reply.Body), "\"verified\":false") {
 		t.Fatalf("Bash line breakpoint incorrectly claimed verified: %s", reply.Body)
@@ -114,6 +128,9 @@ func TestShellDAPWorkerRealBashBreakpointStepScalarsAndExit(t *testing.T) {
 	stack := c.success("stackTrace", map[string]any{"threadId": 1})
 	if !strings.Contains(string(stack.Body), "\"line\":2") {
 		t.Fatalf("wrong entry line: %s", stack.Body)
+	}
+	if !strings.Contains(string(stack.Body), script) || strings.Contains(string(stack.Body), "/proc/self/fd/6") {
+		t.Fatalf("source-line identity leaked internal sealed descriptor: %s", stack.Body)
 	}
 	c.success("stepIn", map[string]any{"threadId": 1})
 	c.event("stopped")
@@ -195,7 +212,7 @@ func TestShellDAPWorkerRealBashFunctionStepOverAndOut(t *testing.T) {
 			c := &shellDAPTestClient{t: t, conn: client, parser: &dapState{conn: client}}
 			c.success("initialize", map[string]any{})
 			c.event("initialized")
-			c.success("launch", map[string]any{"program": script, "cwd": dir})
+			c.success("launch", map[string]any{"program": script, "cwd": dir, "fileVersion": shellDAPTestVersion(t, script)})
 			c.success("setBreakpoints", map[string]any{
 				"source":      map[string]any{"path": script},
 				"breakpoints": []any{map[string]any{"line": 7}},
@@ -252,7 +269,7 @@ func TestShellDAPWorkerPreservesStrictBashExit(t *testing.T) {
 	c := &shellDAPTestClient{t: t, conn: client, parser: &dapState{conn: client}}
 	c.success("initialize", map[string]any{})
 	c.event("initialized")
-	c.success("launch", map[string]any{"program": script, "cwd": dir})
+	c.success("launch", map[string]any{"program": script, "cwd": dir, "fileVersion": shellDAPTestVersion(t, script)})
 	c.success("configurationDone", map[string]any{})
 	c.event("process")
 	c.success("asaActivate", map[string]any{})
@@ -296,7 +313,7 @@ func TestShellDAPWorkerHoldsBeforeFirstCommandUntilActivation(t *testing.T) {
 	c := &shellDAPTestClient{t: t, conn: client, parser: &dapState{conn: client}}
 	c.success("initialize", map[string]any{})
 	c.event("initialized")
-	c.success("launch", map[string]any{"program": script, "cwd": dir})
+	c.success("launch", map[string]any{"program": script, "cwd": dir, "fileVersion": shellDAPTestVersion(t, script)})
 	c.success("configurationDone", map[string]any{})
 	process := c.event("process")
 	var proc struct {
@@ -354,10 +371,10 @@ func TestShellDAPWorkerRejectsSymlinkAndForeignBreakpoints(t *testing.T) {
 	c := &shellDAPTestClient{t: t, conn: client, parser: &dapState{conn: client}}
 	c.success("initialize", map[string]any{})
 	c.event("initialized")
-	if p := c.request("launch", map[string]any{"program": link, "cwd": dir}); p.Success {
+	if p := c.request("launch", map[string]any{"program": link, "cwd": dir, "fileVersion": shellDAPTestVersion(t, link)}); p.Success {
 		t.Fatal("linked Bash script accepted")
 	}
-	c.success("launch", map[string]any{"program": script, "cwd": dir})
+	c.success("launch", map[string]any{"program": script, "cwd": dir, "fileVersion": shellDAPTestVersion(t, script)})
 	if p := c.request("setBreakpoints", map[string]any{"source": map[string]any{"path": link}, "breakpoints": []any{}}); p.Success {
 		t.Fatal("foreign source breakpoint accepted")
 	}
@@ -396,7 +413,7 @@ func TestShellDAPWorkerPreservesPreviousCommandStatus(t *testing.T) {
 	c := &shellDAPTestClient{t: t, conn: client, parser: &dapState{conn: client}}
 	c.success("initialize", map[string]any{})
 	c.event("initialized")
-	c.success("launch", map[string]any{"program": script, "cwd": dir})
+	c.success("launch", map[string]any{"program": script, "cwd": dir, "fileVersion": shellDAPTestVersion(t, script)})
 	c.success("configurationDone", map[string]any{})
 	c.event("process")
 	c.success("asaActivate", map[string]any{})
@@ -449,7 +466,7 @@ func TestShellDAPWorkerDoesNotParseScriptBeforeActivation(t *testing.T) {
 	c := &shellDAPTestClient{t: t, conn: client, parser: &dapState{conn: client}}
 	c.success("initialize", map[string]any{})
 	c.event("initialized")
-	c.success("launch", map[string]any{"program": script, "cwd": dir})
+	c.success("launch", map[string]any{"program": script, "cwd": dir, "fileVersion": shellDAPTestVersion(t, script)})
 	c.success("configurationDone", map[string]any{})
 	c.event("process") // still alive, despite syntactically invalid source
 	c.success("asaActivate", map[string]any{})
@@ -466,5 +483,267 @@ func TestShellDAPWorkerDoesNotParseScriptBeforeActivation(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("adapter was not retired")
+	}
+}
+
+// Regression for the mutable-path gap: the adapter must execute the original
+// safely-opened snapshot, not whatever a concurrent writer replaces the
+// pathname with while the original Bash PID is blocked.
+func TestShellDAPWorkerFrozenSourceSurvivesConcurrentWorkspaceMutation(t *testing.T) {
+	for _, mutation := range []string{"rename", "inplace", "symlink"} {
+		t.Run(mutation, func(t *testing.T) {
+			dir := t.TempDir()
+			script := filepath.Join(dir, "snapshot.sh")
+			if err := os.WriteFile(script, []byte("#!/usr/bin/env bash\necho ORIGINAL_PINNED\n"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			client, worker := net.Pipe()
+			defer client.Close()
+			done := make(chan error, 1)
+			go func() { defer worker.Close(); done <- serveShellDAP(worker, worker) }()
+			c := &shellDAPTestClient{t: t, conn: client, parser: &dapState{conn: client}}
+			c.success("initialize", map[string]any{})
+			c.event("initialized")
+			c.success("launch", map[string]any{"program": script, "cwd": dir, "fileVersion": shellDAPTestVersion(t, script)})
+			newBytes := []byte("#!/usr/bin/env bash\necho REPLACED_UNVERIFIED\n")
+			switch mutation {
+			case "inplace":
+				if err := os.WriteFile(script, newBytes, 0600); err != nil {
+					t.Fatal(err)
+				}
+			case "rename", "symlink":
+				backup := filepath.Join(dir, "old.sh")
+				if err := os.Rename(script, backup); err != nil {
+					t.Fatal(err)
+				}
+				if mutation == "symlink" {
+					replacement := filepath.Join(dir, "replacement.sh")
+					if err := os.WriteFile(replacement, newBytes, 0600); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(replacement, script); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.WriteFile(script, newBytes, 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			c.success("configurationDone", map[string]any{})
+			c.event("process")
+			c.success("asaActivate", map[string]any{})
+			c.event("terminated")
+			var seenOriginal, seenReplaced bool
+			for _, packet := range c.pending {
+				if packet.Event != "output" {
+					continue
+				}
+				seenOriginal = seenOriginal || strings.Contains(string(packet.Body), "ORIGINAL_PINNED")
+				seenReplaced = seenReplaced || strings.Contains(string(packet.Body), "REPLACED_UNVERIFIED")
+			}
+			if !seenOriginal || seenReplaced {
+				t.Fatalf("mutable path reached interpreter: original=%v replaced=%v", seenOriginal, seenReplaced)
+			}
+			c.success("disconnect", map[string]any{})
+			select {
+			case err := <-done:
+				if err != nil {
+					t.Fatal(err)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("adapter did not retire")
+			}
+		})
+	}
+}
+
+func TestShellDAPSourceSnapshotRejectsStaleAndNonBoundedFiles(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "source.sh")
+	if err := os.WriteFile(script, []byte("echo accepted\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	version := shellDAPTestVersion(t, script)
+	fd, err := openShellDAPSnapshot(dir, script, version)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fd.Close()
+	seals, err := unix.FcntlInt(fd.Fd(), unix.F_GET_SEALS, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const required = unix.F_SEAL_SEAL | unix.F_SEAL_SHRINK | unix.F_SEAL_GROW | unix.F_SEAL_WRITE
+	if seals&required != required {
+		t.Fatalf("snapshot memfd not immutable: seals=%x", seals)
+	}
+	if _, err := fd.WriteAt([]byte("modified"), 0); err == nil {
+		t.Fatal("sealed Bash source remained writable")
+	}
+	// Change the size to guarantee a distinct metadata-version precondition
+	// even on filesystems with coarse mtime/ctime resolution.
+	if err := os.WriteFile(script, []byte("echo replaced with different size\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openShellDAPSnapshot(dir, script, version); err == nil {
+		t.Fatal("stale workspace source version was accepted")
+	}
+	link := filepath.Join(dir, "link.sh")
+	if err := os.Symlink(script, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openShellDAPSnapshot(dir, link, shellDAPTestVersion(t, link)); err == nil {
+		t.Fatal("symlink source passed descriptor-anchored open")
+	}
+	if err := os.WriteFile(script, bytes.Repeat([]byte{'x'}, maxFileReadBytes+1), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := openShellDAPSnapshot(dir, script, shellDAPTestVersion(t, script)); err == nil {
+		t.Fatal("oversized snapshot was silently truncated")
+	}
+}
+
+// Exercise a large number of concurrent adapter-originated notifications and
+// control replies against the exact framed stream, not an unordered channel
+// of parsed objects. DAP seq must be strictly increasing ON THE WIRE.
+func TestShellDAPWorkerConcurrentOutboundWireSequence(t *testing.T) {
+	var output bytes.Buffer
+	w := &shellDAPWorker{out: &output}
+	const goroutines, messages = 8, 35
+	var group sync.WaitGroup
+	for g := 0; g < goroutines; g++ {
+		group.Add(1)
+		go func(g int) {
+			defer group.Done()
+			for i := 0; i < messages; i++ {
+				if i%3 == 0 {
+					if err := w.response(shellDAPRequest{Seq: g*100 + i + 1, Command: "threads"}, map[string]any{"threads": []any{}}, ""); err != nil {
+						t.Error(err)
+						return
+					}
+					continue
+				}
+				if err := w.event([]string{"stopped", "output", "exited"}[i%3], map[string]any{"worker": g, "iteration": i}); err != nil {
+					t.Error(err)
+					return
+				}
+			}
+		}(g)
+	}
+	group.Wait()
+	remaining := output.Bytes()
+	last := 0
+	for len(remaining) > 0 {
+		frame, used, err := readLSPFrame(remaining)
+		if err != nil || used <= 0 {
+			t.Fatalf("invalid concurrent output framing at message %d: used=%d err=%v", last, used, err)
+		}
+		var packet dapPacket
+		if err := json.Unmarshal(frame, &packet); err != nil {
+			t.Fatal(err)
+		}
+		if packet.Seq != last+1 {
+			t.Fatalf("outbound DAP wire sequence jumped or reordered: prev=%d got=%d", last, packet.Seq)
+		}
+		if packet.Type == "response" && packet.RequestSeq <= 0 {
+			t.Fatalf("lost response correlation: %+v", packet)
+		}
+		last = packet.Seq
+		remaining = remaining[used:]
+	}
+	if last != goroutines*messages {
+		t.Fatalf("lost outbound event: got=%d want=%d", last, goroutines*messages)
+	}
+}
+
+func TestShellDAPWorkerFailureLatchesNoFurtherConfiguration(t *testing.T) {
+	for _, cause := range []string{"readiness_timeout", "child_exit_before_ready"} {
+		t.Run(cause, func(t *testing.T) {
+			pipeRead, pipeWrite, err := os.Pipe()
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer pipeRead.Close()
+			w := &shellDAPWorker{
+				spawned: true, launched: true, configured: false,
+				ready: make(chan int), exit: make(chan struct{}), command: pipeWrite,
+			}
+			if cause == "child_exit_before_ready" {
+				close(w.exit)
+			}
+			timeout := 2 * time.Millisecond
+			err = w.awaitShellDAPReady(timeout)
+			if err == nil || !w.failed || !w.spawned || w.command != nil {
+				t.Fatalf("post-spawn uncertainty was not latched: state=%+v err=%v", w, err)
+			}
+			client, server := net.Pipe()
+			done := make(chan error, 1)
+			w.reader, w.out = bufio.NewReader(server), server
+			go func() { defer server.Close(); done <- w.serve() }()
+			c := &shellDAPTestClient{t: t, conn: client, parser: &dapState{conn: client}}
+			if r := c.request("configurationDone", map[string]any{}); r.Success || r.Message != "shell_dap_state_uncertain_stop_required" {
+				t.Fatalf("second Bash start accepted after uncertain first: %+v", r)
+			}
+			if w.bash != nil {
+				t.Fatal("another Bash process was spawned")
+			}
+			c.success("disconnect", map[string]any{})
+			select {
+			case e := <-done:
+				if e != nil {
+					t.Fatal(e)
+				}
+			case <-time.After(time.Second):
+				t.Fatal("adapter not closed")
+			}
+			client.Close()
+		})
+	}
+}
+
+func TestShellDAPWorkerActivationBrokenPipeLatchesFailure(t *testing.T) {
+	rd, wr, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rd.Close()
+	// Retain the already-closed command stream to force a permanent EPIPE
+	// instead of a fabricated negative DAP reply from an unused activation.
+	w := &shellDAPWorker{initialized: true, launched: true, configured: true, spawned: true, command: wr}
+	client, server := net.Pipe()
+	defer client.Close()
+	done := make(chan error, 1)
+	w.reader, w.out = bufio.NewReader(server), server
+	go func() { defer server.Close(); done <- w.serve() }()
+	c := &shellDAPTestClient{t: t, conn: client, parser: &dapState{conn: client}}
+	if r := c.request("asaActivate", map[string]any{}); r.Success || !w.failed || !w.activated {
+		t.Fatalf("failed START not terminal: reply=%+v failed=%v activated=%v", r, w.failed, w.activated)
+	}
+	if r := c.request("asaActivate", map[string]any{}); r.Success || r.Message != "shell_dap_state_uncertain_stop_required" {
+		t.Fatalf("activation retry accepted: %+v", r)
+	}
+	c.success("disconnect", map[string]any{})
+	select {
+	case e := <-done:
+		if e != nil {
+			t.Fatal(e)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("adapter not closed")
+	}
+}
+
+func TestShellDAPRootUncertaintyLatchAfterConfiguration(t *testing.T) {
+	d := &dapState{stage: "starting", adapter: "shell/bash-trap"}
+	failure := shellDAPUncertain(d, "shell_dap_configuration_uncertain", context.Canceled)
+	if failure.OK || !d.uncertain || d.stage != "uncertain" {
+		t.Fatalf("post-config negative response not latched: %+v state=%+v", failure, d)
+	}
+	client, server := net.Pipe()
+	defer client.Close()
+	defer server.Close()
+	d.conn = client
+	if _, err := d.call(context.Background(), "configurationDone", map[string]any{}); err == nil ||
+		!strings.Contains(err.Error(), "dap_state_uncertain") {
+		t.Fatalf("root DAP accepted a second configure after uncertainty: %v", err)
 	}
 }

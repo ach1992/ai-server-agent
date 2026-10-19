@@ -716,6 +716,9 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 	defer cancel()
 	out, err := d.call(callCtx, command, args)
 	if err != nil {
+		if d.adapter == "shell/bash-trap" && method == "configure" {
+			return shellDAPUncertain(d, "shell_dap_configuration_uncertain", err)
+		}
 		return fileError("debug_action_uncertain", "runtime", err)
 	}
 	if breakpointStat != nil {
@@ -734,19 +737,16 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 			// before reading ANY script bytes. configurationDone emitted
 			// and pinned the original Bash child in its private cgroup.
 			if err := d.pinnedDebuggeeError(); err != nil {
-				return fileError("shell_dap_debuggee_identity_unverified", "state", err)
+				return shellDAPUncertain(d, "shell_dap_debuggee_identity_unverified", err)
 			}
 			// The original Bash PID is now kernel-pinned but blocked
 			// *before its first script command*. Check the exact current
 			// source once more before granting the private activation.
 			if err := s.checkDAPBreakpointSources(ctx, req, d); err != nil {
-				d.mu.Lock()
-				d.uncertain, d.stage = true, "uncertain"
-				d.mu.Unlock()
-				return fileError("debug_source_changed", "conflict", err)
+				return shellDAPUncertain(d, "debug_source_changed", err)
 			}
 			if _, err := d.call(callCtx, "asaActivate", map[string]any{}); err != nil {
-				return fileError("shell_dap_activation_uncertain", "state", err)
+				return shellDAPUncertain(d, "shell_dap_activation_uncertain", err)
 			}
 		}
 		if d.phpHTTP != nil {

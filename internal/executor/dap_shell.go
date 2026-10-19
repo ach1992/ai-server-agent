@@ -162,6 +162,7 @@ func (s *Server) debugLaunchShell(ctx context.Context, req Request) (response Re
 	}
 	_, err = d.call(callCtx, "launch", map[string]any{
 		"program": program, "cwd": workspace, "stopOnEntry": req.DebugStopOnEntry,
+		"fileVersion": req.FileVersion,
 	})
 	if err != nil {
 		return fileError("shell_dap_launch_failed", "runtime", err)
@@ -173,4 +174,14 @@ func (s *Server) debugLaunchShell(ctx context.Context, req Request) (response Re
 	cleanup = false
 	body, _ := json.Marshal(map[string]any{"adapter": "shell/bash-trap", "mode": "bash", "configuration_required": true})
 	return Response{OK: true, SessionID: id, Status: "starting", FileVersion: req.FileVersion, Output: string(body), OutputEncoding: "json", BytesSeen: int64(len(body)), BytesReturned: int64(len(body))}
+}
+
+// Invoked only after a Shell configuration or activation command might have
+// spawned/resumed a worker Bash. A negative DAP reply is not evidence that
+// no command ran. Retain the original session and cgroup for status/stop.
+func shellDAPUncertain(d *dapState, code string, err error) Response {
+	d.mu.Lock()
+	_ = d.markUncertain(err)
+	d.mu.Unlock()
+	return fileError(code, "state", err)
 }

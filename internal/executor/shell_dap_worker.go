@@ -47,7 +47,7 @@ builtin printf 'READY\t1\n' >&4 || exit 97
 IFS= read -r _asa_answer <&5 || exit 98
 [[ "$_asa_answer" == START ]] || exit 98
 export BASH_ENV=/proc/self/fd/3
-exec /usr/bin/bash --noprofile --norc "$1"
+exec /usr/bin/bash --noprofile --norc /proc/self/fd/6
 `
 
 const shellDAPPrelude = `# sourced only from the sealed inherited BASH_ENV fd
@@ -122,12 +122,15 @@ type shellDAPWorker struct {
 	seq           int
 	program       string
 	workspace     string
+	snapshot      *os.File
 	stopEntry     bool
 	points        []int
 	initialized   bool
 	launched      bool
 	configured    bool
 	activated     bool
+	spawned       bool // actual child may exist; never retry its configuration
+	failed        bool // terminal/uncertain child state; only disconnect remains
 	bash          *exec.Cmd
 	command       *os.File
 	ready         chan int
@@ -167,31 +170,32 @@ func shellDAPRead(r *bufio.Reader) (shellDAPRequest, error) {
 	return msg, nil
 }
 
-func (w *shellDAPWorker) send(payload any) error {
-	body, err := json.Marshal(payload)
+// One lock covers sequence allocation, JSON serialization, framing and the
+// complete wire write. Concurrent process, output, stopped and control events
+// therefore carry strictly ascending sequence IDs in observed wire order.
+func (w *shellDAPWorker) send(packet map[string]any) error {
+	w.sendMu.Lock()
+	defer w.sendMu.Unlock()
+	w.seq++
+	packet["seq"] = w.seq
+	body, err := json.Marshal(packet)
 	if err != nil || len(body) > dapMaxFrame {
 		return errors.New("shell DAP response too large")
 	}
-	w.sendMu.Lock()
-	defer w.sendMu.Unlock()
-	_, err = fmt.Fprintf(w.out, "Content-Length: %d\r\n\r\n", len(body))
-	if err == nil {
-		n, writeErr := w.out.Write(body)
-		if writeErr != nil {
-			return writeErr
-		}
-		if n != len(body) {
-			return io.ErrShortWrite
-		}
+	if _, err = fmt.Fprintf(w.out, "Content-Length: %d\r\n\r\n", len(body)); err != nil {
+		return err
 	}
-	return err
+	n, err := w.out.Write(body)
+	if err != nil {
+		return err
+	}
+	if n != len(body) {
+		return io.ErrShortWrite
+	}
+	return nil
 }
 func (w *shellDAPWorker) response(r shellDAPRequest, body any, failure string) error {
-	w.mu.Lock()
-	w.seq++
-	seq := w.seq
-	w.mu.Unlock()
-	packet := map[string]any{"seq": seq, "type": "response", "request_seq": r.Seq, "command": r.Command, "success": failure == ""}
+	packet := map[string]any{"type": "response", "request_seq": r.Seq, "command": r.Command, "success": failure == ""}
 	if failure != "" {
 		packet["message"] = failure
 	} else {
@@ -200,11 +204,7 @@ func (w *shellDAPWorker) response(r shellDAPRequest, body any, failure string) e
 	return w.send(packet)
 }
 func (w *shellDAPWorker) event(name string, body any) error {
-	w.mu.Lock()
-	w.seq++
-	seq := w.seq
-	w.mu.Unlock()
-	return w.send(map[string]any{"seq": seq, "type": "event", "event": name, "body": body})
+	return w.send(map[string]any{"type": "event", "event": name, "body": body})
 }
 
 func (w *shellDAPWorker) consumeTrace(r *os.File) {
@@ -254,6 +254,59 @@ func (w *shellDAPWorker) consumeTrace(r *os.File) {
 	_ = r.Close()
 }
 
+// openShellDAPSnapshot reuses the existing worker-only descriptor-anchored
+// workspace read (openat2, no symlink traversal, original inode identity,
+// file_version before/after reading). The returned memfd is sealed: a
+// concurrent editor can neither redirect the Bash open nor modify the bytes
+// already accepted. No root-side file reader or second process broker.
+func openShellDAPSnapshot(workspace, program, version string) (*os.File, error) {
+	relative, err := filepath.Rel(workspace, program)
+	if err != nil {
+		return nil, err
+	}
+	resp := readWorkerWorkspaceFile(workspaceFileOperation{
+		Action: "workspace_read", WorkspaceRoot: workspace, Workspace: workspace,
+		Path: relative, FileVersion: version, Limit: maxFileReadBytes,
+	})
+	if !resp.OK || resp.FileVersion != version || resp.EOF == nil || !*resp.EOF ||
+		resp.Truncated || resp.FileSize == nil || *resp.FileSize > maxFileReadBytes ||
+		*resp.FileSize < 0 {
+		return nil, errors.New("shell_dap_source_snapshot_unavailable_or_changed")
+	}
+	var content []byte
+	switch resp.OutputEncoding {
+	case "utf-8":
+		content = []byte(resp.Output)
+	case "base64":
+		content, err = base64.StdEncoding.DecodeString(resp.Output)
+		if err != nil {
+			return nil, errors.New("shell_dap_source_snapshot_invalid_encoding")
+		}
+	default:
+		return nil, errors.New("shell_dap_source_snapshot_invalid_encoding")
+	}
+	if int64(len(content)) != *resp.FileSize || int64(len(content)) != resp.BytesReturned {
+		return nil, errors.New("shell_dap_source_snapshot_incomplete")
+	}
+	fd, err := unix.MemfdCreate("asa-shell-dap-script", unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING)
+	if err != nil {
+		return nil, err
+	}
+	file := os.NewFile(uintptr(fd), "shell-dap-sealed-script")
+	if _, err = file.Write(content); err == nil {
+		_, err = file.Seek(0, io.SeekStart)
+	}
+	if err == nil {
+		_, err = unix.FcntlInt(file.Fd(), unix.F_ADD_SEALS,
+			unix.F_SEAL_SEAL|unix.F_SEAL_SHRINK|unix.F_SEAL_GROW|unix.F_SEAL_WRITE)
+	}
+	if err != nil {
+		_ = file.Close()
+		return nil, err
+	}
+	return file, nil
+}
+
 func (w *shellDAPWorker) startBash() error {
 	prelude, err := unix.MemfdCreate("asa-shell-dap-prelude", unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING)
 	if err != nil {
@@ -280,15 +333,14 @@ func (w *shellDAPWorker) startBash() error {
 		eventWriter.Close()
 		return err
 	}
-	// The wrapper never opens the target script until the Executor has
-	// pinned this original Bash PID. Bash -c sets $0 to the fixed marker
-	// and $1 to the validated original workspace script path.
+	// Bash only opens inherited sealed fd 6, never a mutable workspace
+	// pathname. DAP still reports the exact original source path and lines.
 	cmd := exec.Command("/usr/bin/bash", "--noprofile", "--norc", "-c",
-		shellDAPBootstrap, "asa-shell-dap", w.program)
+		shellDAPBootstrap, "asa-shell-dap")
 	cmd.Dir = w.workspace
 	cmd.Env = []string{
 		"PATH=/usr/bin:/bin", "HOME=" + os.Getenv("HOME"), "LC_ALL=C",
-		"ASA_SHELL_TARGET=" + w.program,
+		"ASA_SHELL_TARGET=/proc/self/fd/6",
 		"ASA_SHELL_BREAKPOINTS=" + shellDAPPoints(w.points),
 		"ASA_SHELL_STOP_ON_ENTRY=" + func() string {
 			if w.stopEntry {
@@ -297,7 +349,7 @@ func (w *shellDAPWorker) startBash() error {
 			return "0"
 		}(),
 	}
-	cmd.ExtraFiles = []*os.File{file, eventWriter, commandReader}
+	cmd.ExtraFiles = []*os.File{file, eventWriter, commandReader, w.snapshot}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Pdeathsig: syscall.SIGKILL}
 	cmd.Stdout = &shellDAPOutput{w: w, category: "stdout"}
 	cmd.Stderr = &shellDAPOutput{w: w, category: "stderr"}
@@ -311,6 +363,7 @@ func (w *shellDAPWorker) startBash() error {
 	eventWriter.Close()
 	commandReader.Close()
 	w.mu.Lock()
+	w.spawned = true
 	w.bash, w.command = cmd, commandWriter
 	w.exit, w.ready = make(chan struct{}), make(chan int, 1)
 	w.mu.Unlock()
@@ -331,17 +384,32 @@ func (w *shellDAPWorker) startBash() error {
 		_ = w.event("terminated", map[string]any{})
 		close(w.exit)
 	}()
-	// The immutable wrapper reports READY before even opening the target.
-	// The Executor proves the original Bash PID, trusted executable inode,
-	// exact cgroup membership and source version before sending START.
+	// The fixed wrapper reports READY before opening the sealed source fd.
+	// The Executor proves the original Bash PID, interpreter inode and
+	// exact cgroup membership before START; source bytes are already sealed.
+	return w.awaitShellDAPReady(5 * time.Second)
+}
+
+// A post-spawn failure cannot be replayed: the Bash PID may remain blocked
+// inside the broker-owned cgroup. Closing our control pipe encourages exit,
+// but does NOT assert reaping or cgroup cleanup. The root session remains
+// available for debug_status / verified debug_stop.
+func (w *shellDAPWorker) awaitShellDAPReady(timeout time.Duration) error {
+	var err error
 	select {
 	case <-w.ready:
 		return nil
 	case <-w.exit:
-		return errors.New("Bash exited before first debug trap")
-	case <-time.After(5 * time.Second):
-		return errors.New("Bash debug trap did not become ready")
+		err = errors.New("Bash exited before bootstrap READY")
+	case <-time.After(timeout):
+		err = errors.New("Bash bootstrap READY deadline exceeded")
 	}
+	w.failed = true
+	if w.command != nil {
+		_ = w.command.Close()
+		w.command = nil
+	}
+	return err
 }
 func shellDAPPoints(lines []int) string {
 	var sb strings.Builder
@@ -385,10 +453,16 @@ func (o *shellDAPOutput) Write(p []byte) (int, error) {
 }
 
 func serveShellDAP(input io.Reader, output io.Writer) error {
-	w := &shellDAPWorker{reader: bufio.NewReaderSize(input, 4096), out: output}
+	return (&shellDAPWorker{reader: bufio.NewReaderSize(input, 4096), out: output}).serve()
+}
+
+func (w *shellDAPWorker) serve() error {
 	defer func() {
 		if w.command != nil {
 			_ = w.command.Close()
+		}
+		if w.snapshot != nil {
+			_ = w.snapshot.Close()
 		}
 	}()
 	for {
@@ -401,6 +475,12 @@ func serveShellDAP(input io.Reader, output io.Writer) error {
 		}
 		var body any = map[string]any{}
 		failure := ""
+		if w.failed && req.Command != "disconnect" {
+			if err := w.response(req, nil, "shell_dap_state_uncertain_stop_required"); err != nil {
+				return err
+			}
+			continue
+		}
 		switch req.Command {
 		case "initialize":
 			if w.initialized {
@@ -422,6 +502,7 @@ func serveShellDAP(input io.Reader, output io.Writer) error {
 				Program     string `json:"program"`
 				Cwd         string `json:"cwd"`
 				StopOnEntry bool   `json:"stopOnEntry"`
+				FileVersion string `json:"fileVersion"`
 			}
 			if json.Unmarshal(req.Arguments, &in) != nil || !filepath.IsAbs(in.Program) || !filepath.IsAbs(in.Cwd) ||
 				filepath.Clean(in.Program) != in.Program || filepath.Clean(in.Cwd) != in.Cwd ||
@@ -435,6 +516,16 @@ func serveShellDAP(input io.Reader, output io.Writer) error {
 				failure = "shell_dap_invalid_source"
 				break
 			}
+			if in.FileVersion == "" {
+				failure = "shell_dap_source_version_required"
+				break
+			}
+			snapshot, err := openShellDAPSnapshot(in.Cwd, in.Program, in.FileVersion)
+			if err != nil {
+				failure = "shell_dap_source_changed_or_unsupported"
+				break
+			}
+			w.snapshot = snapshot
 			w.launched, w.program, w.workspace, w.stopEntry = true, in.Program, in.Cwd, in.StopOnEntry
 		case "setBreakpoints":
 			if !w.launched || w.configured {
@@ -474,7 +565,7 @@ func serveShellDAP(input io.Reader, output io.Writer) error {
 				body = map[string]any{"breakpoints": points}
 			}
 		case "configurationDone":
-			if !w.launched || w.configured {
+			if !w.launched || w.configured || w.spawned {
 				failure = "shell_dap_not_configurable"
 				break
 			}
@@ -495,7 +586,8 @@ func serveShellDAP(input io.Reader, output io.Writer) error {
 			}
 			w.activated = true
 			if _, err := io.WriteString(w.command, "START\n"); err != nil {
-				failure = "shell_dap_activation_failed"
+				w.failed = true
+				failure = "shell_dap_activation_uncertain"
 			}
 		case "threads":
 			if !w.configured {
