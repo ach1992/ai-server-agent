@@ -18,6 +18,29 @@ import (
 	"github.com/ach1992/ai-server-agent/internal/systemexec"
 )
 
+// shellDAPCIFixtureGuard is test-only. No filesystem deletion is permitted
+// after an attempted debug_launch until the original broker's cleanup has
+// been positively verified, including failure/transport-uncertain responses.
+type shellDAPCIFixtureGuard struct {
+	workspace        string
+	launchDispatched bool
+	sessionID        string
+	cleanupVerified  bool
+}
+
+// finish runs the same conservative logic for real installed CI and its
+// deterministic regression tests. verifyStop must include the actual
+// authenticated broker stop and session/cgroup retirement checks.
+func (g *shellDAPCIFixtureGuard) finish(verifyStop func(string) bool) (retained bool, err error) {
+	if g.launchDispatched && !g.cleanupVerified {
+		if g.sessionID == "" || verifyStop == nil || !verifyStop(g.sessionID) {
+			return true, nil
+		}
+		g.cleanupVerified = true
+	}
+	return false, os.RemoveAll(g.workspace)
+}
+
 // This opt-in test runs ONLY inside the disposable GitHub-hosted CI runner,
 // after the source installer has started the real Agent/Root Executor units.
 // It uses their original authenticated Unix transport and a scratch aiworker
@@ -86,12 +109,44 @@ func TestShellDAPInstalledPrivateCgroupLifecycleCI(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cleanupAllowed := true
+	fixture := shellDAPCIFixtureGuard{workspace: workspace}
+	var group string
+	// Register before any launch dispatch. Unknown dispatch/cleanup retains
+	// source evidence; only verified broker stop can authorize its removal.
 	t.Cleanup(func() {
-		if cleanupAllowed {
-			if e := os.RemoveAll(workspace); e != nil {
-				t.Errorf("test-owned workspace cleanup: %v", e)
+		retained, cleanupErr := fixture.finish(func(id string) bool {
+			bounded, cancelCleanup := context.WithTimeout(context.Background(), 6*time.Second)
+			defer cancelCleanup()
+			cleanupCtx := credential.WithPrincipal(bounded, owner)
+			stop, stopErr := ClientCallContext(cleanupCtx, cfg.ExecutorSocket, secret, Request{
+				Action: "debug_stop", SessionID: id, Workspace: workspace,
+				RequestID: requestID,
+			})
+			if stopErr != nil || !stop.OK {
+				t.Errorf("unverified test-owned Shell DAP stop; retaining fixture: err=%v code=%s", stopErr, stop.ErrorCode)
+				return false
 			}
+			retired, statusErr := ClientCallContext(cleanupCtx, cfg.ExecutorSocket, secret, Request{
+				Action: "debug_status", SessionID: id, Workspace: workspace,
+				RequestID: requestID,
+			})
+			if statusErr != nil || retired.OK || retired.ErrorCode != "debug_session_not_found" {
+				t.Errorf("test-owned Shell DAP retirement unverified; retaining fixture: err=%v code=%s", statusErr, retired.ErrorCode)
+				return false
+			}
+			if group != "" {
+				if _, statErr := os.Lstat(group); !errors.Is(statErr, os.ErrNotExist) {
+					t.Errorf("test-owned DAP cgroup removal unverified; retaining fixture: %v", statErr)
+					return false
+				}
+			}
+			return true
+		})
+		if cleanupErr != nil {
+			t.Errorf("test-owned workspace cleanup: %v", cleanupErr)
+		}
+		if retained {
+			t.Logf("test-owned workspace retained after uncertain Shell DAP launch/stop: %s", workspace)
 		}
 	})
 	if err := os.Chown(workspace, uid, gid); err != nil {
@@ -133,7 +188,13 @@ func TestShellDAPInstalledPrivateCgroupLifecycleCI(t *testing.T) {
 		Workspace: workspace, DebugProgram: "probe.sh", FileVersion: stat.FileVersion,
 		DebugStopOnEntry: true,
 	}
-	start := call(launch)
+	launch.RequestID = requestID
+	fixture.launchDispatched = true // Must precede transport, even if its result is lost.
+	start, launchErr := ClientCallContext(ownerCtx, cfg.ExecutorSocket, secret, launch)
+	fixture.sessionID = start.SessionID // Capture even from an unsuccessful response.
+	if launchErr != nil {
+		t.Fatalf("installed Shell DAP launch transport outcome uncertain; fixture retained: %v", launchErr)
+	}
 	if !start.OK || start.SessionID == "" {
 		if !systemexec.Trusted("/usr/local/bin/ai-server-agent") {
 			// Diagnostic metadata only; no change to original root-executable checks.
@@ -154,29 +215,10 @@ func TestShellDAPInstalledPrivateCgroupLifecycleCI(t *testing.T) {
 		t.Fatalf("real installed Shell DAP launch failed: code=%s class=%s reason=%q trusted_bash=%t trusted_installed_agent=%t", start.ErrorCode, start.ErrorClass, start.Error, systemexec.Trusted("/usr/bin/bash"), systemexec.Trusted("/usr/local/bin/ai-server-agent"))
 	}
 	id := start.SessionID
-	cleanupAllowed = false // Retain the fixture if verified process cleanup fails.
-	stopped := false
-	t.Cleanup(func() {
-		if !stopped {
-			bounded, cancelCleanup := context.WithTimeout(context.Background(), 6*time.Second)
-			defer cancelCleanup()
-			cleanupCtx := credential.WithPrincipal(bounded, owner)
-			r, e := ClientCallContext(cleanupCtx, cfg.ExecutorSocket, secret, Request{
-				Action: "debug_stop", SessionID: id, Workspace: workspace,
-				RequestID: requestID,
-			})
-			if e != nil || !r.OK {
-				t.Errorf("unverified test-owned Shell DAP cleanup (fixture retained): %v code=%s", e, r.ErrorCode)
-				return
-			}
-			cleanupAllowed = true
-		}
-	})
 	after, err := groups()
 	if err != nil {
 		t.Fatal(err)
 	}
-	var group string
 	for p := range after {
 		if !prior[p] {
 			if group != "" {
@@ -300,14 +342,13 @@ func TestShellDAPInstalledPrivateCgroupLifecycleCI(t *testing.T) {
 	if !stop.OK {
 		t.Fatalf("real pinned Bash root-owned cgroup cleanup failed: code=%s", stop.ErrorCode)
 	}
-	stopped = true
 	if _, err := os.Lstat(group); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("private root-owned DAP cgroup not removed after verified stop: %v", err)
 	}
 	retired := call(Request{Action: "debug_status", SessionID: id, Workspace: workspace})
-	if retired.OK {
-		t.Fatal("retired Shell DAP session remains addressable")
+	if retired.OK || retired.ErrorCode != "debug_session_not_found" {
+		t.Fatalf("retired Shell DAP session remains addressable or retirement is unverified: code=%s", retired.ErrorCode)
 	}
-	cleanupAllowed = true
+	fixture.cleanupVerified = true
 	t.Logf("PASS installed Root Executor/private cgroup Shell DAP: original Bash UID, stop, stack/variables, principal denial and verified cleanup")
 }
