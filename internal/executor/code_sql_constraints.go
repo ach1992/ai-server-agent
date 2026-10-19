@@ -102,7 +102,7 @@ func sqlNavConstraintColumns(statement []sqlDDLToken, dialect string, table sqlN
 		}
 		// The list parser requires one plain identifier per item. Never
 		// synthesize column references from expressions/lengths/sort order.
-		list := sqlNavColumnList(table, statement[:until], i, false)
+		list := sqlNavColumnList(table, statement[:until], i, false, dialect)
 		if len(list) > 0 {
 			result = append(result, list...)
 		}

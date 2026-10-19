@@ -13,6 +13,279 @@ import (
 	"github.com/ach1992/ai-server-agent/internal/systemexec"
 )
 
+func TestSQLNavigationSelectSourceIdentityFailClosedAcrossConsumers(t *testing.T) {
+	// N4: The column parser can decline unsupported FROM/JOIN, but the
+	// table-level scanner must not independently fabricate an occurrence.
+	// Test BOTH APIs: default table navigation and column-enabled navigation.
+	for _, tc := range []struct{ name, dialect, source, token string }{
+		{"pg_from_only", "postgres", "SELECT accounts.id FROM ONLY accounts;", "ONLY"},
+		{"pg_join_only", "postgres", "SELECT a.id FROM accounts a JOIN ONLY payments p ON p.account_id=a.id;", "ONLY"},
+		{"pg_reserved_source", "postgres", "SELECT a.id FROM TABLE a;", "TABLE"},
+		{"pg_unsupported_alias", "postgres", "SELECT a.id FROM accounts AS ONLY;", "ONLY"},
+		{"pg_malformed_source", "postgres", "SELECT a.id FROM accounts a JUNK JOIN payments p ON a.id=p.id;", "accounts"},
+		{"pg_malformed_on", "postgres", "SELECT a.id FROM accounts a JOIN payments p ON a.id=ONLY;", "accounts"},
+		{"pg_missing_on", "postgres", "SELECT a.id FROM accounts a JOIN payments p ON;", "accounts"},
+		{"pg_unsupported_using", "postgres", "SELECT a.id FROM accounts a JOIN payments p USING(id);", "accounts"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, withColumns := range []bool{false, true} {
+				var items []sqlNavOccurrence
+				var ok bool
+				if withColumns {
+					items, ok = sqlNavAllOccurrences(tc.source, tc.dialect)
+				} else {
+					items, ok = sqlNavOccurrences(tc.source, tc.dialect)
+				}
+				if ok && len(items) != 0 {
+					t.Fatalf("invalid SELECT emitted source/column withColumns=%v: %+v", withColumns, items)
+				}
+			}
+			at := strings.Index(tc.source, tc.token)
+			if at < 0 {
+				t.Fatal("fixture missing target")
+			}
+			if selected, ok := sqlNavSelected(tc.source, tc.dialect, 0, at+1); ok {
+				t.Fatalf("untrusted SELECT yielded selectable SQL navigation: %+v", selected)
+			}
+		})
+	}
+}
+
+func TestSQLNavigationSelectSourceIdentityPositiveAcrossConsumers(t *testing.T) {
+	cases := []struct {
+		name, dialect, source, token, identity string
+		tableCount                             int
+	}{
+		{"pg_plain", "postgres", "SELECT * FROM accounts;", "accounts", "accounts", 1},
+		{"pg_quoted_only", "postgres", `SELECT * FROM "only";`, "only", "only", 1},
+		{"pg_quoted_source_alias", "postgres", `SELECT a.id FROM "only" a;`, "only", "only", 1},
+		{"pg_qualified", "postgres", "SELECT a.id FROM public.accounts a JOIN payments p ON a.id=p.account_id;", "accounts", "public\x00accounts", 2},
+		{"mysql_only", "mysql", "SELECT * FROM ONLY accounts;", "ONLY", "only", 1},
+		{"mariadb_only", "mariadb", "SELECT * FROM ONLY accounts;", "ONLY", "only", 1},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, withColumns := range []bool{false, true} {
+				var items []sqlNavOccurrence
+				var ok bool
+				if withColumns {
+					items, ok = sqlNavAllOccurrences(tc.source, tc.dialect)
+				} else {
+					items, ok = sqlNavOccurrences(tc.source, tc.dialect)
+				}
+				if !ok {
+					t.Fatal("valid SQL unexpectedly unparseable")
+				}
+				var tableCount int
+				for _, item := range items {
+					if !item.isColumn {
+						tableCount++
+					}
+				}
+				if tableCount != tc.tableCount {
+					t.Fatalf("withColumns=%v: expected %d tables, got %+v", withColumns, tc.tableCount, items)
+				}
+			}
+			at := strings.Index(tc.source, tc.token)
+			if at < 0 {
+				t.Fatal("missing source selection")
+			}
+			// A source name is selected at its final identifier, not an alias.
+			selected, ok := sqlNavSelected(tc.source, tc.dialect, 0, at+1)
+			if !ok || selected.isColumn || selected.identity != tc.identity {
+				t.Fatalf("valid source was not navigable: selected=%+v found=%v", selected, ok)
+			}
+		})
+	}
+}
+
+func TestSQLNavigationReservedRelationIdentityAcrossEmissionPaths(t *testing.T) {
+	// SQL navigation includes DDL, relation-level reads, and CREATE VIEW
+	// SELECT bodies. Every producer must decline PostgreSQL grammar tokens
+	// that are not physical table identifiers, even when the "only" table
+	// exists as a valid independently quoted declaration elsewhere.
+	cases := []struct{ name, source, badToken string }{
+		{"create_unquoted_only", "CREATE TABLE ONLY (id BIGINT PRIMARY KEY);", "ONLY"},
+		{"create_reserved_table", "CREATE TABLE TABLE (id INT);", "TABLE"},
+		{"drop_unquoted_only", "DROP TABLE ONLY;", "ONLY"},
+		{"alter_unquoted_only", "ALTER TABLE TABLE ADD COLUMN x INT;", "TABLE"},
+		{"insert_only_modifier", "INSERT INTO ONLY accounts (id) VALUES (1);", "ONLY"},
+		{"update_only_modifier", "UPDATE ONLY accounts SET id=1;", "ONLY"},
+		{"delete_only_modifier", "DELETE FROM ONLY accounts;", "ONLY"},
+		{"create_view_from_only", "CREATE VIEW view_accounts AS SELECT * FROM ONLY accounts;", "ONLY"},
+		{"insert_select_from_only", "INSERT INTO archive (id) SELECT id FROM ONLY accounts;", "ONLY"},
+		{"create_bad_fk_keyword", "CREATE TABLE parent (id BIGINT REFERENCES ONLY(id));", "ONLY"},
+		{"create_bad_fk_type_keyword", "CREATE TABLE parent (id BIGINT REFERENCES LEFT(id));", "LEFT"},
+		{"create_view_bad_join_keyword", "CREATE VIEW v AS SELECT a.id FROM accounts a JOIN ONLY payments p ON p.id=a.id;", "ONLY"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			for _, withColumns := range []bool{false, true} {
+				var occurrences []sqlNavOccurrence
+				var valid bool
+				if withColumns {
+					occurrences, valid = sqlNavAllOccurrences(tc.source, "postgres")
+				} else {
+					occurrences, valid = sqlNavOccurrences(tc.source, "postgres")
+				}
+				if valid {
+					for _, item := range occurrences {
+						if item.identity == strings.ToLower(tc.badToken) ||
+							strings.HasPrefix(item.identity, strings.ToLower(tc.badToken)+"\x00column\x00") {
+							t.Fatalf("withColumns=%v: reserved keyword emitted as physical relation %+v", withColumns, item)
+						}
+					}
+				}
+			}
+			at := strings.Index(tc.source, tc.badToken)
+			if at < 0 {
+				t.Fatal("missing test token")
+			}
+			if selected, ok := sqlNavSelected(tc.source, "postgres", 0, at+1); ok &&
+				selected.identity == strings.ToLower(tc.badToken) {
+				t.Fatalf("reserved modifier selected as physical relation: %+v", selected)
+			}
+		})
+	}
+}
+
+func TestSQLNavigationKeywordRelationsStillValidWhereLegal(t *testing.T) {
+	for _, tc := range []struct{ name, dialect, source, selected, identity string }{
+		{"pg_quoted_create", "postgres", `CREATE TABLE "only" (id BIGINT PRIMARY KEY);`, "only", "only"},
+		{"pg_quoted_select", "postgres", `SELECT * FROM "only";`, "only", "only"},
+		{"mysql_unquoted_create", "mysql", "CREATE TABLE ONLY (id BIGINT PRIMARY KEY);", "ONLY", "only"},
+		{"mariadb_unquoted_create", "mariadb", "CREATE TABLE ONLY (id BIGINT PRIMARY KEY);", "ONLY", "only"},
+		{"mysql_unquoted_from", "mysql", "SELECT * FROM ONLY a;", "ONLY", "only"},
+		{"mariadb_unquoted_from", "mariadb", "SELECT * FROM ONLY a;", "ONLY", "only"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			items, valid := sqlNavOccurrences(tc.source, tc.dialect)
+			if !valid {
+				t.Fatal("supported SQL became unparseable")
+			}
+			var matching bool
+			for _, item := range items {
+				if !item.isColumn && item.identity == tc.identity {
+					matching = true
+				}
+			}
+			if !matching {
+				t.Fatalf("expected real relation identity %q: %+v", tc.identity, items)
+			}
+			index := strings.Index(tc.source, tc.selected)
+			if index < 0 {
+				t.Fatal("missing relation token")
+			}
+			if item, ok := sqlNavSelected(tc.source, tc.dialect, 0, index+1); !ok || item.identity != tc.identity {
+				t.Fatalf("valid relation keyword lost navigation: %+v found=%v", item, ok)
+			}
+		})
+	}
+}
+
+func TestSQLNavigationReservedColumnDeclarationsAndUsesFailClosed(t *testing.T) {
+	for _, tc := range []struct{ dialect, source, forbidden string }{
+		{"postgres", "CREATE TABLE accounts (ONLY BIGINT);", "only"},
+		{"postgres", "CREATE TABLE accounts (SELECT BIGINT);", "select"},
+		{"postgres", "ALTER TABLE accounts ADD COLUMN ONLY BIGINT;", "only"},
+		{"postgres", "ALTER TABLE accounts DROP COLUMN ONLY;", "only"},
+		{"postgres", "INSERT INTO accounts (ONLY) VALUES (1);", "only"},
+		{"mysql", "CREATE TABLE accounts (SELECT BIGINT);", "select"},
+		{"mariadb", "CREATE TABLE accounts (SELECT BIGINT);", "select"},
+	} {
+		t.Run(tc.dialect+"/"+tc.source, func(t *testing.T) {
+			got, valid := sqlNavAllOccurrences(tc.source, tc.dialect)
+			if valid {
+				for _, item := range got {
+					if item.isColumn && item.identity == "accounts\x00column\x00"+tc.forbidden {
+						t.Fatalf("reserved bare DDL column gained a physical identity: %+v", item)
+					}
+				}
+			}
+		})
+	}
+	// Qualified SELECT references use a separate post-dot grammar and must
+	// not be globally banned by the unquoted DDL declaration filter.
+	qualifiedKeywords := "SELECT a.from, a.join, a.only, a.select FROM accounts a;"
+	keywordItems, keywordValid := sqlNavAllOccurrences(qualifiedKeywords, "postgres")
+	if !keywordValid {
+		t.Fatal("qualified PostgreSQL keyword attributes became unparseable")
+	}
+	seen := map[string]bool{}
+	for _, item := range keywordItems {
+		if item.isColumn {
+			seen[item.identity] = true
+		}
+	}
+	for _, key := range []string{"from", "join", "only", "select"} {
+		want := "accounts\x00column\x00" + key
+		if !seen[want] {
+			t.Fatalf("qualified attribute %q lost in SQL scope: %+v", key, keywordItems)
+		}
+	}
+	for _, tc := range []struct{ dialect, source, want string }{
+		{"postgres", "SELECT a.select FROM accounts a;", "accounts\x00column\x00select"},
+		{"postgres", `CREATE TABLE accounts ("select" BIGINT);`, "accounts\x00column\x00select"},
+		{"mysql", "CREATE TABLE accounts (`SELECT` BIGINT);", "accounts\x00column\x00SELECT"},
+	} {
+		t.Run("positive/"+tc.dialect+"/"+tc.source, func(t *testing.T) {
+			got, valid := sqlNavAllOccurrences(tc.source, tc.dialect)
+			if !valid {
+				t.Fatal("valid source unexpectedly unparseable")
+			}
+			var hasColumn bool
+			for _, item := range got {
+				if item.isColumn && item.identity == tc.want {
+					hasColumn = true
+				}
+			}
+			if !hasColumn {
+				t.Fatalf("quoted or post-dot column lost source identity: %+v", got)
+			}
+		})
+	}
+}
+
+func TestSQLNavigationPostgresReservedKeywordsAcrossAllPhysicalEmitters(t *testing.T) {
+	// Regression matrix for the family behind N3/N4: an unquoted SQL
+	// grammar keyword must never produce a matching physical *table* or
+	// DDL-column identity from any independently dispatched navigation path.
+	for keyword := range sqlNavPostgresSelectDisallowed {
+		lower := strings.ToLower(keyword)
+		for _, sql := range []string{
+			"SELECT * FROM " + keyword + ";",
+			"SELECT x.id FROM accounts AS " + keyword + ";",
+			"CREATE TABLE " + keyword + " (id INT);",
+			"CREATE TABLE accounts (" + keyword + " INT);",
+			"ALTER TABLE " + keyword + " ADD COLUMN id INT;",
+			"INSERT INTO " + keyword + " (id) VALUES (1);",
+			"CREATE TABLE accounts (id INT REFERENCES " + keyword + "(id));",
+			"CREATE VIEW v AS SELECT * FROM " + keyword + ";",
+		} {
+			t.Run(keyword+"/"+sql, func(t *testing.T) {
+				for _, withColumns := range []bool{false, true} {
+					var got []sqlNavOccurrence
+					var valid bool
+					if withColumns {
+						got, valid = sqlNavAllOccurrences(sql, "postgres")
+					} else {
+						got, valid = sqlNavOccurrences(sql, "postgres")
+					}
+					if !valid {
+						continue // fail closed is the conservative outcome
+					}
+					for _, ev := range got {
+						if !ev.isColumn && ev.identity == lower ||
+							ev.isColumn && ev.identity == "accounts\x00column\x00"+lower {
+							t.Fatalf("reserved word obtained a physical occurrence withColumns=%v: %+v", withColumns, ev)
+						}
+					}
+				}
+			})
+		}
+	}
+}
+
 func TestSQLSourceNavigationGrammarAndSafeContexts(t *testing.T) {
 	source := "-- REFERENCES forged\n" +
 		"SELECT E'ignored\\'; SELECT * FROM forged;' AS literal;\n" +
@@ -99,8 +372,10 @@ func TestSQLSourceNavigationQuotedCaseAndUTF16(t *testing.T) {
 	if item, found := sqlNavSelected(qualified, "postgres", 0, 23); !found || item.name != "public.orders" {
 		t.Fatalf("qualified table lookup failed: %+v %v", item, found)
 	}
-	if items, valid := sqlNavOccurrences("CREATE VIEW daily AS WITH orders AS (SELECT 1) SELECT * FROM orders;", "postgres"); !valid || len(items) != 1 || !items[0].declaration {
-		t.Fatalf("CTE local name fabricated a table reference: %+v", items)
+	// Valid CTE syntax is outside this bounded navigation grammar:
+	// do not certify a physical view declaration without proving its body.
+	if items, valid := sqlNavOccurrences("CREATE VIEW daily AS WITH orders AS (SELECT 1) SELECT * FROM orders;", "postgres"); valid && len(items) != 0 {
+		t.Fatalf("unproven CTE produced physical source evidence: %+v", items)
 	}
 	if items, valid := sqlNavOccurrences("DELIMITER //\nCREATE PROCEDURE demo() BEGIN SELECT 1; CREATE TABLE phantom (id INT); END //", "mysql"); valid || len(items) != 0 {
 		t.Fatalf("MySQL custom DELIMITER invented SQL declarations: %+v", items)

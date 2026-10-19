@@ -64,12 +64,16 @@ func TestSQLPostgresMaterializedViewSourceGraph(t *testing.T) {
 }
 
 func TestSQLPostgresMaterializedViewOptionalColumnsAndRefresh(t *testing.T) {
-	// The CTE name shadows a relation. Navigation must expose the view
-	// declaration without pretending the CTE is a persistent table.
+	// A valid CTE is not a proven bounded SELECT query body. Retain
+	// document outline syntax separately, but do not synthesize a
+	// physical VIEW declaration or falsely link its shadowed CTE name.
 	cte := "CREATE MATERIALIZED VIEW summary AS WITH orders AS (SELECT 1) SELECT * FROM orders;"
-	if occ, ok := sqlNavOccurrences(cte, "postgres"); !ok || len(occ) != 1 ||
-		!occ[0].declaration || occ[0].name != "summary" {
-		t.Fatalf("materialized CTE shadowing invented relations: %+v", occ)
+	if occ, ok := sqlNavOccurrences(cte, "postgres"); ok && len(occ) != 0 {
+		t.Fatalf("unproven materialized CTE emitted physical identity: %+v", occ)
+	}
+	if symbols := sqlDDLSymbols(cte, "postgres"); len(symbols) != 1 ||
+		symbols[0].Name != "summary" {
+		t.Fatalf("valid materialized CTE lost non-binding document outline: %+v", symbols)
 	}
 	source := "CREATE MATERIALIZED VIEW \"Reports\".daily (total) AS SELECT count(*) FROM orders WITH NO DATA;\n" +
 		"REFRESH MATERIALIZED VIEW \"Reports\".daily WITH NO DATA;\n"
@@ -443,8 +447,16 @@ func TestSQLMaterializedViewPopulationSuffixMustBeTerminal(t *testing.T) {
 			t.Errorf("valid materialized population clause was rejected: %q => %+v", source, symbols)
 		}
 		found, ok := sqlNavOccurrences(source, "postgres")
-		if !ok || len(found) == 0 || !found[0].declaration || !found[0].materialized {
-			t.Errorf("valid materialized source declaration not indexed: %q => %+v", source, found)
+		// Physical navigation is a stronger contract than document syntax.
+		// CTE, TABLE, VALUES, table functions and complex ORDER/FETCH bodies
+		// remain valid SQL but cannot prove a complete bounded source scope.
+		proven := source == valid[0] || source == valid[1]
+		if proven {
+			if !ok || len(found) == 0 || !found[0].declaration || !found[0].materialized {
+				t.Errorf("proven materialized source declaration not indexed: %q => %+v", source, found)
+			}
+		} else if ok && len(found) != 0 {
+			t.Errorf("unproven valid materialized SQL fabricated source navigation: %q => %+v", source, found)
 		}
 	}
 	invalid := []string{
@@ -493,6 +505,10 @@ func TestSQLMaterializedAlterInvalidatesSourceIdentity(t *testing.T) {
 			[]string{"reporting.old_mv"}},
 		{"ALTER MATERIALIZED VIEW reporting.old_mv RENAME old_id TO new_id EXTRA;",
 			[]string{"reporting.old_mv"}},
+		// A removed SQL string between the object-type header tokens cannot
+		// introduce false rename/drop history for an existing declaration.
+		{"ALTER MATERIALIZED 'discarded' VIEW reporting.old_mv RENAME TO new_mv;", nil},
+		{"ALTER MATERIALIZED VIEW 'discarded' reporting.old_mv RENAME TO new_mv;", nil},
 		{"ALTER MATERIALIZED VIEW reporting.old_mv OWNER TO custodian;", nil},
 		{"ALTER MATERIALIZED VIEW reporting.old_mv SET TABLESPACE fast_space;", nil},
 		{"ALTER MATERIALIZED VIEW reporting.old_mv SET (fillfactor = 70);", nil},
