@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 )
@@ -116,5 +117,117 @@ func TestSQLSelectUsingEmbeddedQueriesReuseSameProof(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+// Column-name equivalence is intentionally not relation/alias equivalence.
+// PostgreSQL folds only unquoted words, while MySQL/MariaDB columns are
+// case-insensitive even when backtick-quoted. A malformed USING predicate
+// must not leak any source-backed table/column occurrences.
+func TestSQLUsingColumnDuplicateDialectEquivalence(t *testing.T) {
+	for _, tc := range []struct {
+		name, dialect, members string
+		valid                  bool
+	}{
+		{"mysql_bare_quoted", "mysql", "id, `ID`", false},
+		{"mysql_quoted_quoted", "mysql", "`Id`, `id`", false},
+		{"mysql_quoted_against_bare", "mysql", "`ID`, id", false},
+		{"mariadb_bare_quoted", "mariadb", "id, `ID`", false},
+		{"mariadb_quoted_quoted", "mariadb", "`Id`, `id`", false},
+		{"mariadb_quoted_against_bare", "mariadb", "`ID`, id", false},
+		{"postgres_bare_quoted_equal", "postgres", "id, \"id\"", false},
+		{"postgres_quoted_distinct", "postgres", "id, \"ID\"", true},
+		{"postgres_quoted_distinct_2", "postgres", "\"Id\", \"id\"", true},
+		{"mysql_distinct", "mysql", "`Id`, `other`", true},
+		{"mariadb_distinct", "mariadb", "`ID`, `other`", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			query := "SELECT a.id FROM accounts a JOIN payments p USING (" + tc.members + ");"
+			items, ok := sqlNavAllOccurrences(query, tc.dialect)
+			if !ok {
+				t.Fatal("invalid SQL fixture tokenization")
+			}
+			selected, found := sqlNavSelected(query, tc.dialect, 0, strings.Index(query, "a.id")+2)
+			if tc.valid {
+				if !found || !selected.isColumn || selected.identity != "accounts\x00column\x00id" {
+					t.Fatalf("valid dialect-distinct USING lost source binding: %+v found=%t items=%+v", selected, found, items)
+				}
+			} else if found || len(items) > 0 {
+				t.Fatalf("duplicate USING emitted physical source or column: selected=%+v found=%t items=%+v", selected, found, items)
+			}
+		})
+	}
+}
+
+func TestSQLUsingColumnDuplicateEmbeddedSelectRejected(t *testing.T) {
+	for _, dialect := range []string{"mysql", "mariadb", "postgres"} {
+		duplicate := "id, `ID`"
+		if dialect == "postgres" {
+			duplicate = "id, \"id\""
+		}
+		for _, prefix := range []string{
+			"CREATE VIEW summary AS ",
+			"CREATE TABLE summary AS ",
+			"INSERT INTO archive (id) ",
+		} {
+			t.Run(dialect+"_"+prefix, func(t *testing.T) {
+				query := prefix + "SELECT a.id FROM accounts a JOIN payments p USING (" + duplicate + ");"
+				items, ok := sqlNavAllOccurrences(query, dialect)
+				if !ok {
+					t.Fatal("SQL fixture tokenization failed")
+				}
+				if selected, found := sqlNavSelected(query, dialect, 0, strings.Index(query, "a.id")+2); found {
+					t.Fatalf("duplicate embedded USING resolved unproven source: %+v", selected)
+				}
+				for _, item := range items {
+					if item.isColumn || item.name == "summary" {
+						t.Fatalf("duplicate embedded USING leaked physical identity: %+v", item)
+					}
+				}
+			})
+		}
+	}
+}
+
+func TestSQLUsingColumnListBoundaryAndLiteralGaps(t *testing.T) {
+	for _, dialect := range []string{"postgres", "mysql", "mariadb"} {
+		members := make([]string, 65)
+		for i := range members {
+			members[i] = fmt.Sprintf("column_%02d", i)
+		}
+		for _, tc := range []struct {
+			suffix  string
+			allowed bool
+		}{
+			{strings.Join(members[:64], ", "), true},
+			{strings.Join(members, ", "), false},
+			{"id, id", false},
+			{"id, 'discarded' other", false},
+			{"id 'discarded'", false},
+			{"id, 'discarded'", false},
+		} {
+			query := "SELECT a.id FROM accounts a JOIN payments p USING (" + tc.suffix + ");"
+			events, valid := sqlNavAllOccurrences(query, dialect)
+			if !valid {
+				t.Fatalf("%s: unlexable fixture %q", dialect, tc.suffix)
+			}
+			at := strings.Index(query, "a.id") + 2
+			item, found := sqlNavSelected(query, dialect, 0, at)
+			if tc.allowed && (!found || !item.isColumn) {
+				t.Fatalf("%s expected bounded accepted list with %q", dialect, tc.suffix)
+			}
+			if !tc.allowed && (found || len(events) != 0) {
+				t.Fatalf("%s accepted unproven/oversized list: %+v found=%t events=%+v", dialect, item, found, events)
+			}
+		}
+	}
+	// Ambiguous Unicode column equivalence is outside this bounded
+	// MySQL/MariaDB offline proof. It must not silently appear unique.
+	for _, dialect := range []string{"mysql", "mariadb"} {
+		query := "SELECT a.id FROM accounts a JOIN payments p USING (`İd`, id);"
+		events, valid := sqlNavAllOccurrences(query, dialect)
+		if valid && len(events) > 0 {
+			t.Fatalf("%s unsupported Unicode USING produced physical source binding: %+v", dialect, events)
+		}
 	}
 }

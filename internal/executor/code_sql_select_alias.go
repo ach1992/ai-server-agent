@@ -406,10 +406,27 @@ func sqlNavSelectUsingColumnsEnd(tokens []sqlDDLToken, at int, dialect string) (
 			return 0, false
 		}
 		name, end, ok := sqlNavName(tokens, at)
-		if !ok || end != at+1 || seen[name.identity] {
+		if !ok || end != at+1 {
 			return 0, false
 		}
-		seen[name.identity] = true
+		// USING members are *column* identifiers, not alias/table keys.
+		// MySQL/MariaDB columns are case-insensitive even when quoted;
+		// PostgreSQL preserves quoted case. Restrict MySQL/MariaDB to
+		// ASCII here: Unicode identifier equivalence is not proven by
+		// the offline lexer and must fail closed rather than guess.
+		key := name.identity
+		if dialect == "mysql" || dialect == "mariadb" {
+			for i := 0; i < len(key); i++ {
+				if key[i] >= 0x80 {
+					return 0, false
+				}
+			}
+			key = strings.ToLower(key)
+		}
+		if seen[key] {
+			return 0, false
+		}
+		seen[key] = true
 		at++
 		if at >= len(tokens) || tokens[at].literalBefore {
 			return 0, false

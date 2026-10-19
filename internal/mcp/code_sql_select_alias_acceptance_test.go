@@ -737,17 +737,19 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 	usingPath := "queries/using.sql"
 	usingSQL := "SELECT a.id, p.account_id FROM public.accounts a JOIN public.payments p USING (id) WHERE p.account_id > 0;\n"
 	writeSQL(usingPath, usingSQL)
+	usingVersion := stat(usingPath)
 	for _, method := range []string{"definition", "references"} {
 		res := call("code_"+method, map[string]any{
 			"workspace": cfg.WorkspaceDir, "path": usingPath,
-			"file_version": stat(usingPath), "language": "sql", "sql_dialect": "postgres",
+			"file_version": usingVersion, "language": "sql", "sql_dialect": "postgres",
 			"line": 0, "character": strings.Index(usingSQL, "p.account_id") + 2,
 		})
 		if !res.OK {
 			t.Fatalf("JOIN USING lost authenticated %s: %+v", method, res)
 		}
 		var targets []struct {
-			URI string `json:"uri"`
+			URI         string `json:"uri"`
+			FileVersion string `json:"file_version"`
 		}
 		if err := json.Unmarshal([]byte(res.Output), &targets); err != nil {
 			t.Fatal(err)
@@ -759,6 +761,9 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 		found := false
 		for _, target := range targets {
 			if target.URI == want {
+				if target.FileVersion != stat(want) {
+					t.Fatalf("JOIN USING %s returned stale target: %+v", method, target)
+				}
 				found = true
 			}
 		}
@@ -773,7 +778,7 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 	for _, method := range []string{"definition", "references"} {
 		res := call("code_"+method, map[string]any{
 			"workspace": cfg.WorkspaceDir, "path": usingPath,
-			"file_version": stat(usingPath), "language": "sql", "sql_dialect": "postgres",
+			"file_version": usingVersion, "language": "sql", "sql_dialect": "postgres",
 			"line": 0, "character": usingMemberAt,
 		})
 		if res.OK {
@@ -786,6 +791,48 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 			for _, target := range targets {
 				if strings.HasPrefix(target.URI, "migrations/") {
 					t.Fatalf("unqualified USING token created fabricated %s target: %+v", method, targets)
+				}
+			}
+		}
+	}
+	// The new USING fixture must also reject stale optimistic source versions.
+	writeSQL(usingPath, usingSQL+"-- changed\n")
+	staleUsing := call("code_definition", map[string]any{
+		"workspace": cfg.WorkspaceDir, "path": usingPath,
+		"file_version": usingVersion, "language": "sql", "sql_dialect": "postgres",
+		"line": 0, "character": strings.Index(usingSQL, "p.account_id") + 2,
+	})
+	if staleUsing.OK || staleUsing.ErrorCode != "file_changed" {
+		t.Fatalf("JOIN USING stale version accepted: %+v", staleUsing)
+	}
+	// The exact duplicate-normalization remediation must survive the real
+	// authenticated MCP path for both MySQL-family dialects. A successfully
+	// parsed but semantically duplicate USING list must never publish a
+	// source-backed migration definition or reference.
+	for _, dialect := range []string{"mysql", "mariadb"} {
+		for _, members := range []string{"id, `ID`", "`Id`, `id`", "`ID`, id"} {
+			invalid := "SELECT a.id FROM public.accounts a JOIN public.payments p USING (" + members + ");\n"
+			writeSQL(usingPath, invalid)
+			version := stat(usingPath)
+			at := strings.Index(invalid, "a.id") + 2
+			for _, method := range []string{"definition", "references"} {
+				response := call("code_"+method, map[string]any{
+					"workspace": cfg.WorkspaceDir, "path": usingPath,
+					"file_version": version, "language": "sql", "sql_dialect": dialect,
+					"line": 0, "character": at,
+				})
+				if response.OK {
+					var targets []struct {
+						URI string `json:"uri"`
+					}
+					if err := json.Unmarshal([]byte(response.Output), &targets); err != nil {
+						t.Fatalf("%s duplicate USING %s malformed output: %v", dialect, method, err)
+					}
+					for _, target := range targets {
+						if strings.HasPrefix(target.URI, "migrations/") {
+							t.Fatalf("%s duplicate USING %s published physical source: %+v", dialect, method, targets)
+						}
+					}
 				}
 			}
 		}
