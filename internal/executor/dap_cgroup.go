@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
@@ -48,9 +49,27 @@ func createDAPCgroup() (*dapCgroup, error) {
 	if err != nil {
 		return nil, fmt.Errorf("private DAP cgroup unavailable: %w", err)
 	}
+	// The root Executor unit intentionally uses Group=aiagent. A new
+	// cgroupfs directory can therefore inherit that group even though
+	// the original broker owns its creation. Pin root:root before any
+	// child admission, never treating mode 0700 alone as full provenance.
+	if err := os.Chown(dir, 0, 0); err != nil {
+		_ = os.Remove(dir)
+		return nil, fmt.Errorf("private DAP cgroup root ownership unavailable: %w", err)
+	}
 	if err := os.Chmod(dir, 0700); err != nil {
 		_ = os.Remove(dir)
 		return nil, err
+	}
+	info, err := os.Lstat(dir)
+	if err != nil {
+		_ = os.Remove(dir)
+		return nil, err
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if !ok || !info.IsDir() || info.Mode().Perm() != 0700 || st.Uid != 0 || st.Gid != 0 {
+		_ = os.Remove(dir)
+		return nil, errors.New("private DAP cgroup root ownership/mode verification failed")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "cgroup.kill")); err != nil {
 		_ = os.Remove(dir)

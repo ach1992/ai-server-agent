@@ -612,6 +612,17 @@ jobs:
         run: |
           test "$(uname -m)" = 'x86_64'
           grep -qF 'Ubuntu 22.04' /etc/os-release
+          # On some disposable GitHub-hosted Ubuntu 22.04 images,
+          # /usr/local/bin is root-owned but mode 0777. Product trust
+          # correctly refuses to execute an Agent from that writable
+          # directory. Tighten only this known root-owned CI-runner
+          # directory, never a real/occupied Agent host. Do not weaken
+          # systemexec.Trusted or change host-wide kernel policy.
+          sudo test -d /usr/local/bin
+          sudo test ! -L /usr/local/bin
+          test "$(sudo stat -c '%u:%g' /usr/local/bin)" = '0:0'
+          sudo chmod 0755 /usr/local/bin
+          test "$(sudo stat -c '%u:%g:%a' /usr/local/bin)" = '0:0:755'
           sudo env AI_SERVER_AGENT_BINARY=/tmp/ai-server-agent AI_SERVER_AGENT_NONINTERACTIVE=1 bash install.sh
           sudo systemctl is-active --quiet ai-server-agent.service
           sudo systemctl is-active --quiet ai-server-agent-executor.service
@@ -714,6 +725,43 @@ jobs:
           rm -rf ci-start-job-probe
           sudo /tmp/ai-server-agent-start-job-probe
           rm -f /tmp/ai-server-agent-start-job-probe
+
+          # Distinct from the pre-install root-owned IPC-only test: this
+          # exercises the genuine installed Root Executor -> original
+          # worker Bash DAP -> private cgroup/PIDFD -> verified stop path.
+          # Only this disposable GitHub VM is eligible; never change Yama
+          # sysctl or run this against an occupied Agent.
+          shell_ci_dir="$(mktemp -d)"
+          go test -c -o "$shell_ci_dir/executor.test" ./internal/executor
+          # Reproduce the real unit's euid=0 / egid=aiagent. The earlier
+          # root:root-only IPC test cannot detect group inheritance bugs.
+          # sudo -g alone can request a different sudoers Runas identity
+          # and a password on GitHub runners. Start as root normally and
+          # change only the disposable test subprocess GID via setpriv.
+          aiagent_gid="$(getent group aiagent | cut -d: -f3)"
+          [[ "$aiagent_gid" =~ ^[0-9]+$ ]]
+          test "$(sudo /usr/bin/setpriv --reuid 0 --regid "$aiagent_gid" --clear-groups /usr/bin/id -u)" = '0'
+          test "$(sudo /usr/bin/setpriv --reuid 0 --regid "$aiagent_gid" --clear-groups /usr/bin/id -g)" = "$aiagent_gid"
+          sudo /usr/bin/setpriv --reuid 0 --regid "$aiagent_gid" --clear-groups \
+            /usr/bin/env ASA_REQUIRE_ROOT_SHELL_IPC=1 \
+            "$shell_ci_dir/executor.test" -test.run '^TestShellDAPRootOwnedIPCRejectsSameUIDPeerAndPreservesActivation$' \
+            -test.v -test.timeout=60s 2>&1 | tee "$shell_ci_dir/group-proof.log"
+          grep -Fq -- '--- PASS: TestShellDAPRootOwnedIPCRejectsSameUIDPeerAndPreservesActivation' "$shell_ci_dir/group-proof.log"
+          if grep -Fq -- '--- SKIP: TestShellDAPRootOwnedIPCRejectsSameUIDPeerAndPreservesActivation' "$shell_ci_dir/group-proof.log"; then
+            echo 'Original root-owned IPC under executor service group was skipped' >&2
+            exit 1
+          fi
+          echo 'ROOT_SHELL_DAP_SERVICE_GROUP_IPC_PASS'
+          sudo env GITHUB_ACTIONS=true ASA_REQUIRE_SHELL_DAP_INSTALLED_CI=1 \
+            "$shell_ci_dir/executor.test" -test.run '^TestShellDAPInstalledPrivateCgroupLifecycleCI$' \
+            -test.v -test.timeout=75s 2>&1 | tee "$shell_ci_dir/proof.log"
+          grep -Fq -- '--- PASS: TestShellDAPInstalledPrivateCgroupLifecycleCI' "$shell_ci_dir/proof.log"
+          if grep -Fq -- '--- SKIP: TestShellDAPInstalledPrivateCgroupLifecycleCI' "$shell_ci_dir/proof.log"; then
+            echo 'Installed root Shell DAP private-cgroup acceptance was skipped' >&2
+            exit 1
+          fi
+          echo 'ROOT_SHELL_DAP_INSTALLED_PRIVATE_CGROUP_PASS'
+          rm -rf -- "$shell_ci_dir"
 
           audit_log=/var/log/ai-server-agent/audit.jsonl
           sudo test -s "$audit_log"
