@@ -730,9 +730,9 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 	}
 	if method == "configure" {
 		if d.adapter == "shell/bash-trap" {
-			// The Bash first-command trap blocks until this root-mediated
-			// activation. configurationDone emitted and pinned the real Bash
-			// child before any worker script command is allowed to run.
+			// The immutable Bash wrapper waits for root-mediated START
+			// before reading ANY script bytes. configurationDone emitted
+			// and pinned the original Bash child in its private cgroup.
 			if err := d.pinnedDebuggeeError(); err != nil {
 				return fileError("shell_dap_debuggee_identity_unverified", "state", err)
 			}

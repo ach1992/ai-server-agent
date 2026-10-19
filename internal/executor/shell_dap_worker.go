@@ -34,17 +34,27 @@ func RunShellDAPHelper() int {
 }
 
 // No bashdb, terminal reverse request, pathname FIFO, host-wide signalling,
-// third-party module, listener or writeable adapter source is needed. The Bash
-// DEBUG trap communicates solely over three inherited anonymous descriptors:
+// third-party module, listener or writeable adapter source is needed.
+// The fixed initial Bash wrapper is blocked BEFORE it can read or execute
+// the user's script. The pidfd/cgroup/source verification precedes the one
+// START command. It then execs the target under the SAME original Bash PID.
+// The DEBUG trap communicates solely over three inherited anonymous descriptors:
 // sealed read-only BASH_ENV, event pipe and command pipe. Even if the worker
 // target manipulates these descriptors, it can only affect its own private DAP
 // session; the executor's cgroup is authoritative for descendant cleanup.
+const shellDAPBootstrap = `# fixed adapter-owned bootstrap, not user script
+builtin printf 'READY\t1\n' >&4 || exit 97
+IFS= read -r _asa_answer <&5 || exit 98
+[[ "$_asa_answer" == START ]] || exit 98
+export BASH_ENV=/proc/self/fd/3
+exec /usr/bin/bash --noprofile --norc "$1"
+`
+
 const shellDAPPrelude = `# sourced only from the sealed inherited BASH_ENV fd
 unset BASH_ENV
 _asa_target=$ASA_SHELL_TARGET
 _asa_breakpoints=$ASA_SHELL_BREAKPOINTS
 _asa_entry=$ASA_SHELL_STOP_ON_ENTRY
-_asa_first=1
 _asa_step=continue
 _asa_step_depth=0
 
@@ -63,13 +73,6 @@ _asa_vars() {
 _asa_hook() {
   local _asa_line=$1 _asa_file=$2 _asa_depth=${#FUNCNAME[@]} _asa_reason=''
   [[ "${BASH_SUBSHELL:-0}" == 0 && "$_asa_file" == "$_asa_target" ]] || return 0
-  if [[ $_asa_first == 1 ]]; then
-    _asa_first=0
-    builtin printf 'READY\t%s\n' "$_asa_line" >&4 || exit 97
-    local _asa_answer
-    IFS= read -r _asa_answer <&5 || exit 98
-    [[ $_asa_answer == START ]] || exit 98
-  fi
   case "$_asa_step" in
     into) _asa_reason=step;;
     over) ((_asa_depth<=_asa_step_depth)) && _asa_reason=step;;
@@ -277,11 +280,15 @@ func (w *shellDAPWorker) startBash() error {
 		eventWriter.Close()
 		return err
 	}
-	cmd := exec.Command("/usr/bin/bash", "--noprofile", "--norc", w.program)
+	// The wrapper never opens the target script until the Executor has
+	// pinned this original Bash PID. Bash -c sets $0 to the fixed marker
+	// and $1 to the validated original workspace script path.
+	cmd := exec.Command("/usr/bin/bash", "--noprofile", "--norc", "-c",
+		shellDAPBootstrap, "asa-shell-dap", w.program)
 	cmd.Dir = w.workspace
 	cmd.Env = []string{
 		"PATH=/usr/bin:/bin", "HOME=" + os.Getenv("HOME"), "LC_ALL=C",
-		"BASH_ENV=/proc/self/fd/3", "ASA_SHELL_TARGET=" + w.program,
+		"ASA_SHELL_TARGET=" + w.program,
 		"ASA_SHELL_BREAKPOINTS=" + shellDAPPoints(w.points),
 		"ASA_SHELL_STOP_ON_ENTRY=" + func() string {
 			if w.stopEntry {
@@ -324,9 +331,9 @@ func (w *shellDAPWorker) startBash() error {
 		_ = w.event("terminated", map[string]any{})
 		close(w.exit)
 	}()
-	// First command is paused by the sealed prelude, BEFORE script code is
-	// executed. This handshake lets the Executor verify the original Bash PID,
-	// trusted executable inode and exact private cgroup membership.
+	// The immutable wrapper reports READY before even opening the target.
+	// The Executor proves the original Bash PID, trusted executable inode,
+	// exact cgroup membership and source version before sending START.
 	select {
 	case <-w.ready:
 		return nil

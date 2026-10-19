@@ -277,15 +277,15 @@ func TestShellDAPWorkerPreservesStrictBashExit(t *testing.T) {
 	}
 }
 
-// configurationDone may spawn the original Bash process only into its
-// blocked initial hook. No user script command is allowed until the root
-// executor verifies the separately reported kernel identity and sends the
-// private asaActivate. This test proves the worker-side half of that gate.
+// configurationDone starts only the fixed, blocked Bash bootstrap. It
+// does not even parse script bytes until the root Executor has pinned the
+// original Bash process and explicitly activated execution. The exec of
+// the real script interpreter must preserve that original Bash PID.
 func TestShellDAPWorkerHoldsBeforeFirstCommandUntilActivation(t *testing.T) {
 	dir := t.TempDir()
 	script := filepath.Join(dir, "gated.sh")
 	marker := filepath.Join(dir, "marker")
-	source := "#!/usr/bin/env bash\nprintf 'EXECUTED' > " + shellDAPQuotedTestArg(marker) + "\n"
+	source := "#!/usr/bin/env bash\nprintf '%s' $BASHPID > " + shellDAPQuotedTestArg(marker) + "\n"
 	if err := os.WriteFile(script, []byte(source), 0600); err != nil {
 		t.Fatal(err)
 	}
@@ -298,15 +298,21 @@ func TestShellDAPWorkerHoldsBeforeFirstCommandUntilActivation(t *testing.T) {
 	c.event("initialized")
 	c.success("launch", map[string]any{"program": script, "cwd": dir})
 	c.success("configurationDone", map[string]any{})
-	c.event("process")
+	process := c.event("process")
+	var proc struct {
+		SystemProcessID int `json:"systemProcessId"`
+	}
+	if err := json.Unmarshal(process.Body, &proc); err != nil || proc.SystemProcessID <= 0 {
+		t.Fatalf("unverified original Bash identity: %+v", process)
+	}
 	if _, err := os.Stat(marker); !os.IsNotExist(err) {
 		t.Fatalf("script ran before protected activation: %v", err)
 	}
 	c.success("asaActivate", map[string]any{})
 	c.event("terminated")
 	got, err := os.ReadFile(marker)
-	if err != nil || string(got) != "EXECUTED" {
-		t.Fatalf("activation did not run script command: %q, %v", got, err)
+	if err != nil || string(got) != strconv.Itoa(proc.SystemProcessID) {
+		t.Fatalf("activation changed original Bash PID or failed: source=%q original=%d err=%v", got, proc.SystemProcessID, err)
 	}
 	if r := c.request("asaActivate", map[string]any{}); r.Success {
 		t.Fatal("second activation was accepted")
@@ -424,5 +430,41 @@ func TestShellDAPWorkerRejectsOversizedDAPHeader(t *testing.T) {
 	_, err = shellDAPRead(bufio.NewReader(strings.NewReader("Content-Length: 100000\\r\\n\\r\\n")))
 	if err == nil {
 		t.Fatal("oversized frame was accepted")
+	}
+}
+
+// The initial gate must be outside the user script's parser, not just its
+// DEBUG trap: an invalid script can still enter the original-Bash PID proof
+// state, and its syntax is not evaluated until after explicit activation.
+func TestShellDAPWorkerDoesNotParseScriptBeforeActivation(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "malformed.sh")
+	if err := os.WriteFile(script, []byte("#!/usr/bin/env bash\nif then\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client, worker := net.Pipe()
+	defer client.Close()
+	done := make(chan error, 1)
+	go func() { defer worker.Close(); done <- serveShellDAP(worker, worker) }()
+	c := &shellDAPTestClient{t: t, conn: client, parser: &dapState{conn: client}}
+	c.success("initialize", map[string]any{})
+	c.event("initialized")
+	c.success("launch", map[string]any{"program": script, "cwd": dir})
+	c.success("configurationDone", map[string]any{})
+	c.event("process") // still alive, despite syntactically invalid source
+	c.success("asaActivate", map[string]any{})
+	exit := c.event("exited")
+	if strings.Contains(string(exit.Body), "\"exitCode\":0") {
+		t.Fatalf("malformed script reported success: %s", exit.Body)
+	}
+	c.event("terminated")
+	c.success("disconnect", map[string]any{})
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("adapter was not retired")
 	}
 }
