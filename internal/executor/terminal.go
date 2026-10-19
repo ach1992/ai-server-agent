@@ -241,7 +241,7 @@ func (s *Server) withTerminalAdmissionStop(open func() Response, stop func(strin
 	if admissionErr != nil {
 		return terminalError("terminal_registry_unavailable", admissionErr)
 	}
-	if count+s.sessions.unpersistedTerminalCount() >= maxStdioSessions {
+	if count+s.sessions.unpersistedTerminalCount() >= s.stdioSessionCapacity() {
 		return terminalError("terminal_resource_limit", errSessionBusy)
 	}
 	return open()

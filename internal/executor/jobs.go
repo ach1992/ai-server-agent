@@ -21,11 +21,13 @@ import (
 	"sync"
 	"syscall"
 	"time"
+
+	"github.com/ach1992/ai-server-agent/internal/config"
 )
 
 const (
-	maxActivePersistentJobs           = 8 // hard bound; configured default is four
-	maxActivePersistentServices       = 2
+	maxActivePersistentJobs           = 64 // hard bound; configured default is four
+	maxActivePersistentServices       = 64 // hard bound; configured default is two
 	maxCompletedJobArtifacts          = 32
 	maxFailedJobClaims                = maxCompletedJobArtifacts
 	maxPersistentJobClaims            = 2*maxCompletedJobArtifacts + maxActivePersistentJobs + maxActivePersistentServices
@@ -254,7 +256,7 @@ func (s *Server) startJobBounded(req Request) (resp Response) {
 		}
 	}
 
-	if blocked := persistentJobAdmissionResponseWithLimit(jobsDir, s.persistentTaskCapacity(), req.Kind); blocked != nil {
+	if blocked := persistentJobAdmissionResponseWithLimits(jobsDir, s.persistentTaskCapacity(), s.persistentServiceCapacity(), req.Kind); blocked != nil {
 		return *blocked
 	}
 
@@ -433,7 +435,7 @@ func (s *Server) resumeClaimedJob(req Request, jobsDir, claimPath string, claim 
 	// Only "claimed" proves systemd-run was never invoked. Safely rebuild
 	// any partial handoff before rechecking resource admission.
 	cleanupJobPaths(paths)
-	if blocked := persistentJobAdmissionResponseWithLimit(jobsDir, s.persistentTaskCapacity(), kind); blocked != nil {
+	if blocked := persistentJobAdmissionResponseWithLimits(jobsDir, s.persistentTaskCapacity(), s.persistentServiceCapacity(), kind); blocked != nil {
 		blocked.JobID = claim.JobID
 		blocked.IdempotentReplay = true
 		return *blocked
@@ -1087,6 +1089,14 @@ func (s *Server) persistentTaskCapacity() int {
 	return n
 }
 
+func (s *Server) persistentServiceCapacity() int {
+	n := s.cfg.EffectiveRuntime().PersistentServiceSlots
+	if n < 1 || n > maxActivePersistentServices {
+		return 2 // legacy configs and incomplete internal test fixtures
+	}
+	return n
+}
+
 // Kept for fixture-level checks of the maximum independently protected cap.
 func persistentJobAdmissionResponse(jobsDir string, kinds ...string) *Response {
 	kind := "task"
@@ -1096,30 +1106,43 @@ func persistentJobAdmissionResponse(jobsDir string, kinds ...string) *Response {
 	return persistentJobAdmissionResponseWithLimit(jobsDir, maxActivePersistentJobs, kind)
 }
 
+// Legacy fixture wrapper exercises the default independent service quota.
 func persistentJobAdmissionResponseWithLimit(jobsDir string, taskLimit int, kind string) *Response {
-	return persistentJobAdmissionResponseWithReserveCheck(jobsDir, taskLimit, kind, jobStateHasReserve)
+	return persistentJobAdmissionResponseWithLimits(jobsDir, taskLimit, 2, kind)
 }
 
-// Inject the filesystem check only in deterministic quota tests. Production
-// always inspects real free space; admission never assumes a spare disk.
+func persistentJobAdmissionResponseWithLimits(jobsDir string, taskLimit, serviceLimit int, kind string) *Response {
+	return persistentJobAdmissionResponseWithReserveCheckAndLimits(jobsDir, taskLimit, serviceLimit, kind, jobStateHasReserve)
+}
+
+// Legacy fixture wrapper keeps the original default service quota.
 func persistentJobAdmissionResponseWithReserveCheck(jobsDir string, taskLimit int, kind string, reserveCheck func(string, int64) (bool, int64, error)) *Response {
+	return persistentJobAdmissionResponseWithReserveCheckAndLimits(jobsDir, taskLimit, 2, kind, reserveCheck)
+}
+
+// Production and deterministic tests share admission logic with independently
+// configured task/service quotas. The filesystem check may be injected only
+// in tests; production always examines real disk space.
+func persistentJobAdmissionResponseWithReserveCheckAndLimits(jobsDir string, taskLimit, serviceLimit int, kind string, reserveCheck func(string, int64) (bool, int64, error)) *Response {
 	if taskLimit < 1 || taskLimit > maxActivePersistentJobs {
 		taskLimit = 4
+	}
+	if serviceLimit < 1 || serviceLimit > maxActivePersistentServices {
+		serviceLimit = 2
 	}
 	counts, err := activeAgentJobKindCounts(jobsDir)
 	if err != nil {
 		resp := jobStateError("job_state_unavailable", err)
 		return &resp
 	}
-	// After a supported 8 -> 1 task downscale, the existing transient units
-	// remain alive. Enforce *hard* per-kind bounds but never let previously
-	// admitted tasks consume the two independent service admission slots.
+	// After a supported capacity downscale, existing transient jobs remain
+	// alive. Enforce hard per-kind bounds but preserve independent quotas.
 	if counts.tasks > maxActivePersistentJobs || counts.services > maxActivePersistentServices {
 		resp := jobStateError("job_state_unavailable", errors.New("active persistent jobs exceed the hard per-kind bounds"))
 		return &resp
 	}
 	if (kind == "task" && counts.tasks >= taskLimit) ||
-		(kind == "service" && counts.services >= maxActivePersistentServices) {
+		(kind == "service" && counts.services >= serviceLimit) {
 		return &Response{
 			Error:      "persistent task/service execution capacity is busy",
 			ReasonCode: "resource_limit",
@@ -1133,8 +1156,8 @@ func persistentJobAdmissionResponseWithReserveCheck(jobsDir string, taskLimit in
 		resp := jobStateError("job_state_unavailable", errors.New("unrecognized persistent job kind"))
 		return &resp
 	}
-	// Keep space for all trusted active task logs after a downscale.
-	reserve := jobStateSafetyReserveBytesForActive(taskLimit, counts.tasks)
+	// Keep space for all trusted active task AND service logs after downscale.
+	reserve := jobStateSafetyReserveBytesForLimits(max(taskLimit, counts.tasks), max(serviceLimit, counts.services))
 	ok, free, err := reserveCheck(jobsDir, reserve)
 	if err != nil {
 		resp := jobStateError("job_state_unavailable", err)
@@ -1153,14 +1176,39 @@ func persistentJobAdmissionResponseWithReserveCheck(jobsDir string, taskLimit in
 	return nil
 }
 
-// A new configured admission limit cannot shrink already-running task logs.
-// Validated inventory is required before calling this from live admission.
+// Legacy default-service wrappers retain existing fixture semantics.
 func jobStateSafetyReserveBytesForActive(taskLimit, activeTasks int) int64 {
-	return jobStateSafetyReserveBytesFor(max(taskLimit, activeTasks))
+	return jobStateSafetyReserveBytesForLimits(max(taskLimit, activeTasks), 2)
 }
 
 func jobStateSafetyReserveBytesFor(taskLimit int) int64 {
-	return int64(2*maxCompletedJobArtifacts+taskLimit+maxActivePersistentServices)*maxJobLogBytes + jobStateOverheadBytes
+	return jobStateSafetyReserveBytesForLimits(taskLimit, 2)
+}
+
+// Keep space for bounded retained logs plus every configured or still-active
+// task/service. Neither service downscaling nor task downscaling deletes units.
+func jobStateSafetyReserveBytesForLimits(taskLimit, serviceLimit int) int64 {
+	return int64(2*maxCompletedJobArtifacts+taskLimit+serviceLimit)*maxJobLogBytes + jobStateOverheadBytes
+}
+
+// Audit is a separate admission boundary: after an Executor restart it must
+// preserve the same log reserve for still-active jobs as ordinary job admission.
+// If PID1/claim inventory is untrustworthy, reserve the hard ceiling rather
+// than silently trusting a possibly downscaled configuration.
+func jobAuditSafetyReserveAtStartup(cfg config.Config) int64 {
+	runtime := cfg.EffectiveRuntime()
+	tasks, services := runtime.PersistentTaskSlots, runtime.PersistentServiceSlots
+	if tasks < 1 || tasks > maxActivePersistentJobs {
+		tasks = 4
+	}
+	if services < 1 || services > maxActivePersistentServices {
+		services = 2
+	}
+	counts, err := activeAgentJobKindCounts(filepath.Join(cfg.StateDir, "jobs"))
+	if err != nil {
+		return jobStateSafetyReserveBytesForLimits(maxActivePersistentJobs, maxActivePersistentServices)
+	}
+	return jobStateSafetyReserveBytesForLimits(max(tasks, counts.tasks), max(services, counts.services))
 }
 
 func jobStateHasReserve(path string, reserve int64) (bool, int64, error) {

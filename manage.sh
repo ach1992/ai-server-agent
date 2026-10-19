@@ -471,7 +471,7 @@ RUNTIME_BINARY="/usr/local/bin/ai-server-agent"
 
 runtime_setting_allowed(){
   case "${1:-}" in
-    http_read_header_timeout_seconds|http_idle_timeout_seconds|command_timeout_seconds|workspace_file_timeout_seconds|text_fallback_bytes|transfer_staging_mib|transfer_session_ttl_seconds|transfer_active_sessions|worker_command_slots|persistent_task_slots) return 0 ;;
+    http_read_header_timeout_seconds|http_idle_timeout_seconds|command_timeout_seconds|workspace_file_timeout_seconds|text_fallback_bytes|transfer_staging_mib|transfer_session_ttl_seconds|transfer_active_sessions|worker_command_slots|persistent_task_slots|persistent_service_slots|stdio_session_slots) return 0 ;;
     *) return 1 ;;
   esac
 }
@@ -507,9 +507,11 @@ runtime_menu(){
   while true; do
     header
     ui_section 'Execution capacity'
-    local worker tasks choice key value
+    local worker tasks services sessions choice key value
     worker="$(config_get runtime.worker_command_slots)"
     tasks="$(config_get runtime.persistent_task_slots)"
+    services="$(config_get runtime.persistent_service_slots)"
+    sessions="$(config_get runtime.stdio_session_slots)"
     case "${worker:-0}" in
       0) worker='Automatic: up to 4 commands, CPU-aware' ;;
       *) worker="$worker simultaneous commands" ;;
@@ -517,24 +519,32 @@ runtime_menu(){
     ui_detail 'Commands' "$worker"
     ui_detail 'Tasks' "${tasks:-4} persistent jobs concurrently"
     ui_detail 'Root' '1 concurrent root command (fixed)'
-    ui_detail 'Services' '2 persistent services (fixed)'
+    ui_detail 'Services' "${services:-2} persistent jobs concurrently"
+    ui_detail 'Sessions' "${sessions:-8} LSP/DAP/terminal/Browser sessions"
     printf '\n'
-    ui_wrap '  ' 'Settings: worker_command_slots (0=auto, 1..8); persistent_task_slots (1..8).'
+    ui_wrap '  ' 'Settings: worker_command_slots (0=auto, 1..64); persistent_task_slots and persistent_service_slots (1..64).'
     ui_wrap '  ' 'These limits are independent. Raise gradually on hosts with sufficient CPU and memory.'
     ui_section 'Change settings'
-    ui_option 1 'Worker command slots (0=auto, 1..8)'
-    ui_option 2 'Persistent task slots (1..8)'
+    ui_option 1 'Worker command slots (0=auto, 1..64)'
+    ui_option 2 'Persistent task slots (1..64)'
     ui_option 3 'Other runtime setting (advanced)'
     ui_option 4 'Reset a runtime setting' caution
     ui_option 5 'Show all settings and ranges'
+    ui_option 6 'Persistent service slots (1..64)'
+    ui_option 7 'Shared process sessions (1..64)'
     ui_option 0 'Back' navigation
     if ! ui_read_choice choice 'Choose: '; then
       [ "${UI_SIGINT_CAUGHT:-0}" = 1 ] && continue
       return 0
     fi
     case "$choice" in
-      1|2)
-        if [ "$choice" = 1 ]; then key=worker_command_slots; else key=persistent_task_slots; fi
+      1|2|6|7)
+        case "$choice" in
+          1) key=worker_command_slots ;;
+          2) key=persistent_task_slots ;;
+          6) key=persistent_service_slots ;;
+          7) key=stdio_session_slots ;;
+        esac
         if ! ui_read_choice value 'New value (b=cancel): '; then
           [ "${UI_SIGINT_CAUGHT:-0}" = 1 ] && continue
           return 0

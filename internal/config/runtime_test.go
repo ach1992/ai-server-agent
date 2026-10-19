@@ -129,6 +129,10 @@ func override(t *testing.T, r *RuntimeSettings, key string, value int) {
 		r.WorkerCommandSlots = value
 	case "persistent_task_slots":
 		r.PersistentTaskSlots = value
+	case "persistent_service_slots":
+		r.PersistentServiceSlots = value
+	case "stdio_session_slots":
+		r.StdioSessionSlots = value
 	default:
 		t.Fatalf("new runtime key %q lacks boundary tests", key)
 	}

@@ -9,6 +9,8 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+
+	"github.com/ach1992/ai-server-agent/internal/config"
 	"time"
 )
 
@@ -175,6 +177,39 @@ func TestReviewR2FullRecoveredCapacityRejectsBeforeLaunch(t *testing.T) {
 	}
 	if entries, _ := os.ReadDir(filepath.Join(s.cfg.StateDir, "terminal-sessions")); len(entries) != maxStdioSessions {
 		t.Fatalf("original recovered identities were not preserved: %d", len(entries))
+	}
+}
+
+func TestConfigured64TerminalRecoveredAdmissionAndDownscale(t *testing.T) {
+	s, _, _ := testStdioBroker(t)
+	runtime := config.DefaultRuntimeSettings()
+	runtime.StdioSessionSlots = 64
+	s.cfg.Runtime = &runtime
+	s.sessions = newStdioSessionBrokerForSlots(64)
+	if s.stdioSessionCapacity() != 64 || s.sessions.limit != 64 {
+		t.Fatal("configured broker and admission must share the same limit")
+	}
+	now := time.Now().Add(time.Hour)
+	for n := 1; n <= maxStdioSessions; n++ {
+		admissionRecordForTest(t, s, n, now)
+	}
+	admitted := 0
+	open := func() Response { admitted++; return Response{OK: true} }
+	if r := s.withTerminalAdmissionStop(open, func(string) error { return errors.New("unexpected cleanup") }); !r.OK || admitted != 1 {
+		t.Fatalf("configured 64 slots refused ninth recovered terminal: %+v", r)
+	}
+	for n := maxStdioSessions + 1; n <= 64; n++ {
+		admissionRecordForTest(t, s, n, now)
+	}
+	if r := s.withTerminalAdmissionStop(open, func(string) error { return errors.New("unexpected cleanup") }); r.OK || r.ErrorCode != "terminal_resource_limit" || admitted != 1 {
+		t.Fatalf("65th terminal was admitted or callback invoked: %+v", r)
+	}
+	runtime.StdioSessionSlots = 1
+	if r := s.withTerminalAdmissionStop(open, func(string) error { return errors.New("unexpected cleanup") }); r.OK || r.ErrorCode != "terminal_resource_limit" {
+		t.Fatalf("downscale lost protected terminal records: %+v", r)
+	}
+	if count, err := s.terminalRecordCountWithStop(func(string) error { return errors.New("unexpected cleanup") }); err != nil || count != 64 {
+		t.Fatalf("downscale changed recovered terminal identity count: %d (%v)", count, err)
 	}
 }
 

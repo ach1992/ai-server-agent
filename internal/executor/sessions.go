@@ -19,13 +19,14 @@ import (
 // This broker is an executor-private building block for LSP/DAP. It is not a
 // generic MCP process tool. Terminal/tmux control remains owned by #60.
 const (
-	maxStdioSessions       = 8
-	maxStdioInputBytes     = 16 << 10
-	maxStdioEventBytes     = 4 << 10
-	maxStdioOutputBytes    = 64 << 10
-	maxStdioOutputEvents   = 64
-	maxStdioSessionAge     = time.Hour
-	completedSessionRetain = 5 * time.Minute
+	maxStdioSessions             = 8 // legacy/default shared session capacity
+	maxConfigurableStdioSessions = 64
+	maxStdioInputBytes           = 16 << 10
+	maxStdioEventBytes           = 4 << 10
+	maxStdioOutputBytes          = 64 << 10
+	maxStdioOutputEvents         = 64
+	maxStdioSessionAge           = time.Hour
+	completedSessionRetain       = 5 * time.Minute
 )
 
 var (
@@ -84,10 +85,26 @@ type stdioSession struct {
 type stdioSessionBroker struct {
 	mu       sync.Mutex
 	sessions map[string]*stdioSession
+	limit    int
 }
 
 func newStdioSessionBroker() *stdioSessionBroker {
-	return &stdioSessionBroker{sessions: make(map[string]*stdioSession)}
+	return newStdioSessionBrokerForSlots(maxStdioSessions)
+}
+
+func newStdioSessionBrokerForSlots(slots int) *stdioSessionBroker {
+	if slots < 1 || slots > maxConfigurableStdioSessions {
+		slots = maxStdioSessions
+	}
+	return &stdioSessionBroker{sessions: make(map[string]*stdioSession), limit: slots}
+}
+
+func (s *Server) stdioSessionCapacity() int {
+	n := s.cfg.EffectiveRuntime().StdioSessionSlots
+	if n < 1 || n > maxConfigurableStdioSessions {
+		return maxStdioSessions
+	}
+	return n
 }
 
 // A scope whose startup could not be proven clean has NO Control Mode client
@@ -157,7 +174,7 @@ func (b *stdioSessionBroker) reserve(session *stdioSession) error {
 			delete(b.sessions, id)
 		}
 	}
-	if len(b.sessions) >= maxStdioSessions || b.sessions[session.id] != nil {
+	if len(b.sessions) >= b.limit || b.sessions[session.id] != nil {
 		return errSessionBusy
 	}
 	b.sessions[session.id] = session
