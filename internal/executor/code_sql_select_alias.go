@@ -103,6 +103,7 @@ func sqlNavSelectAnalysis(statement []sqlDDLToken, dialect string) (sources, col
 	tableTokens := make(map[int]bool)
 	sources = make([]sqlNavOccurrence, 0, 8)
 	var fromSeen, joined, onSeen, inFromScope bool
+	fromToken := -1
 	joinModifier := ""     // empty, INNER, LEFT/RIGHT/FULL, or LEFT/RIGHT/FULL OUTER
 	onPredicateStart := -1 // current ON start, or -1 after validated boundary
 	depth, sourceCount := 0, 0
@@ -215,6 +216,7 @@ func sqlNavSelectAnalysis(statement []sqlDDLToken, dialect string) (sources, col
 					return nil, nil
 				}
 				fromSeen, inFromScope = true, true
+				fromToken = i
 			} else {
 				if !fromSeen || !inFromScope || joined && (!onSeen ||
 					onPredicateStart >= 0 && !sqlNavSelectOnPredicateComplete(statement[onPredicateStart:i], dialect)) {
@@ -292,6 +294,9 @@ func sqlNavSelectAnalysis(statement []sqlDDLToken, dialect string) (sources, col
 			!sqlNavSelectOnPredicateComplete(statement[onPredicateStart:], dialect)) || len(tables) == 0 {
 		return nil, nil
 	}
+	if !sqlNavSelectTailProven(statement, fromToken, dialect) {
+		return nil, nil // unsupported/malformed trailing clause, no graph
+	}
 
 	// Qualified spelling is proven by FROM/JOIN, not guessed from SELECT
 	// expressions. Select only the actual column token, so a schema prefix
@@ -317,6 +322,17 @@ func sqlNavSelectAnalysis(statement []sqlDDLToken, dialect string) (sources, col
 		if !valid || end <= i+1 || end-i != 3 && end-i != 5 ||
 			end < len(statement) && (statement[end].text == "." || statement[end].text == "(") {
 			continue
+		}
+		// SQL string literals are elided by the lexer. Lexical equality
+		// after that lossy boundary is not a proof of source identity:
+		// a.'ignored'id must never collapse to a.id. Inspect every token
+		// consumed by the qualified name, including dots and prefixes,
+		// and invalidate the entire SELECT emission unit. Unrelated
+		// literals in other projection expressions are not consumed here.
+		for at := i; at < end; at++ {
+			if statement[at].literalBefore {
+				return nil, nil
+			}
 		}
 		column := statement[end-1]
 		if tableTokens[end-1] || column.text == "" {

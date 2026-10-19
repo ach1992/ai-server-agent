@@ -421,6 +421,13 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 		{"r2_view_unknown_gap", "CREATE VIEW invalid_view AS SELECT a.id FROM public.accounts a JUNK JOIN public.payments p ON a.id=p.id;\n", "public.accounts"},
 		{"r2_insert_invalid_on", "INSERT INTO archive (id) SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id = ONLY;\n", "public.accounts"},
 		{"r3_invalid_ddl_column", "SELECT i.id FROM impossible i;\n", "i.id"},
+		{"f1_qualified_projection_literal", "SELECT a.'ignored'id FROM public.accounts a;\n", "id"},
+		{"f1_qualified_where_literal", "SELECT a.id FROM public.accounts a WHERE a.'ignored'id=1;\n", "a.id"},
+		{"f2_unproven_view_body", "CREATE VIEW bogus AS FROBNICATE;\n", "bogus"},
+		{"f2_function_join_bad_on", "CREATE VIEW bogus AS SELECT * FROM generate_series(1,2) g JOIN public.accounts a ON a.id=ONLY;\n", "public.accounts"},
+		{"f2_where_bad_operand", "CREATE VIEW bogus AS SELECT a.id FROM public.accounts a WHERE ONLY;\n", "public.accounts"},
+		{"f3_index_bad_suffix", "CREATE INDEX bogus ON public.accounts (id) ONLY;\n", "public.accounts"},
+		{"f3_alter_unknown_action", "ALTER TABLE public.accounts ADD COLUMN okay INT, BOGUS REFERENCES public.payments(id);\n", "public.payments"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			path := "queries/r123.sql"
@@ -451,6 +458,70 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 				}
 			}
 		})
+	}
+	// F2/F3: malformed CREATE statements must not become a source-backed
+	// migration declaration even when the querying SQL itself is valid.
+	for _, tc := range []struct{ name, ddl string }{
+		{"incomplete_primary", "CREATE TABLE impossible (id BIGINT, PRIMARY KEY ONLY);\n"},
+		{"incomplete_unique", "CREATE TABLE impossible (id BIGINT, UNIQUE wrong);\n"},
+		{"invalid_create_view_body", "CREATE VIEW impossible AS FROBNICATE;\n"},
+		{"invalid_function_join", "CREATE VIEW impossible AS SELECT * FROM generate_series(1,2) g JOIN public.accounts a ON a.id=ONLY;\n"},
+	} {
+		t.Run("f2_f3_declaration_"+tc.name, func(t *testing.T) {
+			writeSQL(invalidMigration, tc.ddl)
+			source := "SELECT i.id FROM impossible i;\n"
+			path := "queries/r123.sql"
+			writeSQL(path, source)
+			for _, method := range []string{"definition", "references"} {
+				response := call("code_"+method, map[string]any{
+					"workspace": cfg.WorkspaceDir, "path": path, "file_version": stat(path),
+					"language": "sql", "sql_dialect": "postgres", "line": 0,
+					"character": strings.Index(source, "i.id") + 2,
+				})
+				if response.OK {
+					var targets []struct {
+						URI string `json:"uri"`
+					}
+					if err := json.Unmarshal([]byte(response.Output), &targets); err != nil {
+						t.Fatal(err)
+					}
+					for _, target := range targets {
+						if target.URI == invalidMigration {
+							t.Fatalf("unproven %s returned %s source: %+v", tc.name, method, response)
+						}
+					}
+				}
+			}
+		})
+	}
+	// A malformed INDEX suffix or ALTER action must not contaminate
+	// code_references for a real, independently declared accounts table.
+	badIndexPath := "migrations/005_bad_index.sql"
+	badAlterPath := "migrations/006_bad_alter.sql"
+	writeSQL(badIndexPath, "CREATE INDEX fake_idx ON public.accounts (id) ONLY;\n")
+	writeSQL(badAlterPath, "ALTER TABLE public.accounts ADD COLUMN okay INT, BOGUS REFERENCES public.payments(id);\n")
+	validQuery := "SELECT a.id FROM public.accounts a;\n"
+	writeSQL("queries/r123.sql", validQuery)
+	for _, selected := range []string{"a.id", "public.accounts"} {
+		at := strings.Index(validQuery, selected) + len(selected) - 1
+		response := call("code_references", map[string]any{
+			"workspace": cfg.WorkspaceDir, "path": "queries/r123.sql",
+			"file_version": stat("queries/r123.sql"), "language": "sql",
+			"sql_dialect": "postgres", "line": 0, "character": at,
+		})
+		if response.OK {
+			var targets []struct {
+				URI string `json:"uri"`
+			}
+			if err := json.Unmarshal([]byte(response.Output), &targets); err != nil {
+				t.Fatal(err)
+			}
+			for _, target := range targets {
+				if target.URI == badIndexPath || target.URI == badAlterPath {
+					t.Fatalf("invalid migration %s polluted %s references: %+v", target.URI, selected, response)
+				}
+			}
+		}
 	}
 	// A valid nested JOIN remains navigable through real authenticated MCP.
 	// The fail-closed R2 correction must not discard a provable contained
@@ -488,5 +559,5 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 			t.Fatalf("valid contained %s missing %s: %+v", method, want, response)
 		}
 	}
-	t.Log("DIRECT_REAL_SQL_ALIAS_MCP_PASS definitions=2 references=5 versions=3 stale_rejected=true no_db=true malformed_on_rejected=true functions_excluded=true source_literals_rejected=true unconsumed_source_gaps_rejected=true pg_on_reserved_rejected=true pg_only_modifier_rejected=true pg_quoted_only_resolved=true mysql_only_resolved=true mariadb_only_resolved=true mysql_mariadb_join_only_resolved=true r1_r2_r3_crossfile_rejected=true n4_table_level_modifier_rejected=true n4_no_false_crossfile_refs=true")
+	t.Log("DIRECT_REAL_SQL_ALIAS_MCP_PASS definitions=2 references=5 versions=3 stale_rejected=true no_db=true malformed_on_rejected=true functions_excluded=true source_literals_rejected=true unconsumed_source_gaps_rejected=true pg_on_reserved_rejected=true pg_only_modifier_rejected=true pg_quoted_only_resolved=true mysql_only_resolved=true mariadb_only_resolved=true mysql_mariadb_join_only_resolved=true r1_r2_r3_crossfile_rejected=true f1_f2_f3_proven_emission_rejected=true n4_table_level_modifier_rejected=true n4_no_false_crossfile_refs=true")
 }

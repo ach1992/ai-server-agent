@@ -437,12 +437,25 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 					at += 3
 				}
 				occ, next, valid := sqlNavRelationName(statement, at, dialect)
+				if valid && object == "TABLE" && next < len(statement) &&
+					statement[next].keyword() == "LIKE" {
+					// MySQL/MariaDB CREATE TABLE dst LIKE src is a complete
+					// alternative to the column-list grammar. PostgreSQL
+					// instead requires LIKE inside CREATE TABLE (...).
+					if dialect != "mysql" && dialect != "mariadb" {
+						return
+					}
+					_, end, ok := sqlNavRelationName(statement, next+1, dialect)
+					if !ok || end != len(statement) {
+						return
+					}
+				}
 				// A malformed column entry invalidates the entire CREATE
 				// TABLE source: do not publish its table header, an earlier
 				// good column, or any FK/constraint use from the same SQL.
 				if valid && object == "TABLE" && next < len(statement) &&
 					statement[next].text == "(" &&
-					!sqlNavCreateTableColumnsValid(statement, next, dialect) {
+					!sqlNavCreateTableWholeProof(statement, next, dialect) {
 					return
 				}
 				if valid && (dialect == "mysql" || dialect == "mariadb") &&
@@ -454,12 +467,21 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 						statement[next].keyword() == "AS" || statement[next].keyword() == "LIKE")) ||
 						(object == "VIEW" && (materialized && sqlDDLMaterializedQuery(statement, next) ||
 							!materialized && statement[next].keyword() == "AS"))) {
+					// A query-bearing CREATE may publish its physical name
+					// only after its entire supported AS body has been
+					// proved. Header-only recognition is never sufficient.
 					var querySources, queryColumns []sqlNavOccurrence
-					if selectAt := sqlNavCreateQueryStart(statement, next, materialized); selectAt >= 0 {
-						var invalid bool
-						querySources, queryColumns, invalid = sqlNavNestedSelectScope(statement, selectAt, dialect, materialized)
-						if invalid {
-							return // do not publish a declaration from an invalid ordinary query body
+					queryBearing := object == "VIEW" || statement[next].keyword() == "AS" ||
+						materialized
+					if queryBearing {
+						selectAt := sqlNavCreateQueryStart(statement, next, materialized)
+						if selectAt < 0 {
+							return // unsupported TABLE/VALUES/CTE or invalid AS body
+						}
+						var proven bool
+						querySources, queryColumns, proven = sqlNavNestedSelectScope(statement, selectAt, dialect, materialized)
+						if !proven {
+							return // no partial VIEW/TABLE declaration or dependencies
 						}
 					}
 					occ.declaration = true
@@ -526,7 +548,7 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 				}
 				if operation == "ALTER" && object == "TABLE" {
 					if _, end, ok := sqlNavRelationName(statement, at, dialect); ok &&
-						!sqlNavAlterColumnActionsValid(statement, end, dialect) {
+						!sqlNavAlterTableWholeProof(statement, end, dialect) {
 						// Invalid auxiliary columns cannot coexist with
 						// a proven table rename. Preserve the existing
 						// ordered-history uncertainty rather than issuing
@@ -870,9 +892,9 @@ func sqlNavSourceOccurrences(source, dialect string, withColumns bool) ([]sqlNav
 				return // do not accept an incomplete/invalid target column list
 			}
 			if next < len(statement) && statement[next].keyword() == "SELECT" {
-				sources, columns, invalid := sqlNavNestedSelectScope(statement, next, dialect, false)
-				if invalid {
-					return
+				sources, columns, proven := sqlNavNestedSelectScope(statement, next, dialect, false)
+				if !proven {
+					return // cannot certify a direct INSERT ... SELECT source
 				}
 				result = append(result, table)
 				result = append(result, sources...)

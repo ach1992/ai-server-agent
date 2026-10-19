@@ -103,7 +103,11 @@ func sqlNavIndexTarget(statement []sqlDDLToken, dialect string) (sqlNavOccurrenc
 		}
 		i += 2
 	}
-	if i >= len(statement) || statement[i].text != "(" {
+	if i >= len(statement) || statement[i].text != "(" ||
+		!sqlNavIndexWholeProof(statement, i, dialect) {
+		// Prefix-only recognition is never sufficient. In particular an
+		// invalid suffix after the closing key list cannot publish the
+		// table target or earlier valid-looking key references.
 		return sqlNavOccurrence{}, 0, false
 	}
 	return table, i, true

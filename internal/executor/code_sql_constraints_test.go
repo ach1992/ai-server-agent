@@ -22,7 +22,7 @@ func TestSQLConstraintColumnSourceReferences(t *testing.T) {
 		{"mysql_create_constraints", "CREATE TABLE orders (id BIGINT, account_id BIGINT, PRIMARY KEY (id), CONSTRAINT fk FOREIGN KEY fk_idx (account_id) REFERENCES accounts(id), UNIQUE KEY account_unique (account_id));", "mysql", []string{"orders.id", "orders.account_id", "orders.id", "orders.account_id", "orders.account_id", "accounts.id"}},
 		{"mariadb_alter_constraints", "ALTER TABLE orders ADD CONSTRAINT fk FOREIGN KEY (account_id) REFERENCES accounts(id), ADD UNIQUE KEY uq (id);", "mariadb", []string{"orders.id", "orders.account_id", "accounts.id"}},
 		{"unknown_expression", "ALTER TABLE orders ADD CONSTRAINT uq UNIQUE ((id+1));", "postgres", nil},
-		{"foreign_expression", "CREATE TABLE orders (id INT, FOREIGN KEY ((id+1)) REFERENCES accounts(id));", "mysql", []string{"orders.id", "accounts.id"}},
+		{"foreign_expression", "CREATE TABLE orders (id INT, FOREIGN KEY ((id+1)) REFERENCES accounts(id));", "mysql", nil},
 		{"mysql_create_key", "CREATE TABLE orders (id BIGINT, account_id INT, KEY ix_id (id), FULLTEXT INDEX ix_text (account_id));", "mysql", []string{"orders.id", "orders.account_id", "orders.id", "orders.account_id"}},
 		{"mysql_key_expression_ignored", "CREATE TABLE orders (id BIGINT, KEY ix_id ((id+1)));", "mysql", []string{"orders.id"}},
 		// PostgreSQL has no MySQL-style KEY table constraint. Its whole
@@ -34,6 +34,9 @@ func TestSQLConstraintColumnSourceReferences(t *testing.T) {
 			all, ok := sqlNavAllOccurrences(tc.sql, tc.dialect)
 			if !ok {
 				t.Fatal("SQL tokenizer rejected DDL")
+			}
+			if tc.name == "foreign_expression" && len(all) != 0 {
+				t.Fatalf("invalid FOREIGN KEY expression emitted a partial CREATE identity: %+v", all)
 			}
 			var got []string
 			for _, item := range all {

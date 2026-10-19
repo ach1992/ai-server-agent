@@ -858,6 +858,12 @@ func TestSQLSelectAliasWorkerCrossFileNavigation(t *testing.T) {
 		{"r2_invalid_create_view_on", "CREATE VIEW bad AS SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id=ONLY;\n", "public.accounts"},
 		{"r2_invalid_create_view_gap", "CREATE VIEW bad AS SELECT a.id FROM public.accounts a JUNK JOIN public.payments p ON a.id=p.id;\n", "public.accounts"},
 		{"r2_invalid_insert_select", "INSERT INTO archive (id) SELECT a.id FROM public.accounts a JOIN public.payments p ON a.id=ONLY;\n", "public.accounts"},
+		{"f1_qualified_literal_in_projection", "SELECT a.'ignored'id FROM public.accounts a;\n", "id"},
+		{"f1_qualified_literal_in_where", "SELECT a.id FROM public.accounts a WHERE a.'ignored'id=1;\n", "a.id"},
+		{"f2_unproven_view_as_body", "CREATE VIEW invalid_view AS FROBNICATE;\n", "invalid_view"},
+		{"f2_function_source_with_bad_on", "CREATE VIEW invalid_view AS SELECT a.id FROM generate_series(1,2) g JOIN public.accounts a ON a.id=ONLY;\n", "public.accounts"},
+		{"f3_unproven_index_suffix", "CREATE INDEX ix_bad ON public.accounts (id) ONLY;\n", "public.accounts"},
+		{"f3_unproven_alter_action", "ALTER TABLE public.accounts ADD COLUMN okay INT, BOGUS REFERENCES public.payments(id);\n", "public.accounts"},
 	}
 	for _, tc := range badQueries {
 		t.Run(tc.name, func(t *testing.T) {
@@ -912,33 +918,43 @@ func TestSQLSelectAliasWorkerCrossFileNavigation(t *testing.T) {
 		t.Fatalf("quoted PostgreSQL only table references lost: %+v %+v", resp, locs)
 	}
 
-	// R3 real Worker/Landlock: an otherwise plausible migration with a
-	// later invalid column must not declare either its table or id column.
+	// F2/F3 real Worker/Landlock: invalid declarations cannot become
+	// genuine cross-file code_definition or code_references sources,
+	// including an invalid view body and complete constraint grammar.
 	invalidDDLPath := filepath.Join(workspace, "migrations/004_invalid_partial.sql")
-	if err := os.WriteFile(invalidDDLPath,
-		[]byte("CREATE TABLE impossible (id BIGINT, ONLY BIGINT);\n"), 0600); err != nil {
-		t.Fatal(err)
-	}
-	r3Query := "SELECT i.id FROM impossible i;\n"
-	if err := os.WriteFile(filepath.Join(workspace, owner.Path), []byte(r3Query), 0600); err != nil {
-		t.Fatal(err)
-	}
-	owner.FileVersion = version(owner.Path)
-	owner.Character = strings.Index(r3Query, "i.id") + 2
-	for _, method := range []string{"definition", "references"} {
-		owner.CodeMethod = method
-		response := s.codeInspect(ctx, owner)
-		if response.OK {
-			var targets []sqlNavLocation
-			if err := json.Unmarshal([]byte(response.Output), &targets); err != nil {
-				t.Fatalf("R3 malformed %s locations: %v", method, err)
+	for _, tc := range []struct{ name, ddl, table string }{
+		{"reserved_column", "CREATE TABLE impossible (id BIGINT, ONLY BIGINT);\n", "impossible"},
+		{"incomplete_primary", "CREATE TABLE impossible (id BIGINT, PRIMARY KEY ONLY);\n", "impossible"},
+		{"unknown_alter_like_ddl", "CREATE TABLE impossible (id BIGINT, UNIQUE x);\n", "impossible"},
+		{"bad_view_body", "CREATE VIEW impossible AS FROBNICATE;\n", "impossible"},
+		{"bad_view_function_join", "CREATE VIEW impossible AS SELECT * FROM generate_series(1,2) g JOIN public.accounts a ON a.id=ONLY;\n", "impossible"},
+	} {
+		t.Run("f2_f3_crossfile_"+tc.name, func(t *testing.T) {
+			if err := os.WriteFile(invalidDDLPath, []byte(tc.ddl), 0600); err != nil {
+				t.Fatal(err)
 			}
-			for _, target := range targets {
-				if target.URI == "migrations/004_invalid_partial.sql" {
-					t.Fatalf("invalid migration certified a physical %s target: %+v", method, response)
+			query := "SELECT i.id FROM " + tc.table + " i;\n"
+			if err := os.WriteFile(filepath.Join(workspace, owner.Path), []byte(query), 0600); err != nil {
+				t.Fatal(err)
+			}
+			owner.FileVersion = version(owner.Path)
+			owner.Character = strings.Index(query, "i.id") + 2
+			for _, method := range []string{"definition", "references"} {
+				owner.CodeMethod = method
+				response := s.codeInspect(ctx, owner)
+				if response.OK {
+					var targets []sqlNavLocation
+					if err := json.Unmarshal([]byte(response.Output), &targets); err != nil {
+						t.Fatalf("malformed %s locations: %v", method, err)
+					}
+					for _, target := range targets {
+						if target.URI == "migrations/004_invalid_partial.sql" {
+							t.Fatalf("invalid %s migration became %s target: %+v", tc.name, method, response)
+						}
+					}
 				}
 			}
-		}
+		})
 	}
 	if err := os.Remove(invalidDDLPath); err != nil {
 		t.Fatal(err)

@@ -372,8 +372,10 @@ func TestSQLSourceNavigationQuotedCaseAndUTF16(t *testing.T) {
 	if item, found := sqlNavSelected(qualified, "postgres", 0, 23); !found || item.name != "public.orders" {
 		t.Fatalf("qualified table lookup failed: %+v %v", item, found)
 	}
-	if items, valid := sqlNavOccurrences("CREATE VIEW daily AS WITH orders AS (SELECT 1) SELECT * FROM orders;", "postgres"); !valid || len(items) != 1 || !items[0].declaration {
-		t.Fatalf("CTE local name fabricated a table reference: %+v", items)
+	// Valid CTE syntax is outside this bounded navigation grammar:
+	// do not certify a physical view declaration without proving its body.
+	if items, valid := sqlNavOccurrences("CREATE VIEW daily AS WITH orders AS (SELECT 1) SELECT * FROM orders;", "postgres"); valid && len(items) != 0 {
+		t.Fatalf("unproven CTE produced physical source evidence: %+v", items)
 	}
 	if items, valid := sqlNavOccurrences("DELIMITER //\nCREATE PROCEDURE demo() BEGIN SELECT 1; CREATE TABLE phantom (id INT); END //", "mysql"); valid || len(items) != 0 {
 		t.Fatalf("MySQL custom DELIMITER invented SQL declarations: %+v", items)

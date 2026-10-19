@@ -37,9 +37,15 @@ func sqlNavCreateQueryStart(tokens []sqlDDLToken, at int, materialized bool) int
 // used for standalone queries. Merely spotting FROM or JOIN cannot certify
 // a physical source. The surrounding caller must first prove the statement
 // header and the SELECT entrypoint.
-func sqlNavNestedSelectScope(tokens []sqlDDLToken, start int, dialect string, materialized bool) (sources, columns []sqlNavOccurrence, invalid bool) {
+// A contained CREATE/INSERT query has three distinct outcomes:
+// (1) supported and proven with ordinary table dependencies,
+// (2) supported and proven with a trivial no-FROM constant projection, or
+// (3) unsupported/unproven. Only (1) or (2) can justify its parent CREATE
+// declaration. Do not mistake absence of table occurrences for validity.
+// Complete query evidence, not absence of recognised errors, is the gate.
+func sqlNavNestedSelectScope(tokens []sqlDDLToken, start int, dialect string, materialized bool) (sources, columns []sqlNavOccurrence, proven bool) {
 	if start >= len(tokens) || tokens[start].keyword() != "SELECT" {
-		return nil, nil, false // unsupported query family, not a table reference
+		return nil, nil, false
 	}
 	end := len(tokens)
 	if materialized && end >= start+3 &&
@@ -50,32 +56,68 @@ func sqlNavNestedSelectScope(tokens []sqlDDLToken, start int, dialect string, ma
 		tokens[end-1].keyword() == "DATA" {
 		end -= 3
 	}
+	if end <= start+1 {
+		return nil, nil, false
+	}
 	body := tokens[start:end]
 	sources, columns = sqlNavSelectAnalysis(body, dialect)
 	if len(sources) > 0 {
-		return sources, columns, false
+		if sqlNavNestedBoundedBodyProof(body, dialect) {
+			return sources, columns, true
+		}
+		return nil, nil, false
 	}
-	// SELECT without a physical FROM has no dependencies. A table-valued
-	// function (FROM fn(...)) can also be legitimate but is deliberately
-	// unsupported for navigation; do not invalidate a valid view merely
-	// because its dependency is not an ordinary relation.
-	for i := 1; i < len(body); i++ {
-		if i > 0 && body[i-1].text == "." {
-			continue
-		}
-		if body[i].keyword() == "JOIN" {
-			return nil, nil, true
-		}
-		if body[i].keyword() != "FROM" {
-			continue
-		}
-		_, next, ok := sqlNavName(body, i+1)
-		if ok && next < len(body) && body[next].text == "(" {
-			return nil, nil, false
-		}
-		return nil, nil, true // ordinary source exists, but scope was rejected
+	// A true scalar SELECT can have no physical source at all. Admit only
+	// a complete, small constant projection grammar; complex expressions,
+	// CTEs, functions, VALUES and TABLE remain valid SQL but unproven for
+	// this offline navigation. An unsupported FROM function cannot certify
+	// a CREATE view (nor bypass a malformed later JOIN).
+	if sqlNavSelectConstantProjection(body, dialect) {
+		return nil, nil, true
 	}
 	return nil, nil, false
+}
+
+func sqlNavSelectConstantProjection(tokens []sqlDDLToken, dialect string) bool {
+	if len(tokens) < 2 || tokens[0].keyword() != "SELECT" {
+		return false
+	}
+	// SELECT <numeric|TRUE|FALSE|NULL> [AS alias] [, ...]
+	// Optional numeric unary sign is intentionally not supported. A quoted
+	// SQL string has been elided by the lexer, so it cannot be proved here.
+	for at, count := 1, 0; at < len(tokens); {
+		if count >= 64 || tokens[at].literalBefore {
+			return false
+		}
+		scalar := tokens[at].kind == 'p' ||
+			tokens[at].keyword() == "TRUE" ||
+			tokens[at].keyword() == "FALSE" ||
+			tokens[at].keyword() == "NULL"
+		if !scalar {
+			return false
+		}
+		at++
+		if at < len(tokens) && tokens[at].keyword() == "AS" {
+			at++
+			if at >= len(tokens) || !sqlNavSelectAliasAllowed(tokens[at], dialect) ||
+				tokens[at].literalBefore {
+				return false
+			}
+			at++
+		}
+		count++
+		if at == len(tokens) {
+			return true
+		}
+		if tokens[at].text != "," || tokens[at].literalBefore {
+			return false
+		}
+		at++
+		if at == len(tokens) {
+			return false
+		}
+	}
+	return false
 }
 
 // Only INSERT INTO table [(one, column, list)] SELECT is a supported direct
