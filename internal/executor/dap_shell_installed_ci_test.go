@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/ach1992/ai-server-agent/internal/config"
+	"github.com/ach1992/ai-server-agent/internal/credential"
 )
 
 // This opt-in test runs ONLY inside the disposable GitHub-hosted CI runner,
@@ -55,11 +56,13 @@ func TestShellDAPInstalledPrivateCgroupLifecycleCI(t *testing.T) {
 	defer cancel()
 	const principal = "ci-private-shell-dap-proof"
 	requestID := "ci-private-shell-dap-proof"
+	owner := credential.Principal{ID: principal, Class: "direct", Name: "CI Shell DAP"}
+	ownerCtx := credential.WithPrincipal(ctx, owner)
 
 	call := func(q Request) Response {
 		t.Helper()
-		q.PrincipalID, q.PrincipalClass, q.RequestID = principal, "direct", requestID
-		r, e := ClientCallContext(ctx, cfg.ExecutorSocket, secret, q)
+		q.RequestID = requestID
+		r, e := ClientCallContext(ownerCtx, cfg.ExecutorSocket, secret, q)
 		if e != nil {
 			t.Fatalf("authenticated installed Executor call %s failed: %v", q.Action, e)
 		}
@@ -138,12 +141,12 @@ func TestShellDAPInstalledPrivateCgroupLifecycleCI(t *testing.T) {
 	stopped := false
 	t.Cleanup(func() {
 		if !stopped {
-			q := launch
-			q.Action, q.SessionID = "debug_stop", id
-			q.DebugProgram = ""
-			r, e := ClientCallContext(context.Background(), cfg.ExecutorSocket, secret, Request{
-				Action: q.Action, SessionID: q.SessionID, Workspace: workspace,
-				PrincipalID: principal, PrincipalClass: "direct", RequestID: requestID,
+			bounded, cancelCleanup := context.WithTimeout(context.Background(), 6*time.Second)
+			defer cancelCleanup()
+			cleanupCtx := credential.WithPrincipal(bounded, owner)
+			r, e := ClientCallContext(cleanupCtx, cfg.ExecutorSocket, secret, Request{
+				Action: "debug_stop", SessionID: id, Workspace: workspace,
+				RequestID: requestID,
 			})
 			if e != nil || !r.OK {
 				t.Errorf("unverified test-owned Shell DAP cleanup (fixture retained): %v code=%s", e, r.ErrorCode)
@@ -257,8 +260,9 @@ func TestShellDAPInstalledPrivateCgroupLifecycleCI(t *testing.T) {
 	}
 
 	other := Request{Action: "debug_status", SessionID: id, Workspace: workspace,
-		PrincipalID: "unrelated-ci-principal", PrincipalClass: "direct", RequestID: "ci-wrong-principal"}
-	denied, e := ClientCallContext(ctx, cfg.ExecutorSocket, secret, other)
+		RequestID: "ci-wrong-principal"}
+	otherCtx := credential.WithPrincipal(ctx, credential.Principal{ID: "unrelated-ci-principal", Class: "direct", Name: "foreign CI caller"})
+	denied, e := ClientCallContext(otherCtx, cfg.ExecutorSocket, secret, other)
 	if e != nil || denied.OK {
 		t.Fatalf("cross-principal session status was not denied: %v %v", e, denied.OK)
 	}
