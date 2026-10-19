@@ -289,19 +289,21 @@ Runtime settings persist in the existing root-managed `/etc/ai-server-agent/conf
 
 ### Execution concurrency (optional)
 
-The console's **Runtime limits and execution capacity** section offers separate guided controls for synchronous unprivileged commands and persistent task jobs. The safe defaults remain CPU-aware commands (`worker_command_slots=0`: `min(GOMAXPROCS, 4)`) and four active tasks (`persistent_task_slots=4`). An operator can optionally set either independently, up to eight:
+The console's **Runtime limits and execution capacity** section offers independent controls for synchronous unprivileged commands, persistent tasks, persistent services and shared LSP/DAP/Terminal/Browser sessions. Safe defaults remain CPU-aware worker commands (`worker_command_slots=0`: `min(GOMAXPROCS, 4)`), four active tasks (`persistent_task_slots=4`) and two active services (`persistent_service_slots=2`). An operator can configure each independently up to **64** without rebuilding the Agent:
 
 ```bash
 sudo ai-server-agent-manage runtime-show
 sudo ai-server-agent-manage runtime-set worker_command_slots 8
-sudo ai-server-agent-manage runtime-set persistent_task_slots 8
+sudo ai-server-agent-manage runtime-set persistent_task_slots 64
+sudo ai-server-agent-manage runtime-set persistent_service_slots 16
+sudo ai-server-agent-manage runtime-set stdio_session_slots 16
 ```
 
-These controls do not change the fixed one-at-a-time root command limit or two persistent service slots. Invalid values are rejected before changes, and all accepted changes use the existing privileged lock, validated restart, health check and rollback path. `runtime-reset worker_command_slots` and `runtime-reset persistent_task_slots` restore defaults.
+All four capacity keys are validated (`worker_command_slots`: 0 for auto or 1–64, tasks/services/shared stdio sessions: 1–64). They do not change the fixed one-at-a-time **privileged root command** limit. Invalid values are rejected before changes; accepted changes use the existing privileged lifecycle lock, validated Agent/Executor restart, health verification and rollback. Use `runtime-reset <key>` to restore the key's default.
 
-Lowering `persistent_task_slots` does **not** stop already-running tasks. `runtime_list` may temporarily report more active tasks than the newly configured limit; new task admission stays blocked until active tasks fall below that limit. The two persistent service slots remain independently available subject to their own quota and filesystem safety reserve. Job-log and audit disk reservations continue to cover the historical active task exposure up to the hard limit of eight.
+Lowering **either** persistent job limit does **not** stop existing tasks/services: `runtime_list` reports their real active counts, and new admission for that job kind remains blocked until it falls below the new limit. A different job kind retains its own capacity. The trusted active inventory, bounded retained-claim namespace, and log/audit disk reservations account for all running jobs across managed restarts and downscaling. The authenticated `runtime_list` reports the configured task, service and shared-session limits, including capacity still occupied by older services after a downscale. At the 64+64 maximum, the required safety reserve reaches approximately 1.6 GiB; without adequate free disk new job admission fails with a typed `resource_limit` rather than risking log/audit integrity. After a `stdio_session_slots` downscale, older durable Terminal scopes retain their protected reservations. Reconnect with the original authenticated `session_id`/owner/workspace/authority and then close with the new `session_epoch`; previously authorized recovery is not a new admission. New LSP/DAP/Browser/Terminal starts remain blocked while aggregate occupancy exceeds the current configured limit. Untrusted registry entries and unverifiable scope cleanup never free capacity.
 
-Eight available slots is an **admission ceiling**, not a CPU/RAM guarantee. On small hosts (notably two-vCPU machines with limited RAM or exhausted swap), leave the defaults or raise gradually while watching real resource usage. Only use these commands after the installed Agent version supports them; the source implementation alone does not modify the running service.
+Sixty-four slots is a **per-kind admission ceiling**, not a CPU/RAM/FD/systemd guarantee or a scheduler. High settings permit 64 persistent tasks **and** 64 persistent services plus separately configured worker commands; provision CPU, memory, processes, file descriptors and disk accordingly, and raise gradually based on observed usage. On small hosts leave defaults. Existing protocol payload, root-action approval, timeout, log-size and trust boundaries are unchanged. The commands only work after this source change is published and installed; **do not run them against older Stable binaries**. Because management restarts Agent/Executor, change settings from an independent operator SSH terminal, not the MCP connection being restarted.
 
 Privileged install/update/manage/uninstall/purge operations share a root-only lifecycle lock under `/run/lock/ai-server-agent`. A concurrent management operation fails before state mutation rather than racing another lifecycle operation.
 

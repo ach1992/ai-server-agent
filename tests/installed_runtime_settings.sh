@@ -86,11 +86,12 @@ reset_runtime(){
 capacity(){
   mcp_call runtime_list '{}'
   check_ok runtime_list
-  jq -e --argjson limit "$1" --argjson tasks "$2" --argjson services "$3" '
+  jq -e --argjson limit "$1" --argjson tasks "$2" --argjson services "$3"     --argjson service_limit "${4:-2}" '
     .result.structuredContent.runtime_capacity |
-    .state_reliable==true and .task_limit==$limit and .service_limit==2 and
+    .state_reliable==true and .task_limit==$limit and .service_limit==$service_limit and
     .tasks_active==$tasks and .services_active==$services and .unclassified_active==0
-  ' "$scratch/response" >/dev/null || fail "Capacity wrong: task-limit=$1 active=$2 services=$3"
+  ' "$scratch/response" >/dev/null ||
+    fail "Capacity wrong: task-limit=$1 active=$2 services=$3 service-limit=${4:-2}"
 }
 start_job(){
   local request
@@ -118,6 +119,7 @@ credential_before="$(sudo sha256sum /etc/ai-server-agent/mcp-credentials.json | 
 sudo ai-server-agent-manage runtime-show >"$scratch/defaults"
 grep -Fq 'command_timeout_seconds=300 seconds' "$scratch/defaults" || fail 'Default timeout not visible'
 grep -Fq 'persistent_task_slots=4 tasks' "$scratch/defaults" || fail 'Default task capacity not visible'
+grep -Fq 'persistent_service_slots=2 services' "$scratch/defaults" || fail 'Default service capacity not visible'
 mcp_request '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"ci-runtime-acceptance","version":"1"}}}' "$scratch/initialize"
 jq -e '.result.serverInfo.name=="ai-server-agent"' "$scratch/initialize" >/dev/null || fail 'Initialize failed'
 capacity 4 0 0
@@ -148,8 +150,28 @@ for n in $(seq 1 8); do
     "$scratch/parallel-$n" >/dev/null || fail "Parallel worker $n failed"
 done
 
-# Eight real systemd tasks survive an eight-to-one Executor restart.
+# Full 64-slot settings are accepted by the installed root-managed path and
+# observable through authenticated MCP (without spawning 128 real processes).
+set_runtime worker_command_slots 64
+grep -Fq 'worker_command_slots=64 slots' <(sudo ai-server-agent-manage runtime-show) ||
+  fail '64 worker command override not shown'
+set_runtime persistent_task_slots 64
+set_runtime persistent_service_slots 64
+set_runtime stdio_session_slots 64
+grep -Fq 'stdio_session_slots=64 sessions' <(sudo ai-server-agent-manage runtime-show) ||
+  fail '64 shared session override not shown'
+capacity 64 0 0 64
+mcp_call runtime_list '{}'
+check_ok 'Configured shared session limit'
+jq -e '.result.structuredContent.runtime_capacity.session_limit==64' "$scratch/response" >/dev/null ||
+  fail '64 shared session limit not visible through authenticated MCP'
+
+# Exercise real bounded systemd task and service admission below the maximum
+# to limit CI resource consumption. Deterministic source tests test 64+64.
+set_runtime persistent_service_slots 2
 set_runtime persistent_task_slots 8
+reset_runtime stdio_session_slots
+# Eight real systemd tasks survive an eight-to-one Executor restart.
 capacity 8 0 0
 for n in $(seq 1 8); do
   start_job task "$n"
@@ -178,8 +200,21 @@ for n in 1 2; do
   job_ids+=("$job_id")
 done
 capacity 1 8 2
+start_job service 30
+check_limit 'Third service at default two-slot limit'
+set_runtime persistent_service_slots 3
+capacity 1 8 2 3
 start_job service 3
-check_limit 'Third independent service'
+check_ok 'Third independent service after raising limit'
+job_id="$(jq -er '.result.structuredContent.job_id' "$scratch/response")"
+job_ids+=("$job_id")
+capacity 1 8 3 3
+start_job service 4
+check_limit 'Fourth service at three-slot limit'
+set_runtime persistent_service_slots 1
+capacity 1 8 3 1
+start_job service 5
+check_limit 'Downscale must keep the three original services'
 for job_id in "${job_ids[@]}"; do
   body="$(jq -cn --arg job_id "$job_id" '{job_id:$job_id}')"
   mcp_call job_stop "$body"
@@ -192,7 +227,9 @@ for attempt in $(seq 1 30); do
   fi
   sleep 1
 done
-capacity 1 0 0
+capacity 1 0 0 1
+reset_runtime persistent_service_slots
+capacity 1 0 0 2
 
 # Prove BOTH transfer dimensions independently. Error codes alone are
 # ambiguous: production uses one transfer_quota_exceeded code for session and
@@ -294,4 +331,4 @@ sudo systemctl is-active --quiet ai-server-agent-executor.service || fail 'Execu
 mcp_call runtime_list '{}'
 check_ok 'Authenticated client unavailable after rollback'
 sudo cmp -s /tmp/ai-server-agent /usr/local/bin/ai-server-agent || fail 'Installed binary changed'
-printf 'INSTALLED_RUNTIME_CONFIG_ACCEPTANCE_PASS worker_slots=8 task_slots=8_to_1 old_tasks=preserved services=independent transfer_staging_bytes=bounded transfer_sessions=bounded abort=recovered timeout=set_reset rollback=verified authenticated_client=yes\n'
+printf 'INSTALLED_RUNTIME_CONFIG_ACCEPTANCE_PASS worker_slots=64_config_8_real task_slots=64_config_8_to_1_real old_tasks=preserved service_slots=64_config_2_to_3_to_1_real old_services=preserved transfer_staging_bytes=bounded transfer_sessions=bounded abort=recovered timeout=set_reset rollback=verified authenticated_client=yes\n'

@@ -19,13 +19,14 @@ import (
 // This broker is an executor-private building block for LSP/DAP. It is not a
 // generic MCP process tool. Terminal/tmux control remains owned by #60.
 const (
-	maxStdioSessions       = 8
-	maxStdioInputBytes     = 16 << 10
-	maxStdioEventBytes     = 4 << 10
-	maxStdioOutputBytes    = 64 << 10
-	maxStdioOutputEvents   = 64
-	maxStdioSessionAge     = time.Hour
-	completedSessionRetain = 5 * time.Minute
+	maxStdioSessions             = 8 // legacy/default shared session capacity
+	maxConfigurableStdioSessions = 64
+	maxStdioInputBytes           = 16 << 10
+	maxStdioEventBytes           = 4 << 10
+	maxStdioOutputBytes          = 64 << 10
+	maxStdioOutputEvents         = 64
+	maxStdioSessionAge           = time.Hour
+	completedSessionRetain       = 5 * time.Minute
 )
 
 var (
@@ -84,10 +85,26 @@ type stdioSession struct {
 type stdioSessionBroker struct {
 	mu       sync.Mutex
 	sessions map[string]*stdioSession
+	limit    int
 }
 
 func newStdioSessionBroker() *stdioSessionBroker {
-	return &stdioSessionBroker{sessions: make(map[string]*stdioSession)}
+	return newStdioSessionBrokerForSlots(maxStdioSessions)
+}
+
+func newStdioSessionBrokerForSlots(slots int) *stdioSessionBroker {
+	if slots < 1 || slots > maxConfigurableStdioSessions {
+		slots = maxStdioSessions
+	}
+	return &stdioSessionBroker{sessions: make(map[string]*stdioSession), limit: slots}
+}
+
+func (s *Server) stdioSessionCapacity() int {
+	n := s.cfg.EffectiveRuntime().StdioSessionSlots
+	if n < 1 || n > maxConfigurableStdioSessions {
+		return maxStdioSessions
+	}
+	return n
 }
 
 // A scope whose startup could not be proven clean has NO Control Mode client
@@ -139,9 +156,13 @@ func (b *stdioSessionBroker) get(req Request, id string) (*stdioSession, error) 
 	return session, nil
 }
 
+// All production admissions pass a protected terminal registry snapshot under
+// Server.terminalAdmissionMu. Direct broker fixtures have no durable scopes.
 func (b *stdioSessionBroker) reserve(session *stdioSession) error {
-	b.mu.Lock()
-	defer b.mu.Unlock()
+	return b.reserveAgainstRegistry(session, terminalReservations{})
+}
+
+func (b *stdioSessionBroker) pruneCompletedLocked() {
 	now := time.Now()
 	for id, entry := range b.sessions {
 		entry.mu.Lock()
@@ -157,11 +178,63 @@ func (b *stdioSessionBroker) reserve(session *stdioSession) error {
 			delete(b.sessions, id)
 		}
 	}
-	if len(b.sessions) >= maxStdioSessions || b.sessions[session.id] != nil {
+}
+
+// Each protected terminal record costs one slot, even if its Control Mode
+// client was lost on restart. Reconnected clients with that ID must not be
+// counted twice. Nonterminal and unpersisted terminal sessions each cost one.
+func (b *stdioSessionBroker) occupiedLocked(registry terminalReservations) int {
+	occupied := registry.count()
+	for id := range b.sessions {
+		if _, persisted := registry.ids[id]; !persisted {
+			occupied++
+		}
+	}
+	return occupied
+}
+
+func (b *stdioSessionBroker) occupiedAgainstRegistry(registry terminalReservations) int {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.pruneCompletedLocked()
+	return b.occupiedLocked(registry)
+}
+
+func (b *stdioSessionBroker) reserveAgainstRegistry(session *stdioSession, registry terminalReservations) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.pruneCompletedLocked()
+	if b.sessions[session.id] != nil {
+		return errSessionBusy
+	}
+	if session.terminal != nil && session.terminal.recovered {
+		// Must already own a persistent slot. Caller must additionally have
+		// proven the original principal, workspace, authority and backend.
+		if _, ok := registry.ids[session.id]; !ok {
+			return errSessionNotFound
+		}
+	} else if b.occupiedLocked(registry) >= b.limit {
 		return errSessionBusy
 	}
 	b.sessions[session.id] = session
 	return nil
+}
+
+// Shared admission has exactly one lock ordering:
+// terminalAdmissionMu -> trusted registry scanner -> broker.mu -> entry.mu.
+// terminal_open and terminal_reconnect already hold terminalAdmissionMu
+// throughout scope creation or authenticated recovery; other session kinds
+// acquire it here for the same protected resource budget.
+func (s *Server) reserveProcessSession(entry *stdioSession) error {
+	if entry.terminal == nil {
+		s.terminalAdmissionMu.Lock()
+		defer s.terminalAdmissionMu.Unlock()
+	}
+	registry, err := s.terminalReservationsWithStop(stopScopedTerminalBackend)
+	if err != nil {
+		return fmt.Errorf("terminal_registry_unavailable: %w", err)
+	}
+	return s.sessions.reserveAgainstRegistry(entry, registry)
 }
 
 // workerStdioSession starts an explicitly selected language/debug adapter.
@@ -307,7 +380,7 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 		entry.browser = &browserStdioState{}
 		entry.browserLease = &s.browserAdmission
 	}
-	if err := s.sessions.reserve(entry); err != nil {
+	if err := s.reserveProcessSession(entry); err != nil {
 		return "", err
 	}
 	removeOnFailure := true

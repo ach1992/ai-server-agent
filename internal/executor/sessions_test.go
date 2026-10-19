@@ -3,6 +3,7 @@ package executor
 import (
 	"bytes"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -162,6 +163,31 @@ func TestWorkerStdioSessionCapacityAndIdentity(t *testing.T) {
 	}
 	if _, err := s.workerStdioSession(owner, "lsp", "../outside", "/bin/cat"); err == nil {
 		t.Fatal("workspace escape accepted")
+	}
+}
+
+func TestSharedSessionBrokerConfigured64AdmissionAndRelease(t *testing.T) {
+	broker := newStdioSessionBrokerForSlots(64)
+	for i := 0; i < 64; i++ {
+		entry := &stdioSession{id: fmt.Sprintf("stdio_test_%d", i), kind: "lsp", done: make(chan struct{})}
+		if err := broker.reserve(entry); err != nil {
+			t.Fatalf("slot %d refused: %v", i+1, err)
+		}
+	}
+	if err := broker.reserve(&stdioSession{id: "stdio_over", kind: "lsp"}); !errors.Is(err, errSessionBusy) {
+		t.Fatalf("65th shared session admitted: %v", err)
+	}
+	broker.mu.Lock()
+	delete(broker.sessions, "stdio_test_0") // test-only completed-session release
+	broker.mu.Unlock()
+	if err := broker.reserve(&stdioSession{id: "stdio_new", kind: "dap"}); err != nil {
+		t.Fatalf("released slot unavailable to another consumer: %v", err)
+	}
+	if got := len(broker.sessions); got != 64 {
+		t.Fatalf("shared session broker count = %d", got)
+	}
+	if got := newStdioSessionBrokerForSlots(65).limit; got != maxStdioSessions {
+		t.Fatalf("unsupported override removed safe default: %d", got)
 	}
 }
 
