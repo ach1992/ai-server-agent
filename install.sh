@@ -1,6 +1,9 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
+# Verify root command search paths before executing any PATH-resolved tool.
+# Do not silently discard an explicitly configured path: CI legitimately uses
+# an isolated root-owned systemctl fault fixture to prove rollback recovery.
 REPO="ach1992/ai-server-agent"
 AGENT_VERSION="${AI_SERVER_AGENT_VERSION:-source}"
 if [ "$AGENT_VERSION" != "source" ] && [ -z "${AI_SERVER_AGENT_REF+x}" ]; then
@@ -53,7 +56,13 @@ PREVIOUS_CONFIG_BACKUP=""
 PREVIOUS_INSTALL_STATE_BACKUP=""
 PREVIOUS_INSTALL_STATE_PRESENT=0
 PREVIOUS_CREDENTIAL_STORE=""
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-/dev/null}")" 2>/dev/null && pwd || true)"
+# Resolve the local payload root without invoking PATH-based dirname before
+# validating root search-path provenance.
+if [[ "${BASH_SOURCE[0]:-}" = */* ]]; then
+  SCRIPT_DIR="$(cd -- "${BASH_SOURCE[0]%/*}" 2>/dev/null && pwd || true)"
+else
+  SCRIPT_DIR="$PWD"
+fi
 LIFECYCLE_LOCK_DIR=/run/lock/ai-server-agent
 LIFECYCLE_LOCK="$LIFECYCLE_LOCK_DIR/management.lock"
 
@@ -97,6 +106,100 @@ die(){
   installer_message ERROR "$*" >&2
   exit 1
 }
+# Emit root-preflight errors using Bash builtins only. Calling the normal
+# formatted die() before PATH is verified could execute a caller-selected tr.
+root_path_violation(){
+  printf '[ai-server-agent] ERROR: %s\n' "$*" >&2
+  exit 1
+}
+
+# Executable and installed management paths are root trust boundaries.
+# In particular, a root:root 0755 binary is NOT trustworthy through a
+# root-owned but world-writable /usr/local/bin. Reject, never repair the
+# operator's shared system directories. Missing final entries are safe to
+# create later only if their entire existing parent chain is trusted.
+verify_privileged_install_path(){
+  local path="$1" kind="$2" current="" component identity owner mode links
+  local -a components
+  [[ "$path" = /* && "$path" != "/" ]] || root_path_violation "Privileged install path must be absolute: $path"
+  IFS=/ read -r -a components <<< "${path#/}"
+  for component in "${components[@]}"; do
+    [[ -n "$component" && "$component" != "." && "$component" != ".." ]] ||
+      root_path_violation "Invalid privileged install path component: $path"
+    current="$current/$component"
+    [ ! -L "$current" ] || root_path_violation "Unsafe symlink in privileged install path: $current. Correct the path as root before retrying."
+    if [ ! -e "$current" ]; then
+      [ "$current" = "$path" ] || root_path_violation "Missing privileged install parent directory: $current"
+      continue
+    fi
+    if [ "$current" != "$path" ] || [ "$kind" = directory ]; then
+      [ -d "$current" ] || root_path_violation "Privileged install path component is not a directory: $current"
+    else
+      [ "$kind" = file ] && [ -f "$current" ] ||
+        root_path_violation "Privileged install target is not a regular file: $current"
+    fi
+    identity="$(/usr/bin/stat -c '%u:%a' -- "$current")" ||
+      root_path_violation "Cannot inspect privileged install path: $current"
+    owner="${identity%%:*}"
+    mode="${identity#*:}"
+    [[ "$owner" = 0 && "$mode" =~ ^[0-7]{3,4}$ ]] ||
+      root_path_violation "Privileged install path is not root-owned with a valid mode: $current ($identity)"
+    if (( (8#$mode & 0022) != 0 )); then
+      root_path_violation "Privileged install path is writable by non-root users: $current (mode $mode). Refusing to change its permissions automatically."
+    fi
+    if [ "$current" = "$path" ] && [ "$kind" = file ]; then
+      links="$(/usr/bin/stat -c '%h' -- "$current")" ||
+        root_path_violation "Cannot inspect privileged install file link count: $current"
+      [[ "$links" =~ ^[0-9]+$ && "$links" -eq 1 ]] ||
+        root_path_violation "Privileged install target must not be hardlinked: $current"
+    fi
+  done
+}
+
+verify_privileged_install_targets(){
+  local installed_helper
+  verify_privileged_install_path /usr/local/bin directory
+  verify_privileged_install_path "$INSTALL_BIN" file
+  verify_privileged_install_path /usr/local/sbin directory
+  verify_privileged_install_path "$MANAGE_BIN" file
+  verify_privileged_install_path /usr/local/lib directory
+  verify_privileged_install_path "$LIB_DIR" directory
+  for installed_helper in manage.sh update.sh uninstall.sh ensure-lifecycle-lock.sh; do
+    # When the Agent library directory does not yet exist, the helper
+    # checks are performed after its secure creation and before writing.
+    if [ -d "$LIB_DIR" ]; then
+      verify_privileged_install_path "$LIB_DIR/$installed_helper" file
+    fi
+  done
+}
+
+# All root PATH entries must have the same trusted ancestry as installed
+# privileged binaries. /bin and /sbin are allowed only as verified usrmerge
+# aliases to their checked /usr equivalents.
+verify_privileged_search_path(){
+  local entry canonical
+  local -a entries
+  [[ -n "${PATH:-}" && "$PATH" != :* && "$PATH" != *: && "$PATH" != *::* ]] ||
+    root_path_violation "Refusing an empty/current-directory component in root PATH."
+  IFS=: read -r -a entries <<< "$PATH"
+  for entry in "${entries[@]}"; do
+    [[ "$entry" = /* ]] || root_path_violation "Root PATH must use only absolute directories: $entry"
+    case "$entry" in
+      /bin|/sbin)
+        canonical="/usr/${entry#/}"
+        verify_privileged_install_path "$canonical" directory
+        if [ -L "$entry" ]; then
+          [ "$(/usr/bin/readlink -f -- "$entry")" = "$canonical" ] ||
+            root_path_violation "Unexpected root PATH symlink: $entry"
+        else
+          verify_privileged_install_path "$entry" directory
+        fi
+        ;;
+      *) verify_privileged_install_path "$entry" directory ;;
+    esac
+  done
+}
+
 # A one-line bootstrap commonly pipes the script into Bash. stdin is not a
 # TTY there, but stdout/stderr and /dev/tty still provide a real operator UI.
 # In unattended CI, readable /dev/tty permissions alone must not prompt.
@@ -105,7 +208,7 @@ installer_has_interactive_tty(){
   { [ -t 0 ] || [ -t 1 ] || [ -t 2 ]; } || return 1
   ( : </dev/tty ) 2>/dev/null
 }
-need_root(){ [ "$(id -u)" -eq 0 ] || die "Run this installer as root (for example: sudo bash install.sh)."; }
+need_root(){ [ "$EUID" -eq 0 ] || die "Run this installer as root (for example: sudo bash install.sh)."; }
 UBUNTU_MIN_VERSION=22.04
 DEBIAN_MIN_VERSION=11
 
@@ -201,6 +304,7 @@ case "${1:-}" in
   --resolve-ref) RESOLVE_REF_ONLY=1 ;;
 esac
 need_root
+verify_privileged_search_path
 [ -r /etc/os-release ] || die "/etc/os-release not found"
 # shellcheck disable=SC1091
 . /etc/os-release
@@ -214,7 +318,10 @@ if [ "$AGENT_VERSION" != "source" ] && [ -n "${AI_SERVER_AGENT_BINARY:-}" ]; the
   die "AI_SERVER_AGENT_BINARY is disabled for stable releases. Stable installs must use the release archive verified by SHA256SUMS."
 fi
 if [ "$RESOLVE_REF_ONLY" -eq 1 ]; then resolve_source_ref "$REF"; exit 0; fi
-if [ "$CHECK_ONLY" -eq 1 ]; then log "Compatibility check passed: $PRETTY_NAME, $ARCH, systemd available."; exit 0; fi
+# Fail before the lock, packages, users, credentials, executable replacement
+# or service changes. --check also provides a read-only operator preflight.
+verify_privileged_install_targets
+if [ "$CHECK_ONLY" -eq 1 ]; then log "Compatibility and privileged install-path checks passed: $PRETTY_NAME, $ARCH, systemd available."; exit 0; fi
 
 acquire_lifecycle_lock
 if [ -s "$CONFIG_FILE" ]; then FRESH_INSTALL=0; fi
@@ -414,6 +521,9 @@ fi
 # as symlinks after migration.
 find "$STATE_DIR/jobs" -mindepth 1 -maxdepth 1 -type l -delete
 install -d -m 0755 -o root -g root "$LIB_DIR"
+# Recheck the now-created library directory and all helper destinations
+# before any overwrite. Trusted ancestors are not unprivileged-replaceable.
+verify_privileged_install_targets
 
 random_hex(){ od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; printf '\n'; }
 token_verifier(){ printf '%s' "$1" | sha256sum | awk '{print $1}'; }

@@ -100,6 +100,23 @@ jobs:
           cache: false
       - name: Shell syntax
         run: bash -n scripts/install-stable.sh tests/stable_bootstrap.sh tests/root_trust_boundary.sh tests/root_trust_migration.sh tests/worker_home_migration.sh
+      - name: Privileged install path denial and disposable runner preparation
+        run: |
+          set -Eeuo pipefail
+          bash -n tests/privileged_install_paths.sh scripts/ci-prepare-trusted-install-paths.sh
+          sudo bash tests/privileged_install_paths.sh
+          # On affected GitHub images /usr/local/bin starts 0777. Prove
+          # the full installer refuses it BEFORE state/service mutation.
+          mode="$(stat -c '%a' /usr/local/bin)"
+          if (( (8#$mode & 0022) != 0 )); then
+            if sudo bash install.sh --check >/tmp/untrusted-installed-path.out 2>&1; then
+              echo 'installer accepted writable privileged destination' >&2
+              exit 1
+            fi
+            grep -qF 'Privileged install path is writable by non-root users:' /tmp/untrusted-installed-path.out
+          fi
+          sudo env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" bash scripts/ci-prepare-trusted-install-paths.sh
+          sudo bash install.sh --check
       - name: Worker HOME migration identity and fail-closed regression
         run: bash tests/worker_home_migration.sh
       - name: Build local test binary
