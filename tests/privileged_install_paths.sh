@@ -87,6 +87,10 @@ denied "hardlinked privileged target" "$scratch/trusted/bin/agent" file
 rm -f "$scratch/trusted/bin/hardlinked-agent"
 denied "missing parent" "$scratch/missing/bin/agent" file
 denied "parent traversal" "$scratch/trusted/../trusted/bin/agent" file
+if bash "$probe" $'/usr/bin/tr\n/tmp/untrusted' file > "$scratch/rejected.out" 2>&1; then
+  echo "control characters in a privileged executable path were accepted" >&2; exit 1
+fi
+grep -qF 'Refusing control characters in privileged install path' "$scratch/rejected.out"
 
 bash "$probe" "$scratch/trusted/bin/agent" file
 /usr/bin/env PATH="$scratch/trusted/bin:/usr/bin:/bin" /usr/bin/bash "$search_probe"
@@ -153,6 +157,18 @@ if /usr/bin/env PATH="$scratch/trusted/bin:/usr/bin:/bin" /usr/bin/bash "$search
   echo "selected command symlink escaped to an untrusted target" >&2; exit 1
 fi
 grep -qF 'Privileged install path is writable by non-root users' "$scratch/path-rejected.out"
+rm -f "$scratch/trusted/bin/tr"
+
+# A canonical symlink target can contain a newline despite a clean PATH.
+# Never let the slash parser validate only its first (trusted) line.
+mkdir -m 0755 "$scratch/trusted/bin/tr"$'\n'
+printf '#!/bin/sh\nexit 0\n' > "$scratch/trusted/bin/tr"$'\n'"/run"
+chmod 0755 "$scratch/trusted/bin/tr"$'\n'"/run"
+ln -s "$scratch/trusted/bin/tr"$'\n'"/run" "$scratch/trusted/bin/tr"
+if /usr/bin/env PATH="$scratch/trusted/bin:/usr/bin:/bin" /usr/bin/bash "$search_probe" > "$scratch/path-rejected.out" 2>&1; then
+  echo "newline in a selected command target bypassed ancestry validation" >&2; exit 1
+fi
+grep -qF 'Refusing control characters in privileged install path' "$scratch/path-rejected.out"
 rm -f "$scratch/trusted/bin/tr"
 
 # An explicitly trusted root-owned /run shim remains supported. This

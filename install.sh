@@ -121,7 +121,13 @@ root_path_violation(){
 verify_privileged_install_path(){
   local path="$1" kind="$2" current="" component identity owner mode links
   local -a components
+  local LC_ALL=C
   [[ "$path" = /* && "$path" != "/" ]] || root_path_violation "Privileged install path must be absolute: $path"
+  # A selected executable's canonical target may contain newlines even when
+  # PATH itself does not. Reject controls before the slash-separated read
+  # so target ancestry cannot be silently truncated to a trusted prefix.
+  [[ "$path" != *[[:cntrl:]]* ]] ||
+    root_path_violation "Refusing control characters in privileged install path."
   IFS=/ read -r -a components <<< "${path#/}"
   for component in "${components[@]}"; do
     [[ -n "$component" && "$component" != "." && "$component" != ".." ]] ||
