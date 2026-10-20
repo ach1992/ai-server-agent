@@ -303,7 +303,9 @@ The already-installed trusted updater applies the same release identity/digest i
 3. requires exactly one uploaded `install.sh` asset at the exact tag-scoped release URL;
 4. requires the GitHub release asset `sha256:` digest;
 5. downloads `install.sh` and verifies its bytes against that digest before execution;
-6. lets the release-scoped installer verify the archive with `SHA256SUMS`.
+6. requires the authenticated installer to declare the reviewed installed privileged lifecycle/startup trust contract, rejecting historical installers that lack it;
+7. performs existing credential/config compatibility checks and executes only an eligible installer;
+8. lets the release-scoped installer verify the archive with `SHA256SUMS`.
 
 Source updates resolve the selected source ref to a commit SHA and remain a separate development/source mechanism.
 
