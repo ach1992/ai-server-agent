@@ -180,6 +180,7 @@ jobs:
           test "$(sed -n '1p' dist/install.sh)" = '#!/usr/bin/env bash'
           test "$(sed -n '2p' dist/install.sh)" = 'export AI_SERVER_AGENT_VERSION=v0.1.2'
           test "$(sed -n '3p' dist/install.sh)" = 'export AI_SERVER_AGENT_REF=v0.1.2'
+          grep -qF '# INSTALLED_PRIVILEGED_LIFECYCLE_TRUST_V1:' dist/install.sh
       - name: Prepare trusted install paths on disposable Stable provenance runner
         run: sudo env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" bash scripts/ci-prepare-trusted-install-paths.sh
       - name: Reject stable binary override
@@ -331,6 +332,7 @@ jobs:
           marker="$fixture/executed"
           cat > "$fixture/install.sh" <<'INSTALLER'
           #!/usr/bin/env bash
+          # INSTALLED_PRIVILEGED_LIFECYCLE_TRUST_V1: mocked compatible release fixture.
           set -Eeuo pipefail
           printf 'executed\n' > "$EXEC_MARKER"
           INSTALLER
@@ -375,6 +377,27 @@ jobs:
             bash update.sh >/tmp/digest-update.out
           test -s "$marker"
           grep -qF "AI Server Agent update completed on the 'stable' channel." /tmp/digest-update.out
+          # An authentic but old installer must be rejected even if GitHub's
+          # immutable release metadata and its asset SHA-256 are fully valid.
+          # No target installer execution or service-state mutation may occur.
+          sed -i '/^# INSTALLED_PRIVILEGED_LIFECYCLE_TRUST_V1:/d' "$fixture/install.sh"
+          legacy_digest="sha256:$(sha256sum "$fixture/install.sh" | awk '{print $1}')"
+          rm -f -- "$marker"
+          if sudo env \
+            PATH="$fakebin:$PATH" \
+            INSTALLER_DIGEST="$legacy_digest" \
+            FIXTURE_INSTALLER="$fixture/install.sh" \
+            EXEC_MARKER="$marker" \
+            AI_SERVER_AGENT_INSTALL_STATE="$state" \
+            AI_SERVER_AGENT_VERSION=v0.1.2 \
+            AI_SERVER_AGENT_REF=v0.1.2 \
+            bash update.sh >/tmp/legacy-stable-refusal.out 2>&1; then
+            echo 'authenticated legacy release bypassed protected Stable rollback policy' >&2
+            exit 1
+          fi
+          grep -qF 'lacks required privileged lifecycle/startup path trust' /tmp/legacy-stable-refusal.out
+          test ! -e "$marker"
+          echo 'IMMUTABLE_STABLE_ROLLBACK_TRUST_POLICY_PASS'
       - name: Reject stable installer asset digest mismatch before execution
         run: |
           set -Eeuo pipefail

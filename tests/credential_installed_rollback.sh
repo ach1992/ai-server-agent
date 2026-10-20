@@ -53,6 +53,7 @@ verify_tokens(){
 binary_digest(){ sudo sha256sum /usr/local/bin/ai-server-agent | awk '{print $1}'; }
 config_digest(){ sudo sha256sum /etc/ai-server-agent/config.json | awk '{print $1}'; }
 store_digest(){ sudo sha256sum /etc/ai-server-agent/mcp-credentials.json | awk '{print $1}'; }
+identity_digest(){ sudo sha256sum /etc/ai-server-agent/control/install-state.json | awk '{print $1}'; }
 assert_rejected_preserving_install(){
   local candidate="$1" reason="$2" before_binary before_config before_store
   before_binary="$(binary_digest)"; before_config="$(config_digest)"; before_store="$(store_digest)"
@@ -84,22 +85,23 @@ assert_bootstrap_rejected_preserving_install(){
   sudo systemctl is-active --quiet ai-server-agent.service
   sudo systemctl is-active --quiet ai-server-agent-executor.service
 }
-# Real published v0.1.14 asset, not the historical source-built fixture.
-# Only the downloaded installer is reached; the current updater must stop it
-# before any credential/config/service mutation.
+# The published v0.1.14 installer is authentic but predates the hardened
+# helper/systemd trust contract. Refuse even when credentials are compatible,
+# before running historical installer bytes or changing installed services.
 assert_protected_update_refused(){
-  local before_binary before_config before_store
-  before_binary="$(binary_digest)"; before_config="$(config_digest)"; before_store="$(store_digest)"
+  local before_binary before_config before_store before_identity
+  before_binary="$(binary_digest)"; before_config="$(config_digest)"; before_store="$(store_digest)"; before_identity="$(identity_digest)"
   if sudo env AI_SERVER_AGENT_UPDATE_CHANNEL=stable AI_SERVER_AGENT_VERSION=v0.1.14 \
       bash "$ROOT/update.sh" > "$SCRATCH/update-refused.log" 2>&1; then
     echo 'UNSAFE_PROTECTED_UPDATER_ACCEPTED' >&2; exit 1
   fi
-  grep -Fq 'not safe for an older version' "$SCRATCH/update-refused.log" || {
+  grep -Fq 'lacks required privileged lifecycle/startup path trust' "$SCRATCH/update-refused.log" || {
     echo 'MISSING_PROTECTED_UPDATER_DIAGNOSTIC' >&2; exit 1;
   }
   test "$(binary_digest)" = "$before_binary"
   test "$(config_digest)" = "$before_config"
   test "$(store_digest)" = "$before_store"
+  test "$(identity_digest)" = "$before_identity"
   sudo systemctl is-active --quiet ai-server-agent.service
   sudo systemctl is-active --quiet ai-server-agent-executor.service
 }
@@ -176,19 +178,14 @@ test "$(sudo jq -r '.credentials[0].principal.id' /etc/ai-server-agent/mcp-crede
 test "$(sudo jq -r '.credentials[0].verifier' /etc/ai-server-agent/mcp-credentials.json)" = "$direct_verifier"
 verify_tokens "$direct_token" "$secondary_token" 200 401
 assert_bootstrap_rejected_preserving_install direct-only
-echo 'STAGE: protected updater installs published v0.1.14 after explicit cleanup'
-sudo env AI_SERVER_AGENT_UPDATE_CHANNEL=stable AI_SERVER_AGENT_VERSION=v0.1.14 \
-  bash "$ROOT/update.sh" > "$SCRATCH/update-success.log" 2>&1 || {
-    echo 'PROTECTED_PUBLISHED_RELEASE_ROLLBACK_FAILED' >&2
-    tail -n 30 "$SCRATCH/update-success.log" >&2
-    exit 1
-  }
-sudo jq -e '.channel=="stable" and .version=="v0.1.14" and .ref=="v0.1.14"' \
-  /etc/ai-server-agent/control/install-state.json >/dev/null
+echo 'STAGE: published historical rollback remains refused after explicit credential cleanup'
+assert_protected_update_refused
+sudo jq -e '.channel=="source" and .version=="source"' /etc/ai-server-agent/control/install-state.json >/dev/null
 verify_tokens "$direct_token" "$gateway_token" 200 401
 verify_tokens "$direct_token" "$secondary_token" 200 401
+echo 'STAGE: compatible source reinstall still preserves direct credential'
 sudo env AI_SERVER_AGENT_BINARY="$TRUSTED_SOURCE_BINARY" AI_SERVER_AGENT_NONINTERACTIVE=1 bash install.sh >/dev/null
 test "$(token_status "$direct_token")" = 200
 sudo env AI_SERVER_AGENT_YES=1 bash uninstall.sh --purge >/dev/null
 sudo test ! -e /etc/ai-server-agent
-echo 'INSTALLED_CREDENTIAL_UPGRADE_ROLLBACK_SAFETY_PASS'
+echo 'INSTALLED_CREDENTIAL_UPGRADE_ROLLBACK_SAFETY_PASS historical_immutable_downgrade=refused source_reinstall=verified'
