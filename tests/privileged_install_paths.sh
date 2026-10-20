@@ -33,6 +33,7 @@ search_probe="$scratch/search-probe.sh"
   printf '#!/usr/bin/env bash\nset -Eeuo pipefail\n'
   awk '/^root_path_violation\(\)\{/{emit=1} emit{print} emit && /^}/{exit}' "$ROOT/install.sh"
   awk '/^verify_privileged_install_path\(\)\{/{emit=1} emit{print} emit && /^}/{exit}' "$ROOT/install.sh"
+  awk '/^trusted_root_readlink\(\)\{/{emit=1} emit{print} emit && /^}/{exit}' "$ROOT/install.sh"
   awk '/^verify_privileged_search_path\(\)\{/{emit=1} emit{print} emit && /^}/{exit}' "$ROOT/install.sh"
   awk '/^verify_privileged_command_targets\(\)\{/{emit=1} emit{print} emit && /^}/{exit}' "$ROOT/install.sh"
   printf 'verify_privileged_search_path\nverify_privileged_command_targets\n'

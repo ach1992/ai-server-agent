@@ -156,6 +156,22 @@ verify_privileged_install_path(){
   done
 }
 
+# Debian 11 may ship coreutils readlink in /bin while newer usrmerged
+# images ship it in /usr/bin. Resolve only from these fixed OS locations,
+# after checking the actual resolver file and its complete ancestry.
+trusted_root_readlink(){
+  local binary
+  if [ -x /usr/bin/readlink ]; then
+    binary=/usr/bin/readlink
+  elif [ -x /bin/readlink ]; then
+    binary=/bin/readlink
+  else
+    root_path_violation "A trusted coreutils readlink binary is unavailable."
+  fi
+  verify_privileged_install_path "$binary" file
+  "$binary" "$@"
+}
+
 verify_privileged_install_targets(){
   local installed_helper
   verify_privileged_install_path /usr/local/bin directory
@@ -197,7 +213,7 @@ verify_privileged_search_path(){
         canonical="/usr/${entry#/}"
         verify_privileged_install_path "$canonical" directory
         if [ -L "$entry" ]; then
-          [ "$(/usr/bin/readlink -f -- "$entry")" = "$canonical" ] ||
+          [ "$(trusted_root_readlink -f -- "$entry")" = "$canonical" ] ||
             root_path_violation "Unexpected root PATH symlink: $entry"
         else
           verify_privileged_install_path "$entry" directory
@@ -231,7 +247,7 @@ verify_privileged_command_targets(){
     # PATH directory provenance was checked first; resolve any leaf symlink
     # (including the accepted /bin and /sbin usrmerge aliases) and then
     # validate every component and the actual executable inode.
-    real="$(/usr/bin/readlink -f -- "$selected")" ||
+    real="$(trusted_root_readlink -f -- "$selected")" ||
       root_path_violation "Cannot resolve selected root command $command_name: $selected"
     verify_privileged_install_path "$real" file
     [ -x "$real" ] ||
