@@ -188,4 +188,69 @@ if /usr/bin/env PATH=/usr/bin:/bin /usr/bin/bash "$ROOT/install.sh" --check-plat
 fi
 grep -qF 'Unsupported OS' "$scratch/platform-invalid.out"
 
+
+# Exercise the real install-time helper generator, not a manually assembled
+# approximation. An early Bash local-initialization error would otherwise
+# only surface during an expensive later installed-systemd CI stage.
+generator_probe="$scratch/generate-lifecycle-helpers.sh"
+{
+  printf '#!/usr/bin/env bash\nset -Eeuo pipefail\n'
+  for predicate in root_path_violation verify_privileged_install_path \
+      trusted_root_readlink verify_privileged_search_path verify_privileged_command_targets \
+      install_privileged_lifecycle_helper; do
+    awk -v name="$predicate" '$0 == name"(){" {emit=1} emit {print} emit && /^}/ {exit}' "$ROOT/install.sh"
+  done
+  cat <<'GENERATOR_PROBE'
+die(){ builtin printf 'Lifecycle generator refused: %s\n' "$*" >&2; exit 1; }
+LIB_DIR="$1"
+# The missing trusted leaf is an allowed recovery state for --plan.
+INSTALL_BIN="$LIB_DIR/agent-not-yet-installed"
+install_privileged_lifecycle_helper "$2" update.sh
+install_privileged_lifecycle_helper "$2" uninstall.sh
+GENERATOR_PROBE
+} > "$generator_probe"
+[ "$(grep -c '^install_privileged_lifecycle_helper(){' "$generator_probe")" -eq 1 ] ||
+  { echo 'Failed to extract real installed-helper generator' >&2; exit 1; }
+bash -n "$generator_probe"
+mkdir -m 0755 "$scratch/trusted/lib"
+PATH=/usr/bin:/bin bash "$generator_probe" "$scratch/trusted/lib" "$ROOT"
+for helper_name in update.sh uninstall.sh; do
+  generated="$scratch/trusted/lib/$helper_name"
+  [ -x "$generated" ] && [ -f "$generated" ] && [ ! -L "$generated" ] ||
+    { echo "Generated helper is missing: $helper_name" >&2; exit 1; }
+  [ "$(head -n 1 "$generated")" = '#!/bin/bash -p' ] ||
+    { echo "Generated helper has unsafe interpreter: $helper_name" >&2; exit 1; }
+  bash -n "$generated"
+done
+
+printf '{"channel":"stable","version":"v0.1.18","ref":"v0.1.18","track_ref":"v0.1.18"}\n' > "$scratch/fake-install-state.json"
+chmod 0600 "$scratch/fake-install-state.json"
+AI_SERVER_AGENT_INSTALL_STATE="$scratch/fake-install-state.json" \
+  AI_SERVER_AGENT_VERSION=v0.1.18 PATH=/usr/bin:/bin \
+  "$scratch/trusted/lib/update.sh" --plan > "$scratch/generated-update-plan.out"
+grep -qF 'Target version: v0.1.18' "$scratch/generated-update-plan.out"
+# The generated updater, not just the source predicate, rejects a hostile
+# present executable leaf before any update planning or credential operations.
+printf '#!/bin/sh\nexit 0\n' > "$scratch/trusted/lib/agent-not-yet-installed"
+chmod 0777 "$scratch/trusted/lib/agent-not-yet-installed"
+if AI_SERVER_AGENT_INSTALL_STATE="$scratch/fake-install-state.json" \
+  AI_SERVER_AGENT_VERSION=v0.1.18 PATH=/usr/bin:/bin \
+  "$scratch/trusted/lib/update.sh" --plan > "$scratch/generated-binary-denied.out" 2>&1; then
+  echo 'Generated direct updater accepted unsafe active Agent binary' >&2; exit 1
+fi
+grep -qF 'Privileged install path is writable by non-root users' "$scratch/generated-binary-denied.out"
+chmod 0644 "$scratch/trusted/lib/agent-not-yet-installed"
+if AI_SERVER_AGENT_INSTALL_STATE="$scratch/fake-install-state.json" \
+  AI_SERVER_AGENT_VERSION=v0.1.18 PATH=/usr/bin:/bin \
+  "$scratch/trusted/lib/update.sh" --plan > "$scratch/generated-binary-denied.out" 2>&1; then
+  echo 'Generated direct updater accepted a non-executable active Agent' >&2; exit 1
+fi
+grep -qF 'Installed Agent binary is not executable:' "$scratch/generated-binary-denied.out"
+rm -f -- "$scratch/trusted/lib/agent-not-yet-installed"
+if AI_SERVER_AGENT_YES=0 PATH=/usr/bin:/bin \
+  "$scratch/trusted/lib/uninstall.sh" --purge </dev/null > "$scratch/generated-uninstall-denied.out" 2>&1; then
+  echo 'Generated direct purge skipped required confirmation' >&2; exit 1
+fi
+grep -qF 'confirmation requires a terminal' "$scratch/generated-uninstall-denied.out"
+
 echo "ROOT_PRIVILEGED_INSTALL_PATH_PREFLIGHT_PASS"

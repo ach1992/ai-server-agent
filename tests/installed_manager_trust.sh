@@ -14,11 +14,12 @@ set -Eeuo pipefail
 manager=/usr/local/sbin/ai-server-agent-manage
 library=/usr/local/lib/ai-server-agent
 helper="$library/update.sh"
+uninstall_helper="$library/uninstall.sh"
 config=/etc/ai-server-agent/config.json
 identity=/etc/ai-server-agent/control/install-state.json
 
 [ -x "$manager" ] && [ -f "$helper" ] && [ ! -L "$library" ] &&
-  [ -f "$config" ] && [ -f "$identity" ] || {
+  [ -f "$config" ] && [ -f "$identity" ] && [ -f "$uninstall_helper" ] || {
     echo 'Expected fresh disposable installation is missing' >&2
     exit 1
   }
@@ -26,6 +27,19 @@ identity=/etc/ai-server-agent/control/install-state.json
 [ "$(/usr/bin/stat -c '%u' "$helper")" = 0 ] || exit 1
 original_library_mode="$(/usr/bin/stat -c '%a' "$library")"
 original_helper_mode="$(/usr/bin/stat -c '%a' "$helper")"
+original_uninstall_mode="$(/usr/bin/stat -c '%a' "$uninstall_helper")"
+agent_binary=/usr/local/bin/ai-server-agent
+agent_bin_dir=/usr/local/bin
+credentials=/etc/ai-server-agent/mcp-credentials.json
+[ -f "$agent_binary" ] && [ ! -L "$agent_binary" ] && [ -x "$agent_binary" ] &&
+  [ -f "$credentials" ] && [ ! -L "$credentials" ] || {
+    echo 'Expected installed Agent and credential store are missing' >&2; exit 1
+  }
+[ "$(/usr/bin/stat -c '%u' "$agent_binary")" = 0 ] || exit 1
+original_agent_mode="$(/usr/bin/stat -c '%a' "$agent_binary")"
+original_agent_dir_mode="$(/usr/bin/stat -c '%a' "$agent_bin_dir")"
+(( (8#$original_agent_mode & 0022) == 0 )) || exit 1
+(( (8#$original_agent_dir_mode & 0022) == 0 )) || exit 1
 (( (8#$original_library_mode & 0022) == 0 )) || exit 1
 (( (8#$original_helper_mode & 0022) == 0 )) || exit 1
 
@@ -33,6 +47,9 @@ scratch="$(mktemp -d /run/asa-manager-trust.XXXXXXXX)"
 chmod 0700 "$scratch"
 restore(){
   /usr/bin/chmod "$original_helper_mode" "$helper" 2>/dev/null || :
+  /usr/bin/chmod "$original_uninstall_mode" "$uninstall_helper" 2>/dev/null || :
+  /usr/bin/chmod "$original_agent_mode" "$agent_binary" 2>/dev/null || :
+  /usr/bin/chmod "$original_agent_dir_mode" "$agent_bin_dir" 2>/dev/null || :
   /usr/bin/chmod "$original_library_mode" "$library" 2>/dev/null || :
   rm -rf -- "$scratch"
 }
@@ -40,6 +57,7 @@ trap restore EXIT
 
 config_hash="$(/usr/bin/sha256sum "$config")"
 identity_hash="$(/usr/bin/sha256sum "$identity")"
+credentials_hash="$(/usr/bin/sha256sum "$credentials")"
 "$manager" help > "$scratch/safe.out"
 grep -qF 'AI Server Agent management' "$scratch/safe.out"
 
@@ -135,10 +153,192 @@ unset -f asa_env_probe
 [ -f "$scratch/systemctl-called" ] || { echo 'trusted status subprocess fixture did not execute' >&2; exit 1; }
 [ ! -e "$marker" ] || { echo 'BASH_ENV or exported Bash functions escaped the wrapper' >&2; exit 1; }
 
+# Directly invoked installed update/uninstall helpers are separate privileged
+# entrypoints. Exercise the real installed scripts without changing services.
+direct_update="$library/update.sh"
+direct_uninstall="$uninstall_helper"
+[ -x "$direct_update" ] && [ -x "$direct_uninstall" ] || {
+  echo 'Installed direct lifecycle helpers are missing' >&2; exit 1
+}
+update_mode="$(/usr/bin/stat -c '%a' "$direct_update")"
+uninstall_mode="$original_uninstall_mode"
+cat > "$scratch/test-install-state.json" <<'STABLE_STATE'
+{"channel":"stable","version":"v0.1.18","ref":"v0.1.18","track_ref":"v0.1.18"}
+STABLE_STATE
+chmod 0600 "$scratch/test-install-state.json"
+plan_update(){
+  AI_SERVER_AGENT_INSTALL_STATE="$scratch/test-install-state.json" \
+    AI_SERVER_AGENT_VERSION=v0.1.18 "$direct_update" --plan
+}
+refuse_uninstall(){
+  AI_SERVER_AGENT_YES=0 "$direct_uninstall" --purge </dev/null
+}
+plan_update > "$scratch/safe.out"
+grep -qF 'Target version: v0.1.18' "$scratch/safe.out"
+if refuse_uninstall > "$scratch/denied.out" 2>&1; then
+  echo 'Direct purge unexpectedly proceeded without confirmation' >&2; exit 1
+fi
+grep -qF 'confirmation requires a terminal' "$scratch/denied.out"
+
+# The direct updater executes the active Agent via an absolute pathname.
+# Keep its ancestor out of PATH: selected-command checks alone cannot help.
+agent_hash="$(/usr/bin/sha256sum "$agent_binary")"
+chmod 0777 "$agent_binary"
+if PATH=/usr/bin:/bin plan_update > "$scratch/denied.out" 2>&1; then
+  echo 'Updater accepted a writable active binary during --plan' >&2; exit 1
+fi
+grep -qF "Privileged install path is writable by non-root users: $agent_binary" "$scratch/denied.out"
+
+# Test the non-plan entrypoint as well, with an offline curl guard so a broken
+# preflight cannot download, execute or install anything on this CI runner.
+cat > "$scratch/bin/curl" <<'OFFLINE_CURL'
+#!/bin/sh
+printf 'unexpected network\n' > "$ASA_TEST_UPDATE_NETWORK_MARKER"
+exit 97
+OFFLINE_CURL
+chmod 0755 "$scratch/bin/curl"
+if ASA_TEST_UPDATE_NETWORK_MARKER="$scratch/unexpected-update-network" \
+  PATH="$scratch/bin:/usr/bin:/bin" \
+  AI_SERVER_AGENT_INSTALL_STATE="$scratch/test-install-state.json" \
+  AI_SERVER_AGENT_VERSION=v0.1.18 \
+  "$direct_update" > "$scratch/denied.out" 2>&1; then
+  echo 'Updater accepted writable active binary for real update' >&2; exit 1
+fi
+grep -qF "Privileged install path is writable by non-root users: $agent_binary" "$scratch/denied.out"
+[ ! -e "$scratch/unexpected-update-network" ] ||
+  { echo 'Update reached network before unsafe Agent binary rejection' >&2; exit 1; }
+rm -f -- "$scratch/bin/curl"
+chmod "$original_agent_mode" "$agent_binary"
+
+chmod 0777 "$agent_bin_dir"
+if PATH=/usr/bin:/bin plan_update > "$scratch/denied.out" 2>&1; then
+  echo 'Updater accepted writable active binary ancestor outside PATH' >&2; exit 1
+fi
+grep -qF "Privileged install path is writable by non-root users: $agent_bin_dir" "$scratch/denied.out"
+chmod "$original_agent_dir_mode" "$agent_bin_dir"
+test "$(/usr/bin/sha256sum "$agent_binary")" = "$agent_hash"
+
+chmod 0777 "$direct_update"
+if plan_update > "$scratch/denied.out" 2>&1; then
+  echo 'Direct updater accepted writable installed executable' >&2; exit 1
+fi
+grep -qF 'Privileged install path is writable by non-root users' "$scratch/denied.out"
+chmod "$update_mode" "$direct_update"
+chmod 0777 "$direct_uninstall"
+if refuse_uninstall > "$scratch/denied.out" 2>&1; then
+  echo 'Direct uninstaller accepted writable installed executable' >&2; exit 1
+fi
+grep -qF 'Privileged install path is writable by non-root users' "$scratch/denied.out"
+chmod "$uninstall_mode" "$direct_uninstall"
+
+chmod 0777 "$library"
+if plan_update > "$scratch/denied.out" 2>&1; then
+  echo 'Direct updater accepted writable ancestor' >&2; exit 1
+fi
+grep -qF 'Privileged install path is writable by non-root users' "$scratch/denied.out"
+if refuse_uninstall > "$scratch/denied.out" 2>&1; then
+  echo 'Direct uninstaller accepted writable ancestor' >&2; exit 1
+fi
+grep -qF 'Privileged install path is writable by non-root users' "$scratch/denied.out"
+chmod "$original_library_mode" "$library"
+
+# Unsafe selected command leaf must be rejected before execution.
+cat > "$scratch/bin/tr" <<'BAD_DIRECT_TR'
+#!/bin/sh
+printf 'executed\n' > "$ASA_TEST_EXECUTION_MARKER"
+BAD_DIRECT_TR
+chmod 0777 "$scratch/bin/tr"
+if ASA_TEST_EXECUTION_MARKER="$marker" PATH="$scratch/bin:/usr/bin:/bin" \
+  plan_update > "$scratch/denied.out" 2>&1; then
+  echo 'Direct updater accepted unsafe selected tr' >&2; exit 1
+fi
+grep -qF 'Privileged install path is writable by non-root users' "$scratch/denied.out"
+if ASA_TEST_EXECUTION_MARKER="$marker" PATH="$scratch/bin:/usr/bin:/bin" \
+  refuse_uninstall > "$scratch/denied.out" 2>&1; then
+  echo 'Direct uninstaller accepted unsafe selected tr' >&2; exit 1
+fi
+grep -qF 'Privileged install path is writable by non-root users' "$scratch/denied.out"
+[ ! -e "$marker" ] || { echo 'Unsafe direct helper command executed' >&2; exit 1; }
+rm -f -- "$scratch/bin/tr"
+
+# Purge-only command selection is also part of the guarded root command set:
+# absent from ordinary update paths, userdel/groupdel must not be overlooked.
+for destructive_command in userdel groupdel; do
+  cat > "$scratch/bin/$destructive_command" <<'BAD_DESTRUCTIVE'
+#!/bin/sh
+printf 'executed\n' > "$ASA_TEST_EXECUTION_MARKER"
+BAD_DESTRUCTIVE
+  chmod 0777 "$scratch/bin/$destructive_command"
+  if ASA_TEST_EXECUTION_MARKER="$marker" PATH="$scratch/bin:/usr/bin:/bin" \
+    refuse_uninstall > "$scratch/denied.out" 2>&1; then
+    echo "Direct uninstaller accepted unsafe $destructive_command" >&2; exit 1
+  fi
+  grep -qF 'Privileged install path is writable by non-root users' "$scratch/denied.out"
+  [ ! -e "$marker" ] || { echo 'Unsafe purge command executed before validation' >&2; exit 1; }
+  rm -f -- "$scratch/bin/$destructive_command"
+done
+
+# Trusted Bash command shims must not receive inherited BASH_ENV or exported
+# Bash functions; sanitized re-exec must preserve the synthetic FD3.
+cat > "$scratch/bin/jq" <<'DIRECT_JQ'
+#!/bin/bash
+printf 'called\n' > "$ASA_TEST_DIRECT_JQ_WITNESS"
+if /usr/bin/env | /usr/bin/grep -Eq '^(BASH_FUNC_asa_direct_env_probe%%|BASH_ENV)='; then
+  printf 'leaked\n' > "$ASA_TEST_EXECUTION_MARKER"
+fi
+if declare -F asa_direct_env_probe >/dev/null; then asa_direct_env_probe; fi
+[ "$ASA_TEST_EXPECT_CREDENTIAL_FD" = 1 ] && [ -r /proc/self/fd/3 ] || {
+  printf 'fd-missing\n' > "$ASA_TEST_EXECUTION_MARKER"
+  exit 1
+}
+exec /usr/bin/jq "$@"
+DIRECT_JQ
+cat > "$scratch/bin/tr" <<'DIRECT_TR'
+#!/bin/bash
+printf 'called\n' > "$ASA_TEST_DIRECT_TR_WITNESS"
+if /usr/bin/env | /usr/bin/grep -Eq '^(BASH_FUNC_asa_direct_env_probe%%|BASH_ENV)='; then
+  printf 'leaked\n' > "$ASA_TEST_EXECUTION_MARKER"
+fi
+if declare -F asa_direct_env_probe >/dev/null; then asa_direct_env_probe; fi
+[ "$ASA_TEST_EXPECT_CREDENTIAL_FD" = 1 ] && [ -r /proc/self/fd/3 ] || {
+  printf 'fd-missing\n' > "$ASA_TEST_EXECUTION_MARKER"
+  exit 1
+}
+exec /usr/bin/tr "$@"
+DIRECT_TR
+chmod 0755 "$scratch/bin/jq" "$scratch/bin/tr"
+asa_direct_env_probe(){ printf 'imported\n' > "$ASA_TEST_EXECUTION_MARKER"; }
+export -f asa_direct_env_probe
+(
+  exec 3<<<'synthetic-nonsecret-fd3-payload'
+  ASA_TEST_EXPECT_CREDENTIAL_FD=1 \
+    ASA_TEST_EXECUTION_MARKER="$marker" \
+    ASA_TEST_DIRECT_JQ_WITNESS="$scratch/direct-jq-called" \
+    BASH_ENV="$scratch/startup.sh" PATH="$scratch/bin:/usr/bin:/bin" \
+    plan_update > "$scratch/safe.out"
+  if ASA_TEST_EXPECT_CREDENTIAL_FD=1 \
+    ASA_TEST_EXECUTION_MARKER="$marker" \
+    ASA_TEST_DIRECT_TR_WITNESS="$scratch/direct-tr-called" \
+    BASH_ENV="$scratch/startup.sh" PATH="$scratch/bin:/usr/bin:/bin" \
+    refuse_uninstall > "$scratch/denied.out" 2>&1; then
+    echo 'Direct purge unexpectedly passed confirmation' >&2; exit 1
+  fi
+)
+unset -f asa_direct_env_probe
+[ -e "$scratch/direct-jq-called" ] || { echo 'Direct update trusted jq shim not reached' >&2; exit 1; }
+[ -e "$scratch/direct-tr-called" ] || { echo 'Direct uninstall trusted tr shim not reached' >&2; exit 1; }
+grep -qF 'confirmation requires a terminal' "$scratch/denied.out"
+[ ! -e "$marker" ] || { echo 'Direct lifecycle inherited Bash execution state' >&2; exit 1; }
+rm -f -- "$scratch/bin/jq" "$scratch/bin/tr"
+
 test "$(/usr/bin/sha256sum "$config")" = "$config_hash"
 test "$(/usr/bin/sha256sum "$identity")" = "$identity_hash"
+test "$(/usr/bin/sha256sum "$credentials")" = "$credentials_hash"
+test "$(/usr/bin/stat -c '%a' "$agent_binary")" = "$original_agent_mode"
+test "$(/usr/bin/stat -c '%a' "$agent_bin_dir")" = "$original_agent_dir_mode"
 test "$(/usr/bin/stat -c '%a' "$library")" = "$original_library_mode"
 test "$(/usr/bin/stat -c '%a' "$helper")" = "$original_helper_mode"
+test "$(/usr/bin/stat -c '%a' "$uninstall_helper")" = "$original_uninstall_mode"
 systemctl is-active --quiet ai-server-agent.service
 systemctl is-active --quiet ai-server-agent-executor.service
 
