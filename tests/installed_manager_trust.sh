@@ -76,14 +76,47 @@ fi
 grep -qF 'Privileged install path is writable by non-root users' "$scratch/denied.out"
 [ ! -e "$marker" ] || { echo 'untrusted command ran before wrapper preflight' >&2; exit 1; }
 
-# Bash -p suppresses direct startup execution, but does NOT drop raw
-# BASH_FUNC_* environment entries: descendants could import them. Observe
-# the environment of a real status subprocess through a trusted root-owned
-# systemctl fixture, without modifying systemd or installed helper scripts.
+# Bash -p alone does not remove BASH_ENV or exported BASH_FUNC_* from
+# subprocess environments. Exercise a trusted, root-owned Bash flock shim
+# DURING THE WRAPPER'S LOCK SETUP (before manage.sh is invoked), not merely
+# a child of the final management implementation. This also probes the
+# supported inherited credential FD3 without reading any real credential.
 rm -f -- "$scratch/bin/tr"
 cat > "$scratch/startup.sh" <<'UNTRUSTED_STARTUP'
 printf 'executed\n' > "$ASA_TEST_EXECUTION_MARKER"
 UNTRUSTED_STARTUP
+cat > "$scratch/bin/flock" <<'FLOCK_PROBE'
+#!/bin/bash
+printf 'called\n' > "$ASA_TEST_EARLY_SHIM_WITNESS"
+if /usr/bin/env | /usr/bin/grep -Eq '^(BASH_FUNC_asa_env_probe%%|BASH_ENV)='; then
+  printf 'inherited\n' > "$ASA_TEST_EXECUTION_MARKER"
+fi
+if declare -F asa_env_probe >/dev/null; then asa_env_probe; fi
+if [ "${ASA_TEST_EXPECT_CREDENTIAL_FD:-}" = 1 ]; then
+  [ "${AI_SERVER_AGENT_MCP_AUTH_FD:-}" = 3 ] && [ -r /proc/self/fd/3 ] || {
+    printf 'credential fd missing\n' > "$ASA_TEST_EXECUTION_MARKER"
+    exit 1
+  }
+fi
+exec /usr/bin/flock "$@"
+FLOCK_PROBE
+chmod 0755 "$scratch/bin/flock"
+asa_env_probe(){ printf 'imported\n' > "$ASA_TEST_EXECUTION_MARKER"; }
+export -f asa_env_probe
+(
+  exec 3<<<'synthetic-nonsecret-fd3-payload'
+  ASA_TEST_EXPECT_CREDENTIAL_FD=1 AI_SERVER_AGENT_MCP_AUTH_FD=3 \
+    ASA_TEST_EXECUTION_MARKER="$marker" \
+    ASA_TEST_EARLY_SHIM_WITNESS="$scratch/early-flock-called" \
+    BASH_ENV="$scratch/startup.sh" PATH="$scratch/bin:/usr/bin:/bin" \
+    "$manager" help > "$scratch/safe.out"
+)
+[ -f "$scratch/early-flock-called" ] || { echo 'pre-handoff Bash flock shim did not run' >&2; exit 1; }
+[ ! -e "$marker" ] || { echo 'Bash environment leaked before management handoff' >&2; exit 1; }
+rm -f -- "$scratch/bin/flock"
+
+# Continue proving post-handoff isolation through a trusted root-owned
+# systemctl shim, without changing actual installed helper scripts.
 cat > "$scratch/bin/systemctl" <<'SYSTEMCTL_PROBE'
 #!/bin/sh
 printf 'called\n' > "$ASA_TEST_SHIM_WITNESS"

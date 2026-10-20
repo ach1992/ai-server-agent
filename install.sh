@@ -687,6 +687,30 @@ install_helpers(){
       trusted_root_readlink verify_privileged_search_path verify_privileged_command_targets
     cat <<'EOF_MANAGE_WRAPPER'
 [ "$EUID" -eq 0 ] || { printf 'Run as root\n' >&2; exit 1; }
+# Bash -p ignores initial hooks but can pass raw BASH_FUNC_*/BASH_ENV to
+# ordinary child Bash scripts. Before ANY external command (even a trusted
+# root-owned PATH shim), use Bash builtins to inspect the inherited environment
+# and re-execute this fixed installed entrypoint with unsafe Bash state removed.
+[ -r /proc/self/environ ] || { printf 'Cannot inspect privileged process environment\n' >&2; exit 1; }
+clean_env=()
+while IFS= read -r -d '' env_entry; do
+  env_name="${env_entry%%=*}"
+  case "$env_name" in
+    BASH_ENV|ENV|SHELLOPTS|BASHOPTS|CDPATH|GLOBIGNORE|IFS|BASH_FUNC_*)
+      clean_env+=(-u "$env_name") ;;
+  esac
+done < /proc/self/environ
+if (( ${#clean_env[@]} > 0 )); then
+  # The OS-owned fixed env and privileged Bash executables are the same
+  # system trust roots as the wrapper's shebang; validate their full paths
+  # during normal preflight after the environment has been cleaned.
+  [ -f /usr/bin/env ] && [ -x /usr/bin/env ] &&
+    [ -f /bin/bash ] && [ -x /bin/bash ] || {
+      printf 'Trusted privileged environment bootstrap is unavailable\n' >&2
+      exit 1
+    }
+  exec /usr/bin/env "${clean_env[@]}" /bin/bash -p /usr/local/sbin/ai-server-agent-manage "$@"
+fi
 verify_privileged_search_path
 verify_privileged_command_targets
 # Installation-time validation is not sufficient after filesystem drift.
@@ -718,19 +742,10 @@ else
   flock -n 9 || { echo "Another AI Server Agent management operation is already active. Retry after it finishes." >&2; exit 1; }
 fi
 [ -f "$MANAGE_IMPL" ] && [ -x "$MANAGE_IMPL" ] || { echo "Management implementation is missing: $MANAGE_IMPL" >&2; exit 1; }
-# The -p interpreter ignores inherited Bash hooks, but exported Bash
-# functions remain in the *environment* and can reappear in child Bash
-# processes. Remove those raw environment entries before handing off to
-# the installed manager, without discarding supported operator settings.
-verify_privileged_install_path /usr/bin/env file
-[ -r /proc/self/environ ] || root_path_violation 'Cannot inspect privileged process environment.'
-clean_env=(-u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u CDPATH -u GLOBIGNORE)
-while IFS= read -r -d '' env_entry; do
-  env_name="${env_entry%%=*}"
-  case "$env_name" in BASH_FUNC_*) clean_env+=(-u "$env_name") ;; esac
-done < /proc/self/environ
-# Use the trusted fixed Bash interpreter, never another PATH lookup.
-exec /usr/bin/env "${clean_env[@]}" /bin/bash -p "$MANAGE_IMPL" "$@"
+# The entire wrapper, including its trusted-command and lifecycle-lock
+# setup, now runs after the early environment scrub. Never reintroduce an
+# unsanitized handoff or a PATH-selected interpreter here.
+exec /bin/bash -p "$MANAGE_IMPL" "$@"
 EOF_MANAGE_WRAPPER
   } > "$MANAGE_BIN"
   chown root:root "$MANAGE_BIN"; chmod 0755 "$MANAGE_BIN"
