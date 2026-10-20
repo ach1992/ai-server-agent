@@ -74,6 +74,7 @@ type stdioSession struct {
 	bytes                   int
 	done                    chan struct{}
 	expiry                  *time.Timer
+	lastAuthenticatedAction time.Time                // Only non-Terminal sessions can refresh their idle lease; Terminal is PID1 hard-capped.
 	terminal                *tmuxTerminalState       // consumer-specific Control Mode state; broker owns its process
 	terminalRecordPersisted bool                     // guarded by entry.mu; PENDING or ACTIVE file owns capacity
 	dap                     *dapState                // DAP stream attaches to this same process identity and broker
@@ -142,6 +143,42 @@ func (b *stdioSessionBroker) unpersistedTerminalCount() int {
 	return count
 }
 
+// Non-Terminal interactive sessions are limited by authenticated inactivity,
+// not simply age since first launch. Root-controlled Terminal scope cleanup
+// currently requires its existing absolute PID1 lifetime and is unchanged.
+func (e *stdioSession) refreshNonterminalIdleLease() {
+	if e == nil {
+		return
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.terminal != nil || e.closed || e.exited {
+		return
+	}
+	e.lastAuthenticatedAction = time.Now()
+	if e.expiry != nil {
+		e.expiry.Reset(maxStdioSessionAge)
+	}
+}
+
+// A timer callback may have entered concurrently with a request. Recheck
+// under the entry lock to avoid stopping a recently renewed live session.
+func (e *stdioSession) nonterminalIdleLeaseStillValid(now time.Time) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.terminal != nil || e.closed || e.exited || e.lastAuthenticatedAction.IsZero() {
+		return false
+	}
+	remaining := maxStdioSessionAge - now.Sub(e.lastAuthenticatedAction)
+	if remaining <= 0 {
+		return false
+	}
+	if e.expiry != nil {
+		e.expiry.Reset(remaining)
+	}
+	return true
+}
+
 func (b *stdioSessionBroker) get(req Request, id string) (*stdioSession, error) {
 	if b == nil || id == "" || req.PrincipalID == "" || req.PrincipalClass == "" {
 		return nil, errSessionNotFound
@@ -153,6 +190,10 @@ func (b *stdioSessionBroker) get(req Request, id string) (*stdioSession, error) 
 		// Do not reveal whether another principal's opaque session exists.
 		return nil, errSessionNotFound
 	}
+	// This is an authenticated same-owner/workspace access. The legacy durable
+	// Terminal scope remains governed by its independent absolute PID1 TTL;
+	// non-Terminal adapters and Browser processes can be retained while used.
+	session.refreshNonterminalIdleLease()
 	return session, nil
 }
 
@@ -567,6 +608,7 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 	go entry.wait()
 	// A forgotten or disconnected session cannot run indefinitely.
 	entry.mu.Lock()
+	entry.lastAuthenticatedAction = time.Now()
 	entry.expiry = time.AfterFunc(maxStdioSessionAge, func() { s.expireProcessSession(entry) })
 	entry.mu.Unlock()
 	audited := s.finishActionAudit(req, "session_create", auditMode(req.Root), kind+"\x00"+cwd+"\x00"+binary, "developer_session", start, Response{OK: true})

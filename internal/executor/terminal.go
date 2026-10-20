@@ -729,6 +729,9 @@ func (s *Server) terminalCommand(req Request, e *stdioSession, command string) e
 // The existing broker timer owns expiry; terminal expiry must terminate the
 // actual tmux session, not merely its Control Mode client process.
 func (s *Server) expireProcessSession(entry *stdioSession) {
+	if entry.nonterminalIdleLeaseStillValid(time.Now()) {
+		return
+	}
 	if entry.browser != nil {
 		req := Request{Action: "browser_session_close", PrincipalID: entry.ownerID, PrincipalClass: entry.ownerClass, Workspace: entry.workspace, SessionID: entry.id}
 		_ = ensureRequestCorrelation(&req)
