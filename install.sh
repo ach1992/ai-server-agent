@@ -678,13 +678,29 @@ install_helpers(){
   install -o root -g root -m 0755 "$root/update.sh" "$LIB_DIR/update.sh"
   install -o root -g root -m 0755 "$root/uninstall.sh" "$LIB_DIR/uninstall.sh"
   install -o root -g root -m 0700 "$root/ensure-lifecycle-lock.sh" "$LIB_DIR/ensure-lifecycle-lock.sh"
-  cat > "$MANAGE_BIN" <<'EOF_MANAGE_WRAPPER'
-#!/usr/bin/env bash
-set -Eeuo pipefail
-[ "$(id -u)" -eq 0 ] || { echo "Run as root" >&2; exit 1; }
+  # Emit the same validated root path/command predicates already used by
+  # installation. The standalone installed wrapper must not source an
+  # unverified helper or run a PATH-resolved command before its own preflight.
+  {
+    printf '#!/bin/bash -p\nset -Eeuo pipefail\n'
+    declare -f root_path_violation verify_privileged_install_path \
+      trusted_root_readlink verify_privileged_search_path verify_privileged_command_targets
+    cat <<'EOF_MANAGE_WRAPPER'
+[ "$EUID" -eq 0 ] || { printf 'Run as root\n' >&2; exit 1; }
+verify_privileged_search_path
+verify_privileged_command_targets
+# Installation-time validation is not sufficient after filesystem drift.
+# Check the installed manager and its privileged children before creating a
+# lifecycle lock or executing any of those installed helpers.
+MANAGE_IMPL=/usr/local/lib/ai-server-agent/manage.sh
+verify_privileged_install_path /usr/local/sbin/ai-server-agent-manage file
+verify_privileged_install_path /usr/local/lib/ai-server-agent directory
+verify_privileged_install_path /usr/local/bin/ai-server-agent file
+for helper in manage.sh update.sh uninstall.sh ensure-lifecycle-lock.sh; do
+  verify_privileged_install_path "/usr/local/lib/ai-server-agent/$helper" file
+done
 LOCK_DIR=/run/lock/ai-server-agent
 LOCK_FILE="$LOCK_DIR/management.lock"
-MANAGE_IMPL=/usr/local/lib/ai-server-agent/manage.sh
 command -v flock >/dev/null 2>&1 || { echo "flock is required for privileged lifecycle serialization" >&2; exit 1; }
 [ ! -L "$LOCK_DIR" ] || { echo "Refusing symlinked lifecycle lock directory: $LOCK_DIR" >&2; exit 1; }
 install -d -o root -g root -m 0700 "$LOCK_DIR"
@@ -701,9 +717,11 @@ else
   exec 9>>"$LOCK_FILE"
   flock -n 9 || { echo "Another AI Server Agent management operation is already active. Retry after it finishes." >&2; exit 1; }
 fi
-[ -x "$MANAGE_IMPL" ] || { echo "Management implementation is missing: $MANAGE_IMPL" >&2; exit 1; }
-exec "$MANAGE_IMPL" "$@"
+[ -f "$MANAGE_IMPL" ] && [ -x "$MANAGE_IMPL" ] || { echo "Management implementation is missing: $MANAGE_IMPL" >&2; exit 1; }
+# Never allow /usr/bin/env to perform a second PATH/BASH_ENV startup lookup.
+exec /bin/bash -p "$MANAGE_IMPL" "$@"
 EOF_MANAGE_WRAPPER
+  } > "$MANAGE_BIN"
   chown root:root "$MANAGE_BIN"; chmod 0755 "$MANAGE_BIN"
 }
 
