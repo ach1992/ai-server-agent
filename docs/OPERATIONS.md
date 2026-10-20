@@ -349,7 +349,9 @@ The stable updater does not trust a mutable `main` installer. It:
 3. requires the release to be non-draft, non-prerelease and immutable;
 4. requires exactly one uploaded tag-scoped `install.sh` asset;
 5. verifies the downloaded `install.sh` bytes against the SHA-256 digest recorded on that GitHub release asset **before executing it**;
-6. lets the release-scoped installer verify the release archive against `SHA256SUMS`.
+6. requires the authenticated installer to declare the reviewed installed privileged lifecycle/startup trust contract; older releases without it are refused even if credentials are compatible;
+7. performs the existing credential/config checks before invoking the eligible installer;
+8. lets the release-scoped installer verify the release archive against `SHA256SUMS`.
 
 Missing/malformed/contradictory stable install identity fails closed. It does not silently become a source/`main` update.
 
