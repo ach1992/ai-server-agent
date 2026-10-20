@@ -100,6 +100,23 @@ jobs:
           cache: false
       - name: Shell syntax
         run: bash -n scripts/install-stable.sh tests/stable_bootstrap.sh tests/root_trust_boundary.sh tests/root_trust_migration.sh tests/worker_home_migration.sh
+      - name: Privileged install path denial and disposable runner preparation
+        run: |
+          set -Eeuo pipefail
+          bash -n tests/privileged_install_paths.sh scripts/ci-prepare-trusted-install-paths.sh
+          sudo bash tests/privileged_install_paths.sh
+          # On affected GitHub images /usr/local/bin starts 0777. Prove
+          # the full installer refuses it BEFORE state/service mutation.
+          mode="$(stat -c '%a' /usr/local/bin)"
+          if (( (8#$mode & 0022) != 0 )); then
+            if sudo bash install.sh --check >/tmp/untrusted-installed-path.out 2>&1; then
+              echo 'installer accepted writable privileged destination' >&2
+              exit 1
+            fi
+            grep -qF 'Privileged install path is writable by non-root users:' /tmp/untrusted-installed-path.out
+          fi
+          sudo env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" bash scripts/ci-prepare-trusted-install-paths.sh
+          sudo bash install.sh --check
       - name: Worker HOME migration identity and fail-closed regression
         run: bash tests/worker_home_migration.sh
       - name: Build local test binary
@@ -155,6 +172,8 @@ jobs:
           test "$(sed -n '1p' dist/install.sh)" = '#!/usr/bin/env bash'
           test "$(sed -n '2p' dist/install.sh)" = 'export AI_SERVER_AGENT_VERSION=v0.1.2'
           test "$(sed -n '3p' dist/install.sh)" = 'export AI_SERVER_AGENT_REF=v0.1.2'
+      - name: Prepare trusted install paths on disposable Stable provenance runner
+        run: sudo env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" bash scripts/ci-prepare-trusted-install-paths.sh
       - name: Reject stable binary override
         run: |
           if sudo env AI_SERVER_AGENT_BINARY=/bin/true bash dist/install.sh --check >/tmp/binary-override.out 2>&1; then
@@ -167,13 +186,14 @@ jobs:
         run: |
           set -Eeuo pipefail
           fixture="$(mktemp -d)"
-          fakebin="$fixture/bin"
-          mkdir -p "$fakebin"
+          # Trusted root-owned PATH shim must not reside in world-writable /tmp.
+          fakebin="$(sudo mktemp -d /run/asa-stable-provenance-bin.XXXXXX)"
+          trap 'sudo rm -rf "$fakebin"; rm -rf "$fixture"' EXIT
           printf 'corrupted release bytes\n' > "$fixture/corrupt.tgz"
           printf 'different expected bytes\n' > "$fixture/expected.tgz"
           expected_sha="$(sha256sum "$fixture/expected.tgz" | awk '{print $1}')"
           printf '%s  ai-server-agent_0.1.2_linux_amd64.tar.gz\n' "$expected_sha" > "$fixture/SHA256SUMS"
-          cat > "$fakebin/curl" <<'CURL'
+          sudo tee "$fakebin/curl" >/dev/null <<'CURL'
           #!/usr/bin/env bash
           set -Eeuo pipefail
           out=''
@@ -192,9 +212,9 @@ jobs:
             *) exit 22 ;;
           esac
           CURL
-          chmod +x "$fakebin/curl"
+          sudo chmod 0755 "$fakebin" "$fakebin/curl"
           if sudo env \
-            PATH="$fakebin:$PATH" \
+            PATH="$fakebin:/usr/sbin:/usr/bin:/sbin:/bin" \
             FIXTURE_ARCHIVE="$fixture/corrupt.tgz" \
             FIXTURE_SUMS="$fixture/SHA256SUMS" \
             AI_SERVER_AGENT_NONINTERACTIVE=1 \

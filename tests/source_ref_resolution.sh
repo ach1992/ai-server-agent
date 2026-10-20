@@ -5,12 +5,14 @@ set -Eeuo pipefail
 # call. This is a read-only --resolve-ref path on a disposable CI runner.
 cd "$(dirname "$0")/.."
 command -v sudo >/dev/null || { echo 'sudo is required for the installer contract fixture' >&2; exit 1; }
-tmp="$(mktemp -d)"
-trap 'rm -rf "$tmp"' EXIT
-mkdir -p "$tmp/bin"
-chmod 0755 "$tmp" "$tmp/bin"
+# Root search-path tests must not execute a mock from /tmp (1777).
+# Create a private, root-owned mock under /run on the disposable CI
+# runner without touching system binaries or services.
+tmp="$(sudo mktemp -d /run/asa-source-ref-fixture.XXXXXXXX)"
+trap 'sudo rm -rf -- "$tmp"' EXIT
+sudo install -d -o root -g root -m 0755 "$tmp/bin"
 
-cat > "$tmp/bin/curl" <<'MOCK_CURL'
+sudo tee "$tmp/bin/curl" >/dev/null <<'MOCK_CURL'
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
@@ -41,8 +43,8 @@ case "$SOURCE_REF_TEST_SCENARIO" in
   *) exit 98 ;;
 esac
 MOCK_CURL
-chmod 0755 "$tmp/bin/curl"
-fixture_path="$tmp/bin:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+sudo chmod 0755 "$tmp" "$tmp/bin/curl"
+fixture_path="$tmp/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 fixture_sha='97aa670f1e72279349aea557bf25abaf6c2fd7ab'
 
 resolve(){
