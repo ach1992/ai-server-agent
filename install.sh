@@ -695,6 +695,22 @@ install_privileged_lifecycle_helper(){
     printf '#!/bin/bash -p\nset -Eeuo pipefail\n'
     printf '%s\n' "$validators"
     printf 'privileged_helper_entrypoint=%q\n' "$target"
+    if [ "$helper" = ensure-lifecycle-lock.sh ]; then
+      # systemd calls this installed helper as aiagent before Agent ExecStart,
+      # and as root before Executor ExecStart. The unprivileged mode is
+      # read-only; it must never create a lock or elevate privileges.
+      printf 'startup_agent_binary=%q\n' "$INSTALL_BIN"
+      cat <<'EOF_INSTALLED_SYSTEMD_BINARY_CHECK'
+if [ "$#" -eq 1 ] && [ "$1" = --verify-agent-binary ]; then
+  verify_privileged_install_path "$privileged_helper_entrypoint" file
+  verify_privileged_install_path "$startup_agent_binary" file
+  [ -f "$startup_agent_binary" ] && [ -x "$startup_agent_binary" ] ||
+    root_path_violation "Systemd Agent binary is not an executable regular file: $startup_agent_binary"
+  exit 0
+fi
+[ "$#" -eq 0 ] || root_path_violation 'Invalid systemd startup helper argument.'
+EOF_INSTALLED_SYSTEMD_BINARY_CHECK
+    fi
     cat <<'EOF_INSTALLED_LIFECYCLE_PREFLIGHT'
 [ "$EUID" -eq 0 ] || { builtin printf 'Run as root\n' >&2; exit 1; }
 # Preserve supported operator environment/FDs but never let unsafe inherited
@@ -728,6 +744,12 @@ EOF_INSTALLED_LIFECYCLE_PREFLIGHT
       printf 'verify_privileged_install_path %q file\n' "$INSTALL_BIN"
       printf '[ ! -e %q ] || [ -x %q ] || root_path_violation %q\n' \
         "$INSTALL_BIN" "$INSTALL_BIN" "Installed Agent binary is not executable: $INSTALL_BIN"
+    elif [ "$helper" = ensure-lifecycle-lock.sh ]; then
+      # Root Executor startup must verify the active binary before the lock
+      # helper performs any filesystem mutation.
+      printf 'verify_privileged_install_path %q file\n' "$INSTALL_BIN"
+      printf '[ -f %q ] && [ -x %q ] || root_path_violation %q\n' \
+        "$INSTALL_BIN" "$INSTALL_BIN" "Systemd Agent binary is not an executable regular file: $INSTALL_BIN"
     fi
     cat -- "$root/$helper"
   } > "$staged"; then
@@ -747,7 +769,7 @@ install_helpers(){
   install -o root -g root -m 0700 "$root/manage.sh" "$LIB_DIR/manage.sh"
   install_privileged_lifecycle_helper "$root" update.sh
   install_privileged_lifecycle_helper "$root" uninstall.sh
-  install -o root -g root -m 0700 "$root/ensure-lifecycle-lock.sh" "$LIB_DIR/ensure-lifecycle-lock.sh"
+  install_privileged_lifecycle_helper "$root" ensure-lifecycle-lock.sh
   # Emit the same validated root path/command predicates already used by
   # installation. The standalone installed wrapper must not source an
   # unverified helper or run a PATH-resolved command before its own preflight.
@@ -1119,6 +1141,8 @@ Requires=ai-server-agent-executor.service
 Type=simple
 User=$AGENT_USER
 Group=$AGENT_USER
+# Run read-only trust check as aiagent under the service sandbox.
+ExecStartPre=$LIB_DIR/ensure-lifecycle-lock.sh --verify-agent-binary
 ExecStart=$INSTALL_BIN -config $CONFIG_FILE serve
 Restart=always
 RestartSec=2

@@ -207,6 +207,7 @@ LIB_DIR="$1"
 INSTALL_BIN="$LIB_DIR/agent-not-yet-installed"
 install_privileged_lifecycle_helper "$2" update.sh
 install_privileged_lifecycle_helper "$2" uninstall.sh
+install_privileged_lifecycle_helper "$2" ensure-lifecycle-lock.sh
 GENERATOR_PROBE
 } > "$generator_probe"
 [ "$(grep -c '^install_privileged_lifecycle_helper(){' "$generator_probe")" -eq 1 ] ||
@@ -214,7 +215,7 @@ GENERATOR_PROBE
 bash -n "$generator_probe"
 mkdir -m 0755 "$scratch/trusted/lib"
 PATH=/usr/bin:/bin bash "$generator_probe" "$scratch/trusted/lib" "$ROOT"
-for helper_name in update.sh uninstall.sh; do
+for helper_name in update.sh uninstall.sh ensure-lifecycle-lock.sh; do
   generated="$scratch/trusted/lib/$helper_name"
   [ -x "$generated" ] && [ -f "$generated" ] && [ ! -L "$generated" ] ||
     { echo "Generated helper is missing: $helper_name" >&2; exit 1; }
@@ -247,6 +248,41 @@ if AI_SERVER_AGENT_INSTALL_STATE="$scratch/fake-install-state.json" \
 fi
 grep -qF 'Installed Agent binary is not executable:' "$scratch/generated-binary-denied.out"
 rm -f -- "$scratch/trusted/lib/agent-not-yet-installed"
+
+# Exercise the real generated systemd ExecStartPre guard through its
+# read-only mode; root lifecycle lock creation belongs to installed CI.
+startup_guard="$scratch/trusted/lib/ensure-lifecycle-lock.sh"
+if PATH=/usr/bin:/bin "$startup_guard" --verify-agent-binary >"$scratch/systemd-start-denied.out" 2>&1; then
+  echo 'Systemd startup guard accepted an absent active Agent binary' >&2; exit 1
+fi
+grep -qF 'Systemd Agent binary is not an executable regular file:' "$scratch/systemd-start-denied.out"
+install -o root -g root -m 0755 /bin/true "$scratch/trusted/lib/agent-not-yet-installed"
+PATH=/usr/bin:/bin "$startup_guard" --verify-agent-binary
+chmod 0777 "$scratch/trusted/lib/agent-not-yet-installed"
+if PATH=/usr/bin:/bin "$startup_guard" --verify-agent-binary >"$scratch/systemd-start-denied.out" 2>&1; then
+  echo 'Systemd startup guard accepted writable Agent executable' >&2; exit 1
+fi
+grep -qF 'Privileged install path is writable by non-root users:' "$scratch/systemd-start-denied.out"
+chmod 0755 "$scratch/trusted/lib/agent-not-yet-installed"
+chmod 0777 "$scratch/trusted/lib"
+if PATH=/usr/bin:/bin "$startup_guard" --verify-agent-binary >"$scratch/systemd-start-denied.out" 2>&1; then
+  echo 'Systemd startup guard accepted replaceable Agent ancestry' >&2; exit 1
+fi
+grep -qF 'Privileged install path is writable by non-root users:' "$scratch/systemd-start-denied.out"
+chmod 0755 "$scratch/trusted/lib"
+chmod 0644 "$scratch/trusted/lib/agent-not-yet-installed"
+if PATH=/usr/bin:/bin "$startup_guard" --verify-agent-binary >"$scratch/systemd-start-denied.out" 2>&1; then
+  echo 'Systemd startup guard accepted non-executable Agent binary' >&2; exit 1
+fi
+grep -qF 'Systemd Agent binary is not an executable regular file:' "$scratch/systemd-start-denied.out"
+chmod 0755 "$scratch/trusted/lib/agent-not-yet-installed"
+PATH=/usr/bin:/bin "$startup_guard" --verify-agent-binary
+if PATH=/usr/bin:/bin "$startup_guard" --bad-option >"$scratch/systemd-start-denied.out" 2>&1; then
+  echo 'Systemd startup guard accepted unsupported mode' >&2; exit 1
+fi
+grep -qF 'Invalid systemd startup helper argument.' "$scratch/systemd-start-denied.out"
+rm -f -- "$scratch/trusted/lib/agent-not-yet-installed"
+
 if AI_SERVER_AGENT_YES=0 PATH=/usr/bin:/bin \
   "$scratch/trusted/lib/uninstall.sh" --purge </dev/null > "$scratch/generated-uninstall-denied.out" 2>&1; then
   echo 'Generated direct purge skipped required confirmation' >&2; exit 1

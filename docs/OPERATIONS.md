@@ -107,6 +107,9 @@ Services:
 - `ai-server-agent.service`
 - `ai-server-agent-executor.service`
 
+**Service startup trust:** Both installed services verify the active Agent executable's root ownership, regular/executable type, link safety and nonwritable pathname ancestry before each systemd startup. The unprivileged Agent uses the same installed helper in read-only `--verify-agent-binary` `ExecStartPre` mode under its existing sandbox. The Root Executor uses the normal startup helper for the same binary preflight followed by root-only lifecycle lock creation. Unsafe filesystem drift refuses service startup with actionable diagnostics; do not auto-change permissions on an occupied host. The guard and OS interpreter must themselves be trusted before launch; older rollback installers can restore older startup checks.
+
+
 ## First-run choices
 
 A successful core install is independent from public connection setup. The wizard offers:
