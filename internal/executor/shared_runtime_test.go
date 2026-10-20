@@ -235,7 +235,8 @@ func TestSharedRuntimeServiceQuotaIndependentAndUnknownFailsClosed(t *testing.T)
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	fixtureRuntimeClaim(t, claims, "11", "owner", "service", root, now)
 	fixtureRuntimeClaim(t, claims, "12", "owner", "service", root, now)
-	mockActiveUnits(t, "11", "12")
+	fixtureRuntimeClaim(t, claims, "13", "owner", "service", root, now)
+	mockActiveUnits(t, "11", "12", "13")
 	if v := persistentAdmissionWithTestDisk(jobs, 8, "service", nil); v == nil || v.Status != "busy" || v.ErrorCode != "resource_limit" {
 		t.Fatalf("service quota not enforced: %+v", v)
 	}
