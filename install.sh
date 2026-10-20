@@ -676,7 +676,8 @@ grep -Eq '^v1:[0-9a-f]{64}$' "$AUDIT_FINGERPRINT_KEY" || die "Audit fingerprint 
 # source a mutable sidecar or select any root command before validation.
 # Source-tree helpers remain unchanged for existing development/test flows.
 install_privileged_lifecycle_helper(){
-  local root="$1" helper="$2" target="$LIB_DIR/$helper" staged validators
+  local root="$1" helper="$2" target staged validators
+  target="$LIB_DIR/$helper"
   validators="$(declare -f root_path_violation verify_privileged_install_path \
     trusted_root_readlink verify_privileged_search_path verify_privileged_command_targets)" ||
     die "Missing privileged lifecycle trust predicates for $helper"
