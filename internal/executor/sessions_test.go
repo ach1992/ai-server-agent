@@ -498,6 +498,34 @@ func TestNonterminalAuthenticatedIdleLeaseRenewalAndPrincipalIsolation(t *testin
 	}
 }
 
+// Exercising the actual expiry path guards against a fixed-age timer
+// stopping a recently used subprocess and verifies that genuine inactivity
+// still triggers pinned process-group cleanup and admission release.
+func TestNonterminalIdleExpiryKeepsActiveChildButStopsAbandonedChild(t *testing.T) {
+	s, owner, workspace := testStdioBroker(t)
+	id, err := s.workerStdioSession(owner, "lsp", workspace, "/bin/cat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.sessions.close(owner, id)
+	entry, err := s.sessions.get(owner, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.expireProcessSession(entry)
+	if err := s.workerStdioWrite(owner, id, []byte("still-active\n")); err != nil {
+		t.Fatalf("active authorized session was prematurely stopped: %v", err)
+	}
+	entry.mu.Lock()
+	entry.lastAuthenticatedAction = time.Now().Add(-2 * maxStdioSessionAge)
+	entry.mu.Unlock()
+	s.expireProcessSession(entry)
+	waitForStdioExit(t, entry)
+	if _, err := s.sessions.get(owner, id); !errors.Is(err, errSessionNotFound) {
+		t.Fatalf("idle-expired session was not removed after verified cleanup: %v", err)
+	}
+}
+
 func TestTerminalIdleRenewalNeverBypassesPID1HardLimit(t *testing.T) {
 	s, owner, workspace := testStdioBroker(t)
 	prior := time.Now().Add(-2 * maxStdioSessionAge)
