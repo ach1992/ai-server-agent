@@ -242,9 +242,9 @@ verify_privileged_command_targets(){
   local command_name selected real type_name
   for command_name in \
     apt-get awk bash base64 cat chmod chown cp curl cut date dirname dpkg env \
-    find flock getent git grep groupadd head hostname id install jq ln mkdir \
+    find flock getent git grep groupadd groupdel head hostname id install jq ln mkdir \
     mktemp mv od openssl readlink rm runuser sed sha256sum sleep sort stat \
-    systemctl tail tar tee timeout tr uname useradd usermod xz; do
+    systemctl tail tar tee timeout tr uname useradd userdel usermod xz; do
     type_name="$(builtin type -t -- "$command_name" 2>/dev/null || true)"
     [[ "$type_name" != function && "$type_name" != alias ]] ||
       root_path_violation "Refusing shell override of root command: $command_name"
@@ -671,12 +671,65 @@ chown root:root "$AUDIT_FINGERPRINT_KEY"; chmod 0600 "$AUDIT_FINGERPRINT_KEY"
 [ "$(stat -c '%u:%g:%a' "$AUDIT_FINGERPRINT_KEY" 2>/dev/null)" = "0:0:600" ] || die "Audit fingerprint key ownership/mode is unsafe."
 grep -Eq '^v1:[0-9a-f]{64}$' "$AUDIT_FINGERPRINT_KEY" || die "Audit fingerprint key format is invalid."
 
+# An installed updater/uninstaller can be invoked directly, without the
+# checked manager. Emit its preflight into the installed file itself: do not
+# source a mutable sidecar or select any root command before validation.
+# Source-tree helpers remain unchanged for existing development/test flows.
+install_privileged_lifecycle_helper(){
+  local root="$1" helper="$2" target="$LIB_DIR/$helper" staged validators
+  validators="$(declare -f root_path_violation verify_privileged_install_path \
+    trusted_root_readlink verify_privileged_search_path verify_privileged_command_targets)" ||
+    die "Missing privileged lifecycle trust predicates for $helper"
+  staged="$(mktemp "$LIB_DIR/.${helper}.XXXXXXXX")" ||
+    die "Could not stage privileged lifecycle helper: $helper"
+  if ! {
+    printf '#!/bin/bash -p\nset -Eeuo pipefail\n'
+    printf '%s\n' "$validators"
+    printf 'privileged_helper_entrypoint=%q\n' "$target"
+    cat <<'EOF_INSTALLED_LIFECYCLE_PREFLIGHT'
+[ "$EUID" -eq 0 ] || { builtin printf 'Run as root\n' >&2; exit 1; }
+# Preserve supported operator environment/FDs but never let unsafe inherited
+# Bash state reach an early PATH-selected root-owned Bash command shim.
+[ -r /proc/self/environ ] || { builtin printf 'Cannot inspect privileged process environment\n' >&2; exit 1; }
+clean_env=()
+while IFS= read -r -d '' env_entry; do
+  env_name="${env_entry%%=*}"
+  case "$env_name" in
+    BASH_ENV|ENV|SHELLOPTS|BASHOPTS|CDPATH|GLOBIGNORE|IFS|BASH_FUNC_*)
+      clean_env+=(-u "$env_name") ;;
+  esac
+done < /proc/self/environ
+if (( ${#clean_env[@]} > 0 )); then
+  [ -f /usr/bin/env ] && [ -x /usr/bin/env ] &&
+    [ -f /bin/bash ] && [ -x /bin/bash ] || {
+      builtin printf 'Trusted privileged environment bootstrap is unavailable\n' >&2
+      exit 1
+    }
+  exec /usr/bin/env "${clean_env[@]}" /bin/bash -p "$privileged_helper_entrypoint" "$@"
+fi
+verify_privileged_install_path "$privileged_helper_entrypoint" file
+verify_privileged_search_path
+verify_privileged_command_targets
+# Only the guarded installed helper may now invoke its original implementation.
+EOF_INSTALLED_LIFECYCLE_PREFLIGHT
+    cat -- "$root/$helper"
+  } > "$staged"; then
+    rm -f -- "$staged"
+    die "Could not build privileged lifecycle helper: $helper"
+  fi
+  if ! install -o root -g root -m 0755 "$staged" "$target"; then
+    rm -f -- "$staged"
+    die "Could not install privileged lifecycle helper: $helper"
+  fi
+  rm -f -- "$staged"
+}
+
 install_helpers(){
   local root="$1"
   [ -f "$root/manage.sh" ] && [ -f "$root/update.sh" ] && [ -f "$root/uninstall.sh" ] && [ -f "$root/ensure-lifecycle-lock.sh" ] || die "release/source payload is missing management helpers"
   install -o root -g root -m 0700 "$root/manage.sh" "$LIB_DIR/manage.sh"
-  install -o root -g root -m 0755 "$root/update.sh" "$LIB_DIR/update.sh"
-  install -o root -g root -m 0755 "$root/uninstall.sh" "$LIB_DIR/uninstall.sh"
+  install_privileged_lifecycle_helper "$root" update.sh
+  install_privileged_lifecycle_helper "$root" uninstall.sh
   install -o root -g root -m 0700 "$root/ensure-lifecycle-lock.sh" "$LIB_DIR/ensure-lifecycle-lock.sh"
   # Emit the same validated root path/command predicates already used by
   # installation. The standalone installed wrapper must not source an
