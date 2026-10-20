@@ -1187,6 +1187,8 @@ jobs:
         with:
           go-version: '1.26.x'
           cache: false
+      - name: Prepare trusted install destinations on disposable main artifact runner
+        run: sudo env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" bash scripts/ci-prepare-trusted-install-paths.sh
       - name: Build exact-SHA release candidate artifact
         run: |
           rm -rf dist
