@@ -61,6 +61,53 @@ credentials_hash="$(/usr/bin/sha256sum "$credentials")"
 "$manager" help > "$scratch/safe.out"
 grep -qF 'AI Server Agent management' "$scratch/safe.out"
 
+# Root source-mode overrides are separately executable privilege boundaries.
+# Exercise the complete installer --check preflight on this disposable runner,
+# using a private root-owned candidate rather than the installed live binary.
+source_root="${BASH_SOURCE[0]%/*}/.."
+source_stage=/run/asa-trusted-source-bin/ai-server-agent
+[ -x "$source_stage" ] && [ ! -L "$source_stage" ] || {
+  echo 'Missing trusted CI source-binary fixture' >&2; exit 1
+}
+mkdir -m 0755 "$scratch/source-override"
+source_candidate="$scratch/source-override/ai-server-agent"
+install -o root -g root -m 0755 "$source_stage" "$source_candidate"
+source_candidate_hash="$(/usr/bin/sha256sum "$source_candidate")"
+source_check(){
+  AI_SERVER_AGENT_BINARY="$1" bash "$source_root/install.sh" --check
+}
+source_check "$source_candidate" > "$scratch/safe.out"
+grep -qF 'Compatibility and privileged install-path checks passed' "$scratch/safe.out"
+source_denied(){
+  local label="$1" target="$2" diagnostic="$3"
+  if source_check "$target" > "$scratch/denied.out" 2>&1; then
+    echo "Installer accepted unsafe source override: $label" >&2; exit 1
+  fi
+  grep -qF "$diagnostic" "$scratch/denied.out" || {
+    echo "Source override rejected for wrong reason: $label" >&2; exit 1
+  }
+}
+chmod 0777 "$source_candidate"
+source_denied 'writable leaf' "$source_candidate" "Privileged install path is writable by non-root users: $source_candidate"
+chmod 0755 "$source_candidate"
+chmod 0777 "$scratch/source-override"
+source_denied 'writable ancestor' "$source_candidate" "Privileged install path is writable by non-root users: $scratch/source-override"
+chmod 0755 "$scratch/source-override"
+ln -s "$source_candidate" "$scratch/source-override/link-agent"
+source_denied 'symlinked leaf' "$scratch/source-override/link-agent" 'Unsafe symlink in privileged install path:'
+rm -f "$scratch/source-override/link-agent"
+ln "$source_candidate" "$scratch/source-override/linked-agent"
+source_denied 'hardlinked leaf' "$source_candidate" 'Privileged install target must not be hardlinked:'
+rm -f "$scratch/source-override/linked-agent"
+chmod 0644 "$source_candidate"
+source_denied 'nonexecutable leaf' "$source_candidate" 'Source Agent binary must be an existing executable file:'
+chmod 0755 "$source_candidate"
+source_denied 'missing leaf' "$scratch/source-override/missing-agent" 'Source Agent binary must be an existing executable file:'
+source_denied 'relative path' 'relative-agent' 'Privileged install path must be absolute:'
+test "$(/usr/bin/sha256sum "$source_candidate")" = "$source_candidate_hash"
+source_check "$source_candidate" > "$scratch/safe.out"
+grep -qF 'Compatibility and privileged install-path checks passed' "$scratch/safe.out"
+
 # Drifting only the installed helper's permissions must fail BEFORE control
 # state, lifecycle locks, privileged commands or selected helper execution.
 chmod 0777 "$helper"

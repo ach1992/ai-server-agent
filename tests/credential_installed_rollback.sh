@@ -12,12 +12,18 @@ if ! git cat-file -e "$BASE^{commit}" 2>/dev/null; then
 fi
 git cat-file -e "$BASE^{commit}"
 test -x /tmp/ai-server-agent
+TRUSTED_SOURCE_BINARY=/run/asa-trusted-source-bin/ai-server-agent
+TRUSTED_OLD_BINARY=/run/asa-trusted-source-bin/old-agent
+sudo test -x "$TRUSTED_SOURCE_BINARY"
+sudo test ! -e "$TRUSTED_OLD_BINARY"
 sudo test ! -e /etc/ai-server-agent/config.json
 SCRATCH="$(mktemp -d)"
-trap 'rm -rf -- "$SCRATCH"; unset direct_token gateway_token secondary_token' EXIT
+trap 'sudo rm -f -- "$TRUSTED_OLD_BINARY"; rm -rf -- "$SCRATCH"; unset direct_token gateway_token secondary_token' EXIT
 mkdir -p "$SCRATCH/old-source"
 git archive "$BASE" | tar -x -C "$SCRATCH/old-source"
 (cd "$SCRATCH/old-source" && CGO_ENABLED=0 go build -trimpath -o "$SCRATCH/old-agent" ./cmd/ai-server-agent)
+sudo install -o root -g root -m 0755 "$SCRATCH/old-agent" "$TRUSTED_OLD_BINARY"
+sudo cmp -s "$SCRATCH/old-agent" "$TRUSTED_OLD_BINARY"
 # systemd restart returning does not prove that the old/new HTTP listener
 # has rebound its port yet. Wait for a real healthy listener, but never treat
 # an unresponsive or crashing service as successful authentication.
@@ -107,10 +113,10 @@ issue_secret(){
   printf '%s' "$token"
 }
 echo 'STAGE: build historical binary and establish valid direct client'
-sudo env AI_SERVER_AGENT_BINARY=/tmp/ai-server-agent AI_SERVER_AGENT_NONINTERACTIVE=1 bash install.sh >/dev/null
+sudo env AI_SERVER_AGENT_BINARY="$TRUSTED_SOURCE_BINARY" AI_SERVER_AGENT_NONINTERACTIVE=1 bash install.sh >/dev/null
 direct_token="$(issue_secret direct-default)"
 test "$(token_status "$direct_token")" = 200
-sudo env AI_SERVER_AGENT_BINARY="$SCRATCH/old-agent" AI_SERVER_AGENT_NONINTERACTIVE=1 bash install.sh >/dev/null
+sudo env AI_SERVER_AGENT_BINARY="$TRUSTED_OLD_BINARY" AI_SERVER_AGENT_NONINTERACTIVE=1 bash install.sh >/dev/null
 test "$(token_status "$direct_token")" = 200
 echo 'STAGE: valid historical store with only gateway active'
 gateway_token="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
@@ -120,27 +126,27 @@ sudo install -o root -g aiagent -m 0640 "$SCRATCH/gateway-only.json" /etc/ai-ser
 sudo systemctl restart ai-server-agent.service
 await_healthy_listener
 verify_tokens "$direct_token" "$gateway_token" 401 200
-assert_rejected_preserving_install /tmp/ai-server-agent 'Existing MCP credentials are incompatible with the target Agent binary'
+assert_rejected_preserving_install "$TRUSTED_SOURCE_BINARY" 'Existing MCP credentials are incompatible with the target Agent binary'
 verify_tokens "$direct_token" "$gateway_token" 401 200
 echo 'STAGE: restore direct/default explicitly, upgrade safely, reject old bearer'
 direct_token="$(issue_secret direct-default)"
 verify_tokens "$direct_token" "$gateway_token" 200 200
-sudo env AI_SERVER_AGENT_BINARY=/tmp/ai-server-agent AI_SERVER_AGENT_NONINTERACTIVE=1 bash install.sh >/dev/null
+sudo env AI_SERVER_AGENT_BINARY="$TRUSTED_SOURCE_BINARY" AI_SERVER_AGENT_NONINTERACTIVE=1 bash install.sh >/dev/null
 verify_tokens "$direct_token" "$gateway_token" 200 401
 assert_bootstrap_rejected_preserving_install gateway-retained
 assert_protected_update_refused
 echo 'STAGE: block rollback that would reactivate a retired bearer'
-assert_rejected_preserving_install "$SCRATCH/old-agent" 'Unsafe rollback credential state'
+assert_rejected_preserving_install "$TRUSTED_OLD_BINARY" 'Unsafe rollback credential state'
 verify_tokens "$direct_token" "$gateway_token" 200 401
 echo 'STAGE: block rollback with newly issued AND revoked secondary'
 secondary_token="$(issue_secret direct-secondary)"
 verify_tokens "$direct_token" "$secondary_token" 200 200
 assert_bootstrap_rejected_preserving_install secondary-active
-assert_rejected_preserving_install "$SCRATCH/old-agent" 'Unsafe rollback credential state'
+assert_rejected_preserving_install "$TRUSTED_OLD_BINARY" 'Unsafe rollback credential state'
 sudo ai-server-agent-manage credential-revoke direct-secondary >/dev/null
 verify_tokens "$direct_token" "$secondary_token" 200 401
 assert_bootstrap_rejected_preserving_install secondary-revoked
-assert_rejected_preserving_install "$SCRATCH/old-agent" 'Unsafe rollback credential state'
+assert_rejected_preserving_install "$TRUSTED_OLD_BINARY" 'Unsafe rollback credential state'
 echo 'STAGE: explicit rollback preparation cancellation and failed-restart recovery'
 before_failure="$(store_digest)"
 if sudo env AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1 ASA_RESTART_MARKER="$SCRATCH/forced-restart-failure" bash -c '
@@ -181,7 +187,7 @@ sudo jq -e '.channel=="stable" and .version=="v0.1.14" and .ref=="v0.1.14"' \
   /etc/ai-server-agent/control/install-state.json >/dev/null
 verify_tokens "$direct_token" "$gateway_token" 200 401
 verify_tokens "$direct_token" "$secondary_token" 200 401
-sudo env AI_SERVER_AGENT_BINARY=/tmp/ai-server-agent AI_SERVER_AGENT_NONINTERACTIVE=1 bash install.sh >/dev/null
+sudo env AI_SERVER_AGENT_BINARY="$TRUSTED_SOURCE_BINARY" AI_SERVER_AGENT_NONINTERACTIVE=1 bash install.sh >/dev/null
 test "$(token_status "$direct_token")" = 200
 sudo env AI_SERVER_AGENT_YES=1 bash uninstall.sh --purge >/dev/null
 sudo test ! -e /etc/ai-server-agent

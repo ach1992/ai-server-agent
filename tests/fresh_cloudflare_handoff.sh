@@ -5,7 +5,7 @@ set -Eeuo pipefail
 # -> installed manager FD3 boundary without contacting the Cloudflare API.
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT"
-BINARY="${ASA_FRESH_CLOUDFLARE_TEST_BINARY:-/tmp/ai-server-agent}"
+BINARY="${ASA_FRESH_CLOUDFLARE_TEST_BINARY:-/run/asa-trusted-source-bin/ai-server-agent}"
 test -x "$BINARY"
 sudo test ! -e /etc/ai-server-agent
 sudo test ! -e /usr/local/bin/ai-server-agent
