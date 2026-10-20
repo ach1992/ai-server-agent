@@ -525,6 +525,8 @@ jobs:
           restart_line="$(grep -nF 'systemctl restart ai-server-agent-executor.service ai-server-agent.service' install.sh | cut -d: -f1 | awk -v after="$enable_line" '$1 > after { print $1; exit }')"
           active_line="$(grep -nF 'systemctl is-active --quiet ai-server-agent-executor.service' install.sh | cut -d: -f1 | awk -v after="$restart_line" '$1 > after { print $1; exit }')"
           grep -qF 'ExecStartPre=$LIB_DIR/ensure-lifecycle-lock.sh' install.sh
+          grep -qF 'ExecStartPre=$LIB_DIR/ensure-lifecycle-lock.sh --verify-agent-binary' install.sh
+          grep -qF 'install_privileged_lifecycle_helper "$root" ensure-lifecycle-lock.sh' install.sh
           grep -qF 'ensure-lifecycle-lock.sh' scripts/build-release.sh
           bash -n ensure-lifecycle-lock.sh
           test -n "$daemon_line" && test -n "$enable_line" && test -n "$restart_line" && test -n "$active_line"

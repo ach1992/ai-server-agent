@@ -378,6 +378,79 @@ grep -qF 'confirmation requires a terminal' "$scratch/denied.out"
 [ ! -e "$marker" ] || { echo 'Direct lifecycle inherited Bash execution state' >&2; exit 1; }
 rm -f -- "$scratch/bin/jq" "$scratch/bin/tr"
 
+# systemd must run the real generated guard before *both* service ExecStart
+# paths. The aiagent service uses the read-only mode under its existing User=
+# and ProtectSystem/NoNewPrivileges sandbox; Executor uses the same guarded
+# script as root before the unchanged lifecycle-lock setup.
+startup_guard="$library/ensure-lifecycle-lock.sh"
+[ -x "$startup_guard" ] && [ "$(/usr/bin/stat -c '%u:%a' "$startup_guard")" = '0:755' ] ||
+  { echo 'Installed systemd guard is not a trusted readable executable' >&2; exit 1; }
+agent_prestart="$(systemctl show ai-server-agent.service -p ExecStartPre --value)"
+executor_prestart="$(systemctl show ai-server-agent-executor.service -p ExecStartPre --value)"
+[[ "$agent_prestart" == *"$startup_guard --verify-agent-binary"* ]] ||
+  { echo 'Agent systemd unit does not use the non-root guarded preflight' >&2; exit 1; }
+[[ "$executor_prestart" == *"$startup_guard"* && "$executor_prestart" != *--verify-agent-binary* ]] ||
+  { echo 'Executor systemd unit does not use the root guarded preflight' >&2; exit 1; }
+[ "$(systemctl show ai-server-agent.service -p User --value)" = aiagent ] ||
+  { echo 'Agent unit lost its non-root service identity' >&2; exit 1; }
+[ "$(systemctl show ai-server-agent.service -p NoNewPrivileges --value)" = yes ] ||
+  { echo 'Agent unit lost NoNewPrivileges=yes' >&2; exit 1; }
+[ "$(systemctl show ai-server-agent.service -p ProtectSystem --value)" = strict ] ||
+  { echo 'Agent unit lost ProtectSystem=strict' >&2; exit 1; }
+runuser -u aiagent -- "$startup_guard" --verify-agent-binary
+
+# A previously trusted executable can drift *after installation*. The
+# started service must refuse to launch it, not merely have a correct unit
+# string. All mode drift and service stops are CI-only and restored.
+systemctl stop ai-server-agent.service
+chmod 0777 "$agent_binary"
+if systemctl start ai-server-agent.service >"$scratch/agent-start-denied.out" 2>&1; then
+  echo 'systemd Agent ExecStart accepted writable binary leaf' >&2; exit 1
+fi
+systemctl is-active --quiet ai-server-agent.service &&
+  { echo 'Agent activated despite writable binary leaf' >&2; exit 1; }
+if runuser -u aiagent -- "$startup_guard" --verify-agent-binary >"$scratch/agent-guard-denied.out" 2>&1; then
+  echo 'Unprivileged start guard accepted writable executable' >&2; exit 1
+fi
+grep -qF 'Privileged install path is writable by non-root users:' "$scratch/agent-guard-denied.out"
+journalctl -u ai-server-agent.service -n 100 --no-pager -o cat >"$scratch/agent-start-journal.out"
+grep -qF 'Privileged install path is writable by non-root users:' "$scratch/agent-start-journal.out" ||
+  { echo 'Actual Agent systemd startup did not report a binary trust refusal' >&2; exit 1; }
+systemctl stop ai-server-agent.service || :
+chmod "$original_agent_mode" "$agent_binary"
+systemctl reset-failed ai-server-agent.service
+systemctl start ai-server-agent.service
+
+# The privileged Executor must likewise reject a post-install writable
+# /usr/local/bin ancestor before creating a lock or starting the root binary.
+systemctl stop ai-server-agent.service ai-server-agent-executor.service
+chmod 0777 "$agent_bin_dir"
+if systemctl start ai-server-agent-executor.service >"$scratch/executor-start-denied.out" 2>&1; then
+  echo 'systemd Executor ExecStart accepted writable Agent ancestor' >&2; exit 1
+fi
+systemctl is-active --quiet ai-server-agent-executor.service &&
+  { echo 'Executor activated despite writable Agent ancestor' >&2; exit 1; }
+if "$startup_guard" >"$scratch/executor-guard-denied.out" 2>&1; then
+  echo 'Root startup guard accepted writable binary ancestor' >&2; exit 1
+fi
+grep -qF 'Privileged install path is writable by non-root users:' "$scratch/executor-guard-denied.out"
+journalctl -u ai-server-agent-executor.service -n 100 --no-pager -o cat >"$scratch/executor-start-journal.out"
+grep -qF 'Privileged install path is writable by non-root users:' "$scratch/executor-start-journal.out" ||
+  { echo 'Actual Executor systemd startup did not report a binary trust refusal' >&2; exit 1; }
+systemctl stop ai-server-agent-executor.service || :
+chmod "$original_agent_dir_mode" "$agent_bin_dir"
+systemctl reset-failed ai-server-agent.service ai-server-agent-executor.service
+systemctl start ai-server-agent-executor.service ai-server-agent.service
+for attempt in {1..40}; do
+  if systemctl is-active --quiet ai-server-agent-executor.service &&
+     systemctl is-active --quiet ai-server-agent.service &&
+     curl -fsS --max-time 2 http://127.0.0.1:3210/healthz >/dev/null 2>&1; then break; fi
+  sleep 0.25
+done
+systemctl is-active --quiet ai-server-agent-executor.service
+systemctl is-active --quiet ai-server-agent.service
+curl -fsS --max-time 2 http://127.0.0.1:3210/healthz >/dev/null
+
 test "$(/usr/bin/sha256sum "$config")" = "$config_hash"
 test "$(/usr/bin/sha256sum "$identity")" = "$identity_hash"
 test "$(/usr/bin/sha256sum "$credentials")" = "$credentials_hash"
