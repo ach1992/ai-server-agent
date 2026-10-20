@@ -37,9 +37,10 @@ installation files, state, or services, including incomplete installs. The
 bootstrap checks before release requests or optional privileged APT
 prerequisites, then checks again in its privileged handoff. A specific Stable
 tag is **not** a downgrade mechanism. To update an installed Agent, run
-`sudo ai-server-agent-manage update`; to return to an older version, follow
-the credential preparation and protected-updater instructions below. Never
-rerun a historical installer or bootstrap over an occupied installation.
+`sudo ai-server-agent-manage update`. A rollback is supported only to a
+published Stable satisfying the protected updater's security and credential
+contracts (see below); old unguarded installers are refused. Never rerun a
+historical installer or bootstrap over an occupied installation.
 
 The default resolves GitHub's newest published non-draft, non-prerelease, immutable release; the optional tag selects the named release and fails closed if it is not immutable. When `jq` is missing, the bootstrap may first invoke `sudo apt-get update` and `sudo apt-get install ca-certificates jq` for supported Ubuntu/Debian hosts using configured APT repositories, **before** fetching or verifying release metadata. This privileged **OS prerequisite** operation is distinct from privileged execution of release `install.sh`: the latter occurs only **after** SHA-256 verification, followed by digest re-verification in protected root staging. **Do not use `curl ... | sudo bash`** for this initial bootstrap, and do not execute a moving release asset as root. If stronger bootstrap-source provenance is required, operators can independently review or pin the source, but the normal one-line install command deliberately uses the permanent `main` URL. The installed manager already supports version-free Stable updates via `sudo ai-server-agent-manage update`.
 
@@ -233,36 +234,55 @@ explicitly issue/rotate `direct-default`, save the one-time bearer securely,
 and verify that the direct connection works **before** retrying the upgrade.
 No credentials are silently generated during upgrade.
 
-To return to an older version that does not recognize `direct/secondary`, first
-verify that your existing `direct/default` bearer works and run:
+### Supported Stable rollback boundary
+
+Rollback is a recovery path, **not** an entitlement to execute every historical
+installer. The installed protected updater authenticates a published immutable
+Stable installer against its GitHub release SHA-256 and then requires that
+installer to declare `INSTALLED_PRIVILEGED_LIFECYCLE_TRUST_V1`. This means its
+release contract includes the privileged helper pathname guards and both
+systemd service startup checks. A missing contract refuses the update before
+any older installer runs; there is no legacy bypass switch. Ordinary fresh
+Stable installation through the public bootstrap follows its own release
+verification and is not changed by this installed-updater policy.
+
+The latest published Stable as of this decision, `v0.1.18`, and all earlier
+published Stable versions predate this contract. Therefore **there is not yet
+an eligible published Stable rollback target from the hardened source version**.
+Do not assume a version becomes eligible merely because its code is in `main`;
+the compliant version must actually be published and immutable. A verified
+rollback to an older eligible Stable will become available once multiple
+compatible hardened Stable versions have been released.
+
+For a supported published rollback target, select its exact Stable tag through
+the protected management updater using `AI_SERVER_AGENT_UPDATE_CHANNEL=stable`
+and `AI_SERVER_AGENT_VERSION`. `update --plan` is an offline planning aid and
+does not establish target eligibility; actual execution validates the asset.
+Never rerun a historical installer or the fresh-install bootstrap over a live
+installation, and do not substitute source-mode checkout selection for a
+supported immutable Stable rollback.
+
+**Credential compatibility is a separate requirement.** If an otherwise
+eligible older Stable refuses a store containing `direct/secondary`, first
+verify the existing `direct/default` bearer, and only when explicitly necessary
+run:
 
 ```bash
 sudo ai-server-agent-manage credential-prepare-rollback
 ```
 
-This is an interactive, explicitly confirmed **destructive credential
-operation**, not part of automatic update: it removes all optional credential
-records (including revoked `direct/secondary` and any retired Gateway record)
-while preserving the active `direct/default` verifier, and restarts/health-
-checks the current Agent with recovery on failure. Secondary clients lose
-access immediately. The removed records cannot be recovered from retained
-plaintext; issue fresh secondary credentials after returning to a compatible
-newer version. Only after this cleanup should an operator retry a rollback through the
-**installed, protected updater**; for example, to select published immutable
-Stable `v0.1.14` explicitly (only where this older version is otherwise
-compatible):
+This is an interactive, confirmed **destructive credential operation**.
+It deletes optional principal records, including revoked `direct/secondary`
+and retired Gateway entries, while keeping the active `direct/default`
+verifier; it restarts and health-checks the current Agent with recovery on
+failure. Secondary clients immediately lose access and need new credentials
+if later reintroduced. **Do not run it to try to make `v0.1.14` or another
+unsupported legacy release eligible**: removing credentials cannot restore
+missing privileged lifecycle trust.
 
-```bash
-sudo env AI_SERVER_AGENT_UPDATE_CHANNEL=stable AI_SERVER_AGENT_VERSION=v0.1.14 /usr/local/sbin/ai-server-agent-manage update
-```
-
-The updater independently checks credentials before invoking the downloaded
-historical installer. Neither public Stable bootstrap command is an update
-or downgrade route for an existing installation.
-
-A raw rollback of an `enabled=true` retired Gateway record could reactivate
-its bearer; a raw rollback with even a revoked `direct/secondary` record could
-prevent the older Agent from starting. Both cases are intentionally blocked.
+The updater still refuses a target that would reactivate an enabled retired
+Gateway bearer or whose incompatible secondary records could prevent service
+startup. No credential cleanup silently occurs during an update.
 
 ## Management commands
 

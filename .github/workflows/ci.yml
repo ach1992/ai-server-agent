@@ -611,6 +611,7 @@ jobs:
           done
           grep -qF "export AI_SERVER_AGENT_VERSION=$RELEASE_VERSION" dist/install.sh
           grep -qF "export AI_SERVER_AGENT_REF=$RELEASE_VERSION" dist/install.sh
+          grep -qF '# INSTALLED_PRIVILEGED_LIFECYCLE_TRUST_V1:' dist/install.sh
           grep -qF 'curl -fsSL "$url/$asset"' dist/install.sh
           grep -qF 'curl -fsSL "$url/SHA256SUMS"' dist/install.sh
           grep -qF 'sha256sum -c -' dist/install.sh
@@ -1122,7 +1123,7 @@ jobs:
           sudo env AI_SERVER_AGENT_YES=1 bash uninstall.sh --purge
           sudo test ! -e /etc/ai-server-agent
           rm -f /tmp/legacy-agent-config.json
-      - name: Real named-credential upgrade and rollback compatibility
+      - name: Real named-credential migration and historical Stable rollback refusal
         if: ${{ needs.change-scope.outputs.root_trust_security_changed != 'false' }}
         run: ASA_DISPOSABLE_CREDENTIAL_ACCEPTANCE=1 bash tests/credential_installed_rollback.sh
       - name: First-run deferral is not an installation failure

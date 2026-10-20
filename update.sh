@@ -205,6 +205,14 @@ if [ "$CHANNEL" = "stable" ]; then
     cli_error "Stable release install.sh digest mismatch: expected $installer_digest, got $actual_digest"
     exit 1
   }
+  # A verified older release may still replace newer installed guards and
+  # systemd units with weaker historical versions. Support Stable rollback
+  # only to release installers that explicitly retain this reviewed contract.
+  # Source updates remain deliberate operator-controlled code selection.
+  if ! grep -Fq 'INSTALLED_PRIVILEGED_LIFECYCLE_TRUST_V1:' "$TMP/install.sh"; then
+    cli_error "Stable release $TARGET_VERSION lacks required privileged lifecycle/startup path trust; refusing to replace the installed Agent. Select a compatible, hardened published Stable release. Existing configuration, credentials and services are preserved."
+    exit 1
+  fi
   chmod +x "$TMP/install.sh"
   verify_downloaded_installer_credential_compatibility "$TMP/install.sh"
   AI_SERVER_AGENT_NONINTERACTIVE=1 \

@@ -763,6 +763,7 @@ EOF_INSTALLED_LIFECYCLE_PREFLIGHT
   rm -f -- "$staged"
 }
 
+# INSTALLED_PRIVILEGED_LIFECYCLE_TRUST_V1: guarded installed helpers and both systemd startup paths.
 install_helpers(){
   local root="$1"
   [ -f "$root/manage.sh" ] && [ -f "$root/update.sh" ] && [ -f "$root/uninstall.sh" ] && [ -f "$root/ensure-lifecycle-lock.sh" ] || die "release/source payload is missing management helpers"
