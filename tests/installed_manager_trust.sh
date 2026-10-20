@@ -76,13 +76,31 @@ fi
 grep -qF 'Privileged install path is writable by non-root users' "$scratch/denied.out"
 [ ! -e "$marker" ] || { echo 'untrusted command ran before wrapper preflight' >&2; exit 1; }
 
-# /bin/bash -p avoids attacker-supplied noninteractive Bash startup hooks for
-# both the installed wrapper and the subsequent management implementation.
+# Bash -p suppresses direct startup execution, but does NOT drop raw
+# BASH_FUNC_* environment entries: descendants could import them. Observe
+# the environment of a real status subprocess through a trusted root-owned
+# systemctl fixture, without modifying systemd or installed helper scripts.
+rm -f -- "$scratch/bin/tr"
 cat > "$scratch/startup.sh" <<'UNTRUSTED_STARTUP'
 printf 'executed\n' > "$ASA_TEST_EXECUTION_MARKER"
 UNTRUSTED_STARTUP
-ASA_TEST_EXECUTION_MARKER="$marker" BASH_ENV="$scratch/startup.sh" "$manager" help > "$scratch/safe.out"
-[ ! -e "$marker" ] || { echo 'BASH_ENV was executed by installed management' >&2; exit 1; }
+cat > "$scratch/bin/systemctl" <<'SYSTEMCTL_PROBE'
+#!/bin/sh
+printf 'called\n' > "$ASA_TEST_SHIM_WITNESS"
+if /usr/bin/env | /usr/bin/grep -Eq '^(BASH_FUNC_asa_env_probe%%|BASH_ENV)='; then
+  printf 'inherited\n' > "$ASA_TEST_EXECUTION_MARKER"
+fi
+exec /usr/bin/systemctl "$@"
+SYSTEMCTL_PROBE
+chmod 0755 "$scratch/bin/systemctl"
+asa_env_probe(){ :; }
+export -f asa_env_probe
+ASA_TEST_EXECUTION_MARKER="$marker" ASA_TEST_SHIM_WITNESS="$scratch/systemctl-called" \
+  BASH_ENV="$scratch/startup.sh" PATH="$scratch/bin:/usr/bin:/bin" \
+  "$manager" status > "$scratch/safe.out"
+unset -f asa_env_probe
+[ -f "$scratch/systemctl-called" ] || { echo 'trusted status subprocess fixture did not execute' >&2; exit 1; }
+[ ! -e "$marker" ] || { echo 'BASH_ENV or exported Bash functions escaped the wrapper' >&2; exit 1; }
 
 test "$(/usr/bin/sha256sum "$config")" = "$config_hash"
 test "$(/usr/bin/sha256sum "$identity")" = "$identity_hash"

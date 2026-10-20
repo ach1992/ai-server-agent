@@ -718,8 +718,19 @@ else
   flock -n 9 || { echo "Another AI Server Agent management operation is already active. Retry after it finishes." >&2; exit 1; }
 fi
 [ -f "$MANAGE_IMPL" ] && [ -x "$MANAGE_IMPL" ] || { echo "Management implementation is missing: $MANAGE_IMPL" >&2; exit 1; }
-# Never allow /usr/bin/env to perform a second PATH/BASH_ENV startup lookup.
-exec /bin/bash -p "$MANAGE_IMPL" "$@"
+# The -p interpreter ignores inherited Bash hooks, but exported Bash
+# functions remain in the *environment* and can reappear in child Bash
+# processes. Remove those raw environment entries before handing off to
+# the installed manager, without discarding supported operator settings.
+verify_privileged_install_path /usr/bin/env file
+[ -r /proc/self/environ ] || root_path_violation 'Cannot inspect privileged process environment.'
+clean_env=(-u BASH_ENV -u ENV -u SHELLOPTS -u BASHOPTS -u CDPATH -u GLOBIGNORE)
+while IFS= read -r -d '' env_entry; do
+  env_name="${env_entry%%=*}"
+  case "$env_name" in BASH_FUNC_*) clean_env+=(-u "$env_name") ;; esac
+done < /proc/self/environ
+# Use the trusted fixed Bash interpreter, never another PATH lookup.
+exec /usr/bin/env "${clean_env[@]}" /bin/bash -p "$MANAGE_IMPL" "$@"
 EOF_MANAGE_WRAPPER
   } > "$MANAGE_BIN"
   chown root:root "$MANAGE_BIN"; chmod 0755 "$MANAGE_BIN"
