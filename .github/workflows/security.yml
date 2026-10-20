@@ -128,6 +128,10 @@ jobs:
           set -Eeuo pipefail
           sudo env AI_SERVER_AGENT_BINARY=/tmp/ai-server-agent bash tests/root_trust_migration.sh
           sudo bash tests/root_trust_boundary.sh
+      - name: Installed manager rejects post-install path drift on disposable runner
+        run: |
+          bash -n tests/installed_manager_trust.sh
+          sudo env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" ASA_DISPOSABLE_MANAGER_TRUST=1 bash tests/installed_manager_trust.sh
       - name: Root executor to worker workspace delegation (isolated fixture)
         run: sudo env PATH="$PATH" ASA_WORKSPACE_ROOT_ACCEPTANCE=1 ASA_WORKSPACE_TEST_BINARY=/tmp/ai-server-agent go test ./internal/executor -run '^TestWorkerWorkspaceRootDelegation$' -count=1
       - name: Real Go probe telemetry cleanup under root-to-worker credentials (isolated fixture)
