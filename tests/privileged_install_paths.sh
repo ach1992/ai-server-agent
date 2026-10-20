@@ -203,6 +203,8 @@ generator_probe="$scratch/generate-lifecycle-helpers.sh"
   cat <<'GENERATOR_PROBE'
 die(){ builtin printf 'Lifecycle generator refused: %s\n' "$*" >&2; exit 1; }
 LIB_DIR="$1"
+# The missing trusted leaf is an allowed recovery state for --plan.
+INSTALL_BIN="$LIB_DIR/agent-not-yet-installed"
 install_privileged_lifecycle_helper "$2" update.sh
 install_privileged_lifecycle_helper "$2" uninstall.sh
 GENERATOR_PROBE
@@ -227,6 +229,24 @@ AI_SERVER_AGENT_INSTALL_STATE="$scratch/fake-install-state.json" \
   AI_SERVER_AGENT_VERSION=v0.1.18 PATH=/usr/bin:/bin \
   "$scratch/trusted/lib/update.sh" --plan > "$scratch/generated-update-plan.out"
 grep -qF 'Target version: v0.1.18' "$scratch/generated-update-plan.out"
+# The generated updater, not just the source predicate, rejects a hostile
+# present executable leaf before any update planning or credential operations.
+printf '#!/bin/sh\nexit 0\n' > "$scratch/trusted/lib/agent-not-yet-installed"
+chmod 0777 "$scratch/trusted/lib/agent-not-yet-installed"
+if AI_SERVER_AGENT_INSTALL_STATE="$scratch/fake-install-state.json" \
+  AI_SERVER_AGENT_VERSION=v0.1.18 PATH=/usr/bin:/bin \
+  "$scratch/trusted/lib/update.sh" --plan > "$scratch/generated-binary-denied.out" 2>&1; then
+  echo 'Generated direct updater accepted unsafe active Agent binary' >&2; exit 1
+fi
+grep -qF 'Privileged install path is writable by non-root users' "$scratch/generated-binary-denied.out"
+chmod 0644 "$scratch/trusted/lib/agent-not-yet-installed"
+if AI_SERVER_AGENT_INSTALL_STATE="$scratch/fake-install-state.json" \
+  AI_SERVER_AGENT_VERSION=v0.1.18 PATH=/usr/bin:/bin \
+  "$scratch/trusted/lib/update.sh" --plan > "$scratch/generated-binary-denied.out" 2>&1; then
+  echo 'Generated direct updater accepted a non-executable active Agent' >&2; exit 1
+fi
+grep -qF 'Installed Agent binary is not executable:' "$scratch/generated-binary-denied.out"
+rm -f -- "$scratch/trusted/lib/agent-not-yet-installed"
 if AI_SERVER_AGENT_YES=0 PATH=/usr/bin:/bin \
   "$scratch/trusted/lib/uninstall.sh" --purge </dev/null > "$scratch/generated-uninstall-denied.out" 2>&1; then
   echo 'Generated direct purge skipped required confirmation' >&2; exit 1

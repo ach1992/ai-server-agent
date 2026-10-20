@@ -713,6 +713,14 @@ verify_privileged_search_path
 verify_privileged_command_targets
 # Only the guarded installed helper may now invoke its original implementation.
 EOF_INSTALLED_LIFECYCLE_PREFLIGHT
+    if [ "$helper" = update.sh ]; then
+      # The direct updater executes the active Agent by absolute pathname for
+      # credential compatibility. PATH command validation cannot protect it.
+      # An absent binary is recoverable when no active config needs validation.
+      printf 'verify_privileged_install_path %q file\n' "$INSTALL_BIN"
+      printf '[ ! -e %q ] || [ -x %q ] || root_path_violation %q\n' \
+        "$INSTALL_BIN" "$INSTALL_BIN" "Installed Agent binary is not executable: $INSTALL_BIN"
+    fi
     cat -- "$root/$helper"
   } > "$staged"; then
     rm -f -- "$staged"

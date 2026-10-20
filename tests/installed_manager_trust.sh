@@ -28,6 +28,18 @@ identity=/etc/ai-server-agent/control/install-state.json
 original_library_mode="$(/usr/bin/stat -c '%a' "$library")"
 original_helper_mode="$(/usr/bin/stat -c '%a' "$helper")"
 original_uninstall_mode="$(/usr/bin/stat -c '%a' "$uninstall_helper")"
+agent_binary=/usr/local/bin/ai-server-agent
+agent_bin_dir=/usr/local/bin
+credentials=/etc/ai-server-agent/mcp-credentials.json
+[ -f "$agent_binary" ] && [ ! -L "$agent_binary" ] && [ -x "$agent_binary" ] &&
+  [ -f "$credentials" ] && [ ! -L "$credentials" ] || {
+    echo 'Expected installed Agent and credential store are missing' >&2; exit 1
+  }
+[ "$(/usr/bin/stat -c '%u' "$agent_binary")" = 0 ] || exit 1
+original_agent_mode="$(/usr/bin/stat -c '%a' "$agent_binary")"
+original_agent_dir_mode="$(/usr/bin/stat -c '%a' "$agent_bin_dir")"
+(( (8#$original_agent_mode & 0022) == 0 )) || exit 1
+(( (8#$original_agent_dir_mode & 0022) == 0 )) || exit 1
 (( (8#$original_library_mode & 0022) == 0 )) || exit 1
 (( (8#$original_helper_mode & 0022) == 0 )) || exit 1
 
@@ -36,6 +48,8 @@ chmod 0700 "$scratch"
 restore(){
   /usr/bin/chmod "$original_helper_mode" "$helper" 2>/dev/null || :
   /usr/bin/chmod "$original_uninstall_mode" "$uninstall_helper" 2>/dev/null || :
+  /usr/bin/chmod "$original_agent_mode" "$agent_binary" 2>/dev/null || :
+  /usr/bin/chmod "$original_agent_dir_mode" "$agent_bin_dir" 2>/dev/null || :
   /usr/bin/chmod "$original_library_mode" "$library" 2>/dev/null || :
   rm -rf -- "$scratch"
 }
@@ -43,6 +57,7 @@ trap restore EXIT
 
 config_hash="$(/usr/bin/sha256sum "$config")"
 identity_hash="$(/usr/bin/sha256sum "$identity")"
+credentials_hash="$(/usr/bin/sha256sum "$credentials")"
 "$manager" help > "$scratch/safe.out"
 grep -qF 'AI Server Agent management' "$scratch/safe.out"
 
@@ -165,6 +180,44 @@ if refuse_uninstall > "$scratch/denied.out" 2>&1; then
 fi
 grep -qF 'confirmation requires a terminal' "$scratch/denied.out"
 
+# The direct updater executes the active Agent via an absolute pathname.
+# Keep its ancestor out of PATH: selected-command checks alone cannot help.
+agent_hash="$(/usr/bin/sha256sum "$agent_binary")"
+chmod 0777 "$agent_binary"
+if PATH=/usr/bin:/bin plan_update > "$scratch/denied.out" 2>&1; then
+  echo 'Updater accepted a writable active binary during --plan' >&2; exit 1
+fi
+grep -qF "Privileged install path is writable by non-root users: $agent_binary" "$scratch/denied.out"
+
+# Test the non-plan entrypoint as well, with an offline curl guard so a broken
+# preflight cannot download, execute or install anything on this CI runner.
+cat > "$scratch/bin/curl" <<'OFFLINE_CURL'
+#!/bin/sh
+printf 'unexpected network\n' > "$ASA_TEST_UPDATE_NETWORK_MARKER"
+exit 97
+OFFLINE_CURL
+chmod 0755 "$scratch/bin/curl"
+if ASA_TEST_UPDATE_NETWORK_MARKER="$scratch/unexpected-update-network" \
+  PATH="$scratch/bin:/usr/bin:/bin" \
+  AI_SERVER_AGENT_INSTALL_STATE="$scratch/test-install-state.json" \
+  AI_SERVER_AGENT_VERSION=v0.1.18 \
+  "$direct_update" > "$scratch/denied.out" 2>&1; then
+  echo 'Updater accepted writable active binary for real update' >&2; exit 1
+fi
+grep -qF "Privileged install path is writable by non-root users: $agent_binary" "$scratch/denied.out"
+[ ! -e "$scratch/unexpected-update-network" ] ||
+  { echo 'Update reached network before unsafe Agent binary rejection' >&2; exit 1; }
+rm -f -- "$scratch/bin/curl"
+chmod "$original_agent_mode" "$agent_binary"
+
+chmod 0777 "$agent_bin_dir"
+if PATH=/usr/bin:/bin plan_update > "$scratch/denied.out" 2>&1; then
+  echo 'Updater accepted writable active binary ancestor outside PATH' >&2; exit 1
+fi
+grep -qF "Privileged install path is writable by non-root users: $agent_bin_dir" "$scratch/denied.out"
+chmod "$original_agent_dir_mode" "$agent_bin_dir"
+test "$(/usr/bin/sha256sum "$agent_binary")" = "$agent_hash"
+
 chmod 0777 "$direct_update"
 if plan_update > "$scratch/denied.out" 2>&1; then
   echo 'Direct updater accepted writable installed executable' >&2; exit 1
@@ -280,6 +333,9 @@ rm -f -- "$scratch/bin/jq" "$scratch/bin/tr"
 
 test "$(/usr/bin/sha256sum "$config")" = "$config_hash"
 test "$(/usr/bin/sha256sum "$identity")" = "$identity_hash"
+test "$(/usr/bin/sha256sum "$credentials")" = "$credentials_hash"
+test "$(/usr/bin/stat -c '%a' "$agent_binary")" = "$original_agent_mode"
+test "$(/usr/bin/stat -c '%a' "$agent_bin_dir")" = "$original_agent_dir_mode"
 test "$(/usr/bin/stat -c '%a' "$library")" = "$original_library_mode"
 test "$(/usr/bin/stat -c '%a' "$helper")" = "$original_helper_mode"
 test "$(/usr/bin/stat -c '%a' "$uninstall_helper")" = "$original_uninstall_mode"
