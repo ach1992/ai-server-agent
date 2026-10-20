@@ -265,19 +265,29 @@ func TestRuntimeConfiguredTaskCapacityAndAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	now := time.Now().UTC().Format(time.RFC3339Nano)
-	for n := 1; n <= 4; n++ {
+	for n := 1; n <= 6; n++ {
 		fixtureRuntimeClaim(t, claims, fmt.Sprint(n), "owner", "task", root, now)
 	}
-	mockActiveUnits(t, "1", "2", "3", "4")
-	if s.persistentTaskCapacity() != 4 {
+	mockActiveUnits(t, "1", "2", "3", "4", "5", "6")
+	if s.persistentTaskCapacity() != 6 {
 		t.Fatal("default task limit changed")
 	}
-	cap4 := s.runtimeList(Request{PrincipalID: "owner", PrincipalClass: "direct"})
-	if !cap4.OK || cap4.RuntimeCapacity == nil || cap4.RuntimeCapacity.TaskLimit != 4 || cap4.RuntimeCapacity.SessionLimit != 8 || cap4.RuntimeCapacity.TasksActive != 4 {
-		t.Fatalf("default capacity not exposed: %+v", cap4)
+	cap6 := s.runtimeList(Request{PrincipalID: "owner", PrincipalClass: "direct"})
+	if !cap6.OK || cap6.RuntimeCapacity == nil || cap6.RuntimeCapacity.TaskLimit != 6 || cap6.RuntimeCapacity.ServiceLimit != 3 || cap6.RuntimeCapacity.SessionLimit != 8 || cap6.RuntimeCapacity.TasksActive != 6 ||
+		cap6.RuntimeCapacity.WorkerLimit != 2 || cap6.RuntimeCapacity.WorkersActive != 0 || cap6.RuntimeCapacity.RootLimit != 1 || cap6.RuntimeCapacity.RootActive != 0 {
+		t.Fatalf("default capacity not exposed: %+v", cap6)
 	}
-	if r := persistentAdmissionWithTestDisk(jobs, 4, "task", nil); r == nil || r.Status != "busy" {
-		t.Fatalf("four active tasks over-admitted at default: %+v", r)
+	workerRelease, admitted := s.runs.acquire(false)
+	if !admitted {
+		t.Fatal("test worker slot not available")
+	}
+	busyWorkers := s.runtimeList(Request{PrincipalID: "owner", PrincipalClass: "direct"})
+	workerRelease()
+	if !busyWorkers.OK || busyWorkers.RuntimeCapacity == nil || busyWorkers.RuntimeCapacity.WorkersActive != 1 {
+		t.Fatalf("active worker admission not reflected by runtime_list: %+v", busyWorkers)
+	}
+	if r := persistentAdmissionWithTestDisk(jobs, 6, "task", nil); r == nil || r.Status != "busy" {
+		t.Fatalf("six active tasks over-admitted at default: %+v", r)
 	}
 	runtime := config.DefaultRuntimeSettings()
 	runtime.PersistentTaskSlots = 8
@@ -286,13 +296,13 @@ func TestRuntimeConfiguredTaskCapacityAndAdmission(t *testing.T) {
 		t.Fatal("override not effective")
 	}
 	cap8 := s.runtimeList(Request{PrincipalID: "owner", PrincipalClass: "direct"})
-	if !cap8.OK || cap8.RuntimeCapacity == nil || cap8.RuntimeCapacity.TaskLimit != 8 || cap8.RuntimeCapacity.TasksActive != 4 {
+	if !cap8.OK || cap8.RuntimeCapacity == nil || cap8.RuntimeCapacity.TaskLimit != 8 || cap8.RuntimeCapacity.TasksActive != 6 {
 		t.Fatalf("override capacity not exposed: %+v", cap8)
 	}
 	if r := persistentAdmissionWithTestDisk(jobs, 8, "task", nil); r != nil {
-		t.Fatalf("eight-slot task admission rejected 4 running: %+v", r)
+		t.Fatalf("eight-slot task admission rejected 6 running: %+v", r)
 	}
-	for n := 5; n <= 8; n++ {
+	for n := 7; n <= 8; n++ {
 		fixtureRuntimeClaim(t, claims, fmt.Sprint(n), "owner", "task", root, now)
 	}
 	mockActiveUnits(t, "1", "2", "3", "4", "5", "6", "7", "8")
@@ -392,11 +402,10 @@ func TestPersistentServiceConfiguredAdmissionDiskAndAuditFallback(t *testing.T) 
 		t.Fatal(err)
 	}
 	runtime := config.DefaultRuntimeSettings()
-	runtime.PersistentServiceSlots = 3
 	s.cfg.Runtime = &runtime
 	now := time.Now().UTC().Format(time.RFC3339Nano)
 	mockActiveUnits(t)
-	if got := jobAuditSafetyReserveAtStartup(s.cfg); got != jobStateSafetyReserveBytesForLimits(4, 3) {
+	if got := jobAuditSafetyReserveAtStartup(s.cfg); got != jobStateSafetyReserveBytesForLimits(6, 3) {
 		t.Fatalf("healthy default audit reserve %d ignored low configured capacity", got)
 	}
 	ids := []string{"1", "2"}
@@ -406,19 +415,19 @@ func TestPersistentServiceConfiguredAdmissionDiskAndAuditFallback(t *testing.T) 
 	mockActiveUnits(t, ids...)
 	jobs := filepath.Join(state, "jobs")
 	var gotReserve int64
-	canAdmit := persistentJobAdmissionResponseWithReserveCheckAndLimits(jobs, 4, 3, "service",
+	canAdmit := persistentJobAdmissionResponseWithReserveCheckAndLimits(jobs, 6, 3, "service",
 		func(_ string, required int64) (bool, int64, error) { gotReserve = required; return true, required, nil })
-	if canAdmit != nil || gotReserve != jobStateSafetyReserveBytesForLimits(4, 3) {
+	if canAdmit != nil || gotReserve != jobStateSafetyReserveBytesForLimits(6, 3) {
 		t.Fatalf("third service refused or reservation wrong: %+v reserve=%d", canAdmit, gotReserve)
 	}
 	fixtureRuntimeClaim(t, claims, "3", "owner", "service", workspace, now)
 	mockActiveUnits(t, "1", "2", "3")
-	if blocked := persistentJobAdmissionResponseWithReserveCheckAndLimits(jobs, 4, 3, "service",
+	if blocked := persistentJobAdmissionResponseWithReserveCheckAndLimits(jobs, 6, 3, "service",
 		func(_ string, required int64) (bool, int64, error) { return true, required, nil }); blocked == nil || blocked.Status != "busy" {
 		t.Fatalf("fourth service admitted: %+v", blocked)
 	}
 	runtime.PersistentServiceSlots = 1
-	if got := jobAuditSafetyReserveAtStartup(s.cfg); got != jobStateSafetyReserveBytesForLimits(4, 3) {
+	if got := jobAuditSafetyReserveAtStartup(s.cfg); got != jobStateSafetyReserveBytesForLimits(6, 3) {
 		t.Fatalf("audit reserve lost service high-water after downscale: %d", got)
 	}
 	mockBin := t.TempDir()
@@ -435,7 +444,7 @@ exit 9
 
 // Runtime setting changes restart the Executor, not the existing transient
 // systemd units. Old tasks must keep their log reserve, but cannot steal the
-// two independent persistent-service admissions after a downscale.
+// default independent persistent-service admissions after a downscale.
 func TestPersistentTaskDownscalePreservesIndependentServicesAndReserve(t *testing.T) {
 	s, state, workspace := newSharedRuntimeTestServer(t)
 	jobs := filepath.Join(state, "jobs")
@@ -466,7 +475,7 @@ func TestPersistentTaskDownscalePreservesIndependentServicesAndReserve(t *testin
 	after := s.runtimeList(Request{PrincipalID: "owner", PrincipalClass: "direct"})
 	if !after.OK || after.RuntimeCapacity == nil || !after.RuntimeCapacity.StateReliable ||
 		after.RuntimeCapacity.TaskLimit != 1 || after.RuntimeCapacity.TasksActive != maxActivePersistentJobs ||
-		after.RuntimeCapacity.ServicesActive != 0 || after.RuntimeCapacity.ServiceLimit != 2 {
+		after.RuntimeCapacity.ServicesActive != 0 || after.RuntimeCapacity.ServiceLimit != 3 {
 		t.Fatalf("runtime_list lost overcommitted tasks: %+v", after)
 	}
 	if got := persistentJobAdmissionResponseWithLimit(jobs, 1, "task"); got == nil ||
@@ -476,7 +485,7 @@ func TestPersistentTaskDownscalePreservesIndependentServicesAndReserve(t *testin
 	// Sixty-four bounded logs can survive a downscale, but a small host with
 	// the default limits must not reserve storage for 128 unrequested jobs.
 	full := jobStateSafetyReserveBytesFor(maxActivePersistentJobs)
-	if full != 1104<<20 || jobStateSafetyReserveBytesFor(1) != 600<<20 ||
+	if full != 1112<<20 || jobStateSafetyReserveBytesFor(1) != 608<<20 ||
 		jobStateSafetyReserveBytesForActive(1, maxActivePersistentJobs) != full ||
 		jobStateSafetyReserveBytesForActive(maxActivePersistentJobs, 1) != full {
 		t.Fatalf("reserve fell below old running task exposure: %d", jobStateSafetyReserveBytesForActive(1, maxActivePersistentJobs))
@@ -511,7 +520,7 @@ func TestPersistentTaskDownscalePreservesIndependentServicesAndReserve(t *testin
 	}
 	if got := persistentJobAdmissionResponseWithLimit(jobs, 1, "service"); got == nil ||
 		got.ErrorCode != "resource_limit" || got.Status != "busy" {
-		t.Fatalf("third service admitted: %+v", got)
+		t.Fatalf("fourth service admitted: %+v", got)
 	}
 	startedPath := filepath.Join(claims, "job-1.json")
 	started, found, err := readJobClaim(startedPath)

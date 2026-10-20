@@ -26,8 +26,8 @@ import (
 )
 
 const (
-	maxActivePersistentJobs           = 64 // hard bound; configured default is four
-	maxActivePersistentServices       = 64 // hard bound; configured default is two
+	maxActivePersistentJobs           = 64 // hard bound; configured default is six
+	maxActivePersistentServices       = 64 // hard bound; configured default is three
 	maxCompletedJobArtifacts          = 32
 	maxFailedJobClaims                = maxCompletedJobArtifacts
 	maxPersistentJobClaims            = 2*maxCompletedJobArtifacts + maxActivePersistentJobs + maxActivePersistentServices
@@ -1084,7 +1084,7 @@ func terminalJobResponse(status, jobID string) Response {
 func (s *Server) persistentTaskCapacity() int {
 	n := s.cfg.EffectiveRuntime().PersistentTaskSlots
 	if n < 1 || n > maxActivePersistentJobs {
-		return 4 // same safe default as a config with no runtime section
+		return config.DefaultRuntimeSettings().PersistentTaskSlots // same safe default as a config with no runtime section
 	}
 	return n
 }
@@ -1092,7 +1092,7 @@ func (s *Server) persistentTaskCapacity() int {
 func (s *Server) persistentServiceCapacity() int {
 	n := s.cfg.EffectiveRuntime().PersistentServiceSlots
 	if n < 1 || n > maxActivePersistentServices {
-		return 2 // legacy configs and incomplete internal test fixtures
+		return config.DefaultRuntimeSettings().PersistentServiceSlots // legacy configs and incomplete internal test fixtures
 	}
 	return n
 }
@@ -1106,18 +1106,18 @@ func persistentJobAdmissionResponse(jobsDir string, kinds ...string) *Response {
 	return persistentJobAdmissionResponseWithLimit(jobsDir, maxActivePersistentJobs, kind)
 }
 
-// Legacy fixture wrapper exercises the default independent service quota.
+// Fixture wrapper exercises the current default independent service quota.
 func persistentJobAdmissionResponseWithLimit(jobsDir string, taskLimit int, kind string) *Response {
-	return persistentJobAdmissionResponseWithLimits(jobsDir, taskLimit, 2, kind)
+	return persistentJobAdmissionResponseWithLimits(jobsDir, taskLimit, config.DefaultRuntimeSettings().PersistentServiceSlots, kind)
 }
 
 func persistentJobAdmissionResponseWithLimits(jobsDir string, taskLimit, serviceLimit int, kind string) *Response {
 	return persistentJobAdmissionResponseWithReserveCheckAndLimits(jobsDir, taskLimit, serviceLimit, kind, jobStateHasReserve)
 }
 
-// Legacy fixture wrapper keeps the original default service quota.
+// Fixture wrapper uses the current default independent service quota.
 func persistentJobAdmissionResponseWithReserveCheck(jobsDir string, taskLimit int, kind string, reserveCheck func(string, int64) (bool, int64, error)) *Response {
-	return persistentJobAdmissionResponseWithReserveCheckAndLimits(jobsDir, taskLimit, 2, kind, reserveCheck)
+	return persistentJobAdmissionResponseWithReserveCheckAndLimits(jobsDir, taskLimit, config.DefaultRuntimeSettings().PersistentServiceSlots, kind, reserveCheck)
 }
 
 // Production and deterministic tests share admission logic with independently
@@ -1125,10 +1125,10 @@ func persistentJobAdmissionResponseWithReserveCheck(jobsDir string, taskLimit in
 // in tests; production always examines real disk space.
 func persistentJobAdmissionResponseWithReserveCheckAndLimits(jobsDir string, taskLimit, serviceLimit int, kind string, reserveCheck func(string, int64) (bool, int64, error)) *Response {
 	if taskLimit < 1 || taskLimit > maxActivePersistentJobs {
-		taskLimit = 4
+		taskLimit = config.DefaultRuntimeSettings().PersistentTaskSlots
 	}
 	if serviceLimit < 1 || serviceLimit > maxActivePersistentServices {
-		serviceLimit = 2
+		serviceLimit = config.DefaultRuntimeSettings().PersistentServiceSlots
 	}
 	counts, err := activeAgentJobKindCounts(jobsDir)
 	if err != nil {
@@ -1176,13 +1176,13 @@ func persistentJobAdmissionResponseWithReserveCheckAndLimits(jobsDir string, tas
 	return nil
 }
 
-// Legacy default-service wrappers retain existing fixture semantics.
+// Default-service wrappers share the production default while preserving explicit test overrides.
 func jobStateSafetyReserveBytesForActive(taskLimit, activeTasks int) int64 {
-	return jobStateSafetyReserveBytesForLimits(max(taskLimit, activeTasks), 2)
+	return jobStateSafetyReserveBytesForLimits(max(taskLimit, activeTasks), config.DefaultRuntimeSettings().PersistentServiceSlots)
 }
 
 func jobStateSafetyReserveBytesFor(taskLimit int) int64 {
-	return jobStateSafetyReserveBytesForLimits(taskLimit, 2)
+	return jobStateSafetyReserveBytesForLimits(taskLimit, config.DefaultRuntimeSettings().PersistentServiceSlots)
 }
 
 // Keep space for bounded retained logs plus every configured or still-active
@@ -1199,10 +1199,10 @@ func jobAuditSafetyReserveAtStartup(cfg config.Config) int64 {
 	runtime := cfg.EffectiveRuntime()
 	tasks, services := runtime.PersistentTaskSlots, runtime.PersistentServiceSlots
 	if tasks < 1 || tasks > maxActivePersistentJobs {
-		tasks = 4
+		tasks = config.DefaultRuntimeSettings().PersistentTaskSlots
 	}
 	if services < 1 || services > maxActivePersistentServices {
-		services = 2
+		services = config.DefaultRuntimeSettings().PersistentServiceSlots
 	}
 	counts, err := activeAgentJobKindCounts(filepath.Join(cfg.StateDir, "jobs"))
 	if err != nil {

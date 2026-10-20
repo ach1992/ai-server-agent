@@ -49,8 +49,8 @@ grep -Fq 'Runtime settings' <<<"$default" || fail 'runtime settings heading miss
 grep -Fq 'http_idle_timeout_seconds=90 seconds' <<<"$default" || fail 'legacy default is wrong'
 grep -Fq 'text_fallback_bytes=32768 bytes' <<<"$default" || fail 'text fallback default is wrong'
 grep -Fq 'worker_command_slots=0 slots' <<<"$default" || fail 'automatic worker concurrency default missing'
-grep -Fq 'persistent_task_slots=4 tasks' <<<"$default" || fail 'default persistent task concurrency missing'
-grep -Fq 'persistent_service_slots=2 services' <<<"$default" || fail 'default persistent service concurrency missing'
+grep -Fq 'persistent_task_slots=6 tasks' <<<"$default" || fail 'default persistent task concurrency missing'
+grep -Fq 'persistent_service_slots=3 services' <<<"$default" || fail 'default persistent service concurrency missing'
 grep -Fq 'stdio_session_slots=8 sessions' <<<"$default" || fail 'default shared session capacity missing'
 grep -Fq '  Range   : 0..64 slots' <<<"$default" || fail 'worker concurrency range missing'
 grep -Fq '  Range   : 1..64 tasks' <<<"$default" || fail 'task concurrency range missing'
@@ -187,8 +187,8 @@ for key in worker_command_slots persistent_task_slots persistent_service_slots s
   runtime_apply reset "$key" >/dev/null
 done
 grep -Fq 'worker_command_slots=0 slots' <(runtime_show) || fail 'worker default not restored'
-grep -Fq 'persistent_task_slots=4 tasks' <(runtime_show) || fail 'task default not restored'
-grep -Fq 'persistent_service_slots=2 services' <(runtime_show) || fail 'service default not restored'
+grep -Fq 'persistent_task_slots=6 tasks' <(runtime_show) || fail 'task default not restored'
+grep -Fq 'persistent_service_slots=3 services' <(runtime_show) || fail 'service default not restored'
 grep -Fq 'stdio_session_slots=8 sessions' <(runtime_show) || fail 'session default not restored'
 
 ASA_PROFILE_TEST_BINARY="$RUNTIME_BINARY" bash "$ROOT/tests/environment_profiles.sh"
