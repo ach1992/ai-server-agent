@@ -261,6 +261,18 @@ grep -qF "needs.change-scope.outputs.reuse_validated_pr != 'true'" "$ROOT/.githu
 grep -qF "needs.change-scope.outputs.reuse_validated_pr != 'true'" "$ROOT/.github/workflows/security.yml"
 grep -qF "needs.change-scope.outputs.reuse_validated_pr == 'true'" "$ROOT/.github/workflows/ci.yml"
 grep -qF 'gh run download "$run_id"' "$ROOT/.github/workflows/release.yml"
+# The main-only artifact job runs on a separate disposable runner. The PR
+# test job's preparation does not carry over to its root installer check.
+awk '
+  /^  main-release-artifact:$/ { in_job=1; next }
+  in_job && /^  [a-z0-9_-]+:$/ { exit }
+  in_job && /run: sudo env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="\$RUNNER_ENVIRONMENT" bash scripts\/ci-prepare-trusted-install-paths\.sh/ { prep=NR }
+  in_job && /sudo bash dist\/install\.sh --check/ { check=NR }
+  END { if (!prep || !check || prep >= check) exit 1 }
+' "$ROOT/.github/workflows/ci.yml" || {
+  echo 'main-only release artifact must prepare trusted disposable-runner paths before root install check' >&2
+  exit 1
+}
 # Ensure the fallback's trusted GitHub-event run-name contract remains in both
 # workflows. No editable PR title, free-form workflow input, or user text.
 grep -qF 'run-name: "CI ${{ github.event_name }} PR:${{ github.event.pull_request.number || '"'"'none'"'"' }} REF:${{ github.event.pull_request.base.ref || '"'"'none'"'"' }} BASE:${{ github.event.pull_request.base.sha || '"'"'none'"'"' }} HEAD:${{ github.event.pull_request.head.sha || github.sha }}"' "$ROOT/.github/workflows/ci.yml"
