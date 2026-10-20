@@ -34,7 +34,8 @@ search_probe="$scratch/search-probe.sh"
   awk '/^root_path_violation\(\)\{/{emit=1} emit{print} emit && /^}/{exit}' "$ROOT/install.sh"
   awk '/^verify_privileged_install_path\(\)\{/{emit=1} emit{print} emit && /^}/{exit}' "$ROOT/install.sh"
   awk '/^verify_privileged_search_path\(\)\{/{emit=1} emit{print} emit && /^}/{exit}' "$ROOT/install.sh"
-  printf 'verify_privileged_search_path\n'
+  awk '/^verify_privileged_command_targets\(\)\{/{emit=1} emit{print} emit && /^}/{exit}' "$ROOT/install.sh"
+  printf 'verify_privileged_search_path\nverify_privileged_command_targets\n'
 } > "$search_probe"
 [ "$(grep -c '^verify_privileged_search_path(){' "$search_probe")" -eq 1 ]
 bash -n "$search_probe"
@@ -100,4 +101,74 @@ if /usr/bin/env PATH=":/usr/bin" /usr/bin/bash "$search_probe" > "$scratch/path-
   echo "root PATH accepted an empty search component" >&2; exit 1
 fi
 grep -qF 'Refusing an empty/current-directory component in root PATH' "$scratch/path-rejected.out"
+
+# Reviewer BLOCKER-01: line-oriented read previously validated only the
+# first line. This must refuse controls before ANY selected command can run.
+for hostile_path in $'/usr/bin\n:/tmp' $'/usr/bin\t:/bin' $'/usr/bin\r:/bin'; do
+  if /usr/bin/env PATH="$hostile_path" /usr/bin/bash "$search_probe" > "$scratch/path-rejected.out" 2>&1; then
+    echo "control-character root PATH bypassed complete parsing" >&2; exit 1
+  fi
+  grep -qF 'Refusing control characters in root PATH' "$scratch/path-rejected.out"
+done
+if /usr/bin/env PATH=$'/usr/bin\n:/tmp' /usr/bin/bash "$ROOT/install.sh" --check-platform ubuntu 22.04 x86_64 > "$scratch/platform-rejected.out" 2>&1; then
+  echo "full root platform entrypoint accepted multiline PATH" >&2; exit 1
+fi
+grep -qF 'Refusing control characters in root PATH' "$scratch/platform-rejected.out"
+
+# Reviewer REQUIRED-01: directory mode cannot vouch for selected command
+# bytes. All fixtures live inside root-owned /run; no real executable is
+# modified. A marker detects malicious tr execution before preflight.
+marker="$scratch/untrusted-command-executed"
+printf '#!/bin/sh\nprintf executed > %q\n' "$marker" > "$scratch/trusted/bin/tr"
+chmod 0777 "$scratch/trusted/bin/tr"
+if /usr/bin/env PATH="$scratch/trusted/bin:/usr/bin:/bin" /usr/bin/bash "$search_probe" > "$scratch/path-rejected.out" 2>&1; then
+  echo "writable selected command leaf was accepted" >&2; exit 1
+fi
+grep -qF 'Privileged install path is writable by non-root users' "$scratch/path-rejected.out"
+[ ! -e "$marker" ] || { echo "untrusted command ran before rejection" >&2; exit 1; }
+
+# Reviewer BLOCKER-02: the REAL root installer --check-platform entrypoint,
+# not just an extracted helper, must fail before unsafe tr runs.
+if /usr/bin/env PATH="$scratch/trusted/bin:/usr/bin:/bin" /usr/bin/bash "$ROOT/install.sh" --check-platform ubuntu 22.04 x86_64 > "$scratch/platform-rejected.out" 2>&1; then
+  echo "root --check-platform executed through untrusted command PATH" >&2; exit 1
+fi
+grep -qF 'Privileged install path is writable by non-root users' "$scratch/platform-rejected.out"
+[ ! -e "$marker" ] || { echo "unsafe tr ran during root platform preflight" >&2; exit 1; }
+
+chmod 0755 "$scratch/trusted/bin/tr"
+chown 65534:65534 "$scratch/trusted/bin/tr"
+if /usr/bin/env PATH="$scratch/trusted/bin:/usr/bin:/bin" /usr/bin/bash "$search_probe" > "$scratch/path-rejected.out" 2>&1; then
+  echo "non-root selected command leaf was accepted" >&2; exit 1
+fi
+grep -qF 'not root-owned' "$scratch/path-rejected.out"
+chown 0:0 "$scratch/trusted/bin/tr"
+rm -f "$scratch/trusted/bin/tr"
+
+mkdir -m 0777 "$scratch/untrusted"
+printf '#!/bin/sh\nexit 0\n' > "$scratch/untrusted/tr"
+chmod 0755 "$scratch/untrusted/tr"
+ln -s "$scratch/untrusted/tr" "$scratch/trusted/bin/tr"
+if /usr/bin/env PATH="$scratch/trusted/bin:/usr/bin:/bin" /usr/bin/bash "$search_probe" > "$scratch/path-rejected.out" 2>&1; then
+  echo "selected command symlink escaped to an untrusted target" >&2; exit 1
+fi
+grep -qF 'Privileged install path is writable by non-root users' "$scratch/path-rejected.out"
+rm -f "$scratch/trusted/bin/tr"
+
+# An explicitly trusted root-owned /run shim remains supported. This
+# preserves real systemctl and curl CI fault/digest fixtures.
+printf '#!/bin/sh\nexit 0\n' > "$scratch/trusted/bin/curl"
+printf '#!/bin/sh\nexit 0\n' > "$scratch/trusted/bin/systemctl"
+chmod 0755 "$scratch/trusted/bin/curl" "$scratch/trusted/bin/systemctl"
+/usr/bin/env PATH="$scratch/trusted/bin:/usr/bin:/bin" /usr/bin/bash "$search_probe"
+
+# Validate root platform success and rejection using the full installer.
+# Neither path may acquire a lifecycle lock, install packages or touch
+# services/configuration; this is a read-only platform contract.
+/usr/bin/env PATH=/usr/bin:/bin /usr/bin/bash "$ROOT/install.sh" --check-platform ubuntu 22.04 x86_64 > "$scratch/platform-valid.out"
+grep -qF 'Compatibility check passed' "$scratch/platform-valid.out"
+if /usr/bin/env PATH=/usr/bin:/bin /usr/bin/bash "$ROOT/install.sh" --check-platform unknown-os 22.04 x86_64 > "$scratch/platform-invalid.out" 2>&1; then
+  echo "unsupported root platform unexpectedly accepted" >&2; exit 1
+fi
+grep -qF 'Unsupported OS' "$scratch/platform-invalid.out"
+
 echo "ROOT_PRIVILEGED_INSTALL_PATH_PREFLIGHT_PASS"

@@ -109,7 +109,7 @@ die(){
 # Emit root-preflight errors using Bash builtins only. Calling the normal
 # formatted die() before PATH is verified could execute a caller-selected tr.
 root_path_violation(){
-  printf '[ai-server-agent] ERROR: %s\n' "$*" >&2
+  builtin printf '[ai-server-agent] ERROR: %s\n' "$*" >&2
   exit 1
 }
 
@@ -177,12 +177,20 @@ verify_privileged_install_targets(){
 # privileged binaries. /bin and /sbin are allowed only as verified usrmerge
 # aliases to their checked /usr equivalents.
 verify_privileged_search_path(){
-  local entry canonical
-  local -a entries
-  [[ -n "${PATH:-}" && "$PATH" != :* && "$PATH" != *: && "$PATH" != *::* ]] ||
+  local entry canonical remainder
+  local LC_ALL=C
+  [[ -n "${PATH:-}" ]] ||
     root_path_violation "Refusing an empty/current-directory component in root PATH."
-  IFS=: read -r -a entries <<< "$PATH"
-  for entry in "${entries[@]}"; do
+  # A here-string/read -a parses only the first line of PATH. Bash command
+  # lookup instead sees its entire value: reject controls, then split every
+  # colon-delimited component with Bash parameter expansion (losslessly).
+  [[ "$PATH" != *[[:cntrl:]]* ]] ||
+    root_path_violation "Refusing control characters in root PATH."
+  remainder="$PATH"
+  while :; do
+    entry="${remainder%%:*}"
+    [[ -n "$entry" ]] ||
+      root_path_violation "Refusing an empty/current-directory component in root PATH."
     [[ "$entry" = /* ]] || root_path_violation "Root PATH must use only absolute directories: $entry"
     case "$entry" in
       /bin|/sbin)
@@ -197,6 +205,41 @@ verify_privileged_search_path(){
         ;;
       *) verify_privileged_install_path "$entry" directory ;;
     esac
+    [[ "$remainder" = *:* ]] || break
+    remainder="${remainder#*:}"
+  done
+}
+
+# Checking a PATH directory alone is insufficient. A 0755 root directory
+# could contain an attacker-writable curl/systemctl/tr file left by an earlier
+# unsafe layout, or a symlink to an untrusted target. Bind each external
+# command used by this installer to its verified real file before any normal
+# root command executes. Only existing commands are checked at this point;
+# verify again after APT provisions optional prerequisites.
+verify_privileged_command_targets(){
+  local command_name selected real type_name
+  for command_name in \
+    apt-get awk bash base64 cat chmod chown cp curl cut date dirname dpkg env \
+    find flock getent git grep groupadd head hostname id install jq ln mkdir \
+    mktemp mv od openssl readlink rm runuser sed sha256sum sleep sort stat \
+    systemctl tail tar tee timeout tr uname useradd usermod xz; do
+    type_name="$(builtin type -t -- "$command_name" 2>/dev/null || true)"
+    [[ "$type_name" != function && "$type_name" != alias ]] ||
+      root_path_violation "Refusing shell override of root command: $command_name"
+    selected="$(builtin type -P -- "$command_name" 2>/dev/null || true)"
+    [ -n "$selected" ] || continue
+    # PATH directory provenance was checked first; resolve any leaf symlink
+    # (including the accepted /bin and /sbin usrmerge aliases) and then
+    # validate every component and the actual executable inode.
+    real="$(/usr/bin/readlink -f -- "$selected")" ||
+      root_path_violation "Cannot resolve selected root command $command_name: $selected"
+    verify_privileged_install_path "$real" file
+    [ -x "$real" ] ||
+      root_path_violation "Selected root command is not executable: $real"
+    # Prevent command lookup changing after verification. Neither PATH
+    # assignment nor hash-table clearing is allowed in this installer.
+    builtin hash -p "$real" "$command_name" ||
+      root_path_violation "Cannot pin selected root command: $command_name"
   done
 }
 
@@ -291,6 +334,14 @@ json_string_value(){
   sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$CONFIG_FILE" | head -n1
 }
 
+# Root-mode platform probes must not bypass command-search preflight: their
+# status formatter itself uses 'tr'. Unprivileged platform checks retain the
+# existing compatibility contract without requiring root path validation.
+if [ "$EUID" -eq 0 ]; then
+  verify_privileged_search_path
+  verify_privileged_command_targets
+fi
+
 if [ "${1:-}" = "--check-platform" ]; then
   [ "$#" -eq 4 ] || die "Usage: install.sh --check-platform OS_ID VERSION_ID ARCH"
   CHECK_ARCH="$(normalize_arch "$4")" || die "Unsupported architecture: $4. Supported architectures: amd64/x86_64 and arm64/aarch64."
@@ -304,7 +355,6 @@ case "${1:-}" in
   --resolve-ref) RESOLVE_REF_ONLY=1 ;;
 esac
 need_root
-verify_privileged_search_path
 [ -r /etc/os-release ] || die "/etc/os-release not found"
 # shellcheck disable=SC1091
 . /etc/os-release
@@ -330,6 +380,10 @@ export DEBIAN_FRONTEND=noninteractive
 log "Installing minimal setup utilities (ca-certificates, curl, git, jq, openssl, tar, xz-utils)..."
 apt-get update -qq
 apt-get install -y -qq ca-certificates curl git jq openssl tar xz-utils >/dev/null
+# Packages may have introduced optional CLI utilities that were absent from
+# the initial preflight. Validate their selected executables before use.
+verify_privileged_search_path
+verify_privileged_command_targets
 
 # Environment purpose is descriptive task-routing guidance, not a tool set,
 # permission tier, GitHub-auth installation or connection mode.
