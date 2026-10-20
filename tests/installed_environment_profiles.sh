@@ -188,7 +188,7 @@ check_profile validation 'Disposable CI'
 
 # Re-invoke the actual source installer on the disposable runner. Inputs for
 # an EXISTING install must not replace the persisted profile or label.
-sudo env AI_SERVER_AGENT_BINARY=/tmp/ai-server-agent \
+sudo env AI_SERVER_AGENT_BINARY=/run/asa-trusted-source-bin/ai-server-agent \
   AI_SERVER_AGENT_NONINTERACTIVE=1 \
   AI_SERVER_AGENT_ENVIRONMENT_PROFILE=development \
   AI_SERVER_AGENT_SERVER_LABEL='Ignored on reinstall' \

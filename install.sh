@@ -193,6 +193,14 @@ verify_privileged_install_targets(){
       verify_privileged_install_path "$LIB_DIR/$installed_helper" file
     fi
   done
+  # Unlike immutable Stable release assets, an explicit source binary
+  # override comes from the operator. Verify the input executable and
+  # ancestors before locks, packages or privileged config compatibility.
+  if [ -n "${AI_SERVER_AGENT_BINARY:-}" ]; then
+    verify_privileged_install_path "$AI_SERVER_AGENT_BINARY" file
+    [ -f "$AI_SERVER_AGENT_BINARY" ] && [ -x "$AI_SERVER_AGENT_BINARY" ] ||
+      root_path_violation "Source Agent binary must be an existing executable file: $AI_SERVER_AGENT_BINARY"
+  fi
 }
 
 # All root PATH entries must have the same trusted ancestry as installed

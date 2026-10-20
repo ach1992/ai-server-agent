@@ -79,6 +79,8 @@ The release-scoped `install.sh` is generated with its version/ref pinned to the 
 
 Stable installation rejects a local `AI_SERVER_AGENT_BINARY` override. Stable payload identity is the published immutable release, not a mutable branch.
 
+**Development/source binary overrides:** `AI_SERVER_AGENT_BINARY` is supported only for deliberate source-mode installation by an operator who trusts the original binary bytes and the installer checkout. The privileged installer validates that the supplied binary is an existing regular executable with root-owned, non-group/world-writable ancestry and leaf, and no symlink/hardlink replacement path, **before** locks, package operations or any privileged binary compatibility probe. Do not point this override directly at a build under `/tmp` or an unprivileged writable checkout. After independently verifying the candidate's provenance, stage it using `sudo install -o root -g root -m 0755` into a dedicated root-owned, non-writable directory (for example under `/run`) and supply its exact absolute path. The original bytes and the standalone installer still require operator trust; this path guard does not authenticate the authorship of arbitrary source code or turn a source build into an immutable Stable release.
+
 ## What gets installed
 
 Main paths:

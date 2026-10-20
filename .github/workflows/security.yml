@@ -120,13 +120,17 @@ jobs:
       - name: Worker HOME migration identity and fail-closed regression
         run: bash tests/worker_home_migration.sh
       - name: Build local test binary
-        run: CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
+        run: |
+          CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
+          sudo install -d -o root -g root -m 0755 /run/asa-trusted-source-bin
+          sudo install -o root -g root -m 0755 /tmp/ai-server-agent /run/asa-trusted-source-bin/ai-server-agent
+          sudo cmp -s /tmp/ai-server-agent /run/asa-trusted-source-bin/ai-server-agent
       - name: Privileged runtime-settings ownership and rollback regression
         run: sudo env ASA_RUNTIME_TEST_BINARY=/tmp/ai-server-agent bash tests/runtime_settings_root.sh
       - name: Migrate hostile legacy state and verify root trust boundary
         run: |
           set -Eeuo pipefail
-          sudo env AI_SERVER_AGENT_BINARY=/tmp/ai-server-agent bash tests/root_trust_migration.sh
+          sudo env AI_SERVER_AGENT_BINARY=/run/asa-trusted-source-bin/ai-server-agent bash tests/root_trust_migration.sh
           sudo bash tests/root_trust_boundary.sh
       - name: Installed manager rejects post-install path drift on disposable runner
         run: |
