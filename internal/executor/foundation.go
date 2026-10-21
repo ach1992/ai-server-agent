@@ -27,7 +27,6 @@ const (
 	processGroupTerminateGrace = 2 * time.Second
 	maxWorkerRunConcurrency    = 64
 	rootRunConcurrency         = 1
-	workerSlotsPerCPU          = 2
 )
 
 type runLimiter struct {
@@ -39,9 +38,9 @@ func newRunLimiter() *runLimiter {
 	return newRunLimiterForSlots(0)
 }
 
-// Zero selects bounded two-per-effective-CPU admission. A validated positive override
-// deliberately allows I/O-bound work to exceed the vCPU count, but never
-// changes the separately protected root command capacity.
+// Zero selects bounded effective-CPU admission without default CPU oversubscription.
+// A validated positive override deliberately permits greater I/O-bound
+// concurrency, without changing separately protected root command capacity.
 func newRunLimiterForSlots(configured int) *runLimiter {
 	if configured > 0 {
 		if configured > 64 {
@@ -53,15 +52,15 @@ func newRunLimiterForSlots(configured int) *runLimiter {
 }
 
 // Each admitted command holds capacity only while it runs, not while idle.
-// Check before multiplication so extreme/invalid effective CPU reports cannot overflow.
+// An auto limit tracks effective CPUs, without the historical cap of four.
 func autoWorkerCommandSlots(effectiveCPUs int) int {
 	if effectiveCPUs < 1 {
 		return 1
 	}
-	if effectiveCPUs >= maxWorkerRunConcurrency/workerSlotsPerCPU {
+	if effectiveCPUs > maxWorkerRunConcurrency {
 		return maxWorkerRunConcurrency
 	}
-	return effectiveCPUs * workerSlotsPerCPU
+	return effectiveCPUs
 }
 
 func newRunLimiterWith(workerLimit, rootLimit int) *runLimiter {

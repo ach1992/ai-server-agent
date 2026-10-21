@@ -513,7 +513,7 @@ runtime_menu(){
     services="$(config_get runtime.persistent_service_slots)"
     sessions="$(config_get runtime.stdio_session_slots)"
     case "${worker:-0}" in
-      0) worker='Automatic: 2 x effective CPUs (max 64), no idle jobs' ;;
+      0) worker='Automatic: effective CPUs (max 64), no idle jobs' ;;
       *) worker="$worker simultaneous commands" ;;
     esac
     ui_detail 'Commands' "$worker"

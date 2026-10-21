@@ -44,7 +44,7 @@ func TestRunLimiterSeparatesWorkerAndRootWithoutQueue(t *testing.T) {
 
 func TestAutoWorkerCommandSlotsBoundedByEffectiveCPU(t *testing.T) {
 	for _, tc := range []struct{ cpu, slots int }{
-		{-1, 1}, {0, 1}, {1, 2}, {2, 4}, {4, 8}, {16, 32}, {31, 62}, {32, 64}, {33, 64}, {1024, 64}, {int(^uint(0) >> 1), 64},
+		{-1, 1}, {0, 1}, {1, 1}, {2, 2}, {4, 4}, {16, 16}, {31, 31}, {32, 32}, {33, 33}, {63, 63}, {64, 64}, {65, 64}, {1024, 64}, {int(^uint(0) >> 1), 64},
 	} {
 		if got := autoWorkerCommandSlots(tc.cpu); got != tc.slots {
 			t.Fatalf("effective CPUs %d: got %d slots, want %d", tc.cpu, got, tc.slots)
