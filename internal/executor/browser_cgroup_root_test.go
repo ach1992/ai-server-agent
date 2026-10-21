@@ -72,7 +72,7 @@ func approvedBrowserCgroupRootFixture(t *testing.T) (*Server, Request, string, s
 	state := filepath.Join(root, "state")
 	home := filepath.Join(state, "worker-home")
 	tmp := filepath.Join(state, "runtime", "browser", "tmp")
-	for _, dir := range []string{sources, state, filepath.Dir(tmp)} {
+	for _, dir := range []string{sources, state, filepath.Join(state, "runtime"), filepath.Dir(tmp)} {
 		if err := os.MkdirAll(dir, 0755); err != nil {
 			t.Fatal(err)
 		}
