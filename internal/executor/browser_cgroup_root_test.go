@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"os/user"
 	"path/filepath"
 	"strconv"
@@ -532,4 +533,127 @@ func TestApprovedRootBrowserOneShotTimeoutDetachedChild(t *testing.T) {
 		t.Fatalf("stopped timeout profile not reclaimed: %v", err)
 	}
 	t.Log("BROWSER_ONESHOT_TIMEOUT_DETACHED_CGROUP_CLEANUP_PASS")
+}
+
+// Exercises the actual production-generated Browser one-shot wrapper, not a
+// hand-written Bash approximation. A separate PGID remains alive after Node
+// and the wrapper exit; the pre-kill barrier proves the Executor has not yet
+// reclaimed the isolated profile or scratch before the kernel cgroup proof.
+func TestApprovedRootBrowserProductionOneShotWrapperOrdering(t *testing.T) {
+	s, req, tmp, root := approvedBrowserCgroupRootFixture(t)
+	repo, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo = filepath.Clean(filepath.Join(repo, "..", ".."))
+	if _, err := os.Stat(filepath.Join(repo, "go.mod")); err != nil {
+		t.Fatalf("source root unavailable for production wrapper export: %v", err)
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+	export := exec.CommandContext(ctx, "go", "test", "./internal/browser",
+		"-run", "^TestExportApprovedRootProductionBrowserWrapper$", "-count=1")
+	export.Dir = repo
+	export.Env = append(os.Environ(),
+		"ASA_BROWSER_ROOT_PRODUCTION_TEST_ROOT="+root,
+		"ASA_197_BROWSER_CGROUP_APPROVED_HOST=hDE01",
+		"TMPDIR=/var/tmp")
+	if output, err := export.CombinedOutput(); err != nil {
+		t.Fatalf("production wrapper export failed: %v: %s", err, output)
+	}
+	wrapper, err := os.ReadFile(filepath.Join(req.Workspace, "production-oneshot.sh"))
+	if err != nil || !strings.Contains(string(wrapper), "trap cleanup EXIT") ||
+		!strings.Contains(string(wrapper), "ASA_BROWSER_RUN_SCRATCH") {
+		t.Fatalf("actual generated production wrapper unavailable: %v", err)
+	}
+	cap := s.cfg.EffectiveRuntime()
+	cap.BrowserConcurrentSlots = 1
+	s.cfg.Runtime = &cap
+	req.Action = "run"
+	req.AuditAction = "browser_run"
+	req.BrowserProfileMode = "isolated"
+	req.Command = string(wrapper)
+	req.Content = ""
+
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	var once sync.Once
+	t.Cleanup(func() { once.Do(func() { close(release) }) })
+	s.browserKillTestHook = func() error {
+		close(entered)
+		<-release
+		return nil
+	}
+	result := make(chan Response, 1)
+	go func() { result <- s.runContext(context.Background(), req) }()
+	select {
+	case <-entered:
+	case <-time.After(12 * time.Second):
+		t.Fatal("production wrapper did not reach its pre-cgroup-kill barrier")
+	}
+	pid := browserFixtureWorkerPID(t, filepath.Join(req.Workspace, "production-oneshot.pid"))
+	if pg, err := syscall.Getpgid(pid); err != nil || pg != pid {
+		t.Fatalf("production detached descendant is not in its own PGID: %d %v", pg, err)
+	}
+	kernel, err := os.ReadFile(fmt.Sprintf("/proc/%d/cgroup", pid))
+	const purpose = "0::/system.slice/ai-server-agent-executor.service/asa-browser-"
+	if err != nil || !strings.HasPrefix(strings.TrimSpace(string(kernel)), purpose) {
+		t.Fatalf("detached Browser is not in its exact private kernel cgroup: %s %v", kernel, err)
+	}
+	group := filepath.Join("/sys/fs/cgroup", strings.TrimPrefix(strings.TrimSpace(string(kernel)), "0::/"))
+	events, err := os.ReadFile(filepath.Join(group, "cgroup.events"))
+	if err != nil || !strings.Contains(string(events), "populated 1") {
+		t.Fatalf("production descendant was not live at the kernel stop barrier: %s %v", events, err)
+	}
+	entries, err := os.ReadDir(tmp)
+	if err != nil {
+		t.Fatal(err)
+	}
+	scratch := ""
+	for _, item := range entries {
+		if item.IsDir() && strings.HasPrefix(item.Name(), "run.") {
+			if scratch != "" {
+				t.Fatal("unexpected second production Browser scratch")
+			}
+			scratch = filepath.Join(tmp, item.Name())
+		}
+	}
+	if scratch == "" {
+		t.Fatal("production one-shot wrapper removed its scratch before kernel proof")
+	}
+	for _, name := range []string{"body.js", "runner.mjs", "isolated-profile"} {
+		if _, err := os.Stat(filepath.Join(scratch, name)); err != nil {
+			t.Fatalf("production Browser removed live scratch entry %s: %v", name, err)
+		}
+	}
+	if !s.browserAdmission.reserved() {
+		t.Fatal("production Browser admission was released while detached child remained alive")
+	}
+	if ok, _ := s.browserAcquire("unsafe-production-overlap", "isolated"); ok {
+		t.Fatal("another Browser was admitted before the original kernel group stopped")
+	}
+	select {
+	case out := <-result:
+		t.Fatalf("production wrapper run completed before kernel proof: %+v", out)
+	case <-time.After(100 * time.Millisecond):
+	}
+	once.Do(func() { close(release) })
+	select {
+	case out := <-result:
+		if out.OK || out.ReasonCode != "background_process" || out.ExitCode != 7 {
+			t.Fatalf("unexpected production wrapper teardown response: %+v", out)
+		}
+	case <-time.After(9 * time.Second):
+		t.Fatal("production wrapper did not complete verified kernel cleanup")
+	}
+	if _, err := os.Stat(group); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("production cgroup was not removed: %v", err)
+	}
+	if _, err := os.Stat(scratch); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("production scratch was not removed after kernel proof: %v", err)
+	}
+	if s.browserAdmission.reserved() {
+		t.Fatal("production reservation retained after exact verified cleanup")
+	}
+	t.Log("PRODUCTION_WRAPPER_DETACHED_CHILD_PROFILE_BARRIER_PASS")
 }
