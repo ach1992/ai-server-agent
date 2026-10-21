@@ -17,8 +17,7 @@ import (
 // The installed Agent/Executor services are never restarted or replaced.
 func TestApprovedRealScopedPTYPreActiveExecutorCrashRecovery(t *testing.T) {
 	host, err := os.Hostname()
-	if err != nil || host != "CLY535343" || os.Geteuid() != 0 ||
-		os.Getenv("ASA_PTY_SCOPE_APPROVED_HOST") != host {
+	if err != nil || !approvedPTYDisposableFixtureHost(host) {
 		t.Skip("explicit approved disposable root test host required")
 	}
 	acct, err := user.Lookup("aiworker")
@@ -70,7 +69,7 @@ func TestApprovedRealScopedPTYPreActiveExecutorCrashRecovery(t *testing.T) {
 	var scopeName string
 	s.terminalActivePublishTestHook = func(term *tmuxTerminalState) error {
 		scopeName = term.name
-		if err := verifyScopedTerminalBackend(scopeName); err != nil {
+		if err := verifyScopedTerminalBackendForVersion(scopeName, 2); err != nil {
 			return err
 		}
 		return errors.New("injected post-scope pre-ACTIVE publication failure")
@@ -101,7 +100,7 @@ func TestApprovedRealScopedPTYPreActiveExecutorCrashRecovery(t *testing.T) {
 	if err := s.sessions.removeAndStop(entry); err != nil {
 		t.Fatalf("could not retire isolated Control Mode client: %v", err)
 	}
-	if err := verifyScopedTerminalBackend(scopeName); err != nil {
+	if err := verifyScopedTerminalBackendForVersion(scopeName, 2); err != nil {
 		t.Fatalf("scope died with its client: %v", err)
 	}
 	restarted := createServer() // completely new broker, no prior sessions
@@ -122,7 +121,7 @@ func TestApprovedRealScopedPTYPreActiveExecutorCrashRecovery(t *testing.T) {
 	if count, err := restarted.terminalRecordCount(); err != nil || count != 0 {
 		t.Fatalf("real scoped terminal capacity not freed: %d %v", count, err)
 	}
-	if err := verifyScopedTerminalBackend(scopeName); err == nil {
+	if err := verifyScopedTerminalBackendForVersion(scopeName, 2); err == nil {
 		t.Fatal("backend still active after verified pending close")
 	}
 }

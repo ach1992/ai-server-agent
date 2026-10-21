@@ -44,6 +44,7 @@ type tmuxTerminalState struct {
 	epoch          string
 	recovered      bool
 	scoped         bool // production backend lives in its own bounded systemd scope
+	recordVersion  int  // 1: legacy hard TTL; 2: separate renewable PID1 timer
 	scopeUncertain bool // PID1 may own a backend but exact-stop verification failed
 	inReply        bool
 	replyLines     []string
@@ -485,11 +486,19 @@ func (s *Server) terminalRead(req Request) Response {
 	if req.SessionEpoch != t.epoch {
 		return Response{Error: "terminal output epoch changed; resume from cursor zero with returned session_epoch", ReasonCode: "terminal_epoch_changed", ErrorCode: "terminal_epoch_changed", ErrorClass: "state", SessionID: e.id, SessionEpoch: t.epoch, RetentionTruncated: t.recovered}
 	}
-	if t.scopeUncertain {
-		return Response{SessionID: e.id, SessionEpoch: t.epoch, Error: "scope creation remains unverified; explicit close/reconciliation required", ErrorCode: "terminal_start_uncertain", ErrorClass: "state"}
-	}
+	// An invalid/future cursor is not successful session activity; reject
+	// before a potentially expensive root systemd lease verification/renewal.
 	if req.Cursor > t.latest {
 		return terminalError("invalid_cursor", fmt.Errorf("future cursor; latest=%d", t.latest))
+	}
+	e.mu.Unlock()
+	renewalErr := s.renewTerminalLease(req, e)
+	e.mu.Lock() // defer above must remain paired even when renewal fails
+	if renewalErr != nil {
+		return Response{SessionID: e.id, SessionEpoch: t.epoch, Error: "Terminal idle lease renewal unverified: " + renewalErr.Error(), ErrorCode: "terminal_lease_unverified", ErrorClass: "state"}
+	}
+	if t.scopeUncertain {
+		return Response{SessionID: e.id, SessionEpoch: t.epoch, Error: "scope creation remains unverified; explicit close/reconciliation required", ErrorCode: "terminal_start_uncertain", ErrorClass: "state"}
 	}
 	earliest := t.latest + 1
 	if len(t.chunks) > 0 {
@@ -602,6 +611,9 @@ func (s *Server) terminalControl(req Request) Response {
 		if pending, ok := s.pendingTerminalAction(req); ok {
 			return pending
 		}
+		if req.Action == "terminal_close" {
+			return s.closeDetachedActiveTerminal(req)
+		}
 		return terminalError("session_not_found", errSessionNotFound)
 	}
 	if e.kind != "terminal" || e.terminal == nil {
@@ -617,6 +629,20 @@ func (s *Server) terminalControl(req Request) Response {
 		}
 		return s.terminalCloseUnstartedScope(req, e)
 	}
+	// Closing a durable scope is serialized with authenticated lease renewal,
+	// expiry and registry GC. Expiry already owns this admission lock and calls
+	// terminalControlEntry directly to avoid a lock cycle.
+	if req.Action == "terminal_close" {
+		s.terminalAdmissionMu.Lock()
+		defer s.terminalAdmissionMu.Unlock()
+	}
+	return s.terminalControlEntry(req, e)
+}
+
+// Caller owns terminalAdmissionMu for a scoped close, otherwise the action
+// renews its validated idle lease under that lock before issuing tmux I/O.
+func (s *Server) terminalControlEntry(req Request, e *stdioSession) Response {
+	t := e.terminal
 	var command string
 	switch req.Action {
 	case "terminal_write":
@@ -651,10 +677,16 @@ func (s *Server) terminalControl(req Request) Response {
 		return *blocked
 	}
 	started := time.Now()
-	err = s.terminalCommand(req, e, command)
+	if req.Action != "terminal_close" {
+		if err := s.renewTerminalLease(req, e); err != nil {
+			return s.finishActionAudit(req, req.Action, auditMode(req.Root), e.id, "developer_terminal", started,
+				Response{SessionID: e.id, SessionEpoch: t.epoch, Error: "Terminal idle lease renewal unverified: " + err.Error(), ErrorCode: "terminal_lease_unverified", ErrorClass: "state"})
+		}
+	}
+	err := s.terminalCommand(req, e, command)
 	if req.Action == "terminal_close" && t.scoped {
-		// At the one-hour PID1 deadline, the scoped backend may have gone
-		// away before our Go timer can send kill-server. A verified stop of
+		// At the PID1 idle deadline (or finite scope hard fallback),
+		// the backend may exit before Go can send kill-server. A verified stop of
 		// the exact session scope is sufficient to reconcile that close;
 		// never abandon its root-only record and capacity after expiry.
 		if scopeErr := stopScopedTerminalBackend(t.name); scopeErr != nil {
@@ -729,6 +761,37 @@ func (s *Server) terminalCommand(req Request, e *stdioSession, command string) e
 // The existing broker timer owns expiry; terminal expiry must terminate the
 // actual tmux session, not merely its Control Mode client process.
 func (s *Server) expireProcessSession(entry *stdioSession) {
+	if entry.terminal != nil {
+		s.terminalAdmissionMu.Lock()
+		if entry.terminalLeaseStillValid(time.Now()) {
+			s.terminalAdmissionMu.Unlock()
+			return
+		}
+		entry.mu.Lock()
+		uncertain := entry.terminal.scopeUncertain
+		root, epoch := entry.terminal.root, entry.terminal.epoch
+		entry.mu.Unlock()
+		req := Request{Action: "terminal_close", PrincipalID: entry.ownerID, PrincipalClass: entry.ownerClass,
+			Workspace: entry.workspace, SessionID: entry.id, Root: root, Approval: root, SessionEpoch: epoch}
+		_ = ensureRequestCorrelation(&req)
+		if uncertain {
+			// The pending-close recovery path already serializes with admission.
+			s.terminalAdmissionMu.Unlock()
+			_ = s.terminalControl(req)
+			return
+		}
+		result := s.terminalControlEntry(req, entry)
+		s.terminalAdmissionMu.Unlock()
+		if !result.OK {
+			entry.mu.Lock()
+			entry.cleanupErr = errors.New("tmux backend stop not verified")
+			entry.mu.Unlock()
+		}
+		return
+	}
+	if entry.nonterminalIdleLeaseStillValid(time.Now()) {
+		return
+	}
 	if entry.browser != nil {
 		req := Request{Action: "browser_session_close", PrincipalID: entry.ownerID, PrincipalClass: entry.ownerClass, Workspace: entry.workspace, SessionID: entry.id}
 		_ = ensureRequestCorrelation(&req)
@@ -749,19 +812,5 @@ func (s *Server) expireProcessSession(entry *stdioSession) {
 		_ = s.debugStop(ctx, req)
 		return
 	}
-	if entry.terminal == nil {
-		_ = s.sessions.removeAndStop(entry)
-		return
-	}
-	req := Request{Action: "terminal_close", PrincipalID: entry.ownerID, PrincipalClass: entry.ownerClass,
-		Workspace: entry.workspace, SessionID: entry.id, Root: entry.terminal.root, Approval: entry.terminal.root, SessionEpoch: entry.terminal.epoch}
-	_ = ensureRequestCorrelation(&req)
-	result := s.terminalControl(req)
-	if !result.OK {
-		// Keep the identity visible. An unverified detached backend is not a
-		// successful stop and must not be silently deleted on retention GC.
-		entry.mu.Lock()
-		entry.cleanupErr = errors.New("tmux backend stop not verified")
-		entry.mu.Unlock()
-	}
+	_ = s.sessions.removeAndStop(entry)
 }

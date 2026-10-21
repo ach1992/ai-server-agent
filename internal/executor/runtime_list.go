@@ -267,7 +267,7 @@ func (s *Server) runtimeListContext(parent context.Context, req Request) Respons
 					if workspace != "" && rec.Workspace != workspace {
 						continue
 					}
-					if rec.ID != id || rec.Version != 1 || !rec.Scoped || rec.Lifecycle != "active" ||
+					if rec.ID != id || !validTerminalRecordVersion(rec) || !rec.Scoped || rec.Lifecycle != "active" ||
 						!validTmuxSessionName(rec.Name) || !validTmuxPaneID(rec.Pane) ||
 						!filepath.IsAbs(rec.Workspace) || filepath.Clean(rec.Workspace) != rec.Workspace ||
 						rec.ExpiresAt.IsZero() || !rec.ExpiresAt.After(now) ||
@@ -275,15 +275,19 @@ func (s *Server) runtimeListContext(parent context.Context, req Request) Respons
 						continue
 					}
 					status := "active"
-					if err := s.verifyRuntimeTerminalBackend(ctx, rec.Name); err != nil {
+					if err := s.verifyRuntimeTerminalBackend(ctx, rec.Name, rec.Version); err != nil {
 						status = "unknown"
 						if ctx.Err() != nil {
 							response.Truncated = true
 						}
 					}
+					createdAt := rec.CreatedAt
+					if rec.Version == 1 {
+						createdAt = rec.ExpiresAt.Add(-maxStdioSessionAge)
+					}
 					response.RuntimeEntries = append(response.RuntimeEntries, RuntimeEntry{
 						Kind: "terminal", ID: rec.ID, Workspace: rec.Workspace, Status: status,
-						CreatedAt: rec.ExpiresAt.Add(-maxStdioSessionAge).UTC().Format(time.RFC3339Nano),
+						CreatedAt: createdAt.UTC().Format(time.RFC3339Nano),
 						ExpiresAt: rec.ExpiresAt.UTC().Format(time.RFC3339),
 					})
 				}
@@ -312,11 +316,17 @@ func (s *Server) runtimeListContext(parent context.Context, req Request) Respons
 	return response
 }
 
-func (s *Server) verifyRuntimeTerminalBackend(ctx context.Context, name string) error {
+func (s *Server) verifyRuntimeTerminalBackend(ctx context.Context, name string, version int) error {
 	if s.runtimeTerminalVerifyTestHook != nil {
 		return s.runtimeTerminalVerifyTestHook(ctx, name)
 	}
-	return verifyScopedTerminalBackendContext(ctx, name)
+	if err := verifyScopedTerminalBackendVersionContext(ctx, name, version); err != nil {
+		return err
+	}
+	if version == 2 {
+		return verifyTerminalLeaseTimer(name)
+	}
+	return nil
 }
 
 // This read-only check parallels the production reconnect socket identity

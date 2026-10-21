@@ -25,8 +25,7 @@ import (
 // restarts or modifies an installed AI Server Agent or its configured services.
 func TestApprovedWorkerScopeRealSystemdUnitRestart(t *testing.T) {
 	host, _ := os.Hostname()
-	if host != "CLY535343" || os.Geteuid() != 0 ||
-		os.Getenv("ASA_PTY_SCOPE_APPROVED_HOST") != host {
+	if !approvedPTYDisposableFixtureHost(host) {
 		t.Skip("independent approved root-owned disposable-host gate")
 	}
 	if childDir := os.Getenv("ASA_PTY_SCOPE_CHILD_TEST_DIR"); childDir != "" {
@@ -100,6 +99,7 @@ func TestApprovedWorkerScopeRealSystemdUnitRestart(t *testing.T) {
 		"--unit="+strings.TrimSuffix(unit, ".service"),
 		"--property=KillMode=control-group", "--property=Type=simple",
 		"--setenv=ASA_PTY_SCOPE_APPROVED_HOST="+host,
+		"--setenv=ASA_197_TERMINAL_DISPOSABLE_HOST="+os.Getenv("ASA_197_TERMINAL_DISPOSABLE_HOST"),
 		"--setenv=ASA_PTY_SCOPE_CHILD_TEST_DIR="+base,
 		executable, "-test.run=^TestApprovedWorkerScopeRealSystemdUnitRestart$", "-test.v")
 	if out, err := launch.CombinedOutput(); err != nil {
@@ -197,6 +197,12 @@ func approvedScopeRestartChild(t *testing.T, dir string) {
 		if err != nil {
 			fail(err)
 		}
+		if err := verifyScopedTerminalBackendForVersion(e.terminal.name, 2); err != nil {
+			fail(fmt.Errorf("pre-restart v2 PID1 scope: %w", err))
+		}
+		if err := verifyTerminalLeaseTimer(e.terminal.name); err != nil {
+			fail(fmt.Errorf("pre-restart PID1 idle timer: %w", err))
+		}
 		owned := struct {
 			ID         string `json:"id"`
 			Epoch      string `json:"epoch"`
@@ -227,6 +233,12 @@ func approvedScopeRestartChild(t *testing.T, dir string) {
 			!validTmuxSessionName(owned.Generation) {
 			fail(errors.New("untrusted stored terminal identity"))
 		}
+		if err := verifyScopedTerminalBackendForVersion(owned.Generation, 2); err != nil {
+			fail(fmt.Errorf("post-restart v2 PID1 scope: %w", err))
+		}
+		if err := verifyTerminalLeaseTimer(owned.Generation); err != nil {
+			fail(fmt.Errorf("post-restart persistent PID1 timer: %w", err))
+		}
 		req.Action = "terminal_reconnect"
 		req.SessionID = owned.ID
 		req.SessionEpoch = owned.Epoch
@@ -236,6 +248,9 @@ func approvedScopeRestartChild(t *testing.T, dir string) {
 			fail(fmt.Errorf("post-real-systemd-restart reconnect failed: %+v", res))
 		}
 		req.SessionEpoch = res.SessionEpoch
+		if err := verifyTerminalLeaseTimer(owned.Generation); err != nil {
+			fail(fmt.Errorf("post-reconnect PID1 timer: %w", err))
+		}
 		req.Action = "terminal_write"
 		req.Content = "id -u | sed s/^/SCOPED_RESTART_WORKER_UID:/" + "\n"
 		if got := s.terminalAction(req); !got.OK {

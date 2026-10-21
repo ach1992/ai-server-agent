@@ -74,6 +74,8 @@ type stdioSession struct {
 	bytes                   int
 	done                    chan struct{}
 	expiry                  *time.Timer
+	lastAuthenticatedAction time.Time                // nonterminal lease timestamp
+	terminalLeaseExpiresAt  time.Time                // v2 Terminal idle lease, consistent with root-owned record
 	terminal                *tmuxTerminalState       // consumer-specific Control Mode state; broker owns its process
 	terminalRecordPersisted bool                     // guarded by entry.mu; PENDING or ACTIVE file owns capacity
 	dap                     *dapState                // DAP stream attaches to this same process identity and broker
@@ -142,7 +144,60 @@ func (b *stdioSessionBroker) unpersistedTerminalCount() int {
 	return count
 }
 
+// Non-Terminal interactive sessions are limited by authenticated inactivity,
+// not simply age since first launch. Root-controlled Terminal scope cleanup
+// currently requires its existing absolute PID1 lifetime and is unchanged.
+func (e *stdioSession) refreshNonterminalIdleLease() bool {
+	if e == nil {
+		return false
+	}
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.terminal != nil || e.closed || e.exited {
+		return true
+	}
+	now := time.Now()
+	// A delayed callback must never permit a stale principal to resurrect a
+	// genuinely expired subprocess after its idle deadline has passed.
+	if !e.lastAuthenticatedAction.IsZero() && !now.Before(e.lastAuthenticatedAction.Add(maxStdioSessionAge)) {
+		return false
+	}
+	e.lastAuthenticatedAction = now
+	if e.expiry != nil {
+		e.expiry.Reset(maxStdioSessionAge)
+	}
+	return true
+}
+
+// A timer callback may have entered concurrently with a request. Recheck
+// under the entry lock to avoid stopping a recently renewed live session.
+func (e *stdioSession) nonterminalIdleLeaseStillValid(now time.Time) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.terminal != nil || e.closed || e.exited || e.lastAuthenticatedAction.IsZero() {
+		return false
+	}
+	remaining := maxStdioSessionAge - now.Sub(e.lastAuthenticatedAction)
+	if remaining <= 0 {
+		return false
+	}
+	if e.expiry != nil {
+		e.expiry.Reset(remaining)
+	}
+	return true
+}
+
 func (b *stdioSessionBroker) get(req Request, id string) (*stdioSession, error) {
+	return b.getWithIdlePolicy(req, id, true)
+}
+
+// A verified explicit stop is allowed to clean a genuinely expired process;
+// it never revives the session by extending its idle deadline.
+func (b *stdioSessionBroker) getForCleanup(req Request, id string) (*stdioSession, error) {
+	return b.getWithIdlePolicy(req, id, false)
+}
+
+func (b *stdioSessionBroker) getWithIdlePolicy(req Request, id string, renew bool) (*stdioSession, error) {
 	if b == nil || id == "" || req.PrincipalID == "" || req.PrincipalClass == "" {
 		return nil, errSessionNotFound
 	}
@@ -152,6 +207,12 @@ func (b *stdioSessionBroker) get(req Request, id string) (*stdioSession, error) 
 	if session == nil || session.ownerID != req.PrincipalID || session.ownerClass != req.PrincipalClass || filepath.Clean(req.Workspace) != session.workspace || (session.terminal != nil && session.terminal.root != req.Root) || (session.terminal == nil && (req.Root || req.Approval)) || (session.terminal != nil && req.Approval != req.Root) {
 		// Do not reveal whether another principal's opaque session exists.
 		return nil, errSessionNotFound
+	}
+	// Internal or user-requested exact stop/close must remain possible after
+	// expiry, but cannot accidentally extend a lease while cleaning it up.
+	if renew && req.Action != "browser_session_close" && req.Action != "debug_stop" && req.Action != "terminal_close" &&
+		!session.refreshNonterminalIdleLease() {
+		return nil, errSessionStopped
 	}
 	return session, nil
 }
@@ -567,6 +628,8 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 	go entry.wait()
 	// A forgotten or disconnected session cannot run indefinitely.
 	entry.mu.Lock()
+	entry.lastAuthenticatedAction = time.Now()
+
 	entry.expiry = time.AfterFunc(maxStdioSessionAge, func() { s.expireProcessSession(entry) })
 	entry.mu.Unlock()
 	audited := s.finishActionAudit(req, "session_create", auditMode(req.Root), kind+"\x00"+cwd+"\x00"+binary, "developer_session", start, Response{OK: true})
@@ -883,7 +946,7 @@ func (b *stdioSessionBroker) removeAndStop(entry *stdioSession) error {
 }
 
 func (b *stdioSessionBroker) close(req Request, id string) error {
-	e, err := b.get(req, id)
+	e, err := b.getForCleanup(req, id)
 	if err != nil {
 		return err
 	}
@@ -934,7 +997,7 @@ func (s *Server) workerStdioWrite(req Request, id string, data []byte) error {
 }
 
 func (s *Server) workerStdioClose(req Request, id string) error {
-	if _, err := s.sessions.get(req, id); err != nil {
+	if _, err := s.sessions.getForCleanup(req, id); err != nil {
 		return err
 	}
 	if blocked := s.beginActionAudit(req, "session_close", "worker", id, "developer_session"); blocked != nil {

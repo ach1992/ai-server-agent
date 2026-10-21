@@ -17,16 +17,25 @@ import (
 	"github.com/ach1992/ai-server-agent/internal/config"
 )
 
+// For the 197 session-lifecycle acceptance, a test-owned host with the
+// explicit per-host opt-in may exercise isolated tmux/systemd fixtures.
+// This grants no permission to restart any installed Agent service.
+func approvedPTYDisposableFixtureHost(host string) bool {
+	if host == "" || os.Geteuid() != 0 || os.Getenv("ASA_PTY_SCOPE_APPROVED_HOST") != host {
+		return false
+	}
+	return host == "CLY535343" || (host == "hDE01" && os.Getenv("ASA137_E2E_HOST") == host) ||
+		os.Getenv("ASA_197_TERMINAL_DISPOSABLE_HOST") == host
+}
+
 // This test must never execute as part of ordinary CI. It launches a genuine
 // root-owned transient systemd scope and drops the pane to aiworker. Only a
 // separately authorized disposable host may opt in explicitly.
 // The hDE01 path additionally requires the Issue #137 E2E environment gate;
 // it neither broadens the historical CLY535343 gate nor affects installed services.
 func TestApprovedWorkerTmuxScopeSurvivesBrokerStop(t *testing.T) {
-	approved := os.Getenv("ASA_PTY_SCOPE_APPROVED_HOST")
 	hostname, _ := os.Hostname()
-	if approved == "" || approved != hostname || os.Geteuid() != 0 ||
-		(hostname != "CLY535343" && (hostname != "hDE01" || os.Getenv("ASA137_E2E_HOST") != hostname)) {
+	if !approvedPTYDisposableFixtureHost(hostname) {
 		t.Skip("real systemd scope test requires explicitly authorized disposable host and root")
 	}
 	account, err := user.Lookup("aiworker")
@@ -113,8 +122,37 @@ func TestApprovedWorkerTmuxScopeSurvivesBrokerStop(t *testing.T) {
 	if !e.terminal.scoped {
 		t.Fatal("production tmux did not use the isolated systemd backend")
 	}
-	if err := verifyScopedTerminalBackend(generation); err != nil {
+	if err := verifyScopedTerminalBackendForVersion(generation, 2); err != nil {
 		t.Fatalf("scope lost cgroup or lifetime boundary: %v", err)
+	}
+	if err := verifyTerminalLeaseTimer(generation); err != nil {
+		t.Fatalf("independent PID1 idle timer missing: %v", err)
+	}
+	// Move a test-owned durable lease near expiry to exercise the real public
+	// terminal_read renewal, including persisted deadline and restarted PID1 timer.
+	// This never reduces the actual one-hour timer of a live Agent session.
+	old, err := s.readTerminalRecord(owner)
+	if err != nil || old.Version != 2 {
+		t.Fatalf("new scope lacks versioned lease: %+v %v", old, err)
+	}
+	old.ExpiresAt = time.Now().Add(20 * time.Second)
+	if _, err := s.writeTerminalRecord(old, true); err != nil {
+		t.Fatal(err)
+	}
+	e.mu.Lock()
+	e.terminalLeaseExpiresAt = old.ExpiresAt
+	e.mu.Unlock()
+	readLease := owner
+	readLease.Action, readLease.Limit = "terminal_read", 8192
+	if response := s.terminalAction(readLease); !response.OK {
+		t.Fatalf("authenticated read failed to renew near-expiry lease: %+v", response)
+	}
+	renewed, err := s.readTerminalRecord(owner)
+	if err != nil || !renewed.ExpiresAt.After(time.Now().Add(58*time.Minute)) || !renewed.CreatedAt.Equal(old.CreatedAt) {
+		t.Fatalf("renewal did not persist the same session with extended idle deadline: %+v %v", renewed, err)
+	}
+	if err := verifyTerminalLeaseTimer(generation); err != nil {
+		t.Fatalf("renewed PID1 timer failed verification: %v", err)
 	}
 	// Worker UID must NOT attach directly to another principal's root-owned
 	// socket, even when it knows the opaque socket path.
@@ -124,12 +162,16 @@ func TestApprovedWorkerTmuxScopeSurvivesBrokerStop(t *testing.T) {
 	}
 	// Simulate loss of the Executor-owned Control Mode broker process.
 	// Unlike the former single-cgroup implementation, the server remains
-	// under PID1 ownership in a separate 1h-bounded scope.
+	// under PID1 ownership in a separately hard-capped scope with a
+	// renewable one-hour inactivity timer.
 	if err := s.sessions.removeAndStop(e); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyScopedTerminalBackend(generation); err != nil {
+	if err := verifyScopedTerminalBackendForVersion(generation, 2); err != nil {
 		t.Fatalf("backend did not outlive Control Mode: %v", err)
+	}
+	if err := verifyTerminalLeaseTimer(generation); err != nil {
+		t.Fatalf("PID1 timer did not survive lost Executor client: %v", err)
 	}
 	s2 := &Server{
 		cfg: s.cfg, workerUID: s.workerUID, workerGID: s.workerGID,
@@ -192,8 +234,11 @@ func TestApprovedWorkerTmuxScopeSurvivesBrokerStop(t *testing.T) {
 	if closed := s2.terminalAction(owner); !closed.OK {
 		t.Fatalf("production terminal close did not clean scope: %+v", closed)
 	}
-	if err := verifyScopedTerminalBackend(generation); err == nil {
+	if err := verifyScopedTerminalBackendForVersion(generation, 2); err == nil {
 		t.Fatal("systemd scope remained active after terminal_close")
+	}
+	if err := verifyTerminalLeaseTimer(generation); err == nil {
+		t.Fatal("PID1 idle timer survived verified close")
 	}
 	if _, err := os.Stat(sock); !os.IsNotExist(err) {
 		t.Fatalf("private socket survived verified close: %v", err)
@@ -229,6 +274,10 @@ func TestApprovedWorkerTmuxScopeSurvivesBrokerStop(t *testing.T) {
 		t.Fatal("new record did not persist protected scope provenance")
 	}
 	oldRecord.ExpiresAt = time.Now().Add(-time.Minute)
+	// v2 persistence binds expiry to an immutable creation timestamp.
+	// Simulate an aged but internally coherent record, not a forged lease
+	// whose expiry predates its creation and must remain fail-closed.
+	oldRecord.CreatedAt = oldRecord.ExpiresAt.Add(-maxStdioSessionAge)
 	body, err = json.Marshal(oldRecord)
 	if err != nil {
 		t.Fatal(err)
@@ -240,7 +289,7 @@ func TestApprovedWorkerTmuxScopeSurvivesBrokerStop(t *testing.T) {
 	if err != nil || count != 0 {
 		t.Fatalf("expired trusted scope record not pruned: count=%d err=%v", count, err)
 	}
-	if err := verifyScopedTerminalBackend(name2); err == nil {
+	if err := verifyScopedTerminalBackendForVersion(name2, 2); err == nil {
 		t.Fatal("expired terminal backend scope remained active")
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -266,15 +315,65 @@ func TestApprovedWorkerTmuxScopeSurvivesBrokerStop(t *testing.T) {
 	}
 	goneName := goneEntry.terminal.name
 	t.Cleanup(func() { _ = stopScopedTerminalBackend(goneName) })
-	if err := stopScopedTerminalBackend(goneName); err != nil {
-		t.Fatalf("could not simulate PID1 backend deadline: %v", err)
+	// Losing the independently managed timer while the scope still lives
+	// must fail the next authenticated I/O and reconnect closed, including if
+	// the in-memory record still claims almost one hour of idle capacity.
+	if err := stopTerminalLeaseTimer(goneName); err != nil {
+		t.Fatalf("could not simulate disappeared PID1 idle timer: %v", err)
+	}
+	gone.Action = "terminal_read"
+	if blocked := s2.terminalAction(gone); blocked.OK || blocked.ErrorCode != "terminal_lease_unverified" {
+		t.Fatalf("missing PID1 fallback was masked by cached lease: %+v", blocked)
+	}
+	gone.Action = "terminal_reconnect"
+	if blocked := s2.terminalAction(gone); blocked.OK || blocked.ErrorCode != "terminal_lease_unverified" {
+		t.Fatalf("reconnect hid missing PID1 timer: %+v", blocked)
+	}
+	// A completely new Executor must refuse to reconnect to the missing
+	// timer, but the original authenticated owner can explicitly close the
+	// exact detached ACTIVE scope without ever attaching to a dead timer.
+	if err := s2.sessions.removeAndStop(goneEntry); err != nil {
+		t.Fatal(err)
+	}
+	fresh := &Server{cfg: s.cfg, workerUID: s.workerUID, workerGID: s.workerGID,
+		sessions: newStdioSessionBroker(), audit: s.audit}
+	if blocked := fresh.terminalAction(gone); blocked.OK || blocked.ErrorCode != "terminal_lease_unverified" {
+		t.Fatalf("new Executor reconnected without PID1 timer: %+v", blocked)
 	}
 	gone.Action = "terminal_close"
-	if closed := s2.terminalAction(gone); !closed.OK {
-		t.Fatalf("close of scope already ended by PID1 not reconciled: %+v", closed)
+	if closed := fresh.terminalAction(gone); !closed.OK {
+		t.Fatalf("original owner could not clean detached timerless ACTIVE scope: %+v", closed)
+	}
+	if err := verifyScopedTerminalBackendForVersion(goneName, 2); err == nil {
+		t.Fatal("detached terminal scope remained after verified owner close")
 	}
 	if _, err := os.Stat(filepath.Join(state, "terminal-sessions", gone.SessionID+".json")); !os.IsNotExist(err) {
-		t.Fatalf("dead-backend terminal record survived verified close: %v", err)
+		t.Fatalf("detached ACTIVE record survived verified close: %v", err)
 	}
-	t.Log("real scope, restart, principal isolation, stale-record GC, expired-backend close PASS")
+	// Separately retain the original scenario: PID1 can expire the backend
+	// while the old in-process Control Mode connection is still present.
+	expired := Request{Action: "terminal_open", PrincipalID: owner.PrincipalID, PrincipalClass: owner.PrincipalClass,
+		Workspace: project, Columns: 80, Rows: 24, RequestID: "expired-backend-live-client"}
+	openedExpired := fresh.terminalAction(expired)
+	if !openedExpired.OK {
+		t.Fatalf("expired backend fixture open: %+v", openedExpired)
+	}
+	expired.SessionID, expired.SessionEpoch = openedExpired.SessionID, openedExpired.SessionEpoch
+	expiredEntry, err := fresh.sessions.get(expired, expired.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiredName := expiredEntry.terminal.name
+	t.Cleanup(func() { _ = stopScopedTerminalBackend(expiredName) })
+	if err := stopScopedTerminalBackend(expiredName); err != nil {
+		t.Fatalf("could not simulate PID1 backend deadline: %v", err)
+	}
+	expired.Action = "terminal_close"
+	if closed := fresh.terminalAction(expired); !closed.OK {
+		t.Fatalf("close of already-ended PID1 scope not reconciled: %+v", closed)
+	}
+	if _, err := os.Stat(filepath.Join(state, "terminal-sessions", expired.SessionID+".json")); !os.IsNotExist(err) {
+		t.Fatalf("dead-backend record survived verified close: %v", err)
+	}
+	t.Log("real scope, service reattach, principal isolation, missing-timer detached close, stale GC, expired-backend close PASS")
 }

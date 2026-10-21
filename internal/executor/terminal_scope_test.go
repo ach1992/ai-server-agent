@@ -3,6 +3,7 @@ package executor
 import (
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestTerminalScopeUnitNamingAndValidation(t *testing.T) {
@@ -23,5 +24,82 @@ func TestTerminalScopeUnitNamingAndValidation(t *testing.T) {
 		if err := stopScopedTerminalBackend(unsafe); err == nil {
 			t.Fatalf("accepted invalid systemd unit identity: %q", unsafe)
 		}
+	}
+}
+
+func TestTerminalLeaseUnitScopedToExactGeneration(t *testing.T) {
+	name := "asa_0123456789abcdef01234567"
+	timer, err := terminalLeaseTimerUnit(name)
+	if err != nil || timer != "asa-pty-0123456789abcdef01234567-idle.timer" {
+		t.Fatalf("incorrect root-only timer identity: %q %v", timer, err)
+	}
+	for _, candidate := range []string{"", "asa_123", "asa_0123456789abcdef01234567/../bad"} {
+		if _, err := terminalLeaseTimerUnit(candidate); err == nil {
+			t.Fatalf("unsafe generation %q", candidate)
+		}
+	}
+}
+
+func TestTerminalRecordVersionedLeaseGuards(t *testing.T) {
+	opened := time.Now().UTC()
+	old := terminalRecord{Version: 1, ExpiresAt: opened.Add(time.Hour)}
+	if !validTerminalRecordVersion(old) {
+		t.Fatal("valid one-hour legacy record rejected")
+	}
+	v2 := terminalRecord{Version: 2, Scoped: true, CreatedAt: opened, ExpiresAt: opened.Add(time.Hour)}
+	if !validTerminalRecordVersion(v2) {
+		t.Fatal("durable scoped lease rejected")
+	}
+	cases := []terminalRecord{
+		{Version: 3}, {Version: 2, Scoped: false, CreatedAt: opened, ExpiresAt: opened.Add(time.Hour)},
+		{Version: 2, Scoped: true, ExpiresAt: opened.Add(time.Hour)},
+		{Version: 2, Scoped: true, CreatedAt: opened, ExpiresAt: opened.Add(-time.Second)},
+		{Version: 2, Scoped: true, CreatedAt: opened, ExpiresAt: opened.Add(terminalScopeHardAge + time.Second)},
+	}
+	for _, rec := range cases {
+		if validTerminalRecordVersion(rec) {
+			t.Fatalf("unsafe record accepted: %+v", rec)
+		}
+	}
+}
+
+func TestTerminalReadLeaseFailureNeverUnlocksUnheldMutex(t *testing.T) {
+	s, req, workspace := testStdioBroker(t)
+	req.Action = "terminal_read"
+	req.SessionID = "stdio_invalid-lease"
+	req.SessionEpoch = "valid-epoch"
+	term := &tmuxTerminalState{epoch: req.SessionEpoch, scoped: true, name: "INVALID"}
+	e := &stdioSession{id: req.SessionID, kind: "terminal", ownerID: req.PrincipalID,
+		ownerClass: req.PrincipalClass, workspace: workspace, terminal: term}
+	if err := s.sessions.reserve(e); err != nil {
+		t.Fatal(err)
+	}
+	defer s.sessions.remove(e)
+	// The invalid cursor must not reach PID1 renewal, including on a
+	// presently broken timer, and must remain a specific client error.
+	req.Cursor = 1
+	if got := s.terminalRead(req); got.OK || got.ErrorCode != "invalid_cursor" {
+		t.Fatalf("invalid terminal cursor unexpectedly reached PID1 lease: %+v", got)
+	}
+	req.Cursor = 0
+	got := s.terminalRead(req)
+	if got.OK || got.ErrorCode != "terminal_lease_unverified" {
+		t.Fatalf("renewal error not fail-closed: %+v", got)
+	}
+}
+
+func TestLegacyScopedTerminalNeverRequiresNewPID1IdleTimer(t *testing.T) {
+	s, owner, workspace := testStdioBroker(t)
+	owner.SessionID = "stdio_0123456789abcdef0123456789abcdef"
+	entry := &stdioSession{
+		id: owner.SessionID, kind: "terminal", ownerID: owner.PrincipalID, ownerClass: owner.PrincipalClass,
+		workspace: workspace, terminal: &tmuxTerminalState{scoped: true, recordVersion: 1},
+	}
+	if err := s.sessions.reserve(entry); err != nil {
+		t.Fatal(err)
+	}
+	defer s.sessions.remove(entry)
+	if err := s.renewTerminalLease(owner, entry); err != nil {
+		t.Fatalf("v1 scope incorrectly required a new PID1 timer or record migration: %v", err)
 	}
 }
