@@ -39,6 +39,20 @@ func TestApprovedRootBrowserPrivateTraceNormalCloseAndWorkerDenial(t *testing.T)
 	}
 	s.browserUID, s.browserGID = uint32(uid), uint32(gid)
 	s.cfg.AgentUser = "aiagent" // activate the real production readiness guard
+	s.cfg.WorkerUser = "aiworker"
+	agentAccount, err := user.Lookup("aiagent")
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentUID, err := strconv.ParseUint(agentAccount.Uid, 10, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	agentGID, err := strconv.ParseUint(agentAccount.Gid, 10, 32)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.agentUID, s.agentGID = uint32(agentUID), uint32(agentGID)
 	private := s.isolatedBrowserScratchDir()
 	home := filepath.Join(s.cfg.StateDir, "browser-home")
 	for _, dir := range []string{home, private} {

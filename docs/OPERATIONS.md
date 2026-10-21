@@ -102,7 +102,7 @@ System users:
 
 - `aiagent`: unprivileged MCP/API service account;
 - `aiworker`: ordinary command/workspace account;
-- `aibrowser`: dedicated nologin UID/GID for isolated managed Chromium and private ZIP traces (never a worker group member).
+- `aibrowser`: dedicated nologin UID/GID for isolated managed Chromium and private ZIP traces. Its numeric UID and GID must differ from both `aiagent` and `aiworker` (including named protected groups). Unsafe pre-existing aliases refuse install and isolated Browser admission, without renumbering accounts.
 
 Services:
 

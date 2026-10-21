@@ -130,7 +130,8 @@ jobs:
       - name: Migrate hostile legacy state and verify root trust boundary
         run: |
           set -Eeuo pipefail
-          sudo env AI_SERVER_AGENT_BINARY=/run/asa-trusted-source-bin/ai-server-agent bash tests/root_trust_migration.sh
+          bash tests/browser_account_identity.sh
+          sudo env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" ASA_DISPOSABLE_BROWSER_ALIAS_ACCEPTANCE=1 AI_SERVER_AGENT_BINARY=/run/asa-trusted-source-bin/ai-server-agent bash tests/root_trust_migration.sh
           sudo bash tests/root_trust_boundary.sh
       - name: Installed manager rejects post-install path drift on disposable runner
         run: |

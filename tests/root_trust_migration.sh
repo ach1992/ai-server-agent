@@ -29,6 +29,12 @@ LEGACY
 chown aiagent:aiagent "$STATE_DIR/install-state.env"
 rm -f /tmp/ai-server-agent-legacy-state-executed
 
+# Negative real-account fixtures run only when GitHub explicitly opts in,
+# before this disposable runner's first real Agent installation.
+if [ "${ASA_DISPOSABLE_BROWSER_ALIAS_ACCEPTANCE:-0}" = 1 ]; then
+  bash "$ROOT/tests/browser_account_identity_root.sh"
+fi
+
 AI_SERVER_AGENT_BINARY="$BINARY" AI_SERVER_AGENT_NONINTERACTIVE=1 bash "$ROOT/install.sh"
 
 test ! -e /tmp/ai-server-agent-legacy-state-executed
@@ -46,6 +52,9 @@ test "$(getent passwd aibrowser | cut -d: -f6-7)" = "$STATE_DIR/browser-home:/us
 test "$(id -G aibrowser)" = "$(id -g aibrowser)"
 test "$(id -u aibrowser)" != "$(id -u aiworker)"
 test "$(id -g aibrowser)" != "$(id -g aiworker)"
+test "$(id -u aibrowser)" != "$(id -u aiagent)"
+test "$(id -g aibrowser)" != "$(id -g aiagent)"
+test "$(id -g aibrowser)" != "$(getent group aiagent | cut -d: -f3)"
 # Account-scoped files are invisible to an otherwise authorized worker UID.
 runuser -u aibrowser -- /usr/bin/sh -c 'printf private > /var/lib/ai-server-agent/runtime/browser/isolated/private.marker'
 if runuser -u aiworker -- /usr/bin/cat "$STATE_DIR/runtime/browser/isolated/private.marker" >/dev/null 2>&1; then
