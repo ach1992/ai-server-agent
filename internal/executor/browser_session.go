@@ -369,7 +369,31 @@ func (s *Server) browserSessionOpen(ctx context.Context, req Request) Response {
 	if len(args) > 64 {
 		return browserSessionError("input_too_large", "validation", errors.New("too many Browser argv fragments"))
 	}
-	id, err := s.workerStdioSession(req, "browser", req.Workspace, node, args...)
+	// Production root Executor atomically places Node and Playwright's
+	// independently grouped Chromium descendants inside one private cgroup.
+	// Private fixture binary overrides do not run Chromium in ordinary CI.
+	var group *dapCgroup
+	if s.browserNodeBinary == "" {
+		group, err = createBrowserCgroup()
+		if err != nil {
+			return browserSessionError("browser_containment_unavailable", "dependency", err)
+		}
+		group.beforeKillTestHook = s.browserContainmentBeforeKillTestHook
+	}
+	var id string
+	if group != nil {
+		id, err = s.workerContainedBrowserSession(req, req.Workspace, node, group, args...)
+		if id == "" {
+			// A failed/premature spawn cannot release Browser admission
+			// until the kernel confirms no detached descendants remain.
+			if cleanupErr := group.abortBeforeLaunch(); cleanupErr != nil {
+				reserved = false // stay fail-closed until root recovery
+				return browserSessionError("browser_containment_cleanup_unknown", "state", errors.Join(err, cleanupErr))
+			}
+		}
+	} else {
+		id, err = s.workerStdioSession(req, "browser", req.Workspace, node, args...)
+	}
 	if id != "" {
 		// A child may have started even if the audit completion was degraded.
 		// Hold the exact Browser capacity/profile reservation until verified stop.

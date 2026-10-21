@@ -19,13 +19,29 @@ import (
 // proof of cleanup for pre-identity or multi-descendant DAP launches.
 // The executor service itself is NEVER written into or killed by this code.
 type dapCgroup struct {
-	path     string
-	verified bool
+	path               string
+	verified           bool
+	beforeKillTestHook func() error // test-only pause/fail before actual cgroup.kill
 }
 
 func createDAPCgroup() (*dapCgroup, error) {
+	return createPrivateExecutorCgroup("asa-dap-")
+}
+
+// Browser and DAP share the existing root Executor's kernel ownership proof:
+// the child starts atomically inside its own cgroup, and cgroup.kill plus
+// populated=0 accounts for detached descendants in different process groups.
+// Names are trusted internal constants, never supplied by MCP clients.
+func createBrowserCgroup() (*dapCgroup, error) {
+	return createPrivateExecutorCgroup("asa-browser-")
+}
+
+func createPrivateExecutorCgroup(prefix string) (*dapCgroup, error) {
+	if prefix != "asa-dap-" && prefix != "asa-browser-" {
+		return nil, errors.New("unrecognized Executor cgroup purpose")
+	}
 	if os.Geteuid() != 0 {
-		return nil, errors.New("dap containment requires root executor")
+		return nil, errors.New("private containment requires root Executor")
 	}
 	data, err := os.ReadFile("/proc/self/cgroup")
 	if err != nil {
@@ -45,9 +61,9 @@ func createDAPCgroup() (*dapCgroup, error) {
 	if _, err := os.Stat(filepath.Join(parent, "cgroup.procs")); err != nil {
 		return nil, err
 	}
-	dir, err := os.MkdirTemp(parent, "asa-dap-")
+	dir, err := os.MkdirTemp(parent, prefix)
 	if err != nil {
-		return nil, fmt.Errorf("private DAP cgroup unavailable: %w", err)
+		return nil, fmt.Errorf("private Executor cgroup unavailable: %w", err)
 	}
 	// The root Executor unit intentionally uses Group=aiagent. A new
 	// cgroupfs directory can therefore inherit that group even though
@@ -55,7 +71,7 @@ func createDAPCgroup() (*dapCgroup, error) {
 	// child admission, never treating mode 0700 alone as full provenance.
 	if err := os.Chown(dir, 0, 0); err != nil {
 		_ = os.Remove(dir)
-		return nil, fmt.Errorf("private DAP cgroup root ownership unavailable: %w", err)
+		return nil, fmt.Errorf("private Executor cgroup root ownership unavailable: %w", err)
 	}
 	if err := os.Chmod(dir, 0700); err != nil {
 		_ = os.Remove(dir)
@@ -69,7 +85,7 @@ func createDAPCgroup() (*dapCgroup, error) {
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if !ok || !info.IsDir() || info.Mode().Perm() != 0700 || st.Uid != 0 || st.Gid != 0 {
 		_ = os.Remove(dir)
-		return nil, errors.New("private DAP cgroup root ownership/mode verification failed")
+		return nil, errors.New("private Executor cgroup root ownership/mode verification failed")
 	}
 	if _, err := os.Stat(filepath.Join(dir, "cgroup.kill")); err != nil {
 		_ = os.Remove(dir)
@@ -153,6 +169,11 @@ func (g *dapCgroup) populated() (bool, error) {
 func (g *dapCgroup) killVerifyAndRelease() error {
 	if g == nil || !g.verified {
 		return errors.New("DAP containment provenance not verified")
+	}
+	if g.beforeKillTestHook != nil {
+		if err := g.beforeKillTestHook(); err != nil {
+			return err
+		}
 	}
 	if err := os.WriteFile(filepath.Join(g.path, "cgroup.kill"), []byte("1"), 0600); err != nil {
 		return fmt.Errorf("DAP cgroup kill not proven: %w", err)

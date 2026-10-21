@@ -82,6 +82,7 @@ type stdioSession struct {
 	dapStdout               *dapStdoutQueue          // bounded independent stdio transport; only selected DAP adapter
 	browser                 *browserStdioState       // managed Browser consumer; never a second process broker
 	browserLease            *browserSessionAdmission // release only after verified process cleanup, before broker deletion
+	browserGroup            *dapCgroup               // original Node + detached Chromium; cgroup.kill/empty proof required before lease release
 }
 
 type stdioSessionBroker struct {
@@ -308,6 +309,16 @@ func (s *Server) workerStdioSession(req Request, kind, workspace, binary string,
 	return s.workerProcessSession(req, kind, workspace, binary, nil, args...)
 }
 
+// The original stdio broker owns this Browser, not a second Browser broker.
+// Atomic CLONE_INTO_CGROUP guarantees that Playwright's independently grouped
+// Chromium subprocesses inherit the same private root-controlled boundary.
+func (s *Server) workerContainedBrowserSession(req Request, workspace, binary string, group *dapCgroup, args ...string) (string, error) {
+	if req.Root || req.Approval || group == nil || os.Geteuid() != 0 {
+		return "", errors.New("managed Browser requires a root-owned private process cgroup")
+	}
+	return s.startProcessSessionWithOptions(req, "browser", workspace, binary, nil, "", group, false, args...)
+}
+
 // Python DAP must start inside the exact executor-owned private cgroup
 // atomically, before any trusted adapter startup code can spawn descendants.
 // No other broker consumer or caller may select a cgroup or execution mode.
@@ -387,8 +398,8 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 	if directDAP && (kind != "dap" || terminal != nil || priorID != "" || req.Root || req.Approval) {
 		return "", errors.New("private DAP stdio is available only to fresh worker-owned DAP sessions")
 	}
-	if containment != nil && (kind != "dap" || terminal != nil || priorID != "" || req.Root || req.Approval || os.Geteuid() != 0) {
-		return "", errors.New("DAP cgroup is only valid for worker-only fresh debug sessions")
+	if containment != nil && ((kind != "dap" && kind != "browser") || terminal != nil || priorID != "" || req.Root || req.Approval || os.Geteuid() != 0) {
+		return "", errors.New("private cgroup is only valid for fresh unprivileged DAP or Browser sessions")
 	}
 	if s.sessions == nil || req.PrincipalID == "" || req.PrincipalClass == "" || req.Root != (terminal != nil && terminal.root) || req.Approval != req.Root {
 		return "", errors.New("session requires authenticated worker authority")
@@ -440,6 +451,7 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 		// entry addressable for status/close/expiry reconciliation.
 		entry.browser = &browserStdioState{}
 		entry.browserLease = &s.browserAdmission
+		entry.browserGroup = containment
 	}
 	if err := s.reserveProcessSession(entry); err != nil {
 		return "", err
@@ -604,9 +616,13 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 	if containment != nil {
 		if membershipErr := containment.verifySpawnMembership(cmd.Process.Pid); membershipErr != nil {
 			_ = stdin.Close()
-			_, stopErr := terminateProcessGroup(cmd.Process.Pid)
-			_ = cmd.Wait()
-			failure := errors.Join(membershipErr, stopErr)
+			// CLONE_INTO_CGROUP may have already launched descendants in
+			// different process groups. Stop the entire exact containment
+			// BEFORE waiting for child stdout pipes; a PGID stop alone is
+			// insufficient and could deadlock waiting for inherited fds.
+			stopErr := containment.abortBeforeLaunch()
+			waitErr := cmd.Wait()
+			failure := errors.Join(membershipErr, stopErr, waitErr)
 			s.finishActionAudit(req, "session_create", "worker", kind+"\x00"+cwd+"\x00"+binary, "developer_session", start, Response{Error: failure.Error()})
 			return "", failure
 		}
@@ -617,7 +633,12 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 	pidfd, pinErr := unix.PidfdOpen(cmd.Process.Pid, 0)
 	if pinErr != nil {
 		_ = stdin.Close()
-		_, stopErr := terminateProcessGroup(cmd.Process.Pid)
+		var stopErr error
+		if containment != nil {
+			stopErr = containment.abortBeforeLaunch()
+		} else {
+			_, stopErr = terminateProcessGroup(cmd.Process.Pid)
+		}
 		_ = cmd.Wait()
 		failure := fmt.Errorf("session_pid_identity_unavailable: %w", pinErr)
 		if stopErr != nil {
@@ -685,6 +706,16 @@ func (e *stdioSession) wait() {
 			d.adapterPin = nil
 		}
 		d.mu.Unlock()
+	}
+	// Playwright launches Chromium in a detached process group. Proving
+	// that Node's original group exited is not enough. The same root-owned
+	// kernel cgroup contains both process groups and any descendants.
+	if e.browserGroup != nil {
+		groupErr := e.browserGroup.killVerifyAndRelease()
+		cleanupErr = errors.Join(cleanupErr, groupErr)
+		if groupErr == nil {
+			e.browserGroup = nil
+		}
 	}
 	// Only after the direct child's process group has been reconciled may
 	// os/exec reap the child. The direct-child fallback is no longer valid
@@ -853,6 +884,16 @@ func (b *stdioSessionBroker) removeAndStop(entry *stdioSession) error {
 			return fmt.Errorf("session_stop_outcome_unknown: %w", err)
 		}
 		if exited {
+			// A crashed Node may have left Chromium in a separate PGID.
+			// Do not convert an old cleanupErr to success before the
+			// exact private kernel cgroup is verified empty and removed.
+			if entry.browserGroup != nil {
+				if err := entry.browserGroup.killVerifyAndRelease(); err != nil {
+					entry.stopMu.Unlock()
+					return fmt.Errorf("browser_containment_cleanup_unknown: %w", err)
+				}
+				entry.browserGroup = nil
+			}
 			// Retry the pinned debuggee cleanup as part of reconciliation;
 			// a prior failure is never turned into clean termination merely
 			// because the Delve adapter's group has disappeared.
@@ -945,6 +986,9 @@ func (b *stdioSessionBroker) removeAndStop(entry *stdioSession) error {
 	// reconciliation identity until the verified process is dead AND the
 	// exact lease has been released; an audit-completion failure happens
 	// *later* and must not cause an unrecoverable profile lock.
+	if entry.browserLease != nil && entry.browserGroup != nil {
+		return errors.New("browser_containment_not_verified: Chromium descendants may still be active")
+	}
 	if entry.browserLease != nil && !entry.browserLease.release(entry.id) {
 		return errors.New("browser_profile_lease_reconciliation_failed")
 	}

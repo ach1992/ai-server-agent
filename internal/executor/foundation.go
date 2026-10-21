@@ -17,6 +17,7 @@ import (
 
 	"github.com/ach1992/ai-server-agent/internal/credential"
 	"github.com/ach1992/ai-server-agent/internal/policy"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -351,10 +352,78 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 	out := newBoundedOutputCollector(maxSyncOutputBytes)
 	cmd.Stdout = out
 	cmd.Stderr = out
-	err := cmd.Run()
+	var browserGroup *dapCgroup
+	browserGroupFD := -1
+	// Only the pinned root Executor production path can launch Chromium.
+	// Playwright places Chromium in its own process group, so a Node PGID
+	// terminator cannot safely authorize the next profile admission.
+	if req.AuditAction == "browser_run" && s.browserNodeBinary == "" {
+		var containmentErr error
+		browserGroup, containmentErr = createBrowserCgroup()
+		if containmentErr != nil {
+			return fileError("browser_containment_unavailable", "dependency", containmentErr)
+		}
+		browserGroup.beforeKillTestHook = s.browserContainmentBeforeKillTestHook
+		fd, openErr := unix.Open(browserGroup.path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY, 0)
+		if openErr != nil {
+			cleanupErr := browserGroup.abortBeforeLaunch()
+			if cleanupErr != nil {
+				browserTerminationProven = false
+			}
+			return fileError("browser_containment_unavailable", "state", errors.Join(openErr, cleanupErr))
+		}
+		// cmd.Process is not yet started, so atomic CLONE_INTO_CGROUP
+		// covers Node itself and all future detached Chromium descendants.
+		cmd.SysProcAttr.UseCgroupFD = true
+		cmd.SysProcAttr.CgroupFD = fd
+		browserGroupFD = fd
+	}
+	var err error
+	if browserGroup != nil {
+		err = cmd.Start()
+		// This descriptor is only needed for atomic process startup;
+		// close it before the exact cgroup is verified empty and removed.
+		_ = unix.Close(browserGroupFD)
+		browserGroupFD = -1
+		if err == nil {
+			if verifyErr := browserGroup.verifySpawnMembership(cmd.Process.Pid); verifyErr != nil {
+				// The child may have started. Do not wait indefinitely for
+				// an untrusted launcher before containing its descendants.
+				abortErr := browserGroup.abortBeforeLaunch()
+				if abortErr != nil {
+					browserTerminationProven = false
+				}
+				err = errors.Join(verifyErr, abortErr, cmd.Wait())
+			} else {
+				err = cmd.Wait()
+			}
+		}
+	} else {
+		err = cmd.Run()
+	}
 	lingeringGroup := false
 	var cleanupErr error
-	if cmd.Process != nil {
+	if browserGroup != nil {
+		// A cleanly completed synchronous Browser must have retired its
+		// process children. A surviving detached Chromium is background
+		// work, not a successful main-command completion. Still perform
+		// the exact cgroup kill and empty proof before releasing capacity.
+		if browserGroup.verified {
+			if busy, inspectErr := browserGroup.populated(); inspectErr == nil {
+				lingeringGroup = busy
+			}
+		}
+		if browserGroup.path != "" {
+			if browserGroup.verified {
+				cleanupErr = browserGroup.killVerifyAndRelease()
+			} else {
+				cleanupErr = browserGroup.abortBeforeLaunch()
+			}
+		}
+		if cleanupErr != nil {
+			browserTerminationProven = false
+		}
+	} else if cmd.Process != nil {
 		terminator := terminateProcessGroup
 		if browserReservation != "" && s.browserRunTerminateTestHook != nil {
 			terminator = s.browserRunTerminateTestHook // private test-only fault injection
@@ -406,7 +475,7 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 		}
 	}
 	if cleanupErr != nil {
-		errorText = "command process-group termination could not be proven: " + cleanupErr.Error()
+		errorText = "command or Browser-owned descendant termination could not be proven: " + cleanupErr.Error()
 		reasonCode = "unknown_completion"
 		errorClass = "process"
 		if err == nil {
