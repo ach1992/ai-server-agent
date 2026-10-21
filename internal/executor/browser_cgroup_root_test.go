@@ -133,6 +133,11 @@ func browserFixtureWorkerPID(t *testing.T, marker string) int {
 
 func TestApprovedRootBrowserDetachedChromiumCrashRetainsAdmission(t *testing.T) {
 	s, req, tmp, _ := approvedBrowserCgroupRootFixture(t)
+	// One allowed slot makes an early release observable; another separate
+	// acceptance covers the normal 2-slot concurrent isolated policy.
+	limits := s.cfg.EffectiveRuntime()
+	limits.BrowserConcurrentSlots = 1
+	s.cfg.Runtime = &limits
 	profile := filepath.Join(tmp, "asa-profile-Roo123")
 	marker := filepath.Join(req.Workspace, "detached.pid")
 	req.Content = rootBrowserPersistentScript(profile, marker)
@@ -200,7 +205,7 @@ func TestApprovedRootBrowserDetachedChromiumCrashRetainsAdmission(t *testing.T) 
 	if _, err := os.Stat(profile); err != nil {
 		t.Fatalf("profile deleted while detached process is alive: %v", err)
 	}
-	if allowed, _ := s.browserAcquire("unsafe-concurrent-shared", "shared"); allowed {
+	if allowed, _ := s.browserAcquire("unsafe-concurrent-isolated", "isolated"); allowed {
 		t.Fatal("profile capacity freed before detached Chromium stopped")
 	}
 	closeResult := make(chan Response, 1)
@@ -252,7 +257,8 @@ func TestApprovedRootBrowserOneShotDetachedChildAfterNodeExit(t *testing.T) {
 	s.browserKillTestHook = func() error { close(blocked); <-allow; return nil }
 	marker := filepath.Join(req.Workspace, "oneshot.pid")
 	profile := filepath.Join(tmp, "asa-profile-Sho123")
-	command := fmt.Sprintf("mkdir -m 0700 %q; /usr/bin/python3 -c 'import os,time;os.setsid();time.sleep(90)' </dev/null >/dev/null 2>&1 & echo $! > %q; exit 0", profile, marker)
+	js := fmt.Sprintf("const {spawn}=require('node:child_process');const {writeFileSync}=require('node:fs');const p=spawn('/bin/sleep',['90'],{detached:true,stdio:'ignore'});writeFileSync(%q,String(p.pid));p.unref();", marker)
+	command := fmt.Sprintf("mkdir -m 0700 %q; /opt/ai-server-agent/browser/node/bin/node -e %q", profile, js)
 	one := req
 	one.Action = "run"
 	one.AuditAction = "browser_run"
