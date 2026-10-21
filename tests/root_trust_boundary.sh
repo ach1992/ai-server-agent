@@ -37,6 +37,15 @@ assert_owner_mode "$INSTALL_STATE" root root 600
 assert_owner_mode "$STATE_DIR" root root 711
 assert_owner_mode "$STATE_DIR/runtime" root root 711
 assert_owner_mode "$STATE_DIR/jobs" root root 711
+assert_owner_mode "$STATE_DIR/browser-home" aibrowser aibrowser 700
+assert_owner_mode "$STATE_DIR/runtime/browser" root root 755
+assert_owner_mode "$STATE_DIR/runtime/browser/isolated" aibrowser aibrowser 700
+[ "$(id -u aibrowser)" != "$(id -u aiworker)" ] &&
+[ "$(id -g aibrowser)" != "$(id -g aiworker)" ] &&
+[ "$(id -G aibrowser)" = "$(id -g aibrowser)" ] || {
+  echo "isolated Browser identity/group not distinct from worker" >&2
+  exit 1
+}
 assert_owner_mode "$LIFECYCLE_LOCK_DIR" root root 700
 assert_owner_mode "$LIFECYCLE_LOCK" root root 600
 assert_owner_mode "$AUDIT_FINGERPRINT_KEY" root root 600

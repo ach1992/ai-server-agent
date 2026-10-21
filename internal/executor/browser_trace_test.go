@@ -75,6 +75,15 @@ done
 	if !opened.OK {
 		t.Fatalf("open trace fixture: %+v", opened)
 	}
+	// The fake executable never writes a ZIP, and CI's unprivileged tests
+	// cannot create a second OS UID. Model only the verified private-session
+	// state gate; real confidentiality is exercised by the protected root
+	// Chromium two-principal acceptance.
+	entry, err := s.sessions.get(owner, opened.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry.browserPrivate = true
 	return s, owner, opened.SessionID, raw
 }
 

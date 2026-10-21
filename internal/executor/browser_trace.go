@@ -35,8 +35,8 @@ func (s *Server) browserSessionTrace(ctx context.Context, req Request) Response 
 	if err != nil {
 		return browserSessionError("browser_session_not_found", "authorization", errSessionNotFound)
 	}
-	if entry.browserMode != "isolated" {
-		return browserSessionError("browser_trace_requires_isolated_profile", "security", errors.New("private ZIP traces require an isolated Browser session"))
+	if entry.browserMode != "isolated" || !entry.browserPrivate {
+		return browserSessionError("browser_trace_requires_isolated_profile", "security", errors.New("private ZIP traces require an OS-isolated Browser session"))
 	}
 	if len(req.Content) == 0 || len(req.Content) > 16384 || req.TimeoutMS != 0 {
 		return browserSessionError("invalid_browser_trace", "validation", errors.New("bounded trace parameters required"))
