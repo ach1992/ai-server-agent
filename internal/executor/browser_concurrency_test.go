@@ -124,6 +124,27 @@ func TestBrowserScratchExclusiveFirstAdmissionAndNoSymlinkEscape(t *testing.T) {
 	}
 }
 
+func TestBrowserOneShotBusyMatchesManagedAdmissionContract(t *testing.T) {
+	s, owner, _ := browserAuditFixture(t)
+	s.guard = policy.New(nil)
+	if granted, err := s.browserAcquire("active-shared-browser", "shared"); err != nil || !granted {
+		t.Fatalf("reserve existing shared Browser: %t %v", granted, err)
+	}
+	defer s.browserAdmission.release("active-shared-browser")
+	req := Request{
+		Action: "run", AuditAction: "browser_run", BrowserProfileMode: "shared",
+		PrincipalID: owner.PrincipalID, PrincipalClass: owner.PrincipalClass,
+		Workspace: owner.Workspace, Command: "echo SHOULD_NOT_EXECUTE",
+	}
+	got := s.runContext(context.Background(), req)
+	if got.OK || got.ErrorCode != "resource_limit" || got.ErrorClass != "resource" || !got.Retryable || got.Status != "busy" {
+		t.Fatalf("one-shot admission did not preserve retryable busy contract: %+v", got)
+	}
+	if !s.browserAdmission.matches("active-shared-browser") {
+		t.Fatal("capacity refusal released active Browser reservation")
+	}
+}
+
 func TestBrowserExactScratchDoesNotReclaimConcurrentPeer(t *testing.T) {
 	s, _, _ := browserAuditFixture(t)
 	s.cfg.StateDir = t.TempDir()

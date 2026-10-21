@@ -109,6 +109,16 @@ func TestBrowserPinnedRuntimeAcceptance(t *testing.T) {
 	if err := os.MkdirAll(filepath.Join(state, "runtime"), 0755); err != nil {
 		t.Fatal(err)
 	}
+	// A restrictive root test umask can mask traversal permissions. Give only
+	// the selected worker group access to the root-owned state ancestors.
+	for _, path := range []string{state, filepath.Join(state, "runtime")} {
+		if err := os.Chown(path, 0, gid); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0750); err != nil {
+			t.Fatal(err)
+		}
+	}
 	// The Executor resolves cleanup beneath StateDir/runtime/browser/tmp.
 	// Match the production location so this fixture tests real reclamation.
 	data := filepath.Join(state, "runtime", "browser")
@@ -166,6 +176,18 @@ func TestBrowserPinnedRuntimeAcceptance(t *testing.T) {
 	cfg.ExecutorSocket = filepath.Join(root, "executor.sock")
 	cfg.ExecutorToken = filepath.Join(root, "executor.token")
 	if err := os.WriteFile(cfg.ExecutorToken, []byte(token), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// The production Executor requires a root-owned, versioned audit
+	// fingerprint key before any privileged or worker action may start.
+	auditKey := make([]byte, 32)
+	if _, err := rand.Read(auditKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "audit-fingerprint.key"), []byte("v1:"+hex.EncodeToString(auditKey)+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cfg.LogDir, 0750); err != nil {
 		t.Fatal(err)
 	}
 	configPath := filepath.Join(root, "config.json")

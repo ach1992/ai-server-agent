@@ -322,7 +322,9 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 			return fileError("browser_scratch_reconciliation_failed", "state", err)
 		}
 		if !granted {
-			return fileError("resource_limit", "resource", errors.New("Browser profile, process slots or setup/cleanup capacity busy"))
+			// Share the managed Browser admission contract: a capacity refusal
+			// is a retryable busy outcome, not an execution failure.
+			return browserSessionBusy()
 		}
 		browserReservation = holder
 		defer func() {
