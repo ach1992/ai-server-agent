@@ -166,7 +166,7 @@ func TestBrowserExactScratchDoesNotReclaimConcurrentPeer(t *testing.T) {
 		}
 	}
 	for _, name := range []string{owned, ownedTrace} {
-		if err := s.browserReclaimNamedScratch(name); err != nil {
+		if err := s.browserReclaimNamedScratch(name, false); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := os.Lstat(filepath.Join(tmp, name)); !os.IsNotExist(err) {
@@ -179,7 +179,7 @@ func TestBrowserExactScratchDoesNotReclaimConcurrentPeer(t *testing.T) {
 		}
 	}
 	for _, name := range []string{"../untrusted", "asa-trace-Aa1234", "asa-trace-" + strings.Repeat("g", 32)} {
-		if err := s.browserReclaimNamedScratch(name); err == nil {
+		if err := s.browserReclaimNamedScratch(name, false); err == nil {
 			t.Fatalf("untrusted scratch identity %s accepted", name)
 		}
 	}

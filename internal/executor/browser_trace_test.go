@@ -17,6 +17,7 @@ import (
 func openTraceFixture(t *testing.T, mode string) (*Server, Request, string, []byte) {
 	t.Helper()
 	s, owner, _ := browserAuditFixture(t)
+	owner.BrowserProfileMode = "isolated"
 	raw := append([]byte{'P', 'K', 3, 4}, bytes.Repeat([]byte("bounded-playwright-zip-window"), 40)...)
 	if mode == "large" {
 		raw = append([]byte{'P', 'K', 3, 4}, bytes.Repeat([]byte("sufficiently-large-private-trace-evidence"), 17000)...)
@@ -157,8 +158,8 @@ func TestBrowserTraceMismatchedChunkDigestPoisonsSession(t *testing.T) {
 	if again := s.browserSessionAction(ctx, read); again.OK || again.ErrorCode != "browser_session_uncertain" {
 		t.Fatalf("unknown completion replayable: %+v", again)
 	}
-	if s.browserAdmission.acquireRun() {
-		t.Fatal("poisoned Browser released profile admission")
+	if !s.browserAdmission.matches(id) {
+		t.Fatal("poisoned isolated Browser released its exact admission")
 	}
 }
 
@@ -248,5 +249,29 @@ func TestBrowserTraceOverPreviousCapUsesBoundedWindows(t *testing.T) {
 	}
 	if again := s.browserSessionAction(ctx, read); !again.OK {
 		t.Fatalf("bounded offset validation poisoned healthy session: %+v", again)
+	}
+}
+
+// A shared/default Browser remains fully usable for ordinary flow/capture,
+// but cannot record any disk-backed ZIP under the aiworker security identity.
+func TestBrowserTraceSharedSessionRefusedBeforeNodeExecution(t *testing.T) {
+	s, owner, _ := browserAuditFixture(t)
+	owner.BrowserProfileMode = "shared"
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	opened := s.browserSessionAction(ctx, owner)
+	if !opened.OK {
+		t.Fatalf("shared Browser fixture open: %+v", opened)
+	}
+	defer func() {
+		_ = s.browserSessionAction(ctx, browserOwnerControl(owner, opened.SessionID, "browser_session_close"))
+	}()
+	record := traceReq(owner, opened.SessionID, "{\"operation\":\"record\",\"steps\":[{\"action\":\"snapshot\"}]}")
+	if denied := s.browserSessionAction(ctx, record); denied.OK ||
+		denied.ErrorCode != "browser_trace_requires_isolated_profile" || denied.Output != "" {
+		t.Fatalf("same-UID shared Browser trace must fail before any writes: %+v", denied)
+	}
+	if still := s.browserSessionAction(ctx, browserOwnerControl(owner, opened.SessionID, "browser_session_status")); !still.OK {
+		t.Fatalf("trace refusal poisoned a healthy shared Browser: %+v", still)
 	}
 }

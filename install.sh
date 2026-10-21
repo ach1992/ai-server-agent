@@ -29,6 +29,9 @@ LEGACY_MCP_TOKEN_FILE="$CONFIG_DIR/mcp.token"
 AUDIT_FINGERPRINT_KEY="$CONFIG_DIR/audit-fingerprint.key"
 AGENT_USER="aiagent"
 WORKER_USER="aiworker"
+# Separate unprivileged UID for isolated Browser sessions and private Trace ZIPs.
+BROWSER_USER="aibrowser"
+BROWSER_HOME="$STATE_DIR/browser-home"
 # Developer Runtime HOME is Agent-managed state, never the project checkout.
 WORKER_HOME="$STATE_DIR/worker-home"
 PORT="${AI_SERVER_AGENT_PORT:-3210}"
@@ -497,8 +500,10 @@ fi
 
 if ! getent group "$AGENT_USER" >/dev/null 2>&1; then groupadd --system "$AGENT_USER"; fi
 if ! getent group "$WORKER_USER" >/dev/null 2>&1; then groupadd --system "$WORKER_USER"; fi
+if ! getent group "$BROWSER_USER" >/dev/null 2>&1; then groupadd --system "$BROWSER_USER"; fi
 if ! id "$AGENT_USER" >/dev/null 2>&1; then useradd --system --gid "$AGENT_USER" --home "$STATE_DIR" --shell /usr/sbin/nologin "$AGENT_USER"; fi
 if ! id "$WORKER_USER" >/dev/null 2>&1; then useradd --system --gid "$WORKER_USER" --home-dir "$WORKER_HOME" --shell /bin/bash "$WORKER_USER"; fi
+if ! id "$BROWSER_USER" >/dev/null 2>&1; then useradd --system --gid "$BROWSER_USER" --home-dir "$BROWSER_HOME" --shell /usr/sbin/nologin "$BROWSER_USER"; fi
 
 install -d -m 0750 -o root -g "$AGENT_USER" "$CONFIG_DIR"
 install -d -m 0700 -o root -g root "$CONTROL_DIR"
@@ -509,6 +514,22 @@ install -d -m 0750 -o "$WORKER_USER" -g "$WORKER_USER" "$WORKSPACE_DIR"
 [ ! -L "$WORKER_HOME" ] || die "Refusing symlinked worker HOME."
 [ ! -e "$WORKER_HOME" ] || [ -d "$WORKER_HOME" ] || die "Worker HOME must be a directory."
 install -d -m 0700 -o "$WORKER_USER" -g "$WORKER_USER" "$WORKER_HOME"
+[ ! -L "$BROWSER_HOME" ] || die "Refusing symlinked isolated Browser HOME."
+[ ! -e "$BROWSER_HOME" ] || [ -d "$BROWSER_HOME" ] || die "Isolated Browser HOME must be a directory."
+[ "$(id -u "$BROWSER_USER")" != "$(id -u "$WORKER_USER")" ] || die "Browser identity must differ from worker."
+[ "$(id -g "$BROWSER_USER")" != "$(id -g "$WORKER_USER")" ] || die "Browser group must differ from worker."
+browser_passwd="$(getent passwd "$BROWSER_USER")" || die "Browser account lookup failed."
+IFS=: read -r _ _ _ _ _ browser_login_home browser_shell <<< "$browser_passwd"
+[ "$browser_login_home" = "$BROWSER_HOME" ] && [ "$browser_shell" = /usr/sbin/nologin ] ||
+  die "Existing Browser account HOME/shell differs from the dedicated service identity."
+browser_identity="$(id -u "$BROWSER_USER"):$(id -g "$BROWSER_USER")"
+[ "$(id -G "$BROWSER_USER")" = "$(id -g "$BROWSER_USER")" ] ||
+  die "Dedicated Browser account has unexpected supplementary groups."
+if [ -d "$BROWSER_HOME" ]; then
+  [ "$(stat -c '%u:%g:%a' "$BROWSER_HOME")" = "$browser_identity:700" ] ||
+    die "Existing Browser HOME identity/mode is unsafe."
+fi
+install -d -m 0700 -o "$BROWSER_USER" -g "$BROWSER_USER" "$BROWSER_HOME"
 # Existing installs may still record WorkspaceDir as the account's login
 # home. Change only that known legacy value; never move/delete project data.
 # An active job can make shadow-utils usermod return E_USER_BUSY (8). The
@@ -601,6 +622,17 @@ if [ -d "$STATE_DIR/runtime/browser" ]; then
   # preserves its existing children and Browser profile data.
   install -d -m 0755 -o root -g root "$STATE_DIR/runtime/browser"
 fi
+# A root-controlled Browser parent prevents the isolated UID from replacing
+# its 0700 scratch root. Never reuse the worker's tmp or persistent profile.
+install -d -m 0755 -o root -g root "$STATE_DIR/runtime/browser"
+browser_private="$STATE_DIR/runtime/browser/isolated"
+[ ! -L "$browser_private" ] || die "Isolated Browser state must not be a symlink."
+[ ! -e "$browser_private" ] || [ -d "$browser_private" ] || die "Isolated Browser state must be a real directory."
+if [ -d "$browser_private" ]; then
+  [ "$(stat -c '%u:%g:%a' "$browser_private")" = "$browser_identity:700" ] ||
+    die "Existing isolated Browser state identity/mode is unsafe."
+fi
+install -d -m 0700 -o "$BROWSER_USER" -g "$BROWSER_USER" "$browser_private"
 # Existing job outputs from the older worker-owned container are never trusted
 # as symlinks after migration.
 find "$STATE_DIR/jobs" -mindepth 1 -maxdepth 1 -type l -delete

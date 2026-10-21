@@ -103,6 +103,21 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 	if err := os.Mkdir(downloads, 0700); err != nil {
 		t.Fatal(err)
 	}
+	// Isolated Chromium's ephemeral profile remains live until session
+	// shutdown. Only trace scratch is expected to be absent between records.
+	nonProfileEntries := func() ([]os.DirEntry, error) {
+		entries, err := os.ReadDir(downloads)
+		if err != nil {
+			return nil, err
+		}
+		retained := make([]os.DirEntry, 0, len(entries))
+		for _, entry := range entries {
+			if !strings.HasPrefix(entry.Name(), "asa-profile-") {
+				retained = append(retained, entry)
+			}
+		}
+		return retained, nil
+	}
 	// Simulate an orphan from a prior interrupted trace recording. Startup
 	// under exclusive profile admission reclaims it without touching worktrees.
 	orphan := filepath.Join(downloads, "asa-trace-Ab3d9Z")
@@ -112,7 +127,7 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 	if err := os.WriteFile(filepath.Join(orphan, "trace.zip"), []byte("sensitive-disposable-fixture"), 0600); err != nil {
 		t.Fatal(err)
 	}
-	src, err := managedSessionRunner(engine, filepath.Join(dir, "profile"), downloads, false)
+	src, err := managedSessionRunner(engine, filepath.Join(dir, "profile"), downloads, false, "isolated")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -157,7 +172,7 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 			t.Error("graceful Browser fixture close timed out; emergency kill applied")
 			return
 		}
-		if leftovers, er := os.ReadDir(downloads); er != nil || len(leftovers) != 0 {
+		if leftovers, er := nonProfileEntries(); er != nil || len(leftovers) != 0 {
 			t.Errorf("graceful Browser close retained private trace scratch: %v %v", leftovers, er)
 		}
 	}()
@@ -244,7 +259,7 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 	if meta["event"] != "capture_meta" || len(payload) == 0 || len(payload) > 32<<10 {
 		t.Fatalf("missing bounded capture: %v", meta)
 	}
-	entries, err := os.ReadDir(downloads)
+	entries, err := nonProfileEntries()
 	if err != nil || len(entries) != 0 {
 		t.Fatalf("capture left disk artifacts: %v %v", entries, err)
 	}
@@ -304,7 +319,7 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 	if missing := read(); missing["event"] != "error" || missing["reason"] != "trace_unavailable" {
 		t.Fatalf("discarded trace bytes still retrievable: %v", missing)
 	}
-	if leftovers, er := os.ReadDir(downloads); er != nil || len(leftovers) != 0 {
+	if leftovers, er := nonProfileEntries(); er != nil || len(leftovers) != 0 {
 		t.Fatalf("trace temporary files retained after verified completion: %v %v", leftovers, er)
 	}
 	// A real >512 KiB trace must not be refused merely because the old
@@ -327,7 +342,7 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 	if traceFetches >= 15 && largeSize < 14<<20 {
 		t.Fatalf("near-cap Chromium trace archive unexpectedly small: %d", largeSize)
 	}
-	entries, err = os.ReadDir(downloads)
+	entries, err = nonProfileEntries()
 	if err != nil || len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), "asa-trace-") {
 		t.Fatalf("trace must retain exactly one private directory: %v %v", entries, err)
 	}
@@ -397,7 +412,7 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 	if changed := read(); changed["event"] != "error" || changed["reason"] != "trace_stale" {
 		t.Fatalf("in-place ZIP mutation served stale bytes: %v", changed)
 	}
-	if leftover, er := os.ReadDir(downloads); er != nil || len(leftover) != 0 {
+	if leftover, er := nonProfileEntries(); er != nil || len(leftover) != 0 {
 		t.Fatalf("stale trace not reclaimed: %v %v", leftover, er)
 	}
 	// Session remains healthy after a proven metadata-integrity refusal.
@@ -474,7 +489,7 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 	if finalTrace := read(); finalTrace["event"] != "trace_meta" {
 		t.Fatalf("cannot exercise close-time trace cleanup: %v", finalTrace)
 	}
-	firstRetained, er := os.ReadDir(downloads)
+	firstRetained, er := nonProfileEntries()
 	if er != nil || len(firstRetained) != 1 {
 		t.Fatalf("expected exactly one retained trace before replacement: %v %v", firstRetained, er)
 	}
@@ -485,7 +500,7 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 	if newer := read(); newer["event"] != "trace_meta" {
 		t.Fatalf("trace replacement failed: %v", newer)
 	}
-	secondRetained, er := os.ReadDir(downloads)
+	secondRetained, er := nonProfileEntries()
 	if er != nil || len(secondRetained) != 1 || secondRetained[0].Name() == firstRetained[0].Name() {
 		t.Fatalf("replacement leaked old trace directory: before=%v after=%v err=%v", firstRetained, secondRetained, er)
 	}
@@ -507,7 +522,7 @@ func TestManagedBrowserNormalCloseDefersExecutorTraceCleanup(t *testing.T) {
 	if err := os.Mkdir(tmp, 0700); err != nil {
 		t.Fatal(err)
 	}
-	script, err := managedSessionRunner(engine, filepath.Join(root, "profile"), tmp, false)
+	script, err := managedSessionRunner(engine, filepath.Join(root, "profile"), tmp, false, "isolated")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -522,7 +537,8 @@ func TestManagedBrowserNormalCloseDefersExecutorTraceCleanup(t *testing.T) {
 	cmd.Env = append(os.Environ(),
 		"PLAYWRIGHT_BROWSERS_PATH="+filepath.Join(engine, "browsers"),
 		"ASA_BROWSER_RECLAIM_BY_EXECUTOR=1",
-		"ASA_BROWSER_SESSION_TRACE="+traceName)
+		"ASA_BROWSER_SESSION_TRACE="+traceName,
+		"ASA_BROWSER_SESSION_PROFILE=asa-profile-"+strings.Repeat("b", 32))
 	stdin, err := cmd.StdinPipe()
 	if err != nil {
 		t.Fatal(err)
@@ -587,4 +603,40 @@ func TestManagedBrowserNormalCloseDefersExecutorTraceCleanup(t *testing.T) {
 	}
 	// This fixture owns the root and has waited for its worker. Real
 	// production reclamation is exclusively the original root Executor's job.
+}
+
+// Export the authentic generated managed runner for the separately approved,
+// disposable production-Executor root test. The ONLY instrumentation is a
+// detached non-Chromium test child; the production normal-close finally block
+// and trace code remain generated by managedSessionRunner.
+func TestExportApprovedRootManagedBrowserTraceRunner(t *testing.T) {
+	host, _ := os.Hostname()
+	root := os.Getenv("ASA_BROWSER_ROOT_PRODUCTION_TEST_ROOT")
+	if host != "hDE01" || os.Geteuid() != 0 ||
+		os.Getenv("ASA_197_BROWSER_CGROUP_APPROVED_HOST") != "hDE01" ||
+		!strings.HasPrefix(root, "/var/tmp/asa-browser-owned-root-") ||
+		filepath.Clean(root) != root {
+		t.Skip("requires approved exact disposable root fixture")
+	}
+	engine := "/opt/ai-server-agent/browser"
+	script, err := managedSessionRunner(engine,
+		filepath.Join(root, "state", "runtime", "browser", "profile"),
+		filepath.Join(root, "state", "runtime", "browser", "isolated"), false, "isolated")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// Source-only test instrumentation creates a detached child to keep
+	// the kernel cgroup populated after normal Node shutdown.
+	anchor := "const state = { refs: new Map(), sequence: 0 };"
+	addon := fmt.Sprintf("\nconst {spawn: __fixtureSpawn} = await import('node:child_process');\nconst {writeFileSync: __fixtureWrite} = await import('node:fs');\nconst __fixtureChild = __fixtureSpawn('/bin/sleep', ['90'], {detached:true,stdio:'ignore'});\n__fixtureWrite(%q, String(__fixtureChild.pid));\n__fixtureChild.unref();\n",
+		filepath.Join(root, "state", "runtime", "browser", "isolated", "detached.pid"))
+	if strings.Count(script, anchor) != 1 {
+		t.Fatal("generated managed runner anchor drifted")
+	}
+	script = strings.Replace(script, anchor, anchor+addon, 1)
+	path := filepath.Join(root, "sources", "workspace", "production-managed.mjs")
+	if err := os.WriteFile(path, []byte(script), 0600); err != nil {
+		t.Fatal(err)
+	}
+	t.Log("APPROVED_BROWSER_PRODUCTION_MANAGED_SOURCE_EXPORTED")
 }

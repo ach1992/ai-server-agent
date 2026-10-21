@@ -101,7 +101,8 @@ Main paths:
 System users:
 
 - `aiagent`: unprivileged MCP/API service account;
-- `aiworker`: ordinary command/workspace account.
+- `aiworker`: ordinary command/workspace account;
+- `aibrowser`: dedicated nologin UID/GID for isolated managed Chromium and private ZIP traces (never a worker group member).
 
 Services:
 
@@ -383,12 +384,12 @@ Safe uninstall removes services, the binary and management command while preserv
 sudo ai-server-agent-manage purge
 ```
 
-Purge removes Agent-owned server config/state/log/runtime and the `aiagent` identity.
+Purge removes Agent-owned server config/state/log/runtime and the `aiagent` and `aibrowser` identities.
 
 Purge intentionally preserves:
 
 - `/srv/ai-workspace`
-- the `aiworker` user and group
+- the `aiworker` user and group (the Agent-owned `aibrowser` identity is removed on purge)
 
 Purge does **not** silently delete Cloudflare resources. If recorded Cloudflare resources should be removed, run `cloudflare-cleanup` through the supported management path first.
 
@@ -399,7 +400,7 @@ Key boundaries:
 - public MCP access requires bearer authentication;
 - MCP bearer credentials are named direct-client principals (`direct/default` and optional `direct/secondary`) with independently revocable/rotatable verifier records; bearer plaintext is not retained after issuance/migration;
 - direct public mode requires native TLS;
-- ordinary commands run as `aiworker`;
+- ordinary commands run as `aiworker`; isolated managed Browser runs with `aibrowser` and private 0700 HOME/scratch, while default shared Browser and `browser_run` preserve worker ownership;
 - root commands are intentional capabilities evaluated by executor policy/approval guardrails;
 - connected MCP clients/models are instructed to inspect the current `agent_environment` manifest before host-wide changes;
 - protected Agent resources and known connection-risk/destructive root command patterns require explicit approval before execution;

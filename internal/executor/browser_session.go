@@ -191,11 +191,21 @@ func browserScratchName(name string) bool {
 }
 
 func (s *Server) browserReclaimScratch() error {
-	return s.browserReclaimScratchMatching("")
+	if err := s.browserReclaimScratchMatching(""); err != nil {
+		return err
+	}
+	// The original worker scratch and dedicated Browser scratch are
+	// independent ownership domains. Both are swept only when there are
+	// no admitted Browsers, never across active sessions.
+	if s.browserUID != 0 && s.browserUID != s.workerUID {
+		return s.browserReclaimScratchAt(s.isolatedBrowserScratchDir(), s.browserUID, s.browserGID, "", true)
+	}
+	return nil
 }
 
-// Exact per-session/run reclamation follows verified whole-cgroup termination.
-func (s *Server) browserReclaimNamedScratch(name string) error {
+// Exact session/run scratch reclamation follows verified whole-cgroup stop.
+// The private flag comes from the immutable session record, never the caller.
+func (s *Server) browserReclaimNamedScratch(name string, private bool) error {
 	if !browserScratchName(name) || !(strings.HasPrefix(name, "asa-profile-") && len(name) == len("asa-profile-")+32 ||
 		strings.HasPrefix(name, "asa-trace-") && len(name) == len("asa-trace-")+32 ||
 		strings.HasPrefix(name, "run.") && len(name) == len("run.")+32) {
@@ -204,16 +214,22 @@ func (s *Server) browserReclaimNamedScratch(name string) error {
 	if s.cfg.StateDir == "" {
 		return errors.New("Executor Browser scratch root unavailable")
 	}
+	if private {
+		return s.browserReclaimScratchAt(s.isolatedBrowserScratchDir(), s.browserUID, s.browserGID, name, true)
+	}
 	return s.browserReclaimScratchMatching(name)
 }
 
 func (s *Server) browserReclaimScratchMatching(exact string) error {
 	if s.cfg.StateDir == "" {
-		return nil
-	} // zero-value standalone lease tests
-	dir := filepath.Join(s.cfg.StateDir, "runtime", "browser", "tmp")
+		return nil // zero-value standalone admission tests
+	}
+	return s.browserReclaimScratchAt(filepath.Join(s.cfg.StateDir, "runtime", "browser", "tmp"), s.workerUID, s.workerGID, exact, false)
+}
+
+func (s *Server) browserReclaimScratchAt(dir string, expectedUID, expectedGID uint32, exact string, private bool) error {
 	info, err := os.Lstat(dir)
-	if errors.Is(err, os.ErrNotExist) {
+	if errors.Is(err, os.ErrNotExist) && !private {
 		return nil
 	}
 	if err != nil {
@@ -221,6 +237,18 @@ func (s *Server) browserReclaimScratchMatching(exact string) error {
 	}
 	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
 		return errors.New("Browser scratch is not a real directory")
+	}
+	if private {
+		// Root-controlled parent prevents a Browser or worker from swapping
+		// the isolation root itself (including with a symlink).
+		if err := trustedDir(filepath.Dir(dir)); err != nil {
+			return fmt.Errorf("isolated Browser parent untrusted: %w", err)
+		}
+		stat, ok := info.Sys().(*syscall.Stat_t)
+		if expectedUID == 0 || expectedUID == s.workerUID || !ok ||
+			info.Mode().Perm() != 0700 || stat.Uid != expectedUID || stat.Gid != expectedGID {
+			return errors.New("isolated Browser scratch root ownership changed")
+		}
 	}
 	root, err := os.OpenRoot(dir)
 	if err != nil {
@@ -261,7 +289,7 @@ func (s *Server) browserReclaimScratchMatching(exact string) error {
 			return fmt.Errorf("verify Browser scratch candidate: %w", err)
 		}
 		stat, ok := child.Sys().(*syscall.Stat_t)
-		if !child.IsDir() || child.Mode()&os.ModeSymlink != 0 || !ok || stat.Uid != s.workerUID {
+		if !child.IsDir() || child.Mode()&os.ModeSymlink != 0 || !ok || stat.Uid != expectedUID {
 			if exact != "" {
 				return errors.New("exact Browser scratch ownership is unverified")
 			}
@@ -357,6 +385,14 @@ func (s *Server) browserSessionOpen(ctx context.Context, req Request) Response {
 	mode, valid := browserProfileMode(req.BrowserProfileMode)
 	if !valid {
 		return browserSessionError("invalid_browser_profile_mode", "validation", errors.New("profile mode must be shared or isolated"))
+	}
+	// CI's private fake-executable fixtures do not provision host accounts.
+	// Installed Executor instances always have the configured Agent identity,
+	// and MUST prove the dedicated Browser account/state before admission.
+	if mode == "isolated" && s.cfg.AgentUser != "" {
+		if _, err := s.isolatedBrowserHome(); err != nil {
+			return browserSessionError("browser_isolation_unavailable", "security", err)
+		}
 	}
 	reservation, nonceErr := browserReservationID()
 	if nonceErr != nil {

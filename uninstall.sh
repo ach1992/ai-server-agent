@@ -49,7 +49,7 @@ acquire_lifecycle_lock(){
 if [ "${AI_SERVER_AGENT_YES:-0}" != "1" ]; then
   [ -t 0 ] && [ -r /dev/tty ] || { cli_error 'Uninstall/purge confirmation requires a terminal. For an explicitly authorized scripted operation, use AI_SERVER_AGENT_YES=1.'; exit 1; }
   if [ "$PURGE" -eq 1 ]; then
-    prompt='PURGE Agent-owned config, state, logs and runtime, plus aiagent identity? Workspace and aiworker are preserved. [y/N] '
+    prompt='PURGE Agent-owned config, state, runtime, and aiagent/aibrowser identities? Workspace and aiworker are preserved. [y/N] '
   else
     prompt='Remove Agent services/binaries only, preserving config, state, users and workspace? [y/N] '
   fi
@@ -78,13 +78,28 @@ systemctl daemon-reload
 
 if [ "$PURGE" -eq 1 ]; then
   rm -rf /etc/ai-server-agent /var/lib/ai-server-agent /var/log/ai-server-agent /opt/ai-server-agent
+  # aibrowser is an Agent-provisioned nologin identity, never the preserved
+  # aiworker project account. Refuse to remove a mismatched external user.
+  browser_identity="$(getent passwd aibrowser || true)"
+  if [ -n "$browser_identity" ]; then
+    IFS=: read -r _ _ _ _ _ browser_home browser_shell <<< "$browser_identity"
+    [ "$browser_home" = /var/lib/ai-server-agent/browser-home ] &&
+      [ "$browser_shell" = /usr/sbin/nologin ] || {
+        cli_error 'Unexpected aibrowser account identity; refusing account removal.'
+        exit 1
+      }
+    userdel aibrowser || { cli_error 'Could not remove Agent-owned aibrowser account.'; exit 1; }
+  fi
+  if getent group aibrowser >/dev/null 2>&1; then
+    groupdel aibrowser || { cli_error 'Could not remove Agent-owned aibrowser group.'; exit 1; }
+  fi
   userdel aiagent 2>/dev/null || true
   groupdel aiagent 2>/dev/null || true
   [ -f "$LIFECYCLE_LOCK" ] && [ ! -L "$LIFECYCLE_LOCK" ] && [ "$(stat -c '%u:%g:%a' "$LIFECYCLE_LOCK" 2>/dev/null)" = "0:0:600" ] || {
     cli_error "Lifecycle lock namespace was lost during purge; refusing to report a clean purge."
     exit 1
   }
-  cli_success "Purged Agent-owned config, state, logs, optional runtimes, management helpers, and the aiagent service account/group. Workspace /srv/ai-workspace and its aiworker account/group were intentionally preserved."
+  cli_success "Purged Agent-owned config, state, logs, optional runtimes, management helpers, and the aiagent/aibrowser service accounts/groups. Workspace /srv/ai-workspace and its aiworker account/group were intentionally preserved."
 else
   cli_success "Agent services, binary, management command, and installed helper scripts removed. Config, state, logs, optional runtimes, users, groups, and workspace were preserved. Reinstall to restore management, or use --purge to remove Agent-owned state/runtime; aiworker/workspace remain protected."
 fi

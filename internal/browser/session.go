@@ -49,7 +49,13 @@ func (m *Manager) SessionOpen(ctx context.Context, opts SessionOptions) (executo
 		m.mu.RUnlock()
 		return browserError("browser_runtime_not_ready", "state", "pinned Browser runtime is not ready: "+status.Reason), nil
 	}
-	script, err := managedSessionRunner(m.engineDir(), filepath.Join(m.dataDir(), "profile"), filepath.Join(m.dataDir(), "tmp"), opts.IgnoreHTTPSErrors, mode)
+	scratch := filepath.Join(m.dataDir(), "tmp")
+	if mode == "isolated" {
+		// Browser trace bytes are never created under the aiworker-owned
+		// temporary root, even before the retained ZIP is pinned.
+		scratch = filepath.Join(m.dataDir(), "isolated")
+	}
+	script, err := managedSessionRunner(m.engineDir(), filepath.Join(m.dataDir(), "profile"), scratch, opts.IgnoreHTTPSErrors, mode)
 	m.mu.RUnlock()
 	if err != nil {
 		return browserError("invalid_browser_session", "validation", err.Error()), nil

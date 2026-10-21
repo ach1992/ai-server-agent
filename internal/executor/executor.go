@@ -32,6 +32,8 @@ type Server struct {
 	auditBeforeCompletionHook         func()             // test-only completion-path failure/interleaving injection
 	workerUID                         uint32
 	workerGID                         uint32
+	browserUID                        uint32 // dedicated isolated Browser account; never the worker/Agent identity
+	browserGID                        uint32
 	runs                              *runLimiter
 	sessions                          *stdioSessionBroker
 	phpIndexMu                        sync.Mutex              // single fresh index/build/lookup at a time; bounded, no second broker
@@ -96,6 +98,17 @@ func NewServer(cfg config.Config, token string) (*Server, error) {
 	}
 	uid64, _ := strconv.ParseUint(u.Uid, 10, 32)
 	gid64, _ := strconv.ParseUint(u.Gid, 10, 32)
+	// Existing CI/source-only and older installations must still start and
+	// retain shared Browser/worker operations. The isolated launch fails
+	// closed if the dedicated user has not yet been provisioned by install.
+	var browserUID, browserGID uint64
+	if browserUser, lookupErr := user.Lookup("aibrowser"); lookupErr == nil {
+		browserUID, _ = strconv.ParseUint(browserUser.Uid, 10, 32)
+		browserGID, _ = strconv.ParseUint(browserUser.Gid, 10, 32)
+		if browserUID == 0 || browserUID == uid64 || browserGID == 0 || browserGID == gid64 {
+			browserUID, browserGID = 0, 0
+		}
+	}
 	protected := []string{"ai-server-agent", "/usr/local/bin/ai-server-agent", "/etc/ai-server-agent", cfg.StateDir, cfg.LogDir, cfg.ExecutorSocket, cfg.ListenAddress}
 	// Audit reserves against configured and observed surviving task/service logs
 	// across a managed restart. Unknown inventory fails to a hard-bound reserve.
@@ -106,6 +119,8 @@ func NewServer(cfg config.Config, token string) (*Server, error) {
 		audit:             audit.NewWithKeyAndReserve(filepath.Join(cfg.LogDir, "audit.jsonl"), filepath.Join(filepath.Dir(cfg.ExecutorToken), "audit-fingerprint.key"), jobAuditSafetyReserveAtStartup(cfg)),
 		workerUID:         uint32(uid64),
 		workerGID:         uint32(gid64),
+		browserUID:        uint32(browserUID),
+		browserGID:        uint32(browserGID),
 		runs:              newRunLimiterForSlots(cfg.EffectiveRuntime().WorkerCommandSlots),
 		sessions:          newStdioSessionBrokerForSlots(cfg.EffectiveRuntime().StdioSessionSlots),
 		lifecycleLockPath: lifecycleManagementLockPath,

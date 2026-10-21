@@ -227,6 +227,10 @@ try {
     // cross-call recording. Reading is a separate, integrity/version-pinned
     // operation that never replays actions. Previous trace data is erased
     // BEFORE executing a replacement flow.
+    if (input?.type === 'trace_record' && profileMode !== 'isolated') {
+      reply({event:'error',nonce:input.nonce,reason:'browser_trace_requires_isolated_profile'});
+      continue;
+    }
     if (input?.type === 'trace_record' && typeof input.nonce === 'string' && /^[0-9a-f]{32}$/.test(input.nonce) &&
         Array.isArray(input.steps) && input.steps.length >= 1 && input.steps.length <= 12) {
       try { discardTrace(); }
