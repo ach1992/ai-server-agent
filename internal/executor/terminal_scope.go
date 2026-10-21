@@ -127,6 +127,7 @@ func (s *Server) startScopedTerminalBackend(req Request, binary string, t *tmuxT
 		return err
 	}
 	t.scoped = true
+	t.recordVersion = 2
 	return nil
 }
 

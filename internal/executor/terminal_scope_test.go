@@ -80,3 +80,19 @@ func TestTerminalReadLeaseFailureNeverUnlocksUnheldMutex(t *testing.T) {
 		t.Fatalf("renewal error not fail-closed: %+v", got)
 	}
 }
+
+func TestLegacyScopedTerminalNeverRequiresNewPID1IdleTimer(t *testing.T) {
+	s, owner, workspace := testStdioBroker(t)
+	owner.SessionID = "stdio_0123456789abcdef0123456789abcdef"
+	entry := &stdioSession{
+		id: owner.SessionID, kind: "terminal", ownerID: owner.PrincipalID, ownerClass: owner.PrincipalClass,
+		workspace: workspace, terminal: &tmuxTerminalState{scoped: true, recordVersion: 1},
+	}
+	if err := s.sessions.reserve(entry); err != nil {
+		t.Fatal(err)
+	}
+	defer s.sessions.remove(entry)
+	if err := s.renewTerminalLease(owner, entry); err != nil {
+		t.Fatalf("v1 scope incorrectly required a new PID1 timer or record migration: %v", err)
+	}
+}

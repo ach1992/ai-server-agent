@@ -537,10 +537,14 @@ func (s *Server) renewTerminalLeaseLocked(req Request, e *stdioSession) error {
 		e.mu.Unlock()
 		return errSessionStopped
 	}
-	if !t.scoped {
+	if !t.scoped || t.recordVersion == 1 {
 		e.mu.Unlock()
-		return nil
-	} // existing in-process fixture
+		return nil // fixture or authenticated legacy v1: hard TTL, no timer
+	}
+	if t.recordVersion != 2 {
+		e.mu.Unlock()
+		return errors.New("terminal lease scope version unknown")
+	}
 	name, socketDir := t.name, t.socketDir
 	cached := e.terminalLeaseExpiresAt
 	e.mu.Unlock()
@@ -553,14 +557,8 @@ func (s *Server) renewTerminalLeaseLocked(req Request, e *stdioSession) error {
 	if err != nil {
 		return err
 	}
-	if rec.ID != e.id || rec.Name != name || rec.SocketDir != socketDir || rec.Lifecycle != "active" {
-		return errors.New("terminal lease identity changed")
-	}
-	if rec.Version == 1 {
-		return nil
-	} // older released scopes remain hard-capped
-	if rec.Version != 2 {
-		return errors.New("terminal lease version unsupported")
+	if rec.ID != e.id || rec.Name != name || rec.SocketDir != socketDir || rec.Lifecycle != "active" || rec.Version != 2 {
+		return errors.New("terminal lease identity or version changed")
 	}
 	if rec.ExpiresAt.After(time.Now().Add(maxStdioSessionAge - terminalLeaseRenewInterval)) {
 		if err := verifyTerminalLeaseTimer(name); err != nil {
@@ -681,7 +679,7 @@ func (s *Server) terminalReconnect(req Request) Response {
 	}
 	t := &tmuxTerminalState{root: rec.Root, socketDir: rec.SocketDir, socket: filepath.Join(rec.SocketDir, "socket"),
 		name: rec.Name, pane: rec.Pane, columns: rec.Columns, rows: rec.Rows, epoch: epoch, recovered: true,
-		scoped: s.terminalBinary == ""}
+		scoped: s.terminalBinary == "", recordVersion: rec.Version}
 	binary, err := s.resolveTmuxBinary()
 	if err != nil {
 		return terminalError("tmux_untrusted", err)

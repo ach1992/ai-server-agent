@@ -44,6 +44,7 @@ type tmuxTerminalState struct {
 	epoch          string
 	recovered      bool
 	scoped         bool // production backend lives in its own bounded systemd scope
+	recordVersion  int  // 1: legacy hard TTL; 2: separate renewable PID1 timer
 	scopeUncertain bool // PID1 may own a backend but exact-stop verification failed
 	inReply        bool
 	replyLines     []string
