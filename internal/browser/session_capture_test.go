@@ -18,6 +18,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync/atomic"
 	"testing"
@@ -33,7 +34,14 @@ func TestManagedBrowserSessionCapturePinnedRuntime(t *testing.T) {
 		t.Skip("pinned Chromium runtime required")
 	}
 	var transitionEffects atomic.Int64
-	traceNoise := make([]byte, 1024*1024)
+	traceFetches := 1
+	if os.Getenv("ASA_BROWSER_TRACE_NEAR_MAX_ACCEPTANCE") == "1" {
+		// Playwright may omit a single overly large network resource from
+		// the trace. Independent one-MiB bodies exercise actual ZIP growth
+		// instead of turning this acceptance into a false empty-trace pass.
+		traceFetches = 15
+	}
+	traceNoise := make([]byte, 1<<20)
 	if _, err := mathrand.New(mathrand.NewSource(271828)).Read(traceNoise); err != nil {
 		t.Fatal(err)
 	}
@@ -44,13 +52,24 @@ func TestManagedBrowserSessionCapturePinnedRuntime(t *testing.T) {
 			return
 		}
 		if r.URL.Path == "/trace-blob" {
+			id, err := strconv.Atoi(r.URL.Query().Get("i"))
+			if err != nil || id < 0 || id >= traceFetches {
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
 			w.Header().Set("Content-Type", "application/octet-stream")
-			_, _ = w.Write(traceNoise)
+			if id == 0 {
+				_, _ = w.Write(traceNoise)
+			} else {
+				distinct := make([]byte, len(traceNoise))
+				_, _ = mathrand.New(mathrand.NewSource(271828 + int64(id))).Read(distinct)
+				_, _ = w.Write(distinct)
+			}
 			return
 		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if r.URL.Path == "/trace-noise" {
-			fmt.Fprint(w, "<!doctype html><body><div id='status'>loading</div><script>fetch('/trace-blob',{cache:'no-store'}).then(r=>r.arrayBuffer()).then(b=>{document.querySelector('#status').textContent=b.byteLength===1048576?'loaded':'bad';});</script></body>")
+			fmt.Fprintf(w, "<!doctype html><body><div id='status'>loading</div><script>(async()=>{let sum=0;for(let i=0;i<%d;i++){const r=await fetch('/trace-blob?i='+i,{cache:'no-store'});sum+=(await r.arrayBuffer()).byteLength;}document.querySelector('#status').textContent=sum===%d?'loaded':'bad';})().catch(()=>document.querySelector('#status').textContent='bad');</script></body>", traceFetches, traceFetches*len(traceNoise))
 		} else if r.URL.Path == "/animation" {
 			fmt.Fprint(w, `<!doctype html><html><head><style>
 #moving {width:80px;height:120px;background:#147cc0;transition:width 90s linear;}
@@ -305,6 +324,9 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 	if largeSize <= 512<<10 || largeSize > 16<<20 {
 		t.Fatalf("real trace did not cross old cap while honoring new cap: %d", largeSize)
 	}
+	if traceFetches >= 15 && largeSize < 14<<20 {
+		t.Fatalf("near-cap Chromium trace archive unexpectedly small: %d", largeSize)
+	}
 	entries, err = os.ReadDir(downloads)
 	if err != nil || len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), "asa-trace-") {
 		t.Fatalf("trace must retain exactly one private directory: %v %v", entries, err)
@@ -319,21 +341,43 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 		t.Fatal("large retained trace SHA differs from pinned metadata")
 	}
 	largeVersion := "sha256:" + largeMeta["sha256"].(string)
-	for _, start := range []int{0, largeSize - 111} {
+	// Reconstruct ALL available windows, not just first/last. This proof
+	// must cross both the old 512 KiB offset and 128-command ceilings.
+	var reconstructed []byte
+	readCalls := 0
+	for start := 0; start < largeSize; {
 		nonce := fmt.Sprintf("%032x", start+77)
 		send(map[string]any{"type": "trace_read", "nonce": nonce, "offset": start, "file_version": largeVersion})
 		window := read()
 		if window["event"] != "trace_chunk" || int(window["offset"].(float64)) != start || window["nonce"] != nonce {
-			t.Fatalf("large trace window offset/nonce mismatch: %v", window)
+			t.Fatalf("large trace window offset/nonce mismatch at %d: %v", start, window)
 		}
 		raw, er := base64.StdEncoding.Strict().DecodeString(window["data"].(string))
-		if er != nil || len(raw) > 8192 || !bytes.Equal(raw, retained[start:min(largeSize, start+8192)]) {
+		if er != nil || len(raw) == 0 || len(raw) > 8192 || !bytes.Equal(raw, retained[start:min(largeSize, start+8192)]) {
 			t.Fatalf("large trace window integrity mismatch: offset=%d size=%d err=%v", start, len(raw), er)
 		}
 		chunkDigest := sha256.Sum256(raw)
 		if window["chunk_sha256"] != hex.EncodeToString(chunkDigest[:]) {
 			t.Fatal("large trace window SHA mismatch")
 		}
+		reconstructed = append(reconstructed, raw...)
+		start += len(raw)
+		readCalls++
+	}
+	reconstructedSHA := sha256.Sum256(reconstructed)
+	if readCalls <= 128 || len(reconstructed) != largeSize ||
+		hex.EncodeToString(reconstructedSHA[:]) != largeMeta["sha256"] ||
+		!bytes.Equal(reconstructed, retained) {
+		t.Fatalf("full trace retrieval stopped early: size=%d calls=%d expected=%d", len(reconstructed), readCalls, largeSize)
+	}
+	// An EOF read must return an empty, nonce-correlated window rather than
+	// replay the flow, change the digest or incorrectly return a missing file.
+	send(map[string]any{"type": "trace_read", "nonce": strings.Repeat("8", 32),
+		"offset": largeSize, "file_version": largeVersion})
+	eof := read()
+	if eof["event"] != "trace_chunk" || int(eof["offset"].(float64)) != largeSize ||
+		eof["data"] != "" || eof["nonce"] != strings.Repeat("8", 32) {
+		t.Fatalf("exact-end trace window is not empty/finite: %v", eof)
 	}
 	// Same-sized in-place mutation cannot be reported as an authentic
 	// version-pinned window. Mutation must retire the private artifact.
@@ -447,4 +491,100 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 	}
 	// The deferred teardown sends exactly one close request and awaits
 	// worker+Chromium completion before TempDir cleanup.
+}
+
+// Source-level proof of managed finalizer ordering: a production-generated
+// Node worker must NOT remove Executor-owned trace scratch during an ordinary
+// graceful close. It does not claim root cgroup acceptance: the approved root
+// test must separately prove exact kernel teardown before rooted reclamation.
+func TestManagedBrowserNormalCloseDefersExecutorTraceCleanup(t *testing.T) {
+	engine := os.Getenv("AI_SERVER_AGENT_BROWSER_FLOW_RUNTIME")
+	if engine == "" {
+		t.Skip("real pinned Chromium runtime required")
+	}
+	root := t.TempDir()
+	tmp := filepath.Join(root, "tmp")
+	if err := os.Mkdir(tmp, 0700); err != nil {
+		t.Fatal(err)
+	}
+	script, err := managedSessionRunner(engine, filepath.Join(root, "profile"), tmp, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	source := filepath.Join(root, "runner.mjs")
+	if err := os.WriteFile(source, []byte(script), 0600); err != nil {
+		t.Fatal(err)
+	}
+	traceName := "asa-trace-" + strings.Repeat("a", 32)
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, filepath.Join(engine, "node", "bin", "node"), source)
+	cmd.Env = append(os.Environ(),
+		"PLAYWRIGHT_BROWSERS_PATH="+filepath.Join(engine, "browsers"),
+		"ASA_BROWSER_RECLAIM_BY_EXECUTOR=1",
+		"ASA_BROWSER_SESSION_TRACE="+traceName)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		if cmd.ProcessState == nil {
+			_ = cmd.Process.Kill()
+			_ = cmd.Wait()
+		}
+	}()
+	reader := bufio.NewReader(stdout)
+	read := func() map[string]any {
+		t.Helper()
+		line, er := reader.ReadString('\n')
+		if er != nil || !strings.HasPrefix(line, "ASA_BROWSER_SESSION ") {
+			t.Fatalf("managed worker frame: %q err=%v stderr=%s", line, er, stderr.String())
+		}
+		var result map[string]any
+		if er := json.Unmarshal([]byte(strings.TrimPrefix(line, "ASA_BROWSER_SESSION ")), &result); er != nil {
+			t.Fatal(er)
+		}
+		return result
+	}
+	if ready := read(); ready["event"] != "ready" {
+		t.Fatalf("managed Browser not ready: %v; stderr=%s", ready, stderr.String())
+	}
+	flow, err := json.Marshal(map[string]any{
+		"type": "trace_record", "nonce": strings.Repeat("1", 32),
+		"steps": []FlowStep{{Action: "snapshot"}},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := stdin.Write(append(flow, '\n')); err != nil {
+		t.Fatal(err)
+	}
+	if frame := read(); frame["event"] != "trace_meta" {
+		t.Fatalf("normal-close test trace not recorded: %v stderr=%s", frame, stderr.String())
+	}
+	tracePath := filepath.Join(tmp, traceName, "trace.zip")
+	if info, er := os.Stat(tracePath); er != nil || info.Size() < 4 {
+		t.Fatalf("retained trace not present before close: %v %v", info, er)
+	}
+	if _, err := stdin.Write([]byte("{\"type\":\"close\"}\n")); err != nil {
+		t.Fatal(err)
+	}
+	_ = stdin.Close()
+	if err := cmd.Wait(); err != nil {
+		t.Fatalf("graceful managed Browser exit: %v stderr=%s", err, stderr.String())
+	}
+	if info, er := os.Stat(tracePath); er != nil || !info.Mode().IsRegular() {
+		t.Fatalf("Executor-owned trace was deleted by Node finalizer BEFORE cgroup proof: %v %v", info, er)
+	}
+	// This fixture owns the root and has waited for its worker. Real
+	// production reclamation is exclusively the original root Executor's job.
 }

@@ -167,14 +167,30 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const reply = data => process.stdout.write('ASA_BROWSER_SESSION ' + JSON.stringify(data) + '\n');
 reply({ event: 'ready' });
 try {
-  let commands = 0;
+  // Browser actions remain capped at 128. Read-only 8 KiB ZIP windows have
+  // a distinct *finite* budget: 8192 windows = at most 64 MiB of streamed
+  // trace bytes across this session (four full 16 MiB downloads).
+  // This leaves the ordinary Browser action capacity unchanged.
+  let actions = 0;
+  let traceReads = 0;
+  const maxTraceReads = 8192;
   for await (const line of createInterface({input: process.stdin, crlfDelay: Infinity})) {
-    if (++commands > 128 || Buffer.byteLength(line, 'utf8') > 16384) {
+    if (Buffer.byteLength(line, 'utf8') > 16384) {
       reply({ event: 'error', reason: 'session_input_limit' }); break;
     }
     let input;
     try { input = JSON.parse(line); } catch { reply({event:'error',reason:'invalid_request'}); break; }
+    // Closing must always be possible, even when a read/action budget has
+    // already been spent. It does not add any new user-visible capability.
     if (input?.type === 'close') break;
+    if (input?.type === 'trace_read') {
+      if (++traceReads > maxTraceReads) {
+        reply({event:'error',nonce:input.nonce,reason:'trace_read_budget_exhausted'});
+        continue;
+      }
+    } else if (++actions > 128) {
+      reply({event:'error',nonce:input?.nonce,reason:'session_input_limit'}); break;
+    }
     // Screenshot is an explicit, bounded image consumer. Frames stay below
     // the existing 64 KiB broker event ring; no image is saved to disk,
     // no page bytes enter audit, and the profile remains session-owned.
@@ -346,7 +362,13 @@ try {
   }
 } finally {
   clearInterval(diskMonitor);
-  try { discardTrace(); } catch {}
+  // Never unlink Executor-managed trace scratch during normal shutdown.
+  // Chromium may still have independently grouped descendants. The root
+  // Executor owns final exact-name reclamation AFTER whole-cgroup proof.
+  // Explicit in-session discard/replacement remains separate and supported.
+  if (!executorOwnsScratch) {
+    try { discardTrace(); } catch {}
+  }
   await context.close();
   cleanupProfile();
   process.exit(0);

@@ -120,6 +120,15 @@ func (s *Server) browserSessionTrace(ctx context.Context, req Request) Response 
 	}
 	if frame.Event == "error" {
 		switch frame.Reason {
+		case "trace_read_budget_exhausted":
+			if p.Operation != "read" {
+				return uncertain()
+			}
+			r := browserSessionError("trace_read_budget_exhausted", "resource",
+				errors.New("Browser trace session has exhausted its finite 8192 read-window allowance; no bytes delivered; close and open a new session for further recordings"))
+			r.SessionID = entry.id
+			r.Status = "not_delivered"
+			return r
 		case "trace_unavailable", "trace_stale", "trace_invalid_offset":
 			// These known lookup refusals are valid only for data retrieval
 			// and explicit retirement. During record, Browser actions may

@@ -160,7 +160,7 @@ func (m *Manager) SessionTrace(ctx context.Context, opts SessionOptions) (execut
 		}{Operation: "record", Steps: opts.Steps}
 		limit = 40 * time.Second
 	case "read", "discard":
-		if len(opts.Steps) != 0 || opts.TraceOffset < 0 || opts.TraceOffset > 512<<10 ||
+		if len(opts.Steps) != 0 || opts.TraceOffset < 0 || opts.TraceOffset > 16<<20 ||
 			!strings.HasPrefix(opts.TraceVersion, "sha256:") || len(opts.TraceVersion) != 71 {
 			return browserError("invalid_browser_trace", "validation", "read/discard require version sha256:<64-hex> and bounded offset"), nil
 		}
