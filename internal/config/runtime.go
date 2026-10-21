@@ -43,9 +43,9 @@ var runtimeSettingSpecs = []RuntimeSettingSpec{
 	{Key: "transfer_staging_mib", Default: 512, Minimum: 16, Maximum: 1048576, Unit: "MiB", Description: "Cumulative declared bytes for concurrent staged worker transfers; not a permanent file-size limit"},
 	{Key: "transfer_session_ttl_seconds", Default: 3600, Minimum: 60, Maximum: 86400, Unit: "seconds", Description: "Idle lifetime for resumable worker transfers, including final status receipts"},
 	{Key: "transfer_active_sessions", Default: 8, Minimum: 1, Maximum: 64, Unit: "sessions", Description: "Maximum simultaneous durable worker transfer sessions"},
-	{Key: "worker_command_slots", Default: 0, Minimum: 0, Maximum: 64, Unit: "slots", Description: "Parallel unprivileged run_command capacity; 0=automatic min(CPU,4), 1..64=operator override; root stays at one slot"},
-	{Key: "persistent_task_slots", Default: 4, Minimum: 1, Maximum: 64, Unit: "tasks", Description: "Simultaneous persistent task jobs; independent from service and worker command slots"},
-	{Key: "persistent_service_slots", Default: 2, Minimum: 1, Maximum: 64, Unit: "services", Description: "Simultaneous persistent service jobs; independent from task and worker command slots"},
+	{Key: "worker_command_slots", Default: 0, Minimum: 0, Maximum: 64, Unit: "slots", Description: "Parallel unprivileged run_command capacity; 0=automatic min(effective CPUs,64), 1..64=operator override; root stays at one slot"},
+	{Key: "persistent_task_slots", Default: 6, Minimum: 1, Maximum: 64, Unit: "tasks", Description: "Simultaneous persistent task jobs; independent from service and worker command slots"},
+	{Key: "persistent_service_slots", Default: 3, Minimum: 1, Maximum: 64, Unit: "services", Description: "Simultaneous persistent service jobs; independent from task and worker command slots"},
 	{Key: "stdio_session_slots", Default: 8, Minimum: 1, Maximum: 64, Unit: "sessions", Description: "Shared private LSP/DAP/terminal/browser process-session admission; does not remove any consumer-specific exclusive lease"},
 }
 
@@ -66,8 +66,8 @@ func DefaultRuntimeSettings() RuntimeSettings {
 		TransferSessionTTLSeconds:    3600,
 		TransferActiveSessions:       8,
 		WorkerCommandSlots:           0,
-		PersistentTaskSlots:          4,
-		PersistentServiceSlots:       2,
+		PersistentTaskSlots:          6,
+		PersistentServiceSlots:       3,
 		StdioSessionSlots:            8,
 	}
 }

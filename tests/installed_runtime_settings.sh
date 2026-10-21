@@ -118,11 +118,11 @@ instance_before="$(sudo jq -er '.instance_id' /etc/ai-server-agent/config.json)"
 credential_before="$(sudo sha256sum /etc/ai-server-agent/mcp-credentials.json | awk '{print $1}')"
 sudo ai-server-agent-manage runtime-show >"$scratch/defaults"
 grep -Fq 'command_timeout_seconds=300 seconds' "$scratch/defaults" || fail 'Default timeout not visible'
-grep -Fq 'persistent_task_slots=4 tasks' "$scratch/defaults" || fail 'Default task capacity not visible'
-grep -Fq 'persistent_service_slots=2 services' "$scratch/defaults" || fail 'Default service capacity not visible'
+grep -Fq 'persistent_task_slots=6 tasks' "$scratch/defaults" || fail 'Default task capacity not visible'
+grep -Fq 'persistent_service_slots=3 services' "$scratch/defaults" || fail 'Default service capacity not visible'
 mcp_request '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"ci-runtime-acceptance","version":"1"}}}' "$scratch/initialize"
 jq -e '.result.serverInfo.name=="ai-server-agent"' "$scratch/initialize" >/dev/null || fail 'Initialize failed'
-capacity 4 0 0
+capacity 6 0 0 3
 
 # Genuine eight-at-once worker command admission, not just configuration text.
 set_runtime worker_command_slots 8
@@ -201,7 +201,7 @@ for n in 1 2; do
 done
 capacity 1 8 2
 start_job service 30
-check_limit 'Third service at default two-slot limit'
+check_limit 'Third service at explicitly configured two-slot limit'
 set_runtime persistent_service_slots 3
 capacity 1 8 2 3
 start_job service 3
@@ -229,7 +229,7 @@ for attempt in $(seq 1 30); do
 done
 capacity 1 0 0 1
 reset_runtime persistent_service_slots
-capacity 1 0 0 2
+capacity 1 0 0 3
 
 # Prove BOTH transfer dimensions independently. Error codes alone are
 # ambiguous: production uses one transfer_quota_exceeded code for session and

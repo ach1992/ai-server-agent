@@ -314,7 +314,7 @@ func TestPersistentJobCapacityFailsWithoutQueue(t *testing.T) {
 	provisionActiveTaskClaims(t, claims, workspace, maxActivePersistentJobs)
 	fakeBin := t.TempDir()
 	systemctl := filepath.Join(fakeBin, "systemctl")
-	systemctlScript := "#!/bin/sh\nif [ \"$1\" = list-units ]; then\n  printf 'ai-job-1.service loaded active running x\\nai-job-2.service loaded active running x\\nai-job-3.service loaded active running x\\nai-job-4.service loaded active running x\\n'\n  exit 0\nfi\nexit 64\n"
+	systemctlScript := "#!/bin/sh\nif [ \"$1\" = list-units ]; then\n  printf 'ai-job-1.service loaded active running x\\nai-job-2.service loaded active running x\\nai-job-3.service loaded active running x\\nai-job-4.service loaded active running x\\nai-job-5.service loaded active running x\\nai-job-6.service loaded active running x\\n'\n  exit 0\nfi\nexit 64\n"
 	if err := os.WriteFile(systemctl, []byte(systemctlScript), 0755); err != nil {
 		t.Fatal(err)
 	}

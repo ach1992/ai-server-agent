@@ -9,6 +9,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"testing"
 	"time"
@@ -41,9 +42,19 @@ func TestRunLimiterSeparatesWorkerAndRootWithoutQueue(t *testing.T) {
 	}
 }
 
+func TestAutoWorkerCommandSlotsBoundedByEffectiveCPU(t *testing.T) {
+	for _, tc := range []struct{ cpu, slots int }{
+		{-1, 1}, {0, 1}, {1, 1}, {2, 2}, {4, 4}, {16, 16}, {31, 31}, {32, 32}, {33, 33}, {63, 63}, {64, 64}, {65, 64}, {1024, 64}, {int(^uint(0) >> 1), 64},
+	} {
+		if got := autoWorkerCommandSlots(tc.cpu); got != tc.slots {
+			t.Fatalf("effective CPUs %d: got %d slots, want %d", tc.cpu, got, tc.slots)
+		}
+	}
+}
+
 func TestRunLimiterConfigurableCommandSlotsAndRootSeparation(t *testing.T) {
 	automatic := newRunLimiterForSlots(0)
-	if got := cap(automatic.worker); got < 1 || got > maxWorkerRunConcurrency {
+	if got := cap(automatic.worker); got != autoWorkerCommandSlots(runtime.GOMAXPROCS(0)) {
 		t.Fatalf("auto command capacity = %d", got)
 	}
 	for _, wanted := range []int{1, 4, 8, 64} {

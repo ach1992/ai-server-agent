@@ -31,6 +31,10 @@ type RuntimeEntry struct {
 }
 
 type RuntimeCapacity struct {
+	WorkerLimit        int  `json:"worker_limit"`
+	WorkersActive      int  `json:"workers_active"`
+	RootLimit          int  `json:"root_limit"`
+	RootActive         int  `json:"root_active"`
 	TaskLimit          int  `json:"task_limit"`
 	ServiceLimit       int  `json:"service_limit"`
 	SessionLimit       int  `json:"session_limit"`
@@ -86,7 +90,13 @@ func (s *Server) runtimeListContext(parent context.Context, req Request) Respons
 		RuntimeEntries:  []RuntimeEntry{},
 		RuntimeCapacity: &RuntimeCapacity{TaskLimit: s.persistentTaskCapacity(), ServiceLimit: s.persistentServiceCapacity(), SessionLimit: s.stdioSessionCapacity()},
 	}
-	cap := response.RuntimeCapacity
+	capacity := response.RuntimeCapacity
+	if s.runs != nil {
+		capacity.WorkerLimit = cap(s.runs.worker)
+		capacity.WorkersActive = len(s.runs.worker)
+		capacity.RootLimit = cap(s.runs.root)
+		capacity.RootActive = len(s.runs.root)
+	}
 	// A passive inspection never creates directories, claims, markers or units.
 	if err := trustedDir(s.cfg.StateDir); err != nil {
 		return jobStateError("runtime_unavailable", err)
@@ -147,18 +157,18 @@ func (s *Server) runtimeListContext(parent context.Context, req Request) Respons
 			}
 		}
 	}
-	cap.StateReliable = err == nil && !response.Truncated
+	capacity.StateReliable = err == nil && !response.Truncated
 	for _, id := range ids {
 		claim, found := claims[id]
 		if !found || (claim.Kind != "task" && claim.Kind != "service") || claim.Workspace == "" {
-			cap.UnclassifiedActive++
-			cap.StateReliable = false
+			capacity.UnclassifiedActive++
+			capacity.StateReliable = false
 			continue
 		}
 		if claim.Kind == "task" {
-			cap.TasksActive++
+			capacity.TasksActive++
 		} else {
-			cap.ServicesActive++
+			capacity.ServicesActive++
 		}
 	}
 	if req.Kind == "" || req.Kind == "task" || req.Kind == "service" {

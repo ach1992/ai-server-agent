@@ -513,13 +513,13 @@ runtime_menu(){
     services="$(config_get runtime.persistent_service_slots)"
     sessions="$(config_get runtime.stdio_session_slots)"
     case "${worker:-0}" in
-      0) worker='Automatic: up to 4 commands, CPU-aware' ;;
+      0) worker='Automatic: effective CPUs (max 64), no idle jobs' ;;
       *) worker="$worker simultaneous commands" ;;
     esac
     ui_detail 'Commands' "$worker"
-    ui_detail 'Tasks' "${tasks:-4} persistent jobs concurrently"
+    ui_detail 'Tasks' "${tasks:-6} persistent jobs concurrently"
     ui_detail 'Root' '1 concurrent root command (fixed)'
-    ui_detail 'Services' "${services:-2} persistent jobs concurrently"
+    ui_detail 'Services' "${services:-3} persistent jobs concurrently"
     ui_detail 'Sessions' "${sessions:-8} LSP/DAP/terminal/Browser sessions"
     printf '\n'
     ui_wrap '  ' 'Settings: worker_command_slots (0=auto, 1..64); persistent_task_slots and persistent_service_slots (1..64).'

@@ -25,7 +25,7 @@ const (
 	executorConnectionTimeout  = 31 * time.Minute
 	defaultRunTimeout          = 30 * time.Minute
 	processGroupTerminateGrace = 2 * time.Second
-	maxWorkerRunConcurrency    = 4
+	maxWorkerRunConcurrency    = 64
 	rootRunConcurrency         = 1
 )
 
@@ -38,9 +38,9 @@ func newRunLimiter() *runLimiter {
 	return newRunLimiterForSlots(0)
 }
 
-// Zero retains the current CPU-aware default. A validated positive override
-// deliberately allows I/O-bound work to exceed the vCPU count, but never
-// changes the separately protected root command capacity.
+// Zero selects bounded effective-CPU admission without default CPU oversubscription.
+// A validated positive override deliberately permits greater I/O-bound
+// concurrency, without changing separately protected root command capacity.
 func newRunLimiterForSlots(configured int) *runLimiter {
 	if configured > 0 {
 		if configured > 64 {
@@ -48,14 +48,19 @@ func newRunLimiterForSlots(configured int) *runLimiter {
 		}
 		return newRunLimiterWith(configured, rootRunConcurrency)
 	}
-	workerLimit := runtime.GOMAXPROCS(0)
-	if workerLimit < 1 {
-		workerLimit = 1
+	return newRunLimiterWith(autoWorkerCommandSlots(runtime.GOMAXPROCS(0)), rootRunConcurrency)
+}
+
+// Each admitted command holds capacity only while it runs, not while idle.
+// An auto limit tracks effective CPUs, without the historical cap of four.
+func autoWorkerCommandSlots(effectiveCPUs int) int {
+	if effectiveCPUs < 1 {
+		return 1
 	}
-	if workerLimit > maxWorkerRunConcurrency {
-		workerLimit = maxWorkerRunConcurrency
+	if effectiveCPUs > maxWorkerRunConcurrency {
+		return maxWorkerRunConcurrency
 	}
-	return newRunLimiterWith(workerLimit, rootRunConcurrency)
+	return effectiveCPUs
 }
 
 func newRunLimiterWith(workerLimit, rootLimit int) *runLimiter {
