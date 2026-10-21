@@ -367,6 +367,74 @@ json_string_value(){
   sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$CONFIG_FILE" | head -n1
 }
 
+# Fail closed on PRE-EXISTING numeric ID aliases before account creation or
+# writing Agent credentials/state. Bash account names are not Linux isolation:
+# group IDs on the Executor credential/socket are the actual access boundary.
+# The second invocation verifies freshly provisioned users before install -d.
+verify_isolated_browser_account_ids(){
+  local role role_uid role_gid role_group_gid browser_uid="" browser_gid="" browser_group_gid=""
+  local group_record account_record account_name account_password account_uid account_gid account_info account_home account_shell
+  if getent group "$BROWSER_USER" >/dev/null 2>&1; then
+    group_record="$(getent group "$BROWSER_USER")" || die "Cannot resolve dedicated Browser group."
+    [[ "$group_record" != *$'\n'* ]] || die "Ambiguous dedicated Browser group resolution."
+    IFS=: read -r account_name account_password browser_group_gid account_info <<< "$group_record"
+    [ "$account_name" = "$BROWSER_USER" ] && [[ "$browser_group_gid" =~ ^[0-9]+$ ]] &&
+      [ "$browser_group_gid" -ne 0 ] || die "Invalid dedicated Browser group identity."
+  fi
+  if getent passwd "$BROWSER_USER" >/dev/null 2>&1; then
+    account_record="$(getent passwd "$BROWSER_USER")" || die "Cannot resolve dedicated Browser account."
+    [[ "$account_record" != *$'\n'* ]] || die "Ambiguous dedicated Browser account resolution."
+    IFS=: read -r account_name account_password account_uid account_gid account_info account_home account_shell <<< "$account_record"
+    [ "$account_name" = "$BROWSER_USER" ] && [[ "$account_uid" =~ ^[0-9]+$ ]] &&
+      [[ "$account_gid" =~ ^[0-9]+$ ]] || die "Invalid dedicated Browser account identity."
+    # Named passwd entries are authoritative even if libc/id resolves a
+    # duplicate numeric UID back to another user. Reject protected aliases
+    # by those raw numeric IDs BEFORE the secondary id consistency check.
+    browser_uid="$account_uid"
+    browser_gid="$account_gid"
+    [ "$browser_uid" -ne 0 ] && [ "$browser_gid" -ne 0 ] ||
+      die "Invalid or inconsistent Browser numeric UID/GID."
+    [ "$account_home" = "$BROWSER_HOME" ] && [ "$account_shell" = /usr/sbin/nologin ] ||
+      die "Existing Browser account HOME/shell differs from the dedicated service identity."
+    [ -n "$browser_group_gid" ] && [ "$browser_gid" -eq "$browser_group_gid" ] ||
+      die "Existing Browser account must use its own dedicated primary group."
+  fi
+  for role in "$AGENT_USER" "$WORKER_USER"; do
+    role_uid=""
+    role_gid=""
+    role_group_gid=""
+    if getent passwd "$role" >/dev/null 2>&1; then
+      role_uid="$(id -u "$role")" || die "Peer account UID unavailable: $role"
+      role_gid="$(id -g "$role")" || die "Peer account GID unavailable: $role"
+    fi
+    if getent group "$role" >/dev/null 2>&1; then
+      group_record="$(getent group "$role")" || die "Peer group identity unavailable: $role"
+      [[ "$group_record" != *$'\n'* ]] || die "Ambiguous peer group resolution: $role"
+      IFS=: read -r account_name account_password role_group_gid account_info <<< "$group_record"
+      [ "$account_name" = "$role" ] && [[ "$role_group_gid" =~ ^[0-9]+$ ]] ||
+        die "Invalid peer group identity: $role"
+    fi
+    if [ -n "$browser_uid" ] && [ -n "$role_uid" ] && [ "$browser_uid" -eq "$role_uid" ]; then
+      die "Browser UID aliases protected $role account; refusing existing identities without mutation."
+    fi
+    for protected_gid in "$role_gid" "$role_group_gid"; do
+      [ -z "$protected_gid" ] && continue
+      if { [ -n "$browser_gid" ] && [ "$browser_gid" -eq "$protected_gid" ]; } ||
+         { [ -n "$browser_group_gid" ] && [ "$browser_group_gid" -eq "$protected_gid" ]; }; then
+        die "Browser GID aliases protected $role account/group; refusing existing identities without mutation."
+      fi
+    done
+  done
+  if [ -n "$browser_uid" ]; then
+    [ "$(id -u "$BROWSER_USER")" -eq "$browser_uid" ] &&
+    [ "$(id -g "$BROWSER_USER")" -eq "$browser_gid" ] ||
+      die "Invalid or inconsistent Browser numeric UID/GID."
+    [ "$(id -G "$BROWSER_USER")" = "$browser_gid" ] ||
+      die "Dedicated Browser account has unexpected supplementary groups."
+  fi
+}
+
+
 # Root-mode platform probes must not bypass command-search preflight: their
 # status formatter itself uses 'tr'. Unprivileged platform checks retain the
 # existing compatibility contract without requiring root path validation.
@@ -404,6 +472,10 @@ if [ "$RESOLVE_REF_ONLY" -eq 1 ]; then resolve_source_ref "$REF"; exit 0; fi
 # Fail before the lock, packages, users, credentials, executable replacement
 # or service changes. --check also provides a read-only operator preflight.
 verify_privileged_install_targets
+# Resolve existing NSS aliases through trusted commands BEFORE the lifecycle
+# lock, apt update/install, account creation, credentials or service restart.
+# A bad pre-existing Browser account must produce a truly read-only refusal.
+verify_isolated_browser_account_ids
 if [ "$CHECK_ONLY" -eq 1 ]; then log "Compatibility and privileged install-path checks passed: $PRETTY_NAME, $ARCH, systemd available."; exit 0; fi
 
 acquire_lifecycle_lock
@@ -498,74 +570,6 @@ if [ "$MODE" = "public" ] && { [ -z "$TLS_CERT_FILE" ] || [ -z "$TLS_KEY_FILE" ]
   fi
 fi
 
-# Fail closed on PRE-EXISTING numeric ID aliases before account creation or
-# writing Agent credentials/state. Bash account names are not Linux isolation:
-# group IDs on the Executor credential/socket are the actual access boundary.
-# The second invocation verifies freshly provisioned users before install -d.
-verify_isolated_browser_account_ids(){
-  local role role_uid role_gid role_group_gid browser_uid="" browser_gid="" browser_group_gid=""
-  local group_record account_record account_name account_password account_uid account_gid account_info account_home account_shell
-  if getent group "$BROWSER_USER" >/dev/null 2>&1; then
-    group_record="$(getent group "$BROWSER_USER")" || die "Cannot resolve dedicated Browser group."
-    [[ "$group_record" != *$'\n'* ]] || die "Ambiguous dedicated Browser group resolution."
-    IFS=: read -r account_name account_password browser_group_gid account_info <<< "$group_record"
-    [ "$account_name" = "$BROWSER_USER" ] && [[ "$browser_group_gid" =~ ^[0-9]+$ ]] &&
-      [ "$browser_group_gid" -ne 0 ] || die "Invalid dedicated Browser group identity."
-  fi
-  if getent passwd "$BROWSER_USER" >/dev/null 2>&1; then
-    account_record="$(getent passwd "$BROWSER_USER")" || die "Cannot resolve dedicated Browser account."
-    [[ "$account_record" != *$'\n'* ]] || die "Ambiguous dedicated Browser account resolution."
-    IFS=: read -r account_name account_password account_uid account_gid account_info account_home account_shell <<< "$account_record"
-    [ "$account_name" = "$BROWSER_USER" ] && [[ "$account_uid" =~ ^[0-9]+$ ]] &&
-      [[ "$account_gid" =~ ^[0-9]+$ ]] || die "Invalid dedicated Browser account identity."
-    # Named passwd entries are authoritative even if libc/id resolves a
-    # duplicate numeric UID back to another user. Reject protected aliases
-    # by those raw numeric IDs BEFORE the secondary id consistency check.
-    browser_uid="$account_uid"
-    browser_gid="$account_gid"
-    [ "$browser_uid" -ne 0 ] && [ "$browser_gid" -ne 0 ] ||
-      die "Invalid or inconsistent Browser numeric UID/GID."
-    [ "$account_home" = "$BROWSER_HOME" ] && [ "$account_shell" = /usr/sbin/nologin ] ||
-      die "Existing Browser account HOME/shell differs from the dedicated service identity."
-    [ -n "$browser_group_gid" ] && [ "$browser_gid" -eq "$browser_group_gid" ] ||
-      die "Existing Browser account must use its own dedicated primary group."
-  fi
-  for role in "$AGENT_USER" "$WORKER_USER"; do
-    role_uid=""
-    role_gid=""
-    role_group_gid=""
-    if getent passwd "$role" >/dev/null 2>&1; then
-      role_uid="$(id -u "$role")" || die "Peer account UID unavailable: $role"
-      role_gid="$(id -g "$role")" || die "Peer account GID unavailable: $role"
-    fi
-    if getent group "$role" >/dev/null 2>&1; then
-      group_record="$(getent group "$role")" || die "Peer group identity unavailable: $role"
-      [[ "$group_record" != *$'\n'* ]] || die "Ambiguous peer group resolution: $role"
-      IFS=: read -r account_name account_password role_group_gid account_info <<< "$group_record"
-      [ "$account_name" = "$role" ] && [[ "$role_group_gid" =~ ^[0-9]+$ ]] ||
-        die "Invalid peer group identity: $role"
-    fi
-    if [ -n "$browser_uid" ] && [ -n "$role_uid" ] && [ "$browser_uid" -eq "$role_uid" ]; then
-      die "Browser UID aliases protected $role account; refusing existing identities without mutation."
-    fi
-    for protected_gid in "$role_gid" "$role_group_gid"; do
-      [ -z "$protected_gid" ] && continue
-      if { [ -n "$browser_gid" ] && [ "$browser_gid" -eq "$protected_gid" ]; } ||
-         { [ -n "$browser_group_gid" ] && [ "$browser_group_gid" -eq "$protected_gid" ]; }; then
-        die "Browser GID aliases protected $role account/group; refusing existing identities without mutation."
-      fi
-    done
-  done
-  if [ -n "$browser_uid" ]; then
-    [ "$(id -u "$BROWSER_USER")" -eq "$browser_uid" ] &&
-    [ "$(id -g "$BROWSER_USER")" -eq "$browser_gid" ] ||
-      die "Invalid or inconsistent Browser numeric UID/GID."
-    [ "$(id -G "$BROWSER_USER")" = "$browser_gid" ] ||
-      die "Dedicated Browser account has unexpected supplementary groups."
-  fi
-}
-
-verify_isolated_browser_account_ids
 if ! getent group "$AGENT_USER" >/dev/null 2>&1; then groupadd --system "$AGENT_USER"; fi
 if ! getent group "$WORKER_USER" >/dev/null 2>&1; then groupadd --system "$WORKER_USER"; fi
 if ! getent group "$BROWSER_USER" >/dev/null 2>&1; then groupadd --system "$BROWSER_USER"; fi
