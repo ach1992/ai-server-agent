@@ -107,7 +107,7 @@ const context = await chromium.launchPersistentContext(%q,{headless:true,
 await context.newPage();
 // This disposable, independently grouped child deliberately survives abrupt
 // Node death long enough to expose an incorrectly premature admission release.
-const child=spawn('/usr/bin/setsid',['/bin/sleep','90'],{stdio:'ignore',detached:true});
+const child=spawn('/bin/sleep',['90'],{stdio:'ignore',detached:true});
 writeFileSync(%q,String(child.pid)); child.unref();
 process.stdout.write('ASA_BROWSER_SESSION '+JSON.stringify({event:'ready'})+'\n');
 setInterval(()=>{},1000);`, profile, marker)
@@ -252,7 +252,7 @@ func TestApprovedRootBrowserOneShotDetachedChildAfterNodeExit(t *testing.T) {
 	s.browserKillTestHook = func() error { close(blocked); <-allow; return nil }
 	marker := filepath.Join(req.Workspace, "oneshot.pid")
 	profile := filepath.Join(tmp, "asa-profile-Sho123")
-	command := fmt.Sprintf("mkdir -m 0700 %q; /usr/bin/setsid /bin/sleep 90 </dev/null >/dev/null 2>&1 & echo $! > %q; exit 0", profile, marker)
+	command := fmt.Sprintf("mkdir -m 0700 %q; /usr/bin/python3 -c 'import os,time;os.setsid();time.sleep(90)' </dev/null >/dev/null 2>&1 & echo $! > %q; exit 0", profile, marker)
 	one := req
 	one.Action = "run"
 	one.AuditAction = "browser_run"
