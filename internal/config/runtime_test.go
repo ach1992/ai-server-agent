@@ -46,6 +46,72 @@ func TestRuntimeDefaultBackwardsCompatibilityAndPartialOverrides(t *testing.T) {
 	}
 }
 
+// New defaults apply only to omitted settings; persisted old operator choices
+// must survive source upgrades even when they equal a previous release default.
+func TestPersistentCapacityDefaultsAndLegacyOverrides(t *testing.T) {
+	defaults := DefaultRuntimeSettings()
+	if defaults.PersistentTaskSlots != 6 || defaults.PersistentServiceSlots != 3 {
+		t.Fatalf("unexpected task/service defaults: %+v", defaults)
+	}
+	for _, spec := range RuntimeSettingSpecs() {
+		switch spec.Key {
+		case "persistent_task_slots":
+			if spec.Default != defaults.PersistentTaskSlots || spec.Minimum != 1 || spec.Maximum != 64 {
+				t.Fatalf("task spec drifted from effective defaults/range: %+v", spec)
+			}
+		case "persistent_service_slots":
+			if spec.Default != defaults.PersistentServiceSlots || spec.Minimum != 1 || spec.Maximum != 64 {
+				t.Fatalf("service spec drifted from effective defaults/range: %+v", spec)
+			}
+		}
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	cfg := Default()
+	cfg.Runtime.PersistentTaskSlots = 4
+	cfg.Runtime.PersistentServiceSlots = 2
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	loaded, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := loaded.EffectiveRuntime(); got.PersistentTaskSlots != 4 || got.PersistentServiceSlots != 2 {
+		t.Fatalf("explicit pre-upgrade settings silently changed: %+v", got)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var root map[string]interface{}
+	if err := json.Unmarshal(data, &root); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		settings                map[string]int
+		wantTasks, wantServices int
+	}{
+		{map[string]int{"persistent_task_slots": 4}, 4, 3},
+		{map[string]int{"persistent_service_slots": 2}, 6, 2},
+	} {
+		root["runtime"] = tc.settings
+		partial, err := json.Marshal(root)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, partial, 0600); err != nil {
+			t.Fatal(err)
+		}
+		loaded, err := Load(path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got := loaded.EffectiveRuntime(); got.PersistentTaskSlots != tc.wantTasks || got.PersistentServiceSlots != tc.wantServices {
+			t.Fatalf("partial override not preserved: %+v; expected tasks=%d services=%d", got, tc.wantTasks, tc.wantServices)
+		}
+	}
+}
+
 func TestRuntimeLimitsAndNoSilentUnknownKeys(t *testing.T) {
 	for _, spec := range RuntimeSettingSpecs() {
 		t.Run(spec.Key, func(t *testing.T) {
