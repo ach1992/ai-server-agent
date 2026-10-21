@@ -11,10 +11,33 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
 )
+
+// Linux MemAvailable is a point-in-time host headroom proxy, not an
+// attribution of all Chromium shared memory. The acceptance records both
+// baseline and two-browser readings on an authorized small test host.
+func browserAvailableMemoryKiB() (int64, error) {
+	content, err := os.ReadFile("/proc/meminfo")
+	if err != nil {
+		return 0, err
+	}
+	for _, line := range strings.Split(string(content), "\n") {
+		if !strings.HasPrefix(line, "MemAvailable:") {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 3 || fields[2] != "kB" {
+			break
+		}
+		return strconv.ParseInt(fields[1], 10, 64)
+	}
+	return 0, fmt.Errorf("MemAvailable is not inspectable")
+}
 
 // Real Chromium concurrency and storage-isolation acceptance. Explicit
 // disposable-host opt-in; never uses the installed Agent's shared profile.
@@ -124,8 +147,20 @@ func TestApprovedConcurrentRealIsolatedChromiumProfiles(t *testing.T) {
 			t.Fatalf("isolated flow mismatch: %s stderr=%s", frame, w.stderr.String())
 		}
 	}
+	baselineKiB, err := browserAvailableMemoryKiB()
+	if err != nil {
+		t.Fatalf("inspect disposable host memory: %v", err)
+	}
 	first := launch()
 	second := launch()
+	activeKiB, err := browserAvailableMemoryKiB()
+	if err != nil {
+		t.Fatalf("inspect active Chromium memory: %v", err)
+	}
+	t.Logf("CHROMIUM_2_CPU_4GIB_MEASUREMENT cpus=%d available_baseline_mib=%d available_2_live_mib=%d delta_mib=%d", runtime.NumCPU(), baselineKiB/1024, activeKiB/1024, (baselineKiB-activeKiB)/1024)
+	if activeKiB < 512*1024 {
+		t.Fatalf("two Chrome contexts left less than 512 MiB host headroom: %d KiB", activeKiB)
+	}
 	profileCount := 0
 	if entries, err := os.ReadDir(downloads); err == nil {
 		for _, e := range entries {
