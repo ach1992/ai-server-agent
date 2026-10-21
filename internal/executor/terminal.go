@@ -611,6 +611,9 @@ func (s *Server) terminalControl(req Request) Response {
 		if pending, ok := s.pendingTerminalAction(req); ok {
 			return pending
 		}
+		if req.Action == "terminal_close" {
+			return s.closeDetachedActiveTerminal(req)
+		}
 		return terminalError("session_not_found", errSessionNotFound)
 	}
 	if e.kind != "terminal" || e.terminal == nil {

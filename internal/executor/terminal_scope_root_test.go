@@ -331,15 +331,51 @@ func TestApprovedWorkerTmuxScopeSurvivesBrokerStop(t *testing.T) {
 	if blocked := s2.terminalAction(gone); blocked.OK || blocked.ErrorCode != "terminal_lease_unverified" {
 		t.Fatalf("reconnect hid missing PID1 timer: %+v", blocked)
 	}
-	if err := stopScopedTerminalBackend(goneName); err != nil {
-		t.Fatalf("could not simulate PID1 backend deadline: %v", err)
+	// A completely new Executor must refuse to reconnect to the missing
+	// timer, but the original authenticated owner can explicitly close the
+	// exact detached ACTIVE scope without ever attaching to a dead timer.
+	if err := s2.sessions.removeAndStop(goneEntry); err != nil {
+		t.Fatal(err)
+	}
+	fresh := &Server{cfg: s.cfg, workerUID: s.workerUID, workerGID: s.workerGID,
+		sessions: newStdioSessionBroker(), audit: s.audit}
+	if blocked := fresh.terminalAction(gone); blocked.OK || blocked.ErrorCode != "terminal_lease_unverified" {
+		t.Fatalf("new Executor reconnected without PID1 timer: %+v", blocked)
 	}
 	gone.Action = "terminal_close"
-	if closed := s2.terminalAction(gone); !closed.OK {
-		t.Fatalf("close of scope already ended by PID1 not reconciled: %+v", closed)
+	if closed := fresh.terminalAction(gone); !closed.OK {
+		t.Fatalf("original owner could not clean detached timerless ACTIVE scope: %+v", closed)
+	}
+	if err := verifyScopedTerminalBackendForVersion(goneName, 2); err == nil {
+		t.Fatal("detached terminal scope remained after verified owner close")
 	}
 	if _, err := os.Stat(filepath.Join(state, "terminal-sessions", gone.SessionID+".json")); !os.IsNotExist(err) {
-		t.Fatalf("dead-backend terminal record survived verified close: %v", err)
+		t.Fatalf("detached ACTIVE record survived verified close: %v", err)
 	}
-	t.Log("real scope, restart, principal isolation, stale-record GC, expired-backend close PASS")
+	// Separately retain the original scenario: PID1 can expire the backend
+	// while the old in-process Control Mode connection is still present.
+	expired := Request{Action: "terminal_open", PrincipalID: owner.PrincipalID, PrincipalClass: owner.PrincipalClass,
+		Workspace: project, Columns: 80, Rows: 24, RequestID: "expired-backend-live-client"}
+	openedExpired := fresh.terminalAction(expired)
+	if !openedExpired.OK {
+		t.Fatalf("expired backend fixture open: %+v", openedExpired)
+	}
+	expired.SessionID, expired.SessionEpoch = openedExpired.SessionID, openedExpired.SessionEpoch
+	expiredEntry, err := fresh.sessions.get(expired, expired.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	expiredName := expiredEntry.terminal.name
+	t.Cleanup(func() { _ = stopScopedTerminalBackend(expiredName) })
+	if err := stopScopedTerminalBackend(expiredName); err != nil {
+		t.Fatalf("could not simulate PID1 backend deadline: %v", err)
+	}
+	expired.Action = "terminal_close"
+	if closed := fresh.terminalAction(expired); !closed.OK {
+		t.Fatalf("close of already-ended PID1 scope not reconciled: %+v", closed)
+	}
+	if _, err := os.Stat(filepath.Join(state, "terminal-sessions", expired.SessionID+".json")); !os.IsNotExist(err) {
+		t.Fatalf("dead-backend record survived verified close: %v", err)
+	}
+	t.Log("real scope, service reattach, principal isolation, missing-timer detached close, stale GC, expired-backend close PASS")
 }

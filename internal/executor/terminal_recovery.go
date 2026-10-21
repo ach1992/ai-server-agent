@@ -328,6 +328,27 @@ func (s *Server) readTerminalRecord(req Request) (terminalRecord, error) {
 // pendingOnly permits an authenticated owner to reconcile an incomplete
 // creation after a brand-new Executor has lost its volatile broker.
 func (s *Server) readOwnedTerminalRecord(req Request, pendingOnly bool) (terminalRecord, error) {
+	rec, err := s.readOwnedTerminalRecordIdentity(req)
+	if err != nil {
+		return rec, err
+	}
+	if pendingOnly {
+		if rec.Lifecycle != "pending" || !validTerminalEpoch(rec.Epoch) ||
+			!validTerminalPendingSocket(rec, s.cfg.StateDir) {
+			return terminalRecord{}, errSessionNotFound
+		}
+		return rec, nil
+	}
+	if rec.Lifecycle == "pending" {
+		return rec, errTerminalPending
+	}
+	return s.verifyActiveTerminalRecordBackend(rec)
+}
+
+// Read only the original root-controlled record identity and authorization.
+// Detached ACTIVE cleanup must work without any surviving socket, client,
+// timer, or even an unexpired lease; those are checked only when reattaching.
+func (s *Server) readOwnedTerminalRecordIdentity(req Request) (terminalRecord, error) {
 	var rec terminalRecord
 	path, err := s.terminalRecordPath(req.SessionID)
 	if err != nil {
@@ -357,16 +378,10 @@ func (s *Server) readOwnedTerminalRecord(req Request, pendingOnly bool) (termina
 		(rec.Lifecycle != "" && rec.Lifecycle != "active" && rec.Lifecycle != "pending") {
 		return terminalRecord{}, errSessionNotFound
 	}
-	if pendingOnly {
-		if rec.Lifecycle != "pending" || !validTerminalEpoch(rec.Epoch) ||
-			!validTerminalPendingSocket(rec, s.cfg.StateDir) {
-			return terminalRecord{}, errSessionNotFound
-		}
-		return rec, nil
-	}
-	if rec.Lifecycle == "pending" {
-		return rec, errTerminalPending
-	}
+	return rec, nil
+}
+
+func (s *Server) verifyActiveTerminalRecordBackend(rec terminalRecord) (terminalRecord, error) {
 	if rec.Pane == "" || rec.Columns < 20 || rec.Columns > 240 || rec.Rows < 5 || rec.Rows > 80 {
 		return terminalRecord{}, errSessionNotFound
 	}
@@ -383,11 +398,11 @@ func (s *Server) readOwnedTerminalRecord(req Request, pendingOnly bool) (termina
 	if !filepath.IsAbs(rec.SocketDir) || !withinPath(base, rec.SocketDir) || !strings.HasPrefix(filepath.Base(rec.SocketDir), ".asa-tmux-") || rec.SocketDir == base {
 		return terminalRecord{}, errors.New("terminal_socket_identity_invalid")
 	}
-	info, err = os.Lstat(rec.SocketDir)
+	info, err := os.Lstat(rec.SocketDir)
 	if err != nil {
 		return rec, errors.New("terminal_runtime_missing")
 	}
-	st, ok = info.Sys().(*syscall.Stat_t)
+	st, ok := info.Sys().(*syscall.Stat_t)
 	expectedUID := uint32(0)
 	if fixtureWorkerBackend {
 		expectedUID = s.workerUID
@@ -412,6 +427,45 @@ func (s *Server) readOwnedTerminalRecord(req Request, pendingOnly bool) (termina
 	}
 	return rec, nil
 }
+
+// An ACTIVE scope can outlive the Executor or lose its independent timer.
+// Reconnect must fail closed in that state, but the verified original owner
+// still needs an exact, auditable cleanup without creating a new control
+// client. Unlike I/O, this cleanup-only path cannot rely on an attachment
+// epoch that was intentionally volatile across Executor restarts. Principal,
+// class, workspace, root authority, opaque ID and root record are mandatory.
+func (s *Server) closeDetachedActiveTerminal(req Request) Response {
+	s.terminalAdmissionMu.Lock()
+	defer s.terminalAdmissionMu.Unlock()
+	rec, err := s.readOwnedTerminalRecordIdentity(req)
+	if err != nil || rec.Lifecycle != "active" || !rec.Scoped ||
+		!validTerminalPendingSocket(rec, s.cfg.StateDir) || !validTmuxPaneID(rec.Pane) {
+		return terminalError("session_not_found", errSessionNotFound)
+	}
+	if blocked := s.beginActionAudit(req, req.Action, auditMode(req.Root), rec.ID, "developer_terminal"); blocked != nil {
+		return *blocked
+	}
+	started := time.Now()
+	stop := stopScopedTerminalBackend
+	if s.terminalScopeStopTestHook != nil {
+		stop = s.terminalScopeStopTestHook
+	}
+	err = stop(rec.Name)
+	if err == nil {
+		err = s.deleteTerminalRecord(rec.ID)
+	}
+	if err == nil {
+		removeVerifiedPendingSocketDir(rec.SocketDir)
+	}
+	result := Response{OK: err == nil, SessionID: rec.ID, SessionEpoch: req.SessionEpoch}
+	if err != nil {
+		result.Error = "detached terminal exact cleanup unverified: " + err.Error()
+		result.ErrorCode = "terminal_control_unknown"
+		result.ErrorClass = "state"
+	}
+	return s.finishActionAudit(req, req.Action, auditMode(req.Root), rec.ID, "developer_terminal", started, result)
+}
+
 func (s *Server) deleteTerminalRecord(id string) error {
 	path, err := s.terminalRecordPath(id)
 	if err != nil {
