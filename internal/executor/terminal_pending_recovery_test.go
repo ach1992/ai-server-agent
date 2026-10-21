@@ -17,7 +17,8 @@ func pendingRecoveryFixture(t *testing.T, privileged bool) (*Server, Request, *s
 	// The Unix domain socket address has a strict Linux 107-byte limit.
 	// An intentionally short private test state path still exercises all
 	// the production namespace checks, without touching installed state.
-	state, err := os.MkdirTemp("/tmp", "asa-pending-")
+	// Respect the test runner TMPDIR while preserving a short socket path.
+	state, err := os.MkdirTemp("", "asa-pending-")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -264,6 +265,12 @@ func TestPendingScopeExpiryAndConcurrentAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec.ExpiresAt = time.Now().Add(-time.Minute)
+	// v2 binds the idle expiry to an immutable opening timestamp. This is
+	// an aged, expired, but otherwise internally valid fixture, so the
+	// reaper must actually attempt the exact protected scope stop.
+	if rec.Version == 2 {
+		rec.CreatedAt = rec.ExpiresAt.Add(-maxStdioSessionAge)
+	}
 	expired, err := json.Marshal(rec)
 	if err != nil {
 		t.Fatal(err)
@@ -374,5 +381,104 @@ func TestPendingScopeCleanupRejectsSocketSymlink(t *testing.T) {
 	b, err := os.ReadFile(marker)
 	if err != nil || string(b) != "preserve" {
 		t.Fatalf("followed unexpected symlink: data=%q err=%v", b, err)
+	}
+}
+
+// Corrupted v2 wall-clock chronology must not become permission to stop
+// a scope or silently free its protected reservation. This is the
+// counterpart of the valid-but-expired reaper fixture above.
+func TestInvalidV2ExpiryChronologyRemainsReserved(t *testing.T) {
+	s, req, _ := pendingRecoveryFixture(t, false)
+	path, err := s.terminalRecordPath(req.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec terminalRecord
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Version != 2 {
+		t.Fatalf("expected versioned root scope fixture, got %d", rec.Version)
+	}
+	rec.ExpiresAt = rec.CreatedAt.Add(-time.Minute) // forged invalid chronology
+	forged, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, forged, 0600); err != nil {
+		t.Fatal(err)
+	}
+	attempts := 0
+	count, err := s.terminalRecordCountWithStop(func(string) error { attempts++; return nil })
+	if err != nil || count != 1 || attempts != 0 {
+		t.Fatalf("invalid v2 record authorized scope stop or freed capacity: count=%d calls=%d err=%v", count, attempts, err)
+	}
+}
+
+// Detached ACTIVE scopes must remain explicitly closable by their original
+// authenticated owner even if their PID1 timer, backend socket or Control Mode
+// has disappeared. Reconnect deliberately fails closed in those cases; it
+// must not strand a live privileged scope with no cleanup API for an hour.
+func TestDetachedActiveTerminalOwnerExactCloseAfterMissingTimer(t *testing.T) {
+	for _, root := range []bool{false, true} {
+		t.Run(map[bool]string{false: "worker", true: "root"}[root], func(t *testing.T) {
+			original, owner, entry := pendingRecoveryFixture(t, root)
+			entry.terminal.pane = "%0"
+			if err := original.persistTerminalRecord(owner, entry); err != nil {
+				t.Fatal(err)
+			}
+			name := entry.terminal.name
+			fresh := &Server{cfg: original.cfg, workerUID: original.workerUID, workerGID: original.workerGID,
+				sessions: newStdioSessionBroker(), audit: original.audit}
+			attempts := 0
+			fresh.terminalScopeStopTestHook = func(generation string) error {
+				attempts++
+				if generation != name {
+					t.Fatalf("wrong exact scope stop: %s", generation)
+				}
+				if attempts == 1 {
+					return errors.New("first PID1 stop unknown")
+				}
+				return nil
+			}
+			owner.Action = "terminal_close"
+			for _, change := range []func(*Request){
+				func(r *Request) { r.PrincipalID = "other-owner" },
+				func(r *Request) { r.PrincipalClass = "other-class" },
+				func(r *Request) { r.Workspace = filepath.Dir(r.Workspace) },
+				func(r *Request) { r.Root = !r.Root; r.Approval = r.Root },
+			} {
+				wrong := owner
+				change(&wrong)
+				if got := fresh.terminalAction(wrong); got.OK || got.ErrorCode != "session_not_found" {
+					t.Fatalf("foreign owner closed detached ACTIVE: %+v", got)
+				}
+			}
+			if attempts != 0 {
+				t.Fatal("untrusted close triggered privileged stop")
+			}
+			got := fresh.terminalAction(owner)
+			if got.OK || got.ErrorCode != "terminal_control_unknown" || attempts != 1 {
+				t.Fatalf("unknown exact stop incorrectly freed record: %+v calls=%d", got, attempts)
+			}
+			if _, err := fresh.readOwnedTerminalRecord(owner, false); errors.Is(err, errSessionNotFound) {
+				t.Fatal("unknown close removed durable ACTIVE record")
+			}
+			got = fresh.terminalAction(owner)
+			if !got.OK || attempts != 2 {
+				t.Fatalf("retry failed exact orphan cleanup: %+v calls=%d", got, attempts)
+			}
+			path, err := fresh.terminalRecordPath(owner.SessionID)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err = os.Stat(path); !errors.Is(err, os.ErrNotExist) {
+				t.Fatalf("verified stop left durable reservation: %v", err)
+			}
+		})
 	}
 }

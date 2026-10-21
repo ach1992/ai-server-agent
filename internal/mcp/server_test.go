@@ -523,7 +523,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 				tool.Annotations.OpenWorldHint == nil || !*tool.Annotations.OpenWorldHint {
 				t.Fatal("browser_e2e must disclose open-world/action-capable behavior")
 			}
-			for _, label := range []string{"same pinned Chromium, exclusive admission, TLS/resource limits", "shared-by-default or isolated ephemeral profile", "one browser execution", "not a cross-call live session", "refs expire on navigation"} {
+			for _, label := range []string{"same pinned Chromium", "shared profile is exclusive", "isolated sessions/runs have bounded concurrent admission", "TLS/resource limits remain", "one browser execution", "not a cross-call live session", "refs expire on navigation"} {
 				if !strings.Contains(tool.Description, label) {
 					t.Fatalf("browser_e2e description missing %q", label)
 				}
@@ -545,7 +545,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			if tool.Annotations == nil || tool.Annotations.DestructiveHint == nil || !*tool.Annotations.DestructiveHint || tool.Annotations.OpenWorldHint == nil || !*tool.Annotations.OpenWorldHint {
 				t.Fatal("browser_run must advertise destructive/open-world hints")
 			}
-			if !strings.Contains(tool.Description, "HTTPS certificate validation is enabled by default") || !strings.Contains(tool.Description, "shared persistent profile by default") || !strings.Contains(tool.Description, "profile_mode=isolated") {
+			if !strings.Contains(tool.Description, "HTTPS certificate validation is enabled by default") || !strings.Contains(tool.Description, "shared exclusive persistent profile by default") || !strings.Contains(tool.Description, "profile_mode=isolated") {
 				t.Fatalf("browser_run must disclose TLS/shared-profile semantics: %q", tool.Description)
 			}
 			in, err := json.Marshal(tool.InputSchema)

@@ -135,7 +135,7 @@ type BrowserSetupInput struct {
 	Approval bool `json:"approval,omitempty" jsonschema:"Set true to allow downloading the private browser runtime and installing required shared libraries"`
 }
 type BrowserRunInput struct {
-	ProfileMode       string `json:"profile_mode,omitempty" jsonschema:"shared (default) or isolated ephemeral cookies/localStorage; same global exclusive Browser admission"`
+	ProfileMode       string `json:"profile_mode,omitempty" jsonschema:"shared (default, exclusive persistent profile) or isolated ephemeral cookies/localStorage with bounded concurrent Browser slots"`
 	Script            string `json:"script" jsonschema:"JavaScript statements using the pre-created Playwright browser, context, and page variables; maximum 131072 raw bytes"`
 	TimeoutMS         int64  `json:"timeout_ms,omitempty" jsonschema:"Browser execution timeout in milliseconds; default 90000, maximum 300000"`
 	IgnoreHTTPSErrors bool   `json:"ignore_https_errors,omitempty" jsonschema:"Explicit scoped exception for local/self-signed development; default false preserves normal HTTPS certificate validation"`

@@ -449,3 +449,159 @@ func TestWorkerHomeCannotFallBackToWorkspace(t *testing.T) {
 		t.Fatal("stateful HOME within project workspace accepted")
 	}
 }
+
+// Session age is no longer a fixed one-hour cutoff for connected LSP/DAP/
+// Browser consumers. Only the exact authenticated principal/workspace may
+// renew, and Terminal keeps its separately PID1-owned hard lifetime.
+func TestNonterminalAuthenticatedIdleLeaseRenewalAndPrincipalIsolation(t *testing.T) {
+	s, owner, workspace := testStdioBroker(t)
+	prior := time.Now().Add(-maxStdioSessionAge + 5*time.Minute)
+	entry := &stdioSession{
+		id: "stdio_idle_test", kind: "lsp",
+		ownerID: owner.PrincipalID, ownerClass: owner.PrincipalClass,
+		workspace: workspace, lastAuthenticatedAction: prior,
+		expiry: time.NewTimer(maxStdioSessionAge),
+	}
+	defer entry.expiry.Stop()
+	if err := s.sessions.reserve(entry); err != nil {
+		t.Fatal(err)
+	}
+	defer s.sessions.remove(entry)
+
+	other := owner
+	other.PrincipalID = "unrelated-principal"
+	if _, err := s.sessions.get(other, entry.id); !errors.Is(err, errSessionNotFound) {
+		t.Fatalf("cross-principal lease lookup succeeded: %v", err)
+	}
+	if !entry.lastAuthenticatedAction.Equal(prior) {
+		t.Fatal("cross-principal lookup extended the idle lease")
+	}
+	other = owner
+	other.Workspace = t.TempDir()
+	if _, err := s.sessions.get(other, entry.id); !errors.Is(err, errSessionNotFound) {
+		t.Fatalf("cross-workspace lease lookup succeeded: %v", err)
+	}
+	if !entry.lastAuthenticatedAction.Equal(prior) {
+		t.Fatal("cross-workspace lookup extended the idle lease")
+	}
+	if _, err := s.sessions.get(owner, entry.id); err != nil {
+		t.Fatal(err)
+	}
+	if !entry.lastAuthenticatedAction.After(prior) {
+		t.Fatal("verified same-owner session access failed to renew the idle lease")
+	}
+	if !entry.nonterminalIdleLeaseStillValid(entry.lastAuthenticatedAction.Add(30 * time.Minute)) {
+		t.Fatal("active nonterminal session was treated as expired")
+	}
+	if entry.nonterminalIdleLeaseStillValid(entry.lastAuthenticatedAction.Add(maxStdioSessionAge + time.Nanosecond)) {
+		t.Fatal("unattended nonterminal process outlived its bounded idle lease")
+	}
+}
+
+// Exercising the actual expiry path guards against a fixed-age timer
+// stopping a recently used subprocess and verifies that genuine inactivity
+// still triggers pinned process-group cleanup and admission release.
+func TestNonterminalIdleExpiryKeepsActiveChildButStopsAbandonedChild(t *testing.T) {
+	s, owner, workspace := testStdioBroker(t)
+	id, err := s.workerStdioSession(owner, "lsp", workspace, "/bin/cat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.sessions.close(owner, id)
+	entry, err := s.sessions.get(owner, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.expireProcessSession(entry)
+	if err := s.workerStdioWrite(owner, id, []byte("still-active\n")); err != nil {
+		t.Fatalf("active authorized session was prematurely stopped: %v", err)
+	}
+	entry.mu.Lock()
+	entry.lastAuthenticatedAction = time.Now().Add(-2 * maxStdioSessionAge)
+	entry.mu.Unlock()
+	s.expireProcessSession(entry)
+	waitForStdioExit(t, entry)
+	if _, err := s.sessions.get(owner, id); !errors.Is(err, errSessionNotFound) {
+		t.Fatalf("idle-expired session was not removed after verified cleanup: %v", err)
+	}
+}
+
+func TestTerminalIdleRenewalNeverBypassesPID1HardLimit(t *testing.T) {
+	s, owner, workspace := testStdioBroker(t)
+	prior := time.Now().Add(-2 * maxStdioSessionAge)
+	entry := &stdioSession{
+		id: "stdio_terminal_fixed", kind: "terminal",
+		ownerID: owner.PrincipalID, ownerClass: owner.PrincipalClass,
+		workspace: workspace, lastAuthenticatedAction: prior,
+		terminal: &tmuxTerminalState{}, expiry: time.NewTimer(maxStdioSessionAge),
+	}
+	defer entry.expiry.Stop()
+	if err := s.sessions.reserve(entry); err != nil {
+		t.Fatal(err)
+	}
+	defer s.sessions.remove(entry)
+	if _, err := s.sessions.get(owner, entry.id); err != nil {
+		t.Fatal(err)
+	}
+	if !entry.lastAuthenticatedAction.Equal(prior) {
+		t.Fatal("terminal renewal pretended to extend unrenewable PID1 scope")
+	}
+	if entry.nonterminalIdleLeaseStillValid(time.Now()) {
+		t.Fatal("terminal scope hard expiry was incorrectly bypassed")
+	}
+}
+
+func TestNonterminalExpiredAccessCannotReviveProcess(t *testing.T) {
+	s, req, workspace := testStdioBroker(t)
+	id, err := s.workerStdioSession(req, "lsp", workspace, "/bin/cat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := s.sessions.get(req, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.sessions.close(req, id)
+	e.mu.Lock()
+	e.lastAuthenticatedAction = time.Now().Add(-maxStdioSessionAge - time.Second)
+	e.mu.Unlock()
+	if _, err := s.sessions.get(req, id); !errors.Is(err, errSessionStopped) {
+		t.Fatalf("expired lease resurrected by authenticated request: %v", err)
+	}
+	wrong := req
+	wrong.PrincipalID = "not-original"
+	if _, err := s.sessions.get(wrong, id); !errors.Is(err, errSessionNotFound) {
+		t.Fatalf("expired lease leaked existence cross-principal: %v", err)
+	}
+	s.expireProcessSession(e)
+	waitForStdioExit(t, e)
+}
+
+func TestNonterminalLateAuthenticatedCloseReclaimsExpiredProcess(t *testing.T) {
+	s, owner, workspace := testStdioBroker(t)
+	id, err := s.workerStdioSession(owner, "lsp", workspace, "/bin/cat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := s.sessions.get(owner, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.mu.Lock()
+	e.lastAuthenticatedAction = time.Now().Add(-maxStdioSessionAge - time.Second)
+	e.mu.Unlock()
+	if _, err := s.sessions.get(owner, id); !errors.Is(err, errSessionStopped) {
+		t.Fatalf("expired access unexpectedly accepted: %v", err)
+	}
+	foreign := owner
+	foreign.PrincipalID = "cross-principal"
+	if err := s.workerStdioClose(foreign, id); !errors.Is(err, errSessionNotFound) {
+		t.Fatalf("expired close crossed principal boundary: %v", err)
+	}
+	if err := s.workerStdioClose(owner, id); err != nil {
+		t.Fatalf("late authorized cleanup rejected: %v", err)
+	}
+	if _, err := s.sessions.get(owner, id); !errors.Is(err, errSessionNotFound) {
+		t.Fatalf("verified terminal cleanup retained expired broker ID: %v", err)
+	}
+}
