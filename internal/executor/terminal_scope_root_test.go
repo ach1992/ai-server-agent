@@ -256,6 +256,10 @@ func TestApprovedWorkerTmuxScopeSurvivesBrokerStop(t *testing.T) {
 		t.Fatal("new record did not persist protected scope provenance")
 	}
 	oldRecord.ExpiresAt = time.Now().Add(-time.Minute)
+	// v2 persistence binds expiry to an immutable creation timestamp.
+	// Simulate an aged but internally coherent record, not a forged lease
+	// whose expiry predates its creation and must remain fail-closed.
+	oldRecord.CreatedAt = oldRecord.ExpiresAt.Add(-maxStdioSessionAge)
 	body, err = json.Marshal(oldRecord)
 	if err != nil {
 		t.Fatal(err)
