@@ -354,6 +354,11 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 	cmd.Stderr = out
 	var browserGroup *dapCgroup
 	browserGroupFD := -1
+	browserScratch := ""
+	if req.AuditAction == "browser_run" && s.browserNodeBinary == "" {
+		browserScratch = "run." + strings.TrimPrefix(browserReservation, "browser_")
+		cmd.Env = append(cmd.Env, "ASA_BROWSER_RUN_SCRATCH="+browserScratch)
+	}
 	// Only the pinned root Executor production path can launch Chromium.
 	// Playwright places Chromium in its own process group, so a Node PGID
 	// terminator cannot safely authorize the next profile admission.
@@ -425,6 +430,9 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 			} else {
 				cleanupErr = browserGroup.abortBeforeLaunch()
 			}
+		}
+		if cleanupErr == nil && browserScratch != "" {
+			cleanupErr = s.browserReclaimNamedScratch(browserScratch)
 		}
 		if cleanupErr != nil {
 			browserTerminationProven = false

@@ -167,10 +167,22 @@ func browserScratchName(name string) bool {
 			break
 		}
 	}
-	if prefix == "" || len(name) != len(prefix)+6 {
+	if prefix == "" {
 		return false
 	}
-	for _, c := range name[len(prefix):] {
+	suffix := name[len(prefix):]
+	if len(suffix) == 32 { // Executor-bound random session/run token
+		for _, c := range suffix {
+			if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+				return false
+			}
+		}
+		return true
+	}
+	if len(suffix) != 6 { // Legacy mktemp scratch names
+		return false
+	}
+	for _, c := range suffix {
 		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9') {
 			return false
 		}
@@ -179,6 +191,22 @@ func browserScratchName(name string) bool {
 }
 
 func (s *Server) browserReclaimScratch() error {
+	return s.browserReclaimScratchMatching("")
+}
+
+// Exact per-session/run reclamation follows verified whole-cgroup termination.
+func (s *Server) browserReclaimNamedScratch(name string) error {
+	if !browserScratchName(name) || !(strings.HasPrefix(name, "asa-profile-") && len(name) == len("asa-profile-")+32 ||
+		strings.HasPrefix(name, "run.") && len(name) == len("run.")+32) {
+		return errors.New("invalid Executor Browser scratch identity")
+	}
+	if s.cfg.StateDir == "" {
+		return errors.New("Executor Browser scratch root unavailable")
+	}
+	return s.browserReclaimScratchMatching(name)
+}
+
+func (s *Server) browserReclaimScratchMatching(exact string) error {
 	if s.cfg.StateDir == "" {
 		return nil
 	} // zero-value standalone lease tests
@@ -215,7 +243,13 @@ func (s *Server) browserReclaimScratch() error {
 		return errors.New("Browser scratch reclamation needs operator reconciliation: over 512 entries")
 	}
 	for _, entry := range entries {
+		if exact != "" && entry.Name() != exact {
+			continue
+		}
 		if !entry.IsDir() || !browserScratchName(entry.Name()) {
+			if exact != "" {
+				return errors.New("exact Browser scratch is not a recognized directory")
+			}
 			continue
 		}
 		child, err := root.Lstat(entry.Name())
@@ -227,6 +261,9 @@ func (s *Server) browserReclaimScratch() error {
 		}
 		stat, ok := child.Sys().(*syscall.Stat_t)
 		if !child.IsDir() || child.Mode()&os.ModeSymlink != 0 || !ok || stat.Uid != s.workerUID {
+			if exact != "" {
+				return errors.New("exact Browser scratch ownership is unverified")
+			}
 			continue
 		}
 		if err := root.RemoveAll(entry.Name()); err != nil {

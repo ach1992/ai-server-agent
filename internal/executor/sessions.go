@@ -83,6 +83,8 @@ type stdioSession struct {
 	browser                 *browserStdioState       // managed Browser consumer; never a second process broker
 	browserLease            *browserSessionAdmission // release only after verified process cleanup, before broker deletion
 	browserGroup            *dapCgroup               // original Node + detached Chromium; cgroup.kill/empty proof required before lease release
+	browserScratchName      string                   // exact Executor-issued isolated-profile basename
+	browserScratchCleanup   func() error             // rooted exact removal only after whole-cgroup proof
 }
 
 type stdioSessionBroker struct {
@@ -452,6 +454,11 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 		entry.browser = &browserStdioState{}
 		entry.browserLease = &s.browserAdmission
 		entry.browserGroup = containment
+		if containment != nil && req.BrowserProfileMode == "isolated" {
+			entry.browserScratchName = "asa-profile-" + hex.EncodeToString(nonce[:])
+			name := entry.browserScratchName
+			entry.browserScratchCleanup = func() error { return s.browserReclaimNamedScratch(name) }
+		}
 	}
 	if err := s.reserveProcessSession(entry); err != nil {
 		return "", err
@@ -548,6 +555,9 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 		// standalone JS runner's own global sweep, which could otherwise
 		// delete a different *live* isolated Browser's profile or trace.
 		cmd.Env = append(cmd.Env, "ASA_BROWSER_RECLAIM_BY_EXECUTOR=1")
+		if entry.browserScratchName != "" {
+			cmd.Env = append(cmd.Env, "ASA_BROWSER_SESSION_PROFILE="+entry.browserScratchName)
+		}
 	}
 	if rootControlledWorkerTmux {
 		// Do not supply worker-writable HOME/XDG paths to the root tmux server.
@@ -727,6 +737,13 @@ func (e *stdioSession) wait() {
 		cleanupErr = errors.Join(cleanupErr, groupErr)
 		if groupErr == nil {
 			e.browserGroup = nil
+			if e.browserScratchCleanup != nil {
+				if err := e.browserScratchCleanup(); err != nil {
+					cleanupErr = errors.Join(cleanupErr, fmt.Errorf("browser_profile_cleanup_unverified: %w", err))
+				} else {
+					e.browserScratchCleanup = nil
+				}
+			}
 		}
 	}
 	// Only after the direct child's process group has been reconciled may
@@ -905,6 +922,13 @@ func (b *stdioSessionBroker) removeAndStop(entry *stdioSession) error {
 					return fmt.Errorf("browser_containment_cleanup_unknown: %w", err)
 				}
 				entry.browserGroup = nil
+			}
+			if entry.browserScratchCleanup != nil {
+				if err := entry.browserScratchCleanup(); err != nil {
+					entry.stopMu.Unlock()
+					return fmt.Errorf("browser_profile_cleanup_unverified: %w", err)
+				}
+				entry.browserScratchCleanup = nil
 			}
 			// Retry the pinned debuggee cleanup as part of reconciliation;
 			// a prior failure is never turned into clean termination merely

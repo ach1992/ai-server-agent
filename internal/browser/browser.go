@@ -776,7 +776,13 @@ cleanup_cache() {
   rm -rf --     "$data/profile/Default/Cache"     "$data/profile/Default/Code Cache"     "$data/profile/Default/GPUCache"     "$data/profile/GPUCache"     "$data/profile/ShaderCache"     "$data/profile/GrShaderCache"     "$data/profile/GraphiteDawnCache"     "$data/profile/DawnGraphiteCache"     "$data/profile/DawnWebGPUCache"
 }
 if [ "$profile_mode" = shared ]; then cleanup_cache; fi
-run_tmp=$(mktemp -d "$data/tmp/run.XXXXXX")
+if [ -n "${ASA_BROWSER_RUN_SCRATCH:-}" ]; then
+  [[ "$ASA_BROWSER_RUN_SCRATCH" =~ ^run\.[0-9a-f]{32}$ ]] || exit 2
+  run_tmp="$data/tmp/$ASA_BROWSER_RUN_SCRATCH"
+  mkdir -m 0700 -- "$run_tmp"
+else
+  run_tmp=$(mktemp -d "$data/tmp/run.XXXXXX")
+fi
 if [ "$profile_mode" = isolated ]; then
   profile="$run_tmp/isolated-profile"
   export TMPDIR="$run_tmp"
@@ -786,8 +792,10 @@ runner="$run_tmp/runner.mjs"
 downloads="$run_tmp/downloads"
 mkdir "$downloads"
 cleanup() {
+  if [ -z "${ASA_BROWSER_RUN_SCRATCH:-}" ]; then
   rm -rf -- "$run_tmp"
   if [ "$profile_mode" = shared ]; then cleanup_cache || true; fi
+  fi
 }
 trap cleanup EXIT
 printf '%%s' %s | base64 -d > "$body"

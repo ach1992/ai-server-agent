@@ -101,7 +101,7 @@ func TestApprovedConcurrentRealIsolatedChromiumProfiles(t *testing.T) {
 	launch := func() *worker {
 		t.Helper()
 		cmd := exec.CommandContext(ctx, filepath.Join(engine, "node/bin/node"), script)
-		cmd.Env = append(os.Environ(), "PLAYWRIGHT_BROWSERS_PATH="+filepath.Join(engine, "browsers"), "ASA_BROWSER_RECLAIM_BY_EXECUTOR=1")
+		cmd.Env = append(os.Environ(), "PLAYWRIGHT_BROWSERS_PATH="+filepath.Join(engine, "browsers"), "ASA_BROWSER_RECLAIM_BY_EXECUTOR=1", "ASA_BROWSER_SESSION_PROFILE="+fmt.Sprintf("asa-profile-%032x", len(instances)+1))
 		in, err := cmd.StdinPipe()
 		if err != nil {
 			t.Fatal(err)
@@ -187,22 +187,26 @@ func TestApprovedConcurrentRealIsolatedChromiumProfiles(t *testing.T) {
 				still++
 			}
 		}
-		if still != 1 {
-			t.Fatalf("first close must retain only still-live second profile, got %d", still)
+		if still != 2 {
+			t.Fatalf("standalone worker must retain both Executor-owned profiles until cgroup proof, got %d", still)
 		}
 	}
 	closeWorker(second)
+	retained := 0
 	if entries, err := os.ReadDir(downloads); err != nil {
 		t.Fatal(err)
 	} else {
 		for _, e := range entries {
 			if e.IsDir() && strings.HasPrefix(e.Name(), "asa-profile-") {
-				t.Fatalf("profile leaked after exact controlled close: %s", e.Name())
+				retained++
 			}
 		}
+	}
+	if retained != 2 {
+		t.Fatalf("Executor-owned isolated profiles reclaimed before cgroup proof: retained=%d", retained)
 	}
 	if b, err := os.ReadFile(filepath.Join(shared, "sentinel")); err != nil || string(b) != "untouched" {
 		t.Fatalf("test shared profile changed: %q %v", b, err)
 	}
-	t.Logf("REAL_CHROMIUM_CONCURRENT_ISOLATION_PASS host=%s profiles=2; both sessions maintained independent localStorage/cookies and cleaned precisely", hostname)
+	t.Logf("REAL_CHROMIUM_CONCURRENT_ISOLATION_PASS host=%s profiles=2; both sessions maintained independent localStorage/cookies; worker retained profiles for Executor cleanup", hostname)
 }

@@ -124,6 +124,38 @@ func TestBrowserScratchExclusiveFirstAdmissionAndNoSymlinkEscape(t *testing.T) {
 	}
 }
 
+func TestBrowserExactScratchDoesNotReclaimConcurrentPeer(t *testing.T) {
+	s, _, _ := browserAuditFixture(t)
+	s.cfg.StateDir = t.TempDir()
+	tmp := filepath.Join(s.cfg.StateDir, "runtime", "browser", "tmp")
+	if err := os.MkdirAll(tmp, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := s.browserAcquire("live-peer", "isolated"); err != nil || !ok {
+		t.Fatalf("reserve live peer: %t %v", ok, err)
+	}
+	defer s.browserAdmission.release("live-peer")
+	owned := "run." + strings.Repeat("a", 32)
+	peer := "asa-profile-" + strings.Repeat("b", 32)
+	for _, name := range []string{owned, peer} {
+		if err := os.Mkdir(filepath.Join(tmp, name), 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	if err := s.browserReclaimNamedScratch(owned); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := os.Lstat(filepath.Join(tmp, owned)); !os.IsNotExist(err) {
+		t.Fatalf("exact scratch not reclaimed: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(tmp, peer)); err != nil {
+		t.Fatalf("unrelated live Browser profile removed: %v", err)
+	}
+	if err := s.browserReclaimNamedScratch("../untrusted"); err == nil {
+		t.Fatal("untrusted scratch identity accepted")
+	}
+}
+
 func TestBrowserTwoRealBrokerIsolatedSessions(t *testing.T) {
 	s, owner, _ := browserAuditFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 12*time.Second)

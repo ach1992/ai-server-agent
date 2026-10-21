@@ -715,6 +715,53 @@ func TestBrowserRunCommandUsesEphemeralRunnerAndCleansIt(t *testing.T) {
 	}
 }
 
+func TestBrowserExecutorOwnedOneShotScratchSurvivesWrapperExit(t *testing.T) {
+	m := testBrowserManager(t)
+	for _, dir := range []string{
+		filepath.Join(m.engineDir(), "node", "bin"),
+		filepath.Join(m.dataDir(), "tmp"),
+	} {
+		if err := os.MkdirAll(dir, 0700); err != nil {
+			t.Fatal(err)
+		}
+	}
+	node := filepath.Join(m.engineDir(), "node", "bin", "node")
+	if err := os.WriteFile(node, []byte("#!/bin/sh\nsetsid /bin/sleep 15 </dev/null >/dev/null 2>&1 &\nprintf '%s\\n' \"$!\" > \"$DETACHED_PID_PATH\"\nprintf 'node-completed' > node-result\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	name := "run." + strings.Repeat("a", 32)
+	cmd := exec.Command("/bin/bash", "--noprofile", "--norc", "-s")
+	cmd.Stdin = strings.NewReader(m.runCommand("console.log('kept')", false, "isolated"))
+	pidMarker := filepath.Join(m.dataDir(), "detached.pid")
+	cmd.Env = append(os.Environ(), "ASA_BROWSER_RUN_SCRATCH="+name, "DETACHED_PID_PATH="+pidMarker)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("production-generated wrapper: %v %s", err, output)
+	}
+	pidData, err := os.ReadFile(pidMarker)
+	if err != nil {
+		t.Fatal(err)
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(pidData)))
+	if err != nil || pid <= 0 {
+		t.Fatalf("detached descendant identity invalid: %q %v", pidData, err)
+	}
+	defer syscall.Kill(pid, syscall.SIGKILL)
+	if err := syscall.Kill(pid, 0); err != nil {
+		t.Fatalf("detached descendant not live at wrapper exit: %v", err)
+	}
+	if pg, err := syscall.Getpgid(pid); err != nil || pg != pid {
+		t.Fatalf("descendant process-group independence unproven: pgid=%d err=%v", pg, err)
+	}
+	runDir := filepath.Join(m.dataDir(), "tmp", name)
+	for _, entry := range []string{"body.js", "runner.mjs", "downloads", "node-result"} {
+		if _, err := os.Stat(filepath.Join(runDir, entry)); err != nil {
+			t.Fatalf("wrapper deleted Executor-owned scratch before kernel stop: %s: %v", entry, err)
+		}
+	}
+	// This fixture does not own a kernel cgroup. The enclosing temporary test
+	// directory is removed only after the simulated worker has exited.
+}
+
 func TestBrowserRunCommandStopsOversizedDisposableData(t *testing.T) {
 	m := testBrowserManager(t)
 	for _, dir := range []string{
