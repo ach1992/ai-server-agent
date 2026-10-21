@@ -140,7 +140,6 @@ func TestApprovedRootBrowserDetachedChromiumCrashRetainsAdmission(t *testing.T) 
 	allow := make(chan struct{})
 	var unblock sync.Once
 	t.Cleanup(func() { unblock.Do(func() { close(allow) }) })
-	s.browserContainmentBeforeKillTestHook = func() error { close(blocked); <-allow; return nil }
 	opened := s.browserSessionAction(context.Background(), req)
 	if !opened.OK {
 		t.Fatalf("root-contained Playwright open: %+v", opened)
@@ -161,6 +160,9 @@ func TestApprovedRootBrowserDetachedChromiumCrashRetainsAdmission(t *testing.T) 
 	entry.mu.Lock()
 	parentPID, pin, group := entry.pid, entry.pidPin, entry.browserGroup
 	entry.mu.Unlock()
+	// Install the deterministic barrier only AFTER the actual Playwright
+	// ready handshake; a launch failure must still be free to clean up.
+	group.beforeKillTestHook = func() error { close(blocked); <-allow; return nil }
 	if pin == nil || group == nil || !group.verified || !group.containsPID(parentPID) || !strings.Contains(group.path, "/ai-server-agent-executor.service/asa-browser-") {
 		t.Fatalf("original Node not atomically contained: pid=%d, group=%+v", parentPID, group)
 	}
@@ -247,7 +249,7 @@ func TestApprovedRootBrowserOneShotDetachedChildAfterNodeExit(t *testing.T) {
 	allow := make(chan struct{})
 	var unblock sync.Once
 	t.Cleanup(func() { unblock.Do(func() { close(allow) }) })
-	s.browserContainmentBeforeKillTestHook = func() error { close(blocked); <-allow; return nil }
+	s.browserKillTestHook = func() error { close(blocked); <-allow; return nil }
 	marker := filepath.Join(req.Workspace, "oneshot.pid")
 	profile := filepath.Join(tmp, "asa-profile-Sho123")
 	command := fmt.Sprintf("mkdir -m 0700 %q; /usr/bin/setsid /bin/sleep 90 </dev/null >/dev/null 2>&1 & echo $! > %q; exit 0", profile, marker)

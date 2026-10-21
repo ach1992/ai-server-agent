@@ -24,65 +24,65 @@ import (
 )
 
 type Server struct {
-	cfg                                  config.Config
-	token                                string
-	guard                                *policy.Guard
-	audit                                *audit.Logger
-	auditWriteHook                       func(string) error // test-only pre-action failure injection
-	auditBeforeCompletionHook            func()             // test-only completion-path failure/interleaving injection
-	workerUID                            uint32
-	workerGID                            uint32
-	runs                                 *runLimiter
-	sessions                             *stdioSessionBroker
-	phpIndexMu                           sync.Mutex              // single fresh index/build/lookup at a time; bounded, no second broker
-	terminalAdmissionMu                  sync.Mutex              // serializes disk-backed terminal capacity and scope creation
-	browserAdmission                     browserSessionAdmission // shared, isolated and maintenance admission
-	browserNodeBinary                    string                  // test-only private fixture override; production always uses root-owned pinned Node
-	browserRunTerminateTestHook          func(int) (bool, error) // private one-shot Browser uncertain-stop test hook
-	browserContainmentBeforeKillTestHook func() error            // private root-fixture pause/fault, never public API
-	jobsMu                               sync.Mutex
-	jobUnknownBeforeWriteTestHook        func() // test-only deterministic status reconciliation interleaving
-	lifecycleLockPath                    string
-	fileWriteHooks                       *fileWriteTestHooks
-	workspaceHooks                       *workspaceTestHooks
-	structuralSearchBinary               string                                                    // test-only override; production resolves trusted ast-grep paths
-	workspaceHelperBinary                string                                                    // test-only compiled Agent binary; production self-executes
-	terminalBinary                       string                                                    // test-only isolated tmux fixture; production uses /usr/bin/tmux
-	terminalScopeStartTestHook           func(Request, string, *tmuxTerminalState, []string) error // test-only fault
-	terminalScopeStopTestHook            func(string) error                                        // test-only exact-scope stop fault
-	terminalActivePublishTestHook        func(*tmuxTerminalState) error                            // test-only post-scope/pre-ACTIVE fault
-	runtimeListObservationTimeoutTest    time.Duration                                             // test-only passive inventory deadline override
-	runtimeTerminalVerifyTestHook        func(context.Context, string) error                       // test-only passive terminal verifier
-	goplsBinary                          string                                                    // test-only Go language server fixture
-	ts7Binary                            string                                                    // test-only native TS 7 language server fixture
-	tyBinary                             string                                                    // test-only native Python ty language server fixture
-	bashNodeBinary                       string                                                    // test-only Bash LSP Node executable fixture
-	bashCLIBinary                        string                                                    // test-only Bash LSP trusted JS entrypoint fixture
-	bashShellcheckBinary                 string                                                    // test-only Bash LSP ShellCheck executable fixture
-	webNodeBinary                        string                                                    // test-only HTML/CSS LSP Node executable fixture
-	webHTMLCLIBinary                     string                                                    // test-only HTML LSP entrypoint fixture
-	webCSSCLIBinary                      string                                                    // test-only CSS LSP entrypoint fixture
-	sqlNodeBinary                        string                                                    // test-only SQL LSP Node executable fixture
-	sqlCLIBinary                         string                                                    // test-only SQL LSP entrypoint fixture
-	rustAnalyzerBinary                   string                                                    // test-only pinned native rust-analyzer fixture
-	rustCompilerBinary                   string                                                    // test-only pinned native rustc fixture
-	rustSysrootDir                       string                                                    // test-only Rust toolchain/sysroot fixture
-	phpBinary                            string                                                    // test-only recognized system PHP fixture
-	phpActorPHAR                         string                                                    // test-only pinned Phpactor artifact fixture
-	environmentGoSystemPath              string                                                    // test-only Go discovery path; empty uses fixed safeCommandPath
-	environmentProbeRemoveAll            func(string) error                                        // test-only cleanup fault injection; nil uses os.RemoveAll
-	codeTargetSnapshotHook               func()                                                    // test-only interleaving: alter target after LSP overlay snapshot
-	dlvBinary                            string                                                    // test-only Delve DAP fixture; production uses admin-owned binary
-	pythonDebugpyBinary                  string                                                    // test-only recognized Python interpreter fixture
-	pythonDebugpyModules                 string                                                    // test-only unprivileged verified wheel fixture
-	javascriptDAPNode                    string                                                    // test-only JS adapter Node fixture
-	javascriptDAPCLI                     string                                                    // test-only JS adapter entrypoint fixture
-	javascriptDAPBrowserBinary           string                                                    // test-only pinned local Chromium fixture
-	rustLLDBDAPBinary                    string                                                    // test-only known LLDB-DAP executable fixture
-	phpDAPNodeBinary                     string                                                    // test-only trusted Node fixture
-	phpDAPCLIBinary                      string                                                    // test-only verified PHP adapter entrypoint
-	phpDAPNativeBinary                   string                                                    // test-only recognized PHP interpreter
-	phpDAPXdebugModule                   string                                                    // test-only native Xdebug extension
+	cfg                               config.Config
+	token                             string
+	guard                             *policy.Guard
+	audit                             *audit.Logger
+	auditWriteHook                    func(string) error // test-only pre-action failure injection
+	auditBeforeCompletionHook         func()             // test-only completion-path failure/interleaving injection
+	workerUID                         uint32
+	workerGID                         uint32
+	runs                              *runLimiter
+	sessions                          *stdioSessionBroker
+	phpIndexMu                        sync.Mutex              // single fresh index/build/lookup at a time; bounded, no second broker
+	terminalAdmissionMu               sync.Mutex              // serializes disk-backed terminal capacity and scope creation
+	browserAdmission                  browserSessionAdmission // shared, isolated and maintenance admission
+	browserNodeBinary                 string                  // test-only private fixture override; production always uses root-owned pinned Node
+	browserRunTerminateTestHook       func(int) (bool, error) // private one-shot Browser uncertain-stop test hook
+	browserKillTestHook               func() error            // private root-fixture pause/fault, never public API
+	jobsMu                            sync.Mutex
+	jobUnknownBeforeWriteTestHook     func() // test-only deterministic status reconciliation interleaving
+	lifecycleLockPath                 string
+	fileWriteHooks                    *fileWriteTestHooks
+	workspaceHooks                    *workspaceTestHooks
+	structuralSearchBinary            string                                                    // test-only override; production resolves trusted ast-grep paths
+	workspaceHelperBinary             string                                                    // test-only compiled Agent binary; production self-executes
+	terminalBinary                    string                                                    // test-only isolated tmux fixture; production uses /usr/bin/tmux
+	terminalScopeStartTestHook        func(Request, string, *tmuxTerminalState, []string) error // test-only fault
+	terminalScopeStopTestHook         func(string) error                                        // test-only exact-scope stop fault
+	terminalActivePublishTestHook     func(*tmuxTerminalState) error                            // test-only post-scope/pre-ACTIVE fault
+	runtimeListObservationTimeoutTest time.Duration                                             // test-only passive inventory deadline override
+	runtimeTerminalVerifyTestHook     func(context.Context, string) error                       // test-only passive terminal verifier
+	goplsBinary                       string                                                    // test-only Go language server fixture
+	ts7Binary                         string                                                    // test-only native TS 7 language server fixture
+	tyBinary                          string                                                    // test-only native Python ty language server fixture
+	bashNodeBinary                    string                                                    // test-only Bash LSP Node executable fixture
+	bashCLIBinary                     string                                                    // test-only Bash LSP trusted JS entrypoint fixture
+	bashShellcheckBinary              string                                                    // test-only Bash LSP ShellCheck executable fixture
+	webNodeBinary                     string                                                    // test-only HTML/CSS LSP Node executable fixture
+	webHTMLCLIBinary                  string                                                    // test-only HTML LSP entrypoint fixture
+	webCSSCLIBinary                   string                                                    // test-only CSS LSP entrypoint fixture
+	sqlNodeBinary                     string                                                    // test-only SQL LSP Node executable fixture
+	sqlCLIBinary                      string                                                    // test-only SQL LSP entrypoint fixture
+	rustAnalyzerBinary                string                                                    // test-only pinned native rust-analyzer fixture
+	rustCompilerBinary                string                                                    // test-only pinned native rustc fixture
+	rustSysrootDir                    string                                                    // test-only Rust toolchain/sysroot fixture
+	phpBinary                         string                                                    // test-only recognized system PHP fixture
+	phpActorPHAR                      string                                                    // test-only pinned Phpactor artifact fixture
+	environmentGoSystemPath           string                                                    // test-only Go discovery path; empty uses fixed safeCommandPath
+	environmentProbeRemoveAll         func(string) error                                        // test-only cleanup fault injection; nil uses os.RemoveAll
+	codeTargetSnapshotHook            func()                                                    // test-only interleaving: alter target after LSP overlay snapshot
+	dlvBinary                         string                                                    // test-only Delve DAP fixture; production uses admin-owned binary
+	pythonDebugpyBinary               string                                                    // test-only recognized Python interpreter fixture
+	pythonDebugpyModules              string                                                    // test-only unprivileged verified wheel fixture
+	javascriptDAPNode                 string                                                    // test-only JS adapter Node fixture
+	javascriptDAPCLI                  string                                                    // test-only JS adapter entrypoint fixture
+	javascriptDAPBrowserBinary        string                                                    // test-only pinned local Chromium fixture
+	rustLLDBDAPBinary                 string                                                    // test-only known LLDB-DAP executable fixture
+	phpDAPNodeBinary                  string                                                    // test-only trusted Node fixture
+	phpDAPCLIBinary                   string                                                    // test-only verified PHP adapter entrypoint
+	phpDAPNativeBinary                string                                                    // test-only recognized PHP interpreter
+	phpDAPXdebugModule                string                                                    // test-only native Xdebug extension
 }
 
 func NewServer(cfg config.Config, token string) (*Server, error) {

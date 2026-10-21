@@ -363,7 +363,7 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 		if containmentErr != nil {
 			return fileError("browser_containment_unavailable", "dependency", containmentErr)
 		}
-		browserGroup.beforeKillTestHook = s.browserContainmentBeforeKillTestHook
+		browserGroup.beforeKillTestHook = s.browserKillTestHook
 		fd, openErr := unix.Open(browserGroup.path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY, 0)
 		if openErr != nil {
 			cleanupErr := browserGroup.abortBeforeLaunch()

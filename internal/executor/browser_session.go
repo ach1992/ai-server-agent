@@ -378,7 +378,7 @@ func (s *Server) browserSessionOpen(ctx context.Context, req Request) Response {
 		if err != nil {
 			return browserSessionError("browser_containment_unavailable", "dependency", err)
 		}
-		group.beforeKillTestHook = s.browserContainmentBeforeKillTestHook
+		group.beforeKillTestHook = s.browserKillTestHook
 	}
 	var id string
 	if group != nil {
