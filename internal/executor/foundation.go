@@ -17,6 +17,7 @@ import (
 
 	"github.com/ach1992/ai-server-agent/internal/credential"
 	"github.com/ach1992/ai-server-agent/internal/policy"
+	"golang.org/x/sys/unix"
 )
 
 const (
@@ -114,10 +115,7 @@ func (s *Server) dispatchContext(ctx context.Context, req Request) Response {
 		}
 		switch req.Action {
 		case "browser_admission_status":
-			if s.browserAdmission.reserved() {
-				return Response{OK: true, Status: "reserved"}
-			}
-			return Response{OK: true, Status: "available"}
+			return s.browserAdmissionResponse()
 		case "browser_session_open", "browser_session_flow", "browser_session_capture", "browser_session_trace", "browser_session_status", "browser_session_close":
 			return s.browserSessionAction(ctx, req)
 		case "run":
@@ -273,12 +271,6 @@ func runCapacityResponse(root bool) Response {
 
 func (s *Server) runContext(parent context.Context, req Request) Response {
 	started := time.Now()
-	if req.AuditAction == "browser_run" || req.AuditAction == "browser_setup" || req.AuditAction == "browser_cleanup" {
-		if !s.browserAdmission.acquireRun() {
-			return fileError("resource_limit", "resource", errors.New("shared Browser profile is in use by a managed session or run"))
-		}
-		defer s.browserAdmission.releaseRun()
-	}
 	if bad := commandInputError(req.Command); bad != nil {
 		bad.DurationMS = time.Since(started).Milliseconds()
 		return *bad
@@ -308,6 +300,45 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 	if dec.RequiresApproval && !req.Approval {
 		return Response{Error: "approval_required", ReasonCode: "approval_required", ErrorCode: "approval_required", ErrorClass: "approval", Approval: dec, DurationMS: time.Since(started).Milliseconds()}
 	}
+	browserReservation := ""
+	browserTerminationProven := true
+	if req.AuditAction == "browser_run" || req.AuditAction == "browser_setup" || req.AuditAction == "browser_cleanup" {
+		mode := "maintenance"
+		if req.AuditAction == "browser_run" {
+			var valid bool
+			mode, valid = browserProfileMode(req.BrowserProfileMode)
+			if !valid {
+				return fileError("invalid_browser_profile_mode", "validation", errors.New("Browser profile mode must be shared or isolated"))
+			}
+		} else if req.BrowserProfileMode != "" {
+			return fileError("invalid_browser_profile_mode", "validation", errors.New("Browser maintenance cannot request a profile mode"))
+		}
+		holder, err := browserReservationID()
+		if err != nil {
+			return fileError("browser_admission_unavailable", "state", err)
+		}
+		granted, err := s.browserAcquire(holder, mode)
+		if err != nil {
+			return fileError("browser_scratch_reconciliation_failed", "state", err)
+		}
+		if !granted {
+			// Share the managed Browser admission contract: a capacity refusal
+			// is a retryable busy outcome, not an execution failure.
+			return browserSessionBusy()
+		}
+		browserReservation = holder
+		defer func() {
+			// If the group-stop outcome is unknown, do not release its
+			// profile/process slot: a still-running Chromium may exist.
+			// Executor restart / inspected host recovery remains the
+			// explicitly bounded failure path for this rare one-shot case.
+			if browserTerminationProven {
+				s.browserAdmission.release(browserReservation)
+			}
+		}()
+	} else if req.BrowserProfileMode != "" {
+		return fileError("invalid_browser_profile_mode", "validation", errors.New("Browser profile mode belongs only to managed Browser runs"))
+	}
 	release, ok := s.runs.acquire(req.Root)
 	if !ok {
 		resp := runCapacityResponse(req.Root)
@@ -323,11 +354,100 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 	out := newBoundedOutputCollector(maxSyncOutputBytes)
 	cmd.Stdout = out
 	cmd.Stderr = out
-	err := cmd.Run()
+	var browserGroup *dapCgroup
+	browserGroupFD := -1
+	browserScratch := ""
+	if req.AuditAction == "browser_run" && s.browserNodeBinary == "" {
+		browserScratch = "run." + strings.TrimPrefix(browserReservation, "browser_")
+		cmd.Env = append(cmd.Env, "ASA_BROWSER_RUN_SCRATCH="+browserScratch)
+	}
+	// Only the pinned root Executor production path can launch Chromium.
+	// Playwright places Chromium in its own process group, so a Node PGID
+	// terminator cannot safely authorize the next profile admission.
+	if req.AuditAction == "browser_run" && s.browserNodeBinary == "" {
+		var containmentErr error
+		browserGroup, containmentErr = createBrowserCgroup()
+		if containmentErr != nil {
+			return fileError("browser_containment_unavailable", "dependency", containmentErr)
+		}
+		browserGroup.beforeKillTestHook = s.browserKillTestHook
+		fd, openErr := unix.Open(browserGroup.path, unix.O_RDONLY|unix.O_CLOEXEC|unix.O_DIRECTORY, 0)
+		if openErr != nil {
+			cleanupErr := browserGroup.abortBeforeLaunch()
+			if cleanupErr != nil {
+				browserTerminationProven = false
+			}
+			return fileError("browser_containment_unavailable", "state", errors.Join(openErr, cleanupErr))
+		}
+		// cmd.Process is not yet started, so atomic CLONE_INTO_CGROUP
+		// covers Node itself and all future detached Chromium descendants.
+		cmd.SysProcAttr.UseCgroupFD = true
+		cmd.SysProcAttr.CgroupFD = fd
+		browserGroupFD = fd
+	}
+	var err error
+	if browserGroup != nil {
+		err = cmd.Start()
+		// This descriptor is only needed for atomic process startup;
+		// close it before the exact cgroup is verified empty and removed.
+		_ = unix.Close(browserGroupFD)
+		browserGroupFD = -1
+		if err == nil {
+			if verifyErr := browserGroup.verifySpawnMembership(cmd.Process.Pid); verifyErr != nil {
+				// The child may have started. Do not wait indefinitely for
+				// an untrusted launcher before containing its descendants.
+				abortErr := browserGroup.abortBeforeLaunch()
+				if abortErr != nil {
+					// A failed whole-group stop retains Browser admission.
+					// Best-effort stop of the unreaped original process
+					// prevents a hung synchronous worker, but is not proof
+					// that detached Chromium descendants have exited.
+					browserTerminationProven = false
+					_, groupErr := terminateProcessGroup(cmd.Process.Pid)
+					abortErr = errors.Join(abortErr, groupErr)
+				}
+				err = errors.Join(verifyErr, abortErr, cmd.Wait())
+			} else {
+				err = cmd.Wait()
+			}
+		}
+	} else {
+		err = cmd.Run()
+	}
 	lingeringGroup := false
 	var cleanupErr error
-	if cmd.Process != nil {
-		lingeringGroup, cleanupErr = terminateProcessGroup(cmd.Process.Pid)
+	if browserGroup != nil {
+		// A cleanly completed synchronous Browser must have retired its
+		// process children. A surviving detached Chromium is background
+		// work, not a successful main-command completion. Still perform
+		// the exact cgroup kill and empty proof before releasing capacity.
+		if browserGroup.verified {
+			if busy, inspectErr := browserGroup.populated(); inspectErr == nil {
+				lingeringGroup = busy
+			}
+		}
+		if browserGroup.path != "" {
+			if browserGroup.verified {
+				cleanupErr = browserGroup.killVerifyAndRelease()
+			} else {
+				cleanupErr = browserGroup.abortBeforeLaunch()
+			}
+		}
+		if cleanupErr == nil && browserScratch != "" {
+			cleanupErr = s.browserReclaimNamedScratch(browserScratch)
+		}
+		if cleanupErr != nil {
+			browserTerminationProven = false
+		}
+	} else if cmd.Process != nil {
+		terminator := terminateProcessGroup
+		if browserReservation != "" && s.browserRunTerminateTestHook != nil {
+			terminator = s.browserRunTerminateTestHook // private test-only fault injection
+		}
+		lingeringGroup, cleanupErr = terminator(cmd.Process.Pid)
+		if browserReservation != "" && cleanupErr != nil {
+			browserTerminationProven = false
+		}
 	}
 	code := 0
 	if err != nil {
@@ -371,7 +491,7 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 		}
 	}
 	if cleanupErr != nil {
-		errorText = "command process-group termination could not be proven: " + cleanupErr.Error()
+		errorText = "command or Browser-owned descendant termination could not be proven: " + cleanupErr.Error()
 		reasonCode = "unknown_completion"
 		errorClass = "process"
 		if err == nil {

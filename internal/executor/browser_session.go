@@ -9,62 +9,291 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 )
 
-// Browser profile admission is shared between one-shot browser_run/setup and
-// the executor-owned Browser session consumer. The gate is held until verified
-// pinned-process-group termination. Acquiring the lease never queues callers.
+// The executor is the single authority for Browser admission. Shared profile
+// holders exclude other shared holders, independently isolated profiles occupy
+// configurable bounded slots, and setup/cleanup exclude ALL Browser activity.
+// Reservations survive uncertain process cleanup until the broker verifies an
+// exact process-group stop. No queue or second Browser-process broker exists.
 type browserSessionAdmission struct {
-	mu     sync.Mutex
-	holder string
+	mu                sync.Mutex
+	holders           map[string]string // opaque reservation/session ID -> shared/isolated/maintenance
+	sharedHolder      string
+	maintenanceHolder string
 }
 
-func (a *browserSessionAdmission) acquireRun() bool { return a.try("one-shot") }
-func (a *browserSessionAdmission) releaseRun()      { a.release("one-shot") }
-func (a *browserSessionAdmission) try(holder string) bool {
+func browserProfileMode(input string) (string, bool) {
+	switch input {
+	case "", "shared":
+		return "shared", true
+	case "isolated":
+		return "isolated", true
+	default:
+		return "", false
+	}
+}
+
+func browserReservationID() (string, error) {
+	var nonce [16]byte
+	if _, err := rand.Read(nonce[:]); err != nil {
+		return "", err
+	}
+	return "browser_" + hex.EncodeToString(nonce[:]), nil
+}
+
+func (s *Server) browserConcurrentSlots() int {
+	n := s.cfg.EffectiveRuntime().BrowserConcurrentSlots
+	if n < 1 || n > 64 {
+		return 2
+	}
+	return n
+}
+
+// beforeFirst runs while the admission mutex excludes every concurrent
+// Browser launch. It is called only on an empty admission set, preventing
+// cleanup of scratch directories owned by a live managed Browser peer.
+func (a *browserSessionAdmission) tryMode(holder, mode string, limit int, beforeFirst func() error) (bool, error) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.holder != "" {
-		return false
+	if holder == "" || limit < 1 || limit > 64 ||
+		(mode != "shared" && mode != "isolated" && mode != "maintenance") ||
+		a.maintenanceHolder != "" || a.holders[holder] != "" {
+		return false, nil
 	}
-	a.holder = holder
-	return true
+	if mode == "maintenance" {
+		if len(a.holders) != 0 {
+			return false, nil
+		}
+	} else {
+		if len(a.holders) >= limit || (mode == "shared" && a.sharedHolder != "") {
+			return false, nil
+		}
+	}
+	if len(a.holders) == 0 && beforeFirst != nil {
+		if err := beforeFirst(); err != nil {
+			return false, err
+		}
+	}
+	if a.holders == nil {
+		a.holders = make(map[string]string)
+	}
+	a.holders[holder] = mode
+	if mode == "shared" {
+		a.sharedHolder = holder
+	}
+	if mode == "maintenance" {
+		a.maintenanceHolder = holder
+	}
+	return true, nil
+}
+
+func (s *Server) browserAcquire(holder, mode string) (bool, error) {
+	return s.browserAdmission.tryMode(holder, mode, s.browserConcurrentSlots(), s.browserReclaimScratch)
+}
+
+// Compatibility helpers are retained for existing shared-profile admission
+// clients and tests; production one-shot runs use unique reservation IDs.
+func (a *browserSessionAdmission) acquireRun() bool {
+	return a.try("one-shot")
+}
+func (a *browserSessionAdmission) releaseRun() { a.release("one-shot") }
+func (a *browserSessionAdmission) try(holder string) bool {
+	ok, _ := a.tryMode(holder, "shared", 2, nil)
+	return ok
 }
 func (a *browserSessionAdmission) transfer(from, to string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.holder != from {
+	mode := a.holders[from]
+	if mode == "" || to == "" || a.holders[to] != "" {
 		return false
 	}
-	a.holder = to
+	delete(a.holders, from)
+	a.holders[to] = mode
+	if a.sharedHolder == from {
+		a.sharedHolder = to
+	}
+	if a.maintenanceHolder == from {
+		a.maintenanceHolder = to
+	}
 	return true
 }
 
-// release reports whether this exact owner held the lease. A Browser
-// broker entry must not be discarded unless release was confirmed.
+// Releasing a guessed, cross-session or already-retired identity cannot free
+// another Browser's reservation, including after uncertain cleanup.
 func (a *browserSessionAdmission) release(holder string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	if a.holder != holder {
+	if a.holders[holder] == "" {
 		return false
 	}
-	a.holder = ""
+	delete(a.holders, holder)
+	if a.sharedHolder == holder {
+		a.sharedHolder = ""
+	}
+	if a.maintenanceHolder == holder {
+		a.maintenanceHolder = ""
+	}
 	return true
 }
 func (a *browserSessionAdmission) matches(holder string) bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.holder == holder
+	return a.holders[holder] != ""
 }
 func (a *browserSessionAdmission) reserved() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
-	return a.holder != ""
+	return len(a.holders) != 0
+}
+
+// A global-exclusive first admission reclaims only Agent-recognized
+// disposable worker-owned scratch, using an anchored filesystem root. The
+// scratch parent itself must remain the original, non-symlink directory.
+// Other entries (including shared profiles) are NEVER traversed or removed.
+func browserScratchName(name string) bool {
+	prefix := ""
+	for _, candidate := range []string{"asa-profile-", "asa-trace-", "run."} {
+		if strings.HasPrefix(name, candidate) {
+			prefix = candidate
+			break
+		}
+	}
+	if prefix == "" {
+		return false
+	}
+	suffix := name[len(prefix):]
+	if len(suffix) == 32 { // Executor-bound random session/run token
+		for _, c := range suffix {
+			if !(c >= '0' && c <= '9' || c >= 'a' && c <= 'f') {
+				return false
+			}
+		}
+		return true
+	}
+	if len(suffix) != 6 { // Legacy mktemp scratch names
+		return false
+	}
+	for _, c := range suffix {
+		if !(c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' || c >= '0' && c <= '9') {
+			return false
+		}
+	}
+	return true
+}
+
+func (s *Server) browserReclaimScratch() error {
+	return s.browserReclaimScratchMatching("")
+}
+
+// Exact per-session/run reclamation follows verified whole-cgroup termination.
+func (s *Server) browserReclaimNamedScratch(name string) error {
+	if !browserScratchName(name) || !(strings.HasPrefix(name, "asa-profile-") && len(name) == len("asa-profile-")+32 ||
+		strings.HasPrefix(name, "run.") && len(name) == len("run.")+32) {
+		return errors.New("invalid Executor Browser scratch identity")
+	}
+	if s.cfg.StateDir == "" {
+		return errors.New("Executor Browser scratch root unavailable")
+	}
+	return s.browserReclaimScratchMatching(name)
+}
+
+func (s *Server) browserReclaimScratchMatching(exact string) error {
+	if s.cfg.StateDir == "" {
+		return nil
+	} // zero-value standalone lease tests
+	dir := filepath.Join(s.cfg.StateDir, "runtime", "browser", "tmp")
+	info, err := os.Lstat(dir)
+	if errors.Is(err, os.ErrNotExist) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("inspect Browser scratch: %w", err)
+	}
+	if !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		return errors.New("Browser scratch is not a real directory")
+	}
+	root, err := os.OpenRoot(dir)
+	if err != nil {
+		return fmt.Errorf("open Browser scratch: %w", err)
+	}
+	defer root.Close()
+	anchor, err := root.Open(".")
+	if err != nil {
+		return fmt.Errorf("inspect Browser scratch anchor: %w", err)
+	}
+	defer anchor.Close()
+	anchorInfo, err := anchor.Stat()
+	if err != nil || !os.SameFile(info, anchorInfo) {
+		return errors.New("Browser scratch anchor changed during admission")
+	}
+	entries, err := anchor.ReadDir(513)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return fmt.Errorf("read Browser scratch: %w", err)
+	}
+	if len(entries) > 512 {
+		return errors.New("Browser scratch reclamation needs operator reconciliation: over 512 entries")
+	}
+	for _, entry := range entries {
+		if exact != "" && entry.Name() != exact {
+			continue
+		}
+		if !entry.IsDir() || !browserScratchName(entry.Name()) {
+			if exact != "" {
+				return errors.New("exact Browser scratch is not a recognized directory")
+			}
+			continue
+		}
+		child, err := root.Lstat(entry.Name())
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return fmt.Errorf("verify Browser scratch candidate: %w", err)
+		}
+		stat, ok := child.Sys().(*syscall.Stat_t)
+		if !child.IsDir() || child.Mode()&os.ModeSymlink != 0 || !ok || stat.Uid != s.workerUID {
+			if exact != "" {
+				return errors.New("exact Browser scratch ownership is unverified")
+			}
+			continue
+		}
+		if err := root.RemoveAll(entry.Name()); err != nil {
+			return fmt.Errorf("reclaim Browser scratch %q: %w", entry.Name(), err)
+		}
+	}
+	return nil
+}
+
+// Status discloses only aggregate admission state; no session or principal ID.
+type BrowserAdmissionSnapshot struct {
+	Active                int  `json:"active"`
+	Limit                 int  `json:"limit"`
+	SharedProfileReserved bool `json:"shared_profile_reserved"`
+	MaintenanceReserved   bool `json:"maintenance_reserved"`
+}
+
+func (s *Server) browserAdmissionResponse() Response {
+	s.browserAdmission.mu.Lock()
+	snapshot := BrowserAdmissionSnapshot{
+		Active: len(s.browserAdmission.holders), Limit: s.browserConcurrentSlots(),
+		SharedProfileReserved: s.browserAdmission.sharedHolder != "",
+		MaintenanceReserved:   s.browserAdmission.maintenanceHolder != "",
+	}
+	s.browserAdmission.mu.Unlock()
+	status := "available"
+	if snapshot.Active > 0 {
+		status = "reserved"
+	}
+	return Response{OK: true, Status: status, BrowserAdmission: &snapshot}
 }
 
 type browserStdioState struct {
@@ -84,7 +313,7 @@ func browserSessionError(code, class string, err error) Response {
 	return fileError(code, class, err)
 }
 func browserSessionBusy() Response {
-	return Response{Error: "shared Browser profile or session busy", ReasonCode: "resource_limit", ErrorCode: "resource_limit", ErrorClass: "resource", Status: "busy", Retryable: true}
+	return Response{Error: "Browser profile or concurrent process capacity busy", ReasonCode: "resource_limit", ErrorCode: "resource_limit", ErrorClass: "resource", Status: "busy", Retryable: true}
 }
 func (s *Server) browserSessionAction(ctx context.Context, req Request) Response {
 	if req.Root || req.Approval || req.PrincipalID == "" || req.PrincipalClass == "" {
@@ -124,13 +353,25 @@ func (s *Server) browserSessionOpen(ctx context.Context, req Request) Response {
 	if req.SessionID != "" || len(req.Content) == 0 || len(req.Content) > browserSessionMaxScript || req.TimeoutMS != 0 {
 		return browserSessionError("invalid_browser_session_open", "validation", errors.New("expected bounded runner script and no existing session"))
 	}
-	if !s.browserAdmission.try("opening") {
+	mode, valid := browserProfileMode(req.BrowserProfileMode)
+	if !valid {
+		return browserSessionError("invalid_browser_profile_mode", "validation", errors.New("profile mode must be shared or isolated"))
+	}
+	reservation, nonceErr := browserReservationID()
+	if nonceErr != nil {
+		return browserSessionError("browser_admission_unavailable", "state", nonceErr)
+	}
+	granted, acquireErr := s.browserAcquire(reservation, mode)
+	if acquireErr != nil {
+		return browserSessionError("browser_scratch_reconciliation_failed", "state", acquireErr)
+	}
+	if !granted {
 		return browserSessionBusy()
 	}
 	reserved := true
 	defer func() {
 		if reserved {
-			s.browserAdmission.release("opening")
+			s.browserAdmission.release(reservation)
 		}
 	}()
 	node := "/opt/ai-server-agent/browser/node/bin/node"
@@ -165,11 +406,40 @@ func (s *Server) browserSessionOpen(ctx context.Context, req Request) Response {
 	if len(args) > 64 {
 		return browserSessionError("input_too_large", "validation", errors.New("too many Browser argv fragments"))
 	}
-	id, err := s.workerStdioSession(req, "browser", req.Workspace, node, args...)
+	// Production root Executor atomically places Node and Playwright's
+	// independently grouped Chromium descendants inside one private cgroup.
+	// Private fixture binary overrides do not run Chromium in ordinary CI.
+	var group *dapCgroup
+	if s.browserNodeBinary == "" {
+		group, err = createBrowserCgroup()
+		if err != nil {
+			return browserSessionError("browser_containment_unavailable", "dependency", err)
+		}
+		group.beforeKillTestHook = s.browserKillTestHook
+	}
+	var id string
+	if group != nil {
+		id, err = s.workerContainedBrowserSession(req, req.Workspace, node, group, args...)
+		if id == "" {
+			// A failed/premature spawn cannot release Browser admission
+			// until the kernel confirms no detached descendants remain.
+			if cleanupErr := group.abortBeforeLaunch(); cleanupErr != nil {
+				reserved = false // stay fail-closed until root recovery
+				return browserSessionError("browser_containment_cleanup_unknown", "state", errors.Join(err, cleanupErr))
+			}
+		}
+	} else {
+		id, err = s.workerStdioSession(req, "browser", req.Workspace, node, args...)
+	}
 	if id != "" {
 		// A child may have started even if the audit completion was degraded.
-		// Hold the singleton profile reservation until explicit proof of stop.
-		s.browserAdmission.transfer("opening", id)
+		// Hold the exact Browser capacity/profile reservation until verified stop.
+		if !s.browserAdmission.transfer(reservation, id) {
+			// The broker cannot safely admit another Browser when identity
+			// transfer failed. Keep the original reservation fail-closed.
+			reserved = false
+			return browserSessionError("browser_session_lease_reconciliation_failed", "state", errors.New("cannot bind exact process to Browser admission"))
+		}
 		reserved = false
 	}
 	if err != nil {
@@ -403,7 +673,7 @@ func (s *Server) browserSessionClose(req Request) Response {
 	defer state.mu.Unlock()
 	// Send the best-effort graceful shutdown request before broker-pinned
 	// process-group termination. The whole child group must be proved dead
-	// before releasing the single shared-profile admission lease.
+	// before releasing this Browser session's exact admission lease.
 	_ = s.workerStdioWrite(req, entry.id, []byte("{\"type\":\"close\"}\n"))
 	// Allow Node/Playwright to run context.close(), which also terminates
 	// Chromium's own children even if Playwright launched them in a new

@@ -135,7 +135,7 @@ type BrowserSetupInput struct {
 	Approval bool `json:"approval,omitempty" jsonschema:"Set true to allow downloading the private browser runtime and installing required shared libraries"`
 }
 type BrowserRunInput struct {
-	ProfileMode       string `json:"profile_mode,omitempty" jsonschema:"shared (default) or isolated ephemeral cookies/localStorage; same global exclusive Browser admission"`
+	ProfileMode       string `json:"profile_mode,omitempty" jsonschema:"shared (default, exclusive persistent profile) or isolated ephemeral cookies/localStorage with bounded concurrent Browser slots"`
 	Script            string `json:"script" jsonschema:"JavaScript statements using the pre-created Playwright browser, context, and page variables; maximum 131072 raw bytes"`
 	TimeoutMS         int64  `json:"timeout_ms,omitempty" jsonschema:"Browser execution timeout in milliseconds; default 90000, maximum 300000"`
 	IgnoreHTTPSErrors bool   `json:"ignore_https_errors,omitempty" jsonschema:"Explicit scoped exception for local/self-signed development; default false preserves normal HTTPS certificate validation"`
@@ -429,7 +429,7 @@ func (s *Server) registerTools() {
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_status", Description: "Inspect bounded non-secret browser runtime readiness and pinned Node/Playwright/Chromium versions. The persistent browser profile is Agent-wide shared state, not per-client or per-user isolation.", Annotations: annotations(true, false, true, false)},
 		func(ctx context.Context, req *mcpsdk.CallToolRequest, input EmptyInput) (*mcpsdk.CallToolResult, browser.RuntimeStatus, error) {
 			status := s.browser.Status(ctx)
-			return textResult(fmt.Sprintf("installed=%t ready=%t busy=%t shared_profile=%t reason=%q", status.Installed, status.Ready, status.Busy, status.SharedProfile, status.Reason), false), status, nil
+			return textResult(fmt.Sprintf("installed=%t ready=%t busy=%t shared_profile=%t shared_reserved=%t browser_slots=%d/%d isolated_available=%d reason=%q", status.Installed, status.Ready, status.Busy, status.SharedProfile, status.SharedProfileReserved, status.BrowserActive, status.BrowserLimit, status.IsolatedSlotsAvailable, status.Reason), false), status, nil
 		})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_setup", Description: "Install/repair pinned optional root-owned Node/Playwright/Chromium Browser runtime; may install OS libraries. Preserves shared profile, system Node and ports 80/443.", Annotations: annotations(false, true, true, true)},
@@ -441,7 +441,7 @@ func (s *Server) registerTools() {
 			return s.responseResult(resp)
 		})
 
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_run", Description: "Run bounded Playwright JavaScript with pre-created browser/context/page; console.log reports observations. Uses shared persistent profile by default (cookies may persist) or profile_mode=isolated for disposable state. HTTPS certificate validation is enabled by default; ignore_https_errors is a per-call exception. Can cause page actions.", Annotations: annotations(false, true, false, true)},
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_run", Description: "Run bounded Playwright JavaScript with pre-created browser/context/page; console.log reports observations. Uses shared exclusive persistent profile by default (cookies may persist) or profile_mode=isolated for bounded concurrent disposable state. HTTPS certificate validation is enabled by default; ignore_https_errors is a per-call exception. Can cause page actions.", Annotations: annotations(false, true, false, true)},
 		func(ctx context.Context, req *mcpsdk.CallToolRequest, input BrowserRunInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 			resp, err := s.browser.Run(ctx, browser.RunOptions{Script: input.Script, TimeoutMS: input.TimeoutMS, IgnoreHTTPSErrors: input.IgnoreHTTPSErrors, ProfileMode: input.ProfileMode})
 			if err != nil {
@@ -451,7 +451,7 @@ func (s *Server) registerTools() {
 		})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-		Name: "browser_e2e", Description: "Execute bounded Browser steps (navigate/snapshot/click/fill/assert/console/network) in one browser execution, not a cross-call live session. Uses the same pinned Chromium, exclusive admission, TLS/resource limits and shared-by-default or isolated ephemeral profile. Snapshots are limited to 8192 UTF-8 bytes; stable eN refs work only within this call; refs expire on navigation, detachment or call end. Use browser_run for custom Playwright and browser_session_flow for cross-call sessions. No image/trace bytes.",
+		Name: "browser_e2e", Description: "Execute bounded Browser steps (navigate/snapshot/click/fill/assert/console/network) in one browser execution, not a cross-call live session. Uses the same pinned Chromium; shared profile is exclusive, independently isolated sessions/runs have bounded concurrent admission, and TLS/resource limits remain. Snapshots are limited to 8192 UTF-8 bytes; stable eN refs work only within this call; refs expire on navigation, detachment or call end. Use browser_run for custom Playwright and browser_session_flow for cross-call sessions. No image/trace bytes.",
 		Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input BrowserE2EInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := s.browser.Flow(ctx, browser.FlowOptions{Steps: input.Steps, TimeoutMS: input.TimeoutMS, IgnoreHTTPSErrors: input.IgnoreHTTPSErrors, ProfileMode: input.ProfileMode})

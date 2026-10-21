@@ -25,8 +25,9 @@ type SessionOptions struct {
 	TraceVersion      string
 }
 
-// Managed sessions reuse the same pinned Browser runtime, shared persistent
-// profile, Agent admission mutex, and executor-private stateful worker broker.
+// Managed sessions reuse the same pinned Browser runtime and Executor-owned
+// worker broker. The Executor admits one shared-profile holder plus bounded
+// concurrent isolated profiles; Agent preflight does not serialize RPCs.
 // Unlike browser_e2e, refs remain valid across calls until navigation,
 // next snapshot, same-document identity change, close or expiry.
 func (m *Manager) SessionOpen(ctx context.Context, opts SessionOptions) (executor.Response, error) {
@@ -37,14 +38,19 @@ func (m *Manager) SessionOpen(ctx context.Context, opts SessionOptions) (executo
 	if opts.Workspace == "" || !filepath.IsAbs(opts.Workspace) || filepath.Clean(opts.Workspace) != opts.Workspace {
 		return browserError("invalid_browser_workspace", "validation", "exact absolute workspace is required"), nil
 	}
-	if !m.mu.TryLock() {
-		return browserBusy("Browser session open"), nil
+	if !m.mu.TryRLock() {
+		return browserBusy("Browser runtime preflight"), nil
 	}
-	defer m.mu.Unlock()
-	if status := m.inspectStatus(ctx, true); !status.Ready {
+	// Runtime installation/inspection is short and serialized. The Executor
+	// owns the durable Browser lease; do not hold this Manager mutex across
+	// the network request or the lifetime of independent isolated sessions.
+	status := m.inspectStatus(ctx, true)
+	if !status.Ready {
+		m.mu.RUnlock()
 		return browserError("browser_runtime_not_ready", "state", "pinned Browser runtime is not ready: "+status.Reason), nil
 	}
 	script, err := managedSessionRunner(m.engineDir(), filepath.Join(m.dataDir(), "profile"), filepath.Join(m.dataDir(), "tmp"), opts.IgnoreHTTPSErrors, mode)
+	m.mu.RUnlock()
 	if err != nil {
 		return browserError("invalid_browser_session", "validation", err.Error()), nil
 	}
@@ -55,7 +61,7 @@ func (m *Manager) SessionOpen(ctx context.Context, opts SessionOptions) (executo
 	callCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	resp, err := executor.ClientCallContext(callCtx, m.cfg.ExecutorSocket, m.token, executor.Request{
-		Action: "browser_session_open", Workspace: opts.Workspace, Content: script,
+		Action: "browser_session_open", Workspace: opts.Workspace, Content: script, BrowserProfileMode: mode,
 	})
 	if err != nil {
 		return browserUnknown("browser session open", err, false), nil
@@ -81,10 +87,6 @@ func (m *Manager) SessionFlow(ctx context.Context, opts SessionOptions) (executo
 	if len(steps) > maxFlowInputBytes-128 {
 		return browserError("invalid_browser_flow", "validation", "Browser step payload exceeds framed input budget"), nil
 	}
-	if !m.mu.TryLock() {
-		return browserBusy("Browser session action"), nil
-	}
-	defer m.mu.Unlock()
 	ctx, _, err = executor.EnsureRequestCorrelationContext(ctx)
 	if err != nil {
 		return browserUnknown("browser session action correlation", err, false), nil
@@ -117,10 +119,6 @@ func (m *Manager) SessionCapture(ctx context.Context, opts SessionOptions) (exec
 	if q < 15 || q > 70 || w < 320 || w > 1024 {
 		return browserError("invalid_browser_capture", "validation", "quality must be 15..70 and max_width 320..1024"), nil
 	}
-	if !m.mu.TryLock() {
-		return browserBusy("Browser session screenshot"), nil
-	}
-	defer m.mu.Unlock()
 	ctx, _, err := executor.EnsureRequestCorrelationContext(ctx)
 	if err != nil {
 		return browserUnknown("Browser screenshot correlation", err, false), nil
@@ -179,10 +177,6 @@ func (m *Manager) SessionTrace(ctx context.Context, opts SessionOptions) (execut
 	if err != nil || len(content) > 16384 {
 		return browserError("invalid_browser_trace", "validation", "trace request exceeds bounded input"), nil
 	}
-	if !m.mu.TryLock() {
-		return browserBusy("Browser session trace"), nil
-	}
-	defer m.mu.Unlock()
 	ctx, _, err = executor.EnsureRequestCorrelationContext(ctx)
 	if err != nil {
 		return browserUnknown("Browser trace correlation", err, false), nil
@@ -211,10 +205,6 @@ func (m *Manager) sessionControl(ctx context.Context, opts SessionOptions, actio
 	if action != "browser_session_close" && action != "browser_session_status" {
 		return browserError("invalid_browser_session", "validation", "invalid control"), errors.New("invalid Browser session control")
 	}
-	if !m.mu.TryLock() {
-		return browserBusy("Browser session control"), nil
-	}
-	defer m.mu.Unlock()
 	var err error
 	ctx, _, err = executor.EnsureRequestCorrelationContext(ctx)
 	if err != nil {

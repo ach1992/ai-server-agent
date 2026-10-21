@@ -24,9 +24,7 @@ func TestBrowserSessionLeaseAndPrincipalBinding(t *testing.T) {
 		}
 	}
 	if s.browserNodeBinary == "" {
-		if _, err := os.Stat("/opt/ai-server-agent/browser/node/bin/node"); err != nil {
-			t.Skip("requires pinned Browser runtime for real Node broker proof")
-		}
+		t.Skip("unprivileged test requires runner-owned pinned Node; production uses root Executor cgroup fixture")
 	}
 	// The agent owns this body. The fixture exercises the real pinned Node,
 	// executor-owned process/pidfd, bounded stdio transport and auth layer,

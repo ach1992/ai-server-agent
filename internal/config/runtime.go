@@ -23,6 +23,7 @@ type RuntimeSettings struct {
 	PersistentTaskSlots          int `json:"persistent_task_slots"`
 	PersistentServiceSlots       int `json:"persistent_service_slots"`
 	StdioSessionSlots            int `json:"stdio_session_slots"`
+	BrowserConcurrentSlots       int `json:"browser_concurrent_slots"`
 }
 
 type RuntimeSettingSpec struct {
@@ -46,7 +47,8 @@ var runtimeSettingSpecs = []RuntimeSettingSpec{
 	{Key: "worker_command_slots", Default: 0, Minimum: 0, Maximum: 64, Unit: "slots", Description: "Parallel unprivileged run_command capacity; 0=automatic min(effective CPUs,64), 1..64=operator override; root stays at one slot"},
 	{Key: "persistent_task_slots", Default: 6, Minimum: 1, Maximum: 64, Unit: "tasks", Description: "Simultaneous persistent task jobs; independent from service and worker command slots"},
 	{Key: "persistent_service_slots", Default: 3, Minimum: 1, Maximum: 64, Unit: "services", Description: "Simultaneous persistent service jobs; independent from task and worker command slots"},
-	{Key: "stdio_session_slots", Default: 8, Minimum: 1, Maximum: 64, Unit: "sessions", Description: "Shared private LSP/DAP/terminal/browser process-session admission; does not remove any consumer-specific exclusive lease"},
+	{Key: "stdio_session_slots", Default: 8, Minimum: 1, Maximum: 64, Unit: "sessions", Description: "Shared private LSP/DAP/terminal/browser process-session admission; Browser has its own concurrency budget"},
+	{Key: "browser_concurrent_slots", Default: 2, Minimum: 1, Maximum: 64, Unit: "browsers", Description: "Simultaneous managed Browser sessions and runs; shared profile exclusive, isolated profiles independent, and setup globally exclusive"},
 }
 
 func RuntimeSettingSpecs() []RuntimeSettingSpec {
@@ -69,6 +71,7 @@ func DefaultRuntimeSettings() RuntimeSettings {
 		PersistentTaskSlots:          6,
 		PersistentServiceSlots:       3,
 		StdioSessionSlots:            8,
+		BrowserConcurrentSlots:       2,
 	}
 }
 
@@ -86,6 +89,7 @@ func (r RuntimeSettings) Validate() error {
 		"persistent_task_slots":            r.PersistentTaskSlots,
 		"persistent_service_slots":         r.PersistentServiceSlots,
 		"stdio_session_slots":              r.StdioSessionSlots,
+		"browser_concurrent_slots":         r.BrowserConcurrentSlots,
 	}
 	for _, spec := range runtimeSettingSpecs {
 		got := values[spec.Key]

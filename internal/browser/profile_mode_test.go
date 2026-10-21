@@ -2,7 +2,10 @@ package browser
 
 import (
 	"context"
+	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"testing"
 )
@@ -62,7 +65,10 @@ func TestManagedBrowserIsolatedSessionRunnerCleanupContract(t *testing.T) {
 		`const profileMode = "isolated"`,
 		`mkdtempSync(join(downloads, 'asa-profile-'))`,
 		`isolatedProfile || profile`,
-		`if (isolatedProfile) rmSync(isolatedProfile, {recursive:true,force:true})`,
+		`const executorOwnsScratch = process.env.ASA_BROWSER_RECLAIM_BY_EXECUTOR === '1'`,
+		`ASA_BROWSER_SESSION_PROFILE`,
+		`cleanupProfile();`,
+		`mkdirSync(isolatedProfile, {mode:0o700})`,
 		`/^asa-profile-[A-Za-z0-9]{6}$/`,
 		`bytes > 256 * 1024 * 1024`,
 		`seen > 8192`,
@@ -75,5 +81,37 @@ func TestManagedBrowserIsolatedSessionRunnerCleanupContract(t *testing.T) {
 	shared, err := managedSessionRunner("/opt/runtime", "/var/agent/browser/profile", "/var/agent/browser/tmp", false)
 	if err != nil || !strings.Contains(shared, `const profileMode = "shared"`) {
 		t.Fatalf("shared default changed: %v", err)
+	}
+}
+
+// This opt-in test exports the literal production-generated shell wrapper for
+// the separate Executor root-cgroup acceptance. No public runtime API or
+// cross-package production dependency is needed for the combined proof.
+func TestExportApprovedRootProductionBrowserWrapper(t *testing.T) {
+	host, _ := os.Hostname()
+	root := os.Getenv("ASA_BROWSER_ROOT_PRODUCTION_TEST_ROOT")
+	if host != "hDE01" || os.Geteuid() != 0 ||
+		os.Getenv("ASA_197_BROWSER_CGROUP_APPROVED_HOST") != host ||
+		!strings.HasPrefix(root, "/var/tmp/asa-browser-owned-root-") ||
+		filepath.Clean(root) != root {
+		t.Skip("requires an approved disposable hDE01 root fixture")
+	}
+	workspace := filepath.Join(root, "sources", "workspace")
+	info, err := os.Lstat(workspace)
+	if err != nil || !info.IsDir() || info.Mode()&os.ModeSymlink != 0 {
+		t.Fatal("disposable fixture workspace is not a real directory")
+	}
+	marker := filepath.Join(workspace, "production-oneshot.pid")
+	source := "const { spawn } = await import('node:child_process');\n" +
+		"const { writeFileSync } = await import('node:fs');\n" +
+		"const child = spawn('/bin/sleep', ['90'], {stdio:'ignore', detached:true});\n" +
+		fmt.Sprintf("writeFileSync(%q, String(child.pid)); child.unref(); process.exit(7);\n", marker)
+	manager := &Manager{
+		enginePath: "/opt/ai-server-agent/browser",
+		dataPath:   filepath.Join(root, "state", "runtime", "browser"),
+	}
+	output := filepath.Join(workspace, "production-oneshot.sh")
+	if err := os.WriteFile(output, []byte(manager.runCommand(source, false, "isolated")), 0600); err != nil {
+		t.Fatal(err)
 	}
 }

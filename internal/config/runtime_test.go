@@ -199,6 +199,8 @@ func override(t *testing.T, r *RuntimeSettings, key string, value int) {
 		r.PersistentServiceSlots = value
 	case "stdio_session_slots":
 		r.StdioSessionSlots = value
+	case "browser_concurrent_slots":
+		r.BrowserConcurrentSlots = value
 	default:
 		t.Fatalf("new runtime key %q lacks boundary tests", key)
 	}

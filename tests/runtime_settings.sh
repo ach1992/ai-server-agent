@@ -52,6 +52,7 @@ grep -Fq 'worker_command_slots=0 slots' <<<"$default" || fail 'automatic worker 
 grep -Fq 'persistent_task_slots=6 tasks' <<<"$default" || fail 'default persistent task concurrency missing'
 grep -Fq 'persistent_service_slots=3 services' <<<"$default" || fail 'default persistent service concurrency missing'
 grep -Fq 'stdio_session_slots=8 sessions' <<<"$default" || fail 'default shared session capacity missing'
+grep -Fq 'browser_concurrent_slots=2 browsers' <<<"$default" || fail 'default Browser concurrency capacity missing'
 grep -Fq '  Range   : 0..64 slots' <<<"$default" || fail 'worker concurrency range missing'
 grep -Fq '  Range   : 1..64 tasks' <<<"$default" || fail 'task concurrency range missing'
 grep -Fq '  Range   : 1..64 services' <<<"$default" || fail 'service concurrency range missing'
@@ -170,7 +171,7 @@ test -z "$(runtime_pending_backup)" || fail 'isolated R4 fixture retained stale 
 # The rest of this fixture already proves failed restart/rollback state; this
 # particular isolated case models successful activation without touching PID1.
 restart_and_verify_local(){ return 0; }
-for key in worker_command_slots persistent_task_slots persistent_service_slots stdio_session_slots; do
+for key in worker_command_slots persistent_task_slots persistent_service_slots stdio_session_slots browser_concurrent_slots; do
   runtime_apply set "$key" 64 >/dev/null
   [ "$(jq -r --arg key "$key" '.runtime[$key]' "$CONFIG_FILE")" = 64 ] ||
     fail "$key maximum override was not persisted"
@@ -190,6 +191,7 @@ grep -Fq 'worker_command_slots=0 slots' <(runtime_show) || fail 'worker default 
 grep -Fq 'persistent_task_slots=6 tasks' <(runtime_show) || fail 'task default not restored'
 grep -Fq 'persistent_service_slots=3 services' <(runtime_show) || fail 'service default not restored'
 grep -Fq 'stdio_session_slots=8 sessions' <(runtime_show) || fail 'session default not restored'
+grep -Fq 'browser_concurrent_slots=2 browsers' <(runtime_show) || fail 'Browser default not restored'
 
 ASA_PROFILE_TEST_BINARY="$RUNTIME_BINARY" bash "$ROOT/tests/environment_profiles.sh"
 bash "$ROOT/tests/operator_menu.sh"

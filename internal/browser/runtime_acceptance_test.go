@@ -21,6 +21,7 @@ import (
 	"time"
 
 	"github.com/ach1992/ai-server-agent/internal/config"
+	"github.com/ach1992/ai-server-agent/internal/credential"
 	"github.com/ach1992/ai-server-agent/internal/executor"
 )
 
@@ -90,12 +91,38 @@ func TestBrowserPinnedRuntimeAcceptance(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = os.RemoveAll(root) })
+	t.Cleanup(func() {
+		// A failed Browser containment assertion might leave a live descendant;
+		// never discard evidence or profile before whole-cgroup proof.
+		if t.Failed() {
+			t.Logf("retaining uncertain Browser acceptance fixture for inspected cleanup: %s", root)
+			return
+		}
+		if err := os.RemoveAll(root); err != nil {
+			t.Errorf("disposable Browser fixture cleanup: %v", err)
+		}
+	})
 	if err := os.Chmod(root, 0755); err != nil {
 		t.Fatal(err)
 	}
-	data := filepath.Join(root, "data")
-	for _, path := range []string{data, filepath.Join(data, "profile"), filepath.Join(data, "tmp"), filepath.Join(root, "workspace")} {
+	state := filepath.Join(root, "state")
+	if err := os.MkdirAll(filepath.Join(state, "runtime"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	// A restrictive root test umask can mask traversal permissions. Give only
+	// the selected worker group access to the root-owned state ancestors.
+	for _, path := range []string{state, filepath.Join(state, "runtime")} {
+		if err := os.Chown(path, 0, gid); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Chmod(path, 0750); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// The Executor resolves cleanup beneath StateDir/runtime/browser/tmp.
+	// Match the production location so this fixture tests real reclamation.
+	data := filepath.Join(state, "runtime", "browser")
+	for _, path := range []string{data, filepath.Join(data, "profile"), filepath.Join(data, "tmp"), filepath.Join(root, "workspace"), filepath.Join(state, "worker-home")} {
 		if err := os.MkdirAll(path, 0700); err != nil {
 			t.Fatal(err)
 		}
@@ -145,10 +172,22 @@ func TestBrowserPinnedRuntimeAcceptance(t *testing.T) {
 	cfg := config.Default()
 	cfg.WorkerUser, cfg.AgentUser = worker, worker
 	cfg.WorkspaceDir = filepath.Join(root, "workspace")
-	cfg.StateDir, cfg.LogDir = filepath.Join(root, "state"), filepath.Join(root, "logs")
+	cfg.StateDir, cfg.LogDir = state, filepath.Join(root, "logs")
 	cfg.ExecutorSocket = filepath.Join(root, "executor.sock")
 	cfg.ExecutorToken = filepath.Join(root, "executor.token")
 	if err := os.WriteFile(cfg.ExecutorToken, []byte(token), 0600); err != nil {
+		t.Fatal(err)
+	}
+	// The production Executor requires a root-owned, versioned audit
+	// fingerprint key before any privileged or worker action may start.
+	auditKey := make([]byte, 32)
+	if _, err := rand.Read(auditKey); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(root, "audit-fingerprint.key"), []byte("v1:"+hex.EncodeToString(auditKey)+"\n"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(cfg.LogDir, 0750); err != nil {
 		t.Fatal(err)
 	}
 	configPath := filepath.Join(root, "config.json")
@@ -289,6 +328,66 @@ func TestBrowserPinnedRuntimeAcceptance(t *testing.T) {
 		recovered := response(RunOptions{Script: `console.log('RECOVERED');`, TimeoutMS: 15000})
 		if !recovered.OK || strings.TrimSpace(recovered.Output) != "RECOVERED" {
 			t.Fatalf("browser did not recover after timeout: %+v", recovered)
+		}
+		assertClean()
+	})
+
+	// This is the actual production managed runner through a separate root
+	// Executor, not a hand-written stand-in. Private profile reclamation must
+	// be completed before the authenticated close acknowledges success.
+	// A direct Node exit bypasses the generated JS finally block and leaves
+	// Chromium + a separate process group for the Executor to reap.
+	t.Run("production_oneshot_abrupt_node_exit", func(t *testing.T) {
+		marker := filepath.Join(cfg.WorkspaceDir, "abrupt-detached.pid")
+		encoded, _ := json.Marshal(marker)
+		script := fmt.Sprintf(`const { spawn } = await import('node:child_process');
+const { writeFileSync } = await import('node:fs');
+const detached = spawn('/bin/sleep', ['60'], {stdio:'ignore', detached:true});
+writeFileSync(%s, String(detached.pid)); detached.unref();
+process.exit(7);`, string(encoded))
+		resp := response(RunOptions{Script: script, ProfileMode: "isolated", TimeoutMS: 15000})
+		if resp.OK || resp.ErrorCode == "unknown_completion" {
+			t.Fatalf("abrupt detached Chromium cleanup was not proven: %+v", resp)
+		}
+		if _, err := os.ReadFile(marker); err != nil {
+			t.Fatalf("abrupt detached fixture did not execute: %v", err)
+		}
+		assertClean()
+	})
+
+	t.Run("managed_isolated_profile_after_verified_close", func(t *testing.T) {
+		ctx := credential.WithPrincipal(context.Background(), credential.Principal{
+			ID: "browser-pinned-fixture-owner", Class: "direct",
+		})
+		opened, err := m.SessionOpen(ctx, SessionOptions{Workspace: cfg.WorkspaceDir, ProfileMode: "isolated"})
+		if err != nil || !opened.OK || opened.SessionID == "" {
+			t.Fatalf("production managed isolated open: %+v %v", opened, err)
+		}
+		defer func() {
+			if opened.SessionID != "" {
+				_, _ = m.SessionClose(ctx, SessionOptions{Workspace: cfg.WorkspaceDir, SessionID: opened.SessionID})
+			}
+		}()
+		var before []string
+		entries, err := os.ReadDir(filepath.Join(data, "tmp"))
+		if err != nil {
+			t.Fatal(err)
+		}
+		for _, entry := range entries {
+			if entry.IsDir() && strings.HasPrefix(entry.Name(), "asa-profile-") {
+				before = append(before, entry.Name())
+			}
+		}
+		if len(before) != 1 || len(before[0]) != len("asa-profile-")+32 {
+			t.Fatalf("managed Executor private profile unavailable: %v", before)
+		}
+		closed, err := m.SessionClose(ctx, SessionOptions{Workspace: cfg.WorkspaceDir, SessionID: opened.SessionID})
+		if err != nil || !closed.OK || closed.Status != "closed" {
+			t.Fatalf("production managed close did not verify cleanup: %+v %v", closed, err)
+		}
+		opened.SessionID = ""
+		if _, err := os.Lstat(filepath.Join(data, "tmp", before[0])); !os.IsNotExist(err) {
+			t.Fatalf("managed private profile survived verified close: %v", err)
 		}
 		assertClean()
 	})

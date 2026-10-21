@@ -11,7 +11,7 @@ import (
 // managedSessionRunner creates the bounded Node worker body to be owned by
 // the existing executor session broker. No daemon, public port or second
 // Chromium runtime/profile is created. A Browser session is not a project
-// artifact; its entire state dies with this child process.
+// artifact; Executor-owned private files are removed after verified stop.
 func managedSessionRunner(engine, profile, downloads string, ignoreHTTPS bool, modes ...string) (string, error) {
 	mode := "shared"
 	if len(modes) > 0 {
@@ -35,7 +35,7 @@ func managedSessionRunner(engine, profile, downloads string, ignoreHTTPS bool, m
 	}
 	return fmt.Sprintf(`import { createInterface } from 'node:readline';
 import { createHash } from 'node:crypto';
-import { statfsSync, mkdtempSync, rmSync, openSync, fstatSync, readSync, closeSync, constants, readdirSync, opendirSync, lstatSync } from 'node:fs';
+import { statfsSync, mkdtempSync, mkdirSync, rmSync, openSync, fstatSync, readSync, closeSync, constants, readdirSync, opendirSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 process.env.PLAYWRIGHT_BROWSERS_PATH = %s;
 const { chromium } = await import(%s);
@@ -59,21 +59,29 @@ const diskSafe = () => {
   } catch { return false; }
 };
 if (!diskSafe()) throw new Error('browser_session_disk_reserve_unavailable');
-// At session open, the executor's exclusive Browser profile lease proves
-// no prior managed worker is alive. Reclaim only our own randomly named
-// abandoned trace directories, including those from SIGKILL/crash. Never
-// traverse an arbitrary browser profile/worktree or follow a symlink.
-for (const entry of readdirSync(downloads, {withFileTypes:true})) {
-  if (!entry.isDirectory() ||
-      !(/^asa-trace-[A-Za-z0-9]{6}$/.test(entry.name) ||
-        /^asa-profile-[A-Za-z0-9]{6}$/.test(entry.name))) continue;
-  rmSync(join(downloads,entry.name),{recursive:true,force:true});
+// When run through the Executor, the broker's empty-to-first admission
+// already reclaimed stale disposable directories *before* allowing peers.
+// Independent CLI/standalone acceptance fixtures keep their legacy cleanup;
+// they never share an Executor-owned concurrent admission domain.
+if (process.env.ASA_BROWSER_RECLAIM_BY_EXECUTOR !== '1') {
+  for (const entry of readdirSync(downloads, {withFileTypes:true})) {
+    if (!entry.isDirectory() ||
+        !(/^asa-trace-[A-Za-z0-9]{6}$/.test(entry.name) ||
+          /^asa-profile-[A-Za-z0-9]{6}$/.test(entry.name))) continue;
+    rmSync(join(downloads,entry.name),{recursive:true,force:true});
+  }
 }
 
-// One exclusive Browser lease also protects admission and stale-profile
-// reclamation. A private profile stays under Agent-owned disposable state;
-// unlike the shared profile it is never reused by another session.
-const isolatedProfile = profileMode === 'isolated' ? mkdtempSync(join(downloads, 'asa-profile-')) : '';
+// Each isolated profile is per-session private; it can never be reclaimed
+// from another active session or reused as a shared browser profile.
+const executorOwnsScratch = process.env.ASA_BROWSER_RECLAIM_BY_EXECUTOR === '1';
+const profileName = process.env.ASA_BROWSER_SESSION_PROFILE || '';
+if (executorOwnsScratch && profileMode === 'isolated' && !/^asa-profile-[0-9a-f]{32}$/.test(profileName))
+  throw new Error('browser_profile_identity_unavailable');
+const isolatedProfile = profileMode !== 'isolated' ? '' : executorOwnsScratch ?
+  join(downloads, profileName) : mkdtempSync(join(downloads, 'asa-profile-'));
+if (executorOwnsScratch && isolatedProfile) mkdirSync(isolatedProfile, {mode:0o700});
+const cleanupProfile = () => { if (!executorOwnsScratch && isolatedProfile) rmSync(isolatedProfile, {recursive:true,force:true}); };
 // Bounded private profile retention: no extra monitor process, host scheduler,
 // or arbitrary project cleanup. Never follow symlinks; fail closed if the
 // profile grows beyond 256 MiB or 8192 on-disk entries.
@@ -111,7 +119,7 @@ try {
     args: ['--disk-cache-size=67108864', '--media-cache-size=33554432']
   });
 } catch (error) {
-  if (isolatedProfile) rmSync(isolatedProfile, {recursive:true,force:true});
+  cleanupProfile();
   throw error;
 }
 const browser = context.browser();
@@ -124,7 +132,7 @@ const diskMonitor = setInterval(() => {
     diskPressure = true;
     clearInterval(diskMonitor);
     void context.close().finally(() => {
-      try { if (isolatedProfile) rmSync(isolatedProfile, {recursive:true,force:true}); } catch {}
+      try { cleanupProfile(); } catch {}
       process.exit(73);
     });
   }
@@ -287,7 +295,7 @@ try {
 } finally {
   clearInterval(diskMonitor);
   await context.close();
-  if (isolatedProfile) rmSync(isolatedProfile, {recursive:true,force:true});
+  cleanupProfile();
   process.exit(0);
 }
 `, items[3], items[0], items[1], items[2], items[4], items[5], ignoreHTTPS), nil

@@ -70,16 +70,20 @@ type RuntimeManifest struct {
 }
 
 type RuntimeStatus struct {
-	InspectionComplete bool            `json:"inspection_complete"`
-	Installed          bool            `json:"installed"`
-	Ready              bool            `json:"ready"`
-	Busy               bool            `json:"busy"`
-	SharedProfile      bool            `json:"shared_profile"`
-	EngineDir          string          `json:"engine_dir"`
-	ProfileDir         string          `json:"profile_dir"`
-	Desired            RuntimeManifest `json:"desired"`
-	InstalledState     RuntimeManifest `json:"installed_state"`
-	Reason             string          `json:"reason,omitempty"`
+	InspectionComplete     bool            `json:"inspection_complete"`
+	Installed              bool            `json:"installed"`
+	Ready                  bool            `json:"ready"`
+	Busy                   bool            `json:"busy"`
+	SharedProfile          bool            `json:"shared_profile"`
+	BrowserActive          int             `json:"browser_active,omitempty"`
+	BrowserLimit           int             `json:"browser_limit,omitempty"`
+	SharedProfileReserved  bool            `json:"shared_profile_reserved,omitempty"`
+	IsolatedSlotsAvailable int             `json:"isolated_slots_available,omitempty"`
+	EngineDir              string          `json:"engine_dir"`
+	ProfileDir             string          `json:"profile_dir"`
+	Desired                RuntimeManifest `json:"desired"`
+	InstalledState         RuntimeManifest `json:"installed_state"`
+	Reason                 string          `json:"reason,omitempty"`
 }
 
 type RunOptions struct {
@@ -89,13 +93,14 @@ type RunOptions struct {
 	ProfileMode       string
 }
 
-// Manager owns one optional browser runtime and one Agent-wide persistent
-// browser profile. Setup and execution share a fail-fast mutex: there is no
-// hidden browser queue, and runtime replacement cannot overlap profile use.
+// Manager owns one optional Browser runtime and a persistent shared profile.
+// Setup takes the exclusive local lock; concurrent short read-only preflights
+// use shared locking, and only the Executor decides process/profile admission.
+// There is no hidden Browser queue or overlapping runtime replacement.
 type Manager struct {
 	cfg               config.Config
 	token             string
-	mu                sync.Mutex
+	mu                sync.RWMutex
 	enginePath        string
 	dataPath          string
 	lifecycleLockPath string
@@ -275,9 +280,23 @@ func (m *Manager) Status(ctx context.Context) RuntimeStatus {
 		status.Reason = "shared Browser profile admission could not be verified"
 		return status
 	}
+	if resp.BrowserAdmission != nil {
+		snapshot := resp.BrowserAdmission
+		status.BrowserActive = snapshot.Active
+		status.BrowserLimit = snapshot.Limit
+		status.SharedProfileReserved = snapshot.SharedProfileReserved
+		if !snapshot.MaintenanceReserved && snapshot.Limit >= snapshot.Active {
+			status.IsolatedSlotsAvailable = snapshot.Limit - snapshot.Active
+		}
+	}
 	if resp.Status == "reserved" {
-		status.Busy = true
-		status.Reason = "shared Browser profile reserved by an active operation or managed session"
+		// Busy describes whether an ordinary *shared* Browser can start.
+		// Isolated callers also have the independent isolated_available count.
+		status.Busy = status.BrowserLimit == 0 || status.SharedProfileReserved ||
+			(resp.BrowserAdmission != nil && (resp.BrowserAdmission.MaintenanceReserved || status.BrowserActive >= status.BrowserLimit))
+		if status.Busy {
+			status.Reason = "Browser shared profile reserved, process slots full or maintenance admission busy"
+		}
 	}
 	return status
 }
@@ -501,11 +520,12 @@ func (m *Manager) Run(ctx context.Context, opts RunOptions) (executor.Response, 
 	if err != nil {
 		return browserError("invalid_timeout", "validation", err.Error()), nil
 	}
-	if !m.mu.TryLock() {
-		return browserBusy("browser execution"), nil
+	if !m.mu.TryRLock() {
+		return browserBusy("browser runtime preflight"), nil
 	}
-	defer m.mu.Unlock()
-	if status := m.inspectStatus(ctx, true); !status.Ready {
+	status := m.inspectStatus(ctx, true)
+	m.mu.RUnlock()
+	if !status.Ready {
 		return browserError("browser_runtime_not_ready", "state", "browser runtime is not ready: "+status.Reason+"; call browser_setup"), nil
 	}
 	correlatedCtx, _, err := executor.EnsureRequestCorrelationContext(ctx)
@@ -518,10 +538,10 @@ func (m *Manager) Run(ctx context.Context, opts RunOptions) (executor.Response, 
 	defer cancel()
 	resp, err := executor.ClientCallContext(clientCtx, m.cfg.ExecutorSocket, m.token, executor.Request{
 		Action:      "run",
-		AuditAction: "browser_run",
-		Command:     m.runCommand(opts.Script, opts.IgnoreHTTPSErrors, mode),
-		Root:        false,
-		TimeoutMS:   int64(timeout / time.Millisecond),
+		AuditAction: "browser_run", BrowserProfileMode: mode,
+		Command:   m.runCommand(opts.Script, opts.IgnoreHTTPSErrors, mode),
+		Root:      false,
+		TimeoutMS: int64(timeout / time.Millisecond),
 	})
 	if err != nil {
 		return browserUnknown("browser execution", err, false), nil
@@ -750,12 +770,19 @@ min_free_kb=%d
 disposable_limit_kb=%d
 free_kb=$(df -Pk "$data" | awk 'NR == 2 {print $4}')
 [ -n "$free_kb" ] && [ "$free_kb" -ge "$min_free_kb" ] || { echo "browser resource limit: state filesystem free space is below safety reserve" >&2; exit %d; }
-find "$data/tmp" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+# The executor reclaims known orphaned scratch under its exclusive first
+# admission. A one-shot run must not delete other live isolated profiles.
 cleanup_cache() {
   rm -rf --     "$data/profile/Default/Cache"     "$data/profile/Default/Code Cache"     "$data/profile/Default/GPUCache"     "$data/profile/GPUCache"     "$data/profile/ShaderCache"     "$data/profile/GrShaderCache"     "$data/profile/GraphiteDawnCache"     "$data/profile/DawnGraphiteCache"     "$data/profile/DawnWebGPUCache"
 }
 if [ "$profile_mode" = shared ]; then cleanup_cache; fi
-run_tmp=$(mktemp -d "$data/tmp/run.XXXXXX")
+if [ -n "${ASA_BROWSER_RUN_SCRATCH:-}" ]; then
+  [[ "$ASA_BROWSER_RUN_SCRATCH" =~ ^run\.[0-9a-f]{32}$ ]] || exit 2
+  run_tmp="$data/tmp/$ASA_BROWSER_RUN_SCRATCH"
+  mkdir -m 0700 -- "$run_tmp"
+else
+  run_tmp=$(mktemp -d "$data/tmp/run.XXXXXX")
+fi
 if [ "$profile_mode" = isolated ]; then
   profile="$run_tmp/isolated-profile"
   export TMPDIR="$run_tmp"
@@ -765,8 +792,10 @@ runner="$run_tmp/runner.mjs"
 downloads="$run_tmp/downloads"
 mkdir "$downloads"
 cleanup() {
+  if [ -z "${ASA_BROWSER_RUN_SCRATCH:-}" ]; then
   rm -rf -- "$run_tmp"
   if [ "$profile_mode" = shared ]; then cleanup_cache || true; fi
+  fi
 }
 trap cleanup EXIT
 printf '%%s' %s | base64 -d > "$body"
