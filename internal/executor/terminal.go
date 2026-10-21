@@ -486,6 +486,11 @@ func (s *Server) terminalRead(req Request) Response {
 	if req.SessionEpoch != t.epoch {
 		return Response{Error: "terminal output epoch changed; resume from cursor zero with returned session_epoch", ReasonCode: "terminal_epoch_changed", ErrorCode: "terminal_epoch_changed", ErrorClass: "state", SessionID: e.id, SessionEpoch: t.epoch, RetentionTruncated: t.recovered}
 	}
+	// An invalid/future cursor is not successful session activity; reject
+	// before a potentially expensive root systemd lease verification/renewal.
+	if req.Cursor > t.latest {
+		return terminalError("invalid_cursor", fmt.Errorf("future cursor; latest=%d", t.latest))
+	}
 	e.mu.Unlock()
 	renewalErr := s.renewTerminalLease(req, e)
 	e.mu.Lock() // defer above must remain paired even when renewal fails
@@ -494,9 +499,6 @@ func (s *Server) terminalRead(req Request) Response {
 	}
 	if t.scopeUncertain {
 		return Response{SessionID: e.id, SessionEpoch: t.epoch, Error: "scope creation remains unverified; explicit close/reconciliation required", ErrorCode: "terminal_start_uncertain", ErrorClass: "state"}
-	}
-	if req.Cursor > t.latest {
-		return terminalError("invalid_cursor", fmt.Errorf("future cursor; latest=%d", t.latest))
 	}
 	earliest := t.latest + 1
 	if len(t.chunks) > 0 {

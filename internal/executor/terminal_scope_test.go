@@ -75,6 +75,13 @@ func TestTerminalReadLeaseFailureNeverUnlocksUnheldMutex(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer s.sessions.remove(e)
+	// The invalid cursor must not reach PID1 renewal, including on a
+	// presently broken timer, and must remain a specific client error.
+	req.Cursor = 1
+	if got := s.terminalRead(req); got.OK || got.ErrorCode != "invalid_cursor" {
+		t.Fatalf("invalid terminal cursor unexpectedly reached PID1 lease: %+v", got)
+	}
+	req.Cursor = 0
 	got := s.terminalRead(req)
 	if got.OK || got.ErrorCode != "terminal_lease_unverified" {
 		t.Fatalf("renewal error not fail-closed: %+v", got)

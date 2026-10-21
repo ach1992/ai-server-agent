@@ -128,9 +128,6 @@ func TestApprovedWorkerTmuxScopeSurvivesBrokerStop(t *testing.T) {
 	if err := verifyTerminalLeaseTimer(generation); err != nil {
 		t.Fatalf("independent PID1 idle timer missing: %v", err)
 	}
-	if err := verifyTerminalLeaseTimer(generation); err != nil {
-		t.Fatalf("independent PID1 idle timer missing: %v", err)
-	}
 	// Move a test-owned durable lease near expiry to exercise the real public
 	// terminal_read renewal, including persisted deadline and restarted PID1 timer.
 	// This never reduces the actual one-hour timer of a live Agent session.
@@ -171,9 +168,6 @@ func TestApprovedWorkerTmuxScopeSurvivesBrokerStop(t *testing.T) {
 	}
 	if err := verifyScopedTerminalBackendForVersion(generation, 2); err != nil {
 		t.Fatalf("backend did not outlive Control Mode: %v", err)
-	}
-	if err := verifyTerminalLeaseTimer(generation); err != nil {
-		t.Fatalf("PID1 timer did not survive lost Executor client: %v", err)
 	}
 	if err := verifyTerminalLeaseTimer(generation); err != nil {
 		t.Fatalf("PID1 timer did not survive lost Executor client: %v", err)
