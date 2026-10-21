@@ -17,16 +17,25 @@ import (
 	"github.com/ach1992/ai-server-agent/internal/config"
 )
 
+// For the 197 session-lifecycle acceptance, a test-owned host with the
+// explicit per-host opt-in may exercise isolated tmux/systemd fixtures.
+// This grants no permission to restart any installed Agent service.
+func approvedPTYDisposableFixtureHost(host string) bool {
+	if host == "" || os.Geteuid() != 0 || os.Getenv("ASA_PTY_SCOPE_APPROVED_HOST") != host {
+		return false
+	}
+	return host == "CLY535343" || (host == "hDE01" && os.Getenv("ASA137_E2E_HOST") == host) ||
+		os.Getenv("ASA_197_TERMINAL_DISPOSABLE_HOST") == host
+}
+
 // This test must never execute as part of ordinary CI. It launches a genuine
 // root-owned transient systemd scope and drops the pane to aiworker. Only a
 // separately authorized disposable host may opt in explicitly.
 // The hDE01 path additionally requires the Issue #137 E2E environment gate;
 // it neither broadens the historical CLY535343 gate nor affects installed services.
 func TestApprovedWorkerTmuxScopeSurvivesBrokerStop(t *testing.T) {
-	approved := os.Getenv("ASA_PTY_SCOPE_APPROVED_HOST")
 	hostname, _ := os.Hostname()
-	if approved == "" || approved != hostname || os.Geteuid() != 0 ||
-		(hostname != "CLY535343" && (hostname != "hDE01" || os.Getenv("ASA137_E2E_HOST") != hostname)) {
+	if !approvedPTYDisposableFixtureHost(hostname) {
 		t.Skip("real systemd scope test requires explicitly authorized disposable host and root")
 	}
 	account, err := user.Lookup("aiworker")
@@ -113,8 +122,14 @@ func TestApprovedWorkerTmuxScopeSurvivesBrokerStop(t *testing.T) {
 	if !e.terminal.scoped {
 		t.Fatal("production tmux did not use the isolated systemd backend")
 	}
-	if err := verifyScopedTerminalBackend(generation); err != nil {
+	if err := verifyScopedTerminalBackendForVersion(generation, 2); err != nil {
 		t.Fatalf("scope lost cgroup or lifetime boundary: %v", err)
+	}
+	if err := verifyTerminalLeaseTimer(generation); err != nil {
+		t.Fatalf("independent PID1 idle timer missing: %v", err)
+	}
+	if err := verifyTerminalLeaseTimer(generation); err != nil {
+		t.Fatalf("independent PID1 idle timer missing: %v", err)
 	}
 	// Worker UID must NOT attach directly to another principal's root-owned
 	// socket, even when it knows the opaque socket path.
@@ -128,8 +143,14 @@ func TestApprovedWorkerTmuxScopeSurvivesBrokerStop(t *testing.T) {
 	if err := s.sessions.removeAndStop(e); err != nil {
 		t.Fatal(err)
 	}
-	if err := verifyScopedTerminalBackend(generation); err != nil {
+	if err := verifyScopedTerminalBackendForVersion(generation, 2); err != nil {
 		t.Fatalf("backend did not outlive Control Mode: %v", err)
+	}
+	if err := verifyTerminalLeaseTimer(generation); err != nil {
+		t.Fatalf("PID1 timer did not survive lost Executor client: %v", err)
+	}
+	if err := verifyTerminalLeaseTimer(generation); err != nil {
+		t.Fatalf("PID1 timer did not survive lost Executor client: %v", err)
 	}
 	s2 := &Server{
 		cfg: s.cfg, workerUID: s.workerUID, workerGID: s.workerGID,
@@ -192,8 +213,14 @@ func TestApprovedWorkerTmuxScopeSurvivesBrokerStop(t *testing.T) {
 	if closed := s2.terminalAction(owner); !closed.OK {
 		t.Fatalf("production terminal close did not clean scope: %+v", closed)
 	}
-	if err := verifyScopedTerminalBackend(generation); err == nil {
+	if err := verifyScopedTerminalBackendForVersion(generation, 2); err == nil {
 		t.Fatal("systemd scope remained active after terminal_close")
+	}
+	if err := verifyTerminalLeaseTimer(generation); err == nil {
+		t.Fatal("PID1 idle timer survived verified close")
+	}
+	if err := verifyTerminalLeaseTimer(generation); err == nil {
+		t.Fatal("PID1 idle timer survived verified close")
 	}
 	if _, err := os.Stat(sock); !os.IsNotExist(err) {
 		t.Fatalf("private socket survived verified close: %v", err)
@@ -240,7 +267,7 @@ func TestApprovedWorkerTmuxScopeSurvivesBrokerStop(t *testing.T) {
 	if err != nil || count != 0 {
 		t.Fatalf("expired trusted scope record not pruned: count=%d err=%v", count, err)
 	}
-	if err := verifyScopedTerminalBackend(name2); err == nil {
+	if err := verifyScopedTerminalBackendForVersion(name2, 2); err == nil {
 		t.Fatal("expired terminal backend scope remained active")
 	}
 	if _, err := os.Stat(path); !os.IsNotExist(err) {

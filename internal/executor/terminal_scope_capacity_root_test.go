@@ -16,8 +16,7 @@ import (
 // Opt-in root/hostname gate: NEVER restarts an installed Agent service.
 func TestApprovedPersistentPTYCapacityAfterExecutorRestart(t *testing.T) {
 	host, err := os.Hostname()
-	if err != nil || host != "CLY535343" || os.Geteuid() != 0 ||
-		os.Getenv("ASA_PTY_SCOPE_APPROVED_HOST") != host {
+	if err != nil || !approvedPTYDisposableFixtureHost(host) {
 		t.Skip("requires approved disposable root test host")
 	}
 	u, err := user.Lookup("aiworker")
@@ -94,7 +93,7 @@ func TestApprovedPersistentPTYCapacityAfterExecutorRestart(t *testing.T) {
 			t.Fatal(err)
 		}
 		saved = append(saved, active{id: o.SessionID, epoch: o.SessionEpoch, name: e.terminal.name})
-		if err := verifyScopedTerminalBackend(e.terminal.name); err != nil {
+		if err := verifyScopedTerminalBackendForVersion(e.terminal.name, 2); err != nil {
 			t.Fatalf("scope %d not verified: %v", i, err)
 		}
 	}
@@ -117,7 +116,7 @@ func TestApprovedPersistentPTYCapacityAfterExecutorRestart(t *testing.T) {
 		t.Fatalf("post-restart ninth scope was created before admission: %+v", reject)
 	}
 	for _, v := range saved {
-		if err := verifyScopedTerminalBackend(v.name); err != nil {
+		if err := verifyScopedTerminalBackendForVersion(v.name, 2); err != nil {
 			t.Fatalf("capacity rejection touched a surviving backend: %v", err)
 		}
 	}
@@ -173,7 +172,7 @@ func TestApprovedPersistentPTYCapacityAfterExecutorRestart(t *testing.T) {
 		t.Fatalf("expected exactly eight durable scopes after concurrent opens: count=%d err=%v", count, err)
 	}
 	for _, v := range saved[1:] {
-		if err := verifyScopedTerminalBackend(v.name); err != nil {
+		if err := verifyScopedTerminalBackendForVersion(v.name, 2); err != nil {
 			t.Fatalf("unrelated original real scope was stopped: %v", err)
 		}
 	}

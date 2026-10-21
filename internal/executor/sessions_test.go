@@ -550,3 +550,29 @@ func TestTerminalIdleRenewalNeverBypassesPID1HardLimit(t *testing.T) {
 		t.Fatal("terminal scope hard expiry was incorrectly bypassed")
 	}
 }
+
+func TestNonterminalExpiredAccessCannotReviveProcess(t *testing.T) {
+	s, req, workspace := testStdioBroker(t)
+	id, err := s.workerStdioSession(req, "lsp", workspace, "/bin/cat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := s.sessions.get(req, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.sessions.close(req, id)
+	e.mu.Lock()
+	e.lastAuthenticatedAction = time.Now().Add(-maxStdioSessionAge - time.Second)
+	e.mu.Unlock()
+	if _, err := s.sessions.get(req, id); !errors.Is(err, errSessionStopped) {
+		t.Fatalf("expired lease resurrected by authenticated request: %v", err)
+	}
+	wrong := req
+	wrong.PrincipalID = "not-original"
+	if _, err := s.sessions.get(wrong, id); !errors.Is(err, errSessionNotFound) {
+		t.Fatalf("expired lease leaked existence cross-principal: %v", err)
+	}
+	s.expireProcessSession(e)
+	waitForStdioExit(t, e)
+}

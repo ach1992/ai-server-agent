@@ -34,7 +34,8 @@ type terminalRecord struct {
 	Pane       string    `json:"pane"`
 	Columns    int       `json:"columns"`
 	Rows       int       `json:"rows"`
-	ExpiresAt  time.Time `json:"expires_at"`
+	CreatedAt  time.Time `json:"created_at,omitempty"` // v2: immutable verified opening time
+	ExpiresAt  time.Time `json:"expires_at"`           // v1: hard end; v2: PID1 idle timer lease
 }
 
 func validTerminalID(id string) bool {
@@ -87,6 +88,17 @@ func (s *Server) terminalRecordPath(id string) (string, error) {
 }
 
 var errTerminalPending = errors.New("terminal_start_uncertain")
+
+// v1 records belong to one-hour absolute-lifetime scopes from older builds.
+// v2 records opt into separately verified renewable PID1 timers and 24-hour
+// scope fallback. Never reinterpret old records as renewable during upgrade.
+func validTerminalRecordVersion(rec terminalRecord) bool {
+	if rec.Version == 1 {
+		return true
+	}
+	return rec.Version == 2 && rec.Scoped && !rec.CreatedAt.IsZero() &&
+		!rec.ExpiresAt.Before(rec.CreatedAt) && rec.ExpiresAt.Sub(rec.CreatedAt) <= terminalScopeHardAge
+}
 
 // Retired scoped servers must not permanently consume the limited terminal
 // registry after an Executor crash. Never trust the filename alone: inspect
@@ -162,7 +174,7 @@ func (s *Server) terminalReservationsWithStop(stop func(string) error) (terminal
 		if closeErr != nil {
 			return reservations, fmt.Errorf("terminal_record_close_unverified: %w", closeErr)
 		}
-		if parseErr != nil || rec.Version != 1 || rec.ID != id ||
+		if parseErr != nil || !validTerminalRecordVersion(rec) || rec.ID != id ||
 			!rec.Scoped || !validTmuxSessionName(rec.Name) ||
 			(rec.Lifecycle != "" && rec.Lifecycle != "active" && rec.Lifecycle != "pending") ||
 			(rec.Lifecycle == "pending" && (!validTerminalEpoch(rec.Epoch) || !validTerminalPendingSocket(rec, s.cfg.StateDir))) ||
@@ -189,10 +201,18 @@ func (s *Server) terminalReservationsWithStop(stop func(string) error) (terminal
 func (s *Server) persistPendingTerminalRecord(e *stdioSession) (bool, error) {
 	e.mu.Lock()
 	t := e.terminal
-	rec := terminalRecord{Version: 1, ID: e.id, OwnerID: e.ownerID, OwnerClass: e.ownerClass,
+	version := 1
+	if s.terminalBinary == "" {
+		version = 2
+	} // only production scopes get PID1 timers
+	now := time.Now()
+	rec := terminalRecord{Version: version, ID: e.id, OwnerID: e.ownerID, OwnerClass: e.ownerClass,
 		Workspace: e.workspace, Root: t.root, Scoped: true, Lifecycle: "pending",
 		Epoch: t.epoch, SocketDir: t.socketDir, Name: t.name, Columns: t.columns,
-		Rows: t.rows, ExpiresAt: time.Now().Add(maxStdioSessionAge)}
+		Rows: t.rows, ExpiresAt: now.Add(maxStdioSessionAge)}
+	if version == 2 {
+		rec.CreatedAt = now
+	}
 	e.mu.Unlock()
 	if !validTerminalPendingSocket(rec, s.cfg.StateDir) || !validTerminalEpoch(rec.Epoch) {
 		return false, errors.New("terminal_pending_identity_invalid")
@@ -223,6 +243,8 @@ func (s *Server) persistTerminalRecord(req Request, e *stdioSession) error {
 			old.Root != rec.Root || old.Columns != rec.Columns || old.Rows != rec.Rows {
 			return errors.New("terminal_pending_identity_changed")
 		}
+		rec.Version = old.Version
+		rec.CreatedAt = old.CreatedAt
 		rec.ExpiresAt = old.ExpiresAt
 	}
 	_, err := s.writeTerminalRecord(rec, rec.Scoped)
@@ -331,7 +353,7 @@ func (s *Server) readOwnedTerminalRecord(req Request, pendingOnly bool) (termina
 	if err = json.Unmarshal(body, &rec); err != nil {
 		return rec, errors.New("terminal_record_invalid")
 	}
-	if rec.Version != 1 || rec.ID != req.SessionID || rec.OwnerID != req.PrincipalID || rec.OwnerClass != req.PrincipalClass || rec.Workspace != filepath.Clean(req.Workspace) || rec.Root != req.Root || req.Approval != req.Root || !validTmuxSessionName(rec.Name) || !validTerminalID(rec.ID) ||
+	if !validTerminalRecordVersion(rec) || rec.ID != req.SessionID || rec.OwnerID != req.PrincipalID || rec.OwnerClass != req.PrincipalClass || rec.Workspace != filepath.Clean(req.Workspace) || rec.Root != req.Root || req.Approval != req.Root || !validTmuxSessionName(rec.Name) || !validTerminalID(rec.ID) ||
 		(rec.Lifecycle != "" && rec.Lifecycle != "active" && rec.Lifecycle != "pending") {
 		return terminalRecord{}, errSessionNotFound
 	}
@@ -493,6 +515,107 @@ func removeVerifiedPendingSocketDir(dir string) {
 	_ = os.Remove(dir) // never recurse through unexpected contents
 }
 
+// A bounded refresh never mutates a legacy v1 Terminal, whose existing
+// scope's absolute one-hour limit is immutable. v2 renewal is serialized
+// against disk-backed admission/record cleanup; writes are durable before
+// the independently managed PID1 timer is restarted. In the worst case a
+// failed timer restart stops the scope EARLY, never leaves an infinite scope.
+func (s *Server) renewTerminalLease(req Request, e *stdioSession) error {
+	s.terminalAdmissionMu.Lock()
+	defer s.terminalAdmissionMu.Unlock()
+	return s.renewTerminalLeaseLocked(req, e)
+}
+
+// Caller holds terminalAdmissionMu, including after reconnect validation.
+func (s *Server) renewTerminalLeaseLocked(req Request, e *stdioSession) error {
+	if e == nil {
+		return errSessionNotFound
+	}
+	e.mu.Lock()
+	t := e.terminal
+	if t == nil || t.scopeUncertain || e.closed || e.exited || t.exited {
+		e.mu.Unlock()
+		return errSessionStopped
+	}
+	if !t.scoped {
+		e.mu.Unlock()
+		return nil
+	} // existing in-process fixture
+	name, socketDir := t.name, t.socketDir
+	cached := e.terminalLeaseExpiresAt
+	e.mu.Unlock()
+	if cached.After(time.Now().Add(maxStdioSessionAge - terminalLeaseRenewInterval)) {
+		return nil
+	}
+	rec, err := s.readOwnedTerminalRecord(req, false)
+	if err != nil {
+		return err
+	}
+	if rec.ID != e.id || rec.Name != name || rec.SocketDir != socketDir || rec.Lifecycle != "active" {
+		return errors.New("terminal lease identity changed")
+	}
+	if rec.Version == 1 {
+		return nil
+	} // older released scopes remain hard-capped
+	if rec.Version != 2 {
+		return errors.New("terminal lease version unsupported")
+	}
+	if rec.ExpiresAt.After(time.Now().Add(maxStdioSessionAge - terminalLeaseRenewInterval)) {
+		e.mu.Lock()
+		e.terminalLeaseExpiresAt = rec.ExpiresAt
+		e.mu.Unlock()
+		return nil
+	}
+	if err := verifyScopedTerminalBackendForVersion(name, 2); err != nil {
+		return err
+	}
+	if err := verifyTerminalLeaseTimer(name); err != nil {
+		return err
+	}
+	oldExpiry := rec.ExpiresAt
+	rec.ExpiresAt = time.Now().Add(maxStdioSessionAge)
+	if hard := rec.CreatedAt.Add(terminalScopeHardAge); rec.ExpiresAt.After(hard) {
+		rec.ExpiresAt = hard
+	}
+	if _, err := s.writeTerminalRecord(rec, true); err != nil {
+		return fmt.Errorf("terminal lease persistence failed: %w", err)
+	}
+	if err := renewTerminalLeaseTimer(name); err != nil {
+		// Conservative rollback: the old timer may have fired or stayed armed.
+		// An earlier stored deadline is safe even after an ambiguous restart.
+		rec.ExpiresAt = oldExpiry
+		if _, undoErr := s.writeTerminalRecord(rec, true); undoErr != nil {
+			return errors.Join(err, fmt.Errorf("lease deadline restoration failed: %w", undoErr))
+		}
+		return err
+	}
+	if err := verifyScopedTerminalBackendForVersion(name, 2); err != nil {
+		return err
+	}
+	e.mu.Lock()
+	e.terminalLeaseExpiresAt = rec.ExpiresAt
+	if e.expiry != nil {
+		e.expiry.Reset(time.Until(rec.ExpiresAt))
+	}
+	e.mu.Unlock()
+	return nil
+}
+
+// Go is advisory for v2 Terminal expiry. A concurrent verified refresh may
+// already have extended the durable PID1 timer when the old callback runs.
+func (e *stdioSession) terminalLeaseStillValid(now time.Time) bool {
+	e.mu.Lock()
+	defer e.mu.Unlock()
+	if e.closed || e.exited || e.terminal == nil || e.terminal.scopeUncertain ||
+		!e.terminal.scoped || !e.terminalLeaseExpiresAt.After(now) {
+		return false
+	}
+	if e.expiry != nil {
+		e.expiry.Reset(time.Until(e.terminalLeaseExpiresAt))
+	}
+	return true
+}
+
 // Reattach a verified tmux backend without creating a new shell/pane. An old
 // output epoch cannot silently refer to a new in-memory bounded event stream.
 func (s *Server) terminalReconnect(req Request) Response {
@@ -518,6 +641,9 @@ func (s *Server) terminalReconnect(req Request) Response {
 		epoch := current.terminal.epoch
 		current.mu.Unlock()
 		if live {
+			if err := s.renewTerminalLeaseLocked(req, current); err != nil {
+				return terminalError("terminal_lease_unverified", err)
+			}
 			return Response{OK: true, Status: "already_connected", SessionID: current.id, SessionEpoch: epoch}
 		}
 		if err := s.sessions.removeAndStop(current); err != nil {
@@ -533,6 +659,16 @@ func (s *Server) terminalReconnect(req Request) Response {
 	}
 	if err != nil {
 		return terminalError("terminal_reconnect_unavailable", err)
+	}
+	// A v2 ACTIVE record is not enough to authorize use of a scope whose
+	// independent PID1 idle timer has disappeared or whose boundary changed.
+	if rec.Version == 2 {
+		if err := verifyScopedTerminalBackendForVersion(rec.Name, 2); err != nil {
+			return terminalError("terminal_scope_unverified", err)
+		}
+		if err := verifyTerminalLeaseTimer(rec.Name); err != nil {
+			return terminalError("terminal_lease_unverified", err)
+		}
 	}
 	epoch, err := terminalEpoch()
 	if err != nil {
@@ -596,15 +732,30 @@ func (s *Server) terminalReconnect(req Request) Response {
 		_ = s.sessions.removeAndStop(e)
 		return terminalError("terminal_backend_identity_changed", err)
 	}
+	// Reconnection is a real authenticated action; after pane and generation
+	// proof renew an old v2 lease before announcing a ready connection.
+	e.mu.Lock()
+	e.terminalLeaseExpiresAt = rec.ExpiresAt
+	e.mu.Unlock()
+	if rec.Version == 2 {
+		if err := s.renewTerminalLeaseLocked(req, e); err != nil {
+			_ = s.sessions.removeAndStop(e)
+			return terminalError("terminal_lease_unverified", err)
+		}
+	}
 	e.mu.Lock()
 	if e.expiry != nil {
 		e.expiry.Stop()
 	}
 	remaining := time.Until(rec.ExpiresAt)
+	if e.terminalLeaseExpiresAt.After(rec.ExpiresAt) {
+		remaining = time.Until(e.terminalLeaseExpiresAt)
+	}
 	if remaining < time.Second {
 		remaining = time.Second
 	}
 	e.expiry = time.AfterFunc(remaining, func() { s.expireProcessSession(e) })
+	e.terminalLeaseExpiresAt = time.Now().Add(remaining)
 	e.mu.Unlock()
 	return Response{OK: true, Status: "recovered_previous_output_unavailable", SessionID: rec.ID, SessionEpoch: epoch,
 		Running: boolPtr(true), RetentionTruncated: true, Rows: t.rows, Columns: t.columns}
