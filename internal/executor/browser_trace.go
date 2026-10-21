@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	browserTraceMaxBytes  = 512 << 10
+	browserTraceMaxBytes  = 16 << 20
 	browserTraceReadBytes = 8192
 )
 
@@ -143,7 +143,7 @@ func (s *Server) browserSessionTrace(ctx context.Context, req Request) Response 
 			}
 			// Flow steps were already executed; do NOT imply that retrying
 			// record is idempotent or that a ZIP is available to read.
-			r := browserSessionError("too_large", "resource", errors.New("flow executed; resulting trace ZIP exceeded 512 KiB; no artifact retained; do not blindly replay actions"))
+			r := browserSessionError("too_large", "resource", errors.New("flow executed; resulting trace ZIP exceeded 16 MiB; no artifact retained; do not blindly replay actions"))
 			r.SessionID = entry.id
 			r.Status = "flow_executed_trace_unavailable"
 			r.Output = string(frame.Result)

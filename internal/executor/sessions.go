@@ -84,6 +84,7 @@ type stdioSession struct {
 	browserLease            *browserSessionAdmission // release only after verified process cleanup, before broker deletion
 	browserGroup            *dapCgroup               // original Node + detached Chromium; cgroup.kill/empty proof required before lease release
 	browserScratchName      string                   // exact Executor-issued isolated-profile basename
+	browserTraceScratchName string                   // exact Executor-issued private trace directory for every managed Browser
 	browserScratchCleanup   func() error             // rooted exact removal only after whole-cgroup proof
 }
 
@@ -454,10 +455,22 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 		entry.browser = &browserStdioState{}
 		entry.browserLease = &s.browserAdmission
 		entry.browserGroup = containment
-		if containment != nil && req.BrowserProfileMode == "isolated" {
-			entry.browserScratchName = "asa-profile-" + hex.EncodeToString(nonce[:])
-			name := entry.browserScratchName
-			entry.browserScratchCleanup = func() error { return s.browserReclaimNamedScratch(name) }
+		if containment != nil {
+			// Both shared and isolated Browser sessions can retain private
+			// trace ZIPs across requests. The Executor, not a surviving peer,
+			// must reclaim the exact trace directory after cgroup stop proof.
+			entry.browserTraceScratchName = "asa-trace-" + hex.EncodeToString(nonce[:])
+			if req.BrowserProfileMode == "isolated" {
+				entry.browserScratchName = "asa-profile-" + hex.EncodeToString(nonce[:])
+			}
+			traceName, profileName := entry.browserTraceScratchName, entry.browserScratchName
+			entry.browserScratchCleanup = func() error {
+				var cleanupErr error
+				if profileName != "" {
+					cleanupErr = errors.Join(cleanupErr, s.browserReclaimNamedScratch(profileName))
+				}
+				return errors.Join(cleanupErr, s.browserReclaimNamedScratch(traceName))
+			}
 		}
 	}
 	if err := s.reserveProcessSession(entry); err != nil {
@@ -557,6 +570,9 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 		cmd.Env = append(cmd.Env, "ASA_BROWSER_RECLAIM_BY_EXECUTOR=1")
 		if entry.browserScratchName != "" {
 			cmd.Env = append(cmd.Env, "ASA_BROWSER_SESSION_PROFILE="+entry.browserScratchName)
+		}
+		if entry.browserTraceScratchName != "" {
+			cmd.Env = append(cmd.Env, "ASA_BROWSER_SESSION_TRACE="+entry.browserTraceScratchName)
 		}
 	}
 	if rootControlledWorkerTmux {

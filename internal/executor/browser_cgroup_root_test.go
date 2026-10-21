@@ -169,7 +169,32 @@ func TestApprovedRootBrowserDetachedChromiumCrashRetainsAdmission(t *testing.T) 
 	})
 	entry.mu.Lock()
 	parentPID, pin, group := entry.pid, entry.pidPin, entry.browserGroup
+	traceName := entry.browserTraceScratchName
 	entry.mu.Unlock()
+	if !strings.HasPrefix(traceName, "asa-trace-") || len(traceName) != len("asa-trace-")+32 {
+		t.Fatalf("Executor did not reserve an exact per-session trace basename: %q", traceName)
+	}
+	// The fixture launches a task-owned disposable Browser with the real
+	// production cgroup handoff. Prove that the unprivileged child received
+	// its exact trace name, not an attacker-selected or shared path.
+	childEnv, err := os.ReadFile(fmt.Sprintf("/proc/%d/environ", parentPID))
+	if err != nil || !strings.Contains(string(childEnv), "ASA_BROWSER_SESSION_TRACE="+traceName+"\x00") {
+		t.Fatalf("Executor did not pass the exact per-session trace identity to Node: %v", err)
+	}
+	traceDir := filepath.Join(tmp, traceName)
+	if err := os.Mkdir(traceDir, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(traceDir, int(s.workerUID), int(s.workerGID)); err != nil {
+		t.Fatal(err)
+	}
+	tracePath := filepath.Join(traceDir, "trace.zip")
+	if err := os.WriteFile(tracePath, []byte("private-session-trace-fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(tracePath, int(s.workerUID), int(s.workerGID)); err != nil {
+		t.Fatal(err)
+	}
 	// Install the deterministic barrier only AFTER the actual Playwright
 	// ready handshake; a launch failure must still be free to clean up.
 	group.beforeKillTestHook = func() error { close(blocked); <-allow; return nil }
@@ -210,6 +235,9 @@ func TestApprovedRootBrowserDetachedChromiumCrashRetainsAdmission(t *testing.T) 
 	if _, err := os.Stat(profile); err != nil {
 		t.Fatalf("profile deleted while detached process is alive: %v", err)
 	}
+	if _, err := os.Stat(tracePath); err != nil {
+		t.Fatalf("private trace deleted BEFORE whole-cgroup kill proof: %v", err)
+	}
 	if allowed, _ := s.browserAcquire("unsafe-concurrent-isolated", "isolated"); allowed {
 		t.Fatal("profile capacity freed before detached Chromium stopped")
 	}
@@ -236,6 +264,9 @@ func TestApprovedRootBrowserDetachedChromiumCrashRetainsAdmission(t *testing.T) 
 	}
 	if _, err := os.Stat(ownedCgroup); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("verified private cgroup was not removed: %v", err)
+	}
+	if _, err := os.Stat(traceDir); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("exact private trace scratch remained after whole-cgroup proof: %v", err)
 	}
 	if s.browserAdmission.reserved() {
 		t.Fatal("Browser reservation remained after kernel verified cgroup removal")

@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"image/color"
 	"image/jpeg"
+	mathrand "math/rand"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -32,14 +33,25 @@ func TestManagedBrowserSessionCapturePinnedRuntime(t *testing.T) {
 		t.Skip("pinned Chromium runtime required")
 	}
 	var transitionEffects atomic.Int64
+	traceNoise := make([]byte, 1024*1024)
+	if _, err := mathrand.New(mathrand.NewSource(271828)).Read(traceNoise); err != nil {
+		t.Fatal(err)
+	}
 	web := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/transition-effect" {
 			transitionEffects.Add(1)
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
+		if r.URL.Path == "/trace-blob" {
+			w.Header().Set("Content-Type", "application/octet-stream")
+			_, _ = w.Write(traceNoise)
+			return
+		}
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		if r.URL.Path == "/animation" {
+		if r.URL.Path == "/trace-noise" {
+			fmt.Fprint(w, "<!doctype html><body><div id='status'>loading</div><script>fetch('/trace-blob',{cache:'no-store'}).then(r=>r.arrayBuffer()).then(b=>{document.querySelector('#status').textContent=b.byteLength===1048576?'loaded':'bad';});</script></body>")
+		} else if r.URL.Path == "/animation" {
 			fmt.Fprint(w, `<!doctype html><html><head><style>
 #moving {width:80px;height:120px;background:#147cc0;transition:width 90s linear;}
 #moving.active {width:600px;}
@@ -124,6 +136,10 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 			_ = cmd.Process.Kill()
 			<-done
 			t.Error("graceful Browser fixture close timed out; emergency kill applied")
+			return
+		}
+		if leftovers, er := os.ReadDir(downloads); er != nil || len(leftovers) != 0 {
+			t.Errorf("graceful Browser close retained private trace scratch: %v %v", leftovers, er)
 		}
 	}()
 	rd := bufio.NewReader(stdout)
@@ -224,7 +240,7 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 		t.Fatalf("trace did not return bounded metadata: %v; stderr=%s", traceMeta, stderr.String())
 	}
 	traceSize := int(traceMeta["size"].(float64))
-	if traceSize < 4 || traceSize > 512<<10 {
+	if traceSize < 4 || traceSize > 16<<20 {
 		t.Fatalf("unbounded trace bytes: %d", traceSize)
 	}
 	version := "sha256:" + traceMeta["sha256"].(string)
@@ -272,6 +288,76 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 	if leftovers, er := os.ReadDir(downloads); er != nil || len(leftovers) != 0 {
 		t.Fatalf("trace temporary files retained after verified completion: %v %v", leftovers, er)
 	}
+	// A real >512 KiB trace must not be refused merely because the old
+	// memory-only ZIP limit was small. Persist one private inode and serve
+	// version-pinned 8 KiB windows without buffering the ZIP in Node.
+	largeNonce := strings.Repeat("6", 32)
+	send(map[string]any{"type": "trace_record", "nonce": largeNonce, "steps": []FlowStep{
+		{Action: "goto", URL: web.URL + "/trace-noise"},
+		{Action: "assert_text", Selector: "#status", Expected: "loaded"},
+	}})
+	largeMeta := read()
+	if largeMeta["event"] != "trace_meta" || largeMeta["nonce"] != largeNonce ||
+		largeMeta["result"].(map[string]any)["ok"] != true {
+		t.Fatalf("large real Chromium trace failed: %v; stderr=%s", largeMeta, stderr.String())
+	}
+	largeSize := int(largeMeta["size"].(float64))
+	if largeSize <= 512<<10 || largeSize > 16<<20 {
+		t.Fatalf("real trace did not cross old cap while honoring new cap: %d", largeSize)
+	}
+	entries, err = os.ReadDir(downloads)
+	if err != nil || len(entries) != 1 || !strings.HasPrefix(entries[0].Name(), "asa-trace-") {
+		t.Fatalf("trace must retain exactly one private directory: %v %v", entries, err)
+	}
+	retainedPath := filepath.Join(downloads, entries[0].Name(), "trace.zip")
+	retained, err := os.ReadFile(retainedPath) // Fixture-only: production never reads whole ZIP.
+	if err != nil || len(retained) != largeSize {
+		t.Fatalf("large retained trace invalid: size=%d err=%v", len(retained), err)
+	}
+	largeDigest := sha256.Sum256(retained)
+	if hex.EncodeToString(largeDigest[:]) != largeMeta["sha256"] {
+		t.Fatal("large retained trace SHA differs from pinned metadata")
+	}
+	largeVersion := "sha256:" + largeMeta["sha256"].(string)
+	for _, start := range []int{0, largeSize - 111} {
+		nonce := fmt.Sprintf("%032x", start+77)
+		send(map[string]any{"type": "trace_read", "nonce": nonce, "offset": start, "file_version": largeVersion})
+		window := read()
+		if window["event"] != "trace_chunk" || int(window["offset"].(float64)) != start || window["nonce"] != nonce {
+			t.Fatalf("large trace window offset/nonce mismatch: %v", window)
+		}
+		raw, er := base64.StdEncoding.Strict().DecodeString(window["data"].(string))
+		if er != nil || len(raw) > 8192 || !bytes.Equal(raw, retained[start:min(largeSize, start+8192)]) {
+			t.Fatalf("large trace window integrity mismatch: offset=%d size=%d err=%v", start, len(raw), er)
+		}
+		chunkDigest := sha256.Sum256(raw)
+		if window["chunk_sha256"] != hex.EncodeToString(chunkDigest[:]) {
+			t.Fatal("large trace window SHA mismatch")
+		}
+	}
+	// Same-sized in-place mutation cannot be reported as an authentic
+	// version-pinned window. Mutation must retire the private artifact.
+	writable, err := os.OpenFile(retainedPath, os.O_WRONLY, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := writable.WriteAt([]byte{retained[0] ^ 0xff}, 0); err != nil {
+		_ = writable.Close()
+		t.Fatal(err)
+	}
+	if err := writable.Close(); err != nil {
+		t.Fatal(err)
+	}
+	send(map[string]any{"type": "trace_read", "nonce": strings.Repeat("7", 32),
+		"offset": 0, "file_version": largeVersion})
+	if changed := read(); changed["event"] != "error" || changed["reason"] != "trace_stale" {
+		t.Fatalf("in-place ZIP mutation served stale bytes: %v", changed)
+	}
+	if leftover, er := os.ReadDir(downloads); er != nil || len(leftover) != 0 {
+		t.Fatalf("stale trace not reclaimed: %v %v", leftover, er)
+	}
+	// Session remains healthy after a proven metadata-integrity refusal.
+	goTo(web.URL, strings.Repeat("0", 32))
 	// A screenshot after scroll must represent the *visible* viewport,
 	// never the page origin. The two blocks have opposite dominant colors.
 	goTo(web.URL+"/scroll", strings.Repeat("7", 32))
@@ -336,6 +422,28 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 	goTo(web.URL, strings.Repeat("e", 32))
 	if success, raw := capture(strings.Repeat("f", 32), 35, 320); success["event"] != "capture_meta" || len(raw) == 0 {
 		t.Fatalf("known too_large poisoned Browser session: %v", success)
+	}
+	// Leave one private archive intentionally retained: the normal close
+	// path must remove it after the worker exits (without a discard call).
+	send(map[string]any{"type": "trace_record", "nonce": strings.Repeat("a", 32),
+		"steps": []FlowStep{{Action: "snapshot"}}})
+	if finalTrace := read(); finalTrace["event"] != "trace_meta" {
+		t.Fatalf("cannot exercise close-time trace cleanup: %v", finalTrace)
+	}
+	firstRetained, er := os.ReadDir(downloads)
+	if er != nil || len(firstRetained) != 1 {
+		t.Fatalf("expected exactly one retained trace before replacement: %v %v", firstRetained, er)
+	}
+	// Replacement must delete the old private inode/directory without
+	// retaining two ZIPs or invalidating the running Browser session.
+	send(map[string]any{"type": "trace_record", "nonce": strings.Repeat("b", 32),
+		"steps": []FlowStep{{Action: "snapshot"}}})
+	if newer := read(); newer["event"] != "trace_meta" {
+		t.Fatalf("trace replacement failed: %v", newer)
+	}
+	secondRetained, er := os.ReadDir(downloads)
+	if er != nil || len(secondRetained) != 1 || secondRetained[0].Name() == firstRetained[0].Name() {
+		t.Fatalf("replacement leaked old trace directory: before=%v after=%v err=%v", firstRetained, secondRetained, er)
 	}
 	// The deferred teardown sends exactly one close request and awaits
 	// worker+Chromium completion before TempDir cleanup.

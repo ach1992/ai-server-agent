@@ -157,23 +157,31 @@ func TestBrowserExactScratchDoesNotReclaimConcurrentPeer(t *testing.T) {
 	}
 	defer s.browserAdmission.release("live-peer")
 	owned := "run." + strings.Repeat("a", 32)
+	ownedTrace := "asa-trace-" + strings.Repeat("c", 32)
 	peer := "asa-profile-" + strings.Repeat("b", 32)
-	for _, name := range []string{owned, peer} {
+	peerTrace := "asa-trace-" + strings.Repeat("d", 32)
+	for _, name := range []string{owned, ownedTrace, peer, peerTrace} {
 		if err := os.Mkdir(filepath.Join(tmp, name), 0700); err != nil {
 			t.Fatal(err)
 		}
 	}
-	if err := s.browserReclaimNamedScratch(owned); err != nil {
-		t.Fatal(err)
+	for _, name := range []string{owned, ownedTrace} {
+		if err := s.browserReclaimNamedScratch(name); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := os.Lstat(filepath.Join(tmp, name)); !os.IsNotExist(err) {
+			t.Fatalf("exact scratch %s not reclaimed: %v", name, err)
+		}
 	}
-	if _, err := os.Lstat(filepath.Join(tmp, owned)); !os.IsNotExist(err) {
-		t.Fatalf("exact scratch not reclaimed: %v", err)
+	for _, name := range []string{peer, peerTrace} {
+		if _, err := os.Stat(filepath.Join(tmp, name)); err != nil {
+			t.Fatalf("unrelated live Browser scratch %s removed: %v", name, err)
+		}
 	}
-	if _, err := os.Stat(filepath.Join(tmp, peer)); err != nil {
-		t.Fatalf("unrelated live Browser profile removed: %v", err)
-	}
-	if err := s.browserReclaimNamedScratch("../untrusted"); err == nil {
-		t.Fatal("untrusted scratch identity accepted")
+	for _, name := range []string{"../untrusted", "asa-trace-Aa1234", "asa-trace-" + strings.Repeat("g", 32)} {
+		if err := s.browserReclaimNamedScratch(name); err == nil {
+			t.Fatalf("untrusted scratch identity %s accepted", name)
+		}
 	}
 }
 

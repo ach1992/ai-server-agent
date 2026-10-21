@@ -101,7 +101,8 @@ func TestApprovedConcurrentRealIsolatedChromiumProfiles(t *testing.T) {
 	launch := func() *worker {
 		t.Helper()
 		cmd := exec.CommandContext(ctx, filepath.Join(engine, "node/bin/node"), script)
-		cmd.Env = append(os.Environ(), "PLAYWRIGHT_BROWSERS_PATH="+filepath.Join(engine, "browsers"), "ASA_BROWSER_RECLAIM_BY_EXECUTOR=1", "ASA_BROWSER_SESSION_PROFILE="+fmt.Sprintf("asa-profile-%032x", len(instances)+1))
+		cmd.Env = append(os.Environ(), "PLAYWRIGHT_BROWSERS_PATH="+filepath.Join(engine, "browsers"), "ASA_BROWSER_RECLAIM_BY_EXECUTOR=1", "ASA_BROWSER_SESSION_PROFILE="+fmt.Sprintf("asa-profile-%032x", len(instances)+1),
+			"ASA_BROWSER_SESSION_TRACE="+fmt.Sprintf("asa-trace-%032x", len(instances)+1))
 		in, err := cmd.StdinPipe()
 		if err != nil {
 			t.Fatal(err)

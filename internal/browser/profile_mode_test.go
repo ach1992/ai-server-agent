@@ -67,6 +67,8 @@ func TestManagedBrowserIsolatedSessionRunnerCleanupContract(t *testing.T) {
 		`isolatedProfile || profile`,
 		`const executorOwnsScratch = process.env.ASA_BROWSER_RECLAIM_BY_EXECUTOR === '1'`,
 		`ASA_BROWSER_SESSION_PROFILE`,
+		`ASA_BROWSER_SESSION_TRACE`,
+		`browser_trace_identity_unavailable`,
 		`cleanupProfile();`,
 		`mkdirSync(isolatedProfile, {mode:0o700})`,
 		`/^asa-profile-[A-Za-z0-9]{6}$/`,

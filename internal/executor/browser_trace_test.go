@@ -18,8 +18,15 @@ func openTraceFixture(t *testing.T, mode string) (*Server, Request, string, []by
 	t.Helper()
 	s, owner, _ := browserAuditFixture(t)
 	raw := append([]byte{'P', 'K', 3, 4}, bytes.Repeat([]byte("bounded-playwright-zip-window"), 40)...)
+	if mode == "large" {
+		raw = append([]byte{'P', 'K', 3, 4}, bytes.Repeat([]byte("sufficiently-large-private-trace-evidence"), 17000)...)
+	}
 	full := sha256.Sum256(raw)
-	chunk := sha256.Sum256(raw)
+	firstWindow := raw
+	if len(firstWindow) > browserTraceReadBytes {
+		firstWindow = firstWindow[:browserTraceReadBytes]
+	}
+	chunk := sha256.Sum256(firstWindow)
 	chunkHash := hex.EncodeToString(chunk[:])
 	if mode == "bad_digest" {
 		chunkHash = strings.Repeat("0", 64)
@@ -57,7 +64,7 @@ while IFS= read -r line; do
       printf 'ASA_BROWSER_SESSION {"event":"trace_discarded","nonce":"%%s"}\n' "$nonce" ;;
   esac
 done
-`, recordFrame, version, len(raw), version, chunkHash, base64.StdEncoding.EncodeToString(raw))
+`, recordFrame, version, len(raw), version, chunkHash, base64.StdEncoding.EncodeToString(firstWindow))
 	if err := os.WriteFile(s.browserNodeBinary, []byte(shell), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -205,5 +212,41 @@ func TestBrowserTraceKnownFlowFailureRetainsEvidence(t *testing.T) {
 	read := traceReq(owner, id, fmt.Sprintf(`{"operation":"read","offset":0,"file_version":%q}`, recorded.FileVersion))
 	if got := s.browserSessionAction(ctx, read); !got.OK || got.BytesReturned <= 0 {
 		t.Fatalf("trace of known failed action was lost: %+v", got)
+	}
+}
+
+// The previous 512 KiB whole-ZIP limit must no longer reject a bounded
+// session-private archive. The Executor never loads full ZIP bytes: each
+// response is still a SHA-pinned 8 KiB window with an explicit continuation.
+func TestBrowserTraceOverPreviousCapUsesBoundedWindows(t *testing.T) {
+	s, owner, id, raw := openTraceFixture(t, "large")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	defer func() { _ = s.browserSessionAction(ctx, browserOwnerControl(owner, id, "browser_session_close")) }()
+	if len(raw) <= 512<<10 || len(raw) >= browserTraceMaxBytes {
+		t.Fatalf("bad bounded large fixture size %d", len(raw))
+	}
+	created := s.browserSessionAction(ctx, traceReq(owner, id, "{\"operation\":\"record\",\"steps\":[{\"action\":\"snapshot\"}]}"))
+	full := sha256.Sum256(raw)
+	version := "sha256:" + hex.EncodeToString(full[:])
+	if !created.OK || created.FileVersion != version || created.FileSize == nil ||
+		*created.FileSize != int64(len(raw)) || created.BytesReturned != 0 || created.BytesSeen != int64(len(raw)) {
+		t.Fatalf("large metadata was refused or copied into the result: %+v", created)
+	}
+	read := traceReq(owner, id, fmt.Sprintf("{\"operation\":\"read\",\"offset\":0,\"file_version\":%q}", version))
+	got := s.browserSessionAction(ctx, read)
+	chunk, err := base64.StdEncoding.Strict().DecodeString(got.Output)
+	if err != nil || !got.OK || !bytes.Equal(chunk, raw[:browserTraceReadBytes]) ||
+		got.NextOffset == nil || *got.NextOffset != browserTraceReadBytes ||
+		got.EOF == nil || *got.EOF || !got.Truncated ||
+		got.BytesReturned != browserTraceReadBytes || got.BytesSeen != int64(len(raw)) {
+		t.Fatalf("large trace window invalid: %+v err=%v", got, err)
+	}
+	bad := traceReq(owner, id, fmt.Sprintf("{\"operation\":\"read\",\"offset\":%d,\"file_version\":%q}", browserTraceMaxBytes+1, version))
+	if denied := s.browserSessionAction(ctx, bad); denied.OK || denied.ErrorCode != "invalid_browser_trace" {
+		t.Fatalf("unbounded trace offset accepted: %+v", denied)
+	}
+	if again := s.browserSessionAction(ctx, read); !again.OK {
+		t.Fatalf("bounded offset validation poisoned healthy session: %+v", again)
 	}
 }

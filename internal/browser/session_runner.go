@@ -44,12 +44,35 @@ const downloads = %s;
 const flowTemplate = %s;
 const profileMode = %s;
 const state = { refs: new Map(), sequence: 0 };
-// One bounded, short-lived, per-session trace slot. The artifact's bytes
-// are only held in this worker's memory after Playwright finalizes its ZIP.
-let traceData = null;
+// One short-lived, principal/session-bound ZIP slot. Playwright writes into a
+// private directory; retain one pinned read-only fd, NOT the whole ZIP in RAM.
+// The existing 8 KiB response windows stay inside the 64 KiB broker ring.
+let traceFile = null;
+let traceDir = '';
+let traceSize = 0;
 let traceDigest = '';
-const traceMaxBytes = 512 * 1024;
+let traceIdentity = null;
+const traceMaxBytes = 16 * 1024 * 1024;
 const traceReadBytes = 8192;
+const traceScanBytes = 65536;
+const sameTraceFile = info => traceIdentity !== null && info.isFile() && info.nlink === 1n &&
+  info.dev === traceIdentity.dev && info.ino === traceIdentity.ino &&
+  info.size === traceIdentity.size && info.mtimeNs === traceIdentity.mtimeNs &&
+  info.ctimeNs === traceIdentity.ctimeNs;
+const discardTrace = () => {
+  if (traceFile !== null) {
+    const fd = traceFile;
+    traceFile = null;
+    closeSync(fd);
+  }
+  if (traceDir) {
+    rmSync(traceDir, {recursive:true,force:true});
+    traceDir = '';
+  }
+  traceSize = 0;
+  traceDigest = '';
+  traceIdentity = null;
+};
 globalThis.__asaManagedFlowState = state;
 const reserve = 512n * 1024n * 1024n;
 const diskSafe = () => {
@@ -78,6 +101,9 @@ const executorOwnsScratch = process.env.ASA_BROWSER_RECLAIM_BY_EXECUTOR === '1';
 const profileName = process.env.ASA_BROWSER_SESSION_PROFILE || '';
 if (executorOwnsScratch && profileMode === 'isolated' && !/^asa-profile-[0-9a-f]{32}$/.test(profileName))
   throw new Error('browser_profile_identity_unavailable');
+const traceName = process.env.ASA_BROWSER_SESSION_TRACE || '';
+if (executorOwnsScratch && !/^asa-trace-[0-9a-f]{32}$/.test(traceName))
+  throw new Error('browser_trace_identity_unavailable');
 const isolatedProfile = profileMode !== 'isolated' ? '' : executorOwnsScratch ?
   join(downloads, profileName) : mkdtempSync(join(downloads, 'asa-profile-'));
 if (executorOwnsScratch && isolatedProfile) mkdirSync(isolatedProfile, {mode:0o700});
@@ -187,12 +213,14 @@ try {
     // BEFORE executing a replacement flow.
     if (input?.type === 'trace_record' && typeof input.nonce === 'string' && /^[0-9a-f]{32}$/.test(input.nonce) &&
         Array.isArray(input.steps) && input.steps.length >= 1 && input.steps.length <= 12) {
-      traceData = null; traceDigest = '';
+      try { discardTrace(); }
+      catch { reply({event:'error',nonce:input.nonce,reason:'trace_cleanup_unknown'}); continue; }
       let dir = '', started = false, response;
       const watchdog = setTimeout(() => { void context.close().finally(() => process.exit(74)); }, 30000);
       try {
         if (!diskSafe()) throw Error('trace_disk_reserve_unavailable');
-        dir = mkdtempSync(join(downloads, 'asa-trace-'));
+        dir = executorOwnsScratch ? join(downloads, traceName) : mkdtempSync(join(downloads, 'asa-trace-'));
+        if (executorOwnsScratch) mkdirSync(dir, {mode:0o700});
         const zipPath = join(dir, 'trace.zip');
         await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
         started = true;
@@ -207,72 +235,96 @@ try {
         const flowResult = JSON.parse(emitted[0]);
         await context.tracing.stop({path:zipPath});
         started = false;
-        // O_NOFOLLOW + descriptor-based stat/read avoids path-replacement
-        // ambiguity between size validation and bounded memory allocation.
+        // Hold the exact O_NOFOLLOW inode until discard/replace/close. Scan
+        // with one fixed 64 KiB buffer, never allocating the ZIP's file size.
         const fd = openSync(zipPath, constants.O_RDONLY | constants.O_NOFOLLOW);
-        let payload;
+        let keepFD = false;
         try {
-          const info = fstatSync(fd);
-          if (!info.isFile() || info.size < 4) throw Error('invalid_trace_zip');
-          if (info.size > traceMaxBytes) {
+          const info = fstatSync(fd, {bigint:true});
+          if (!info.isFile() || info.nlink !== 1n || info.size < 4n)
+            throw Error('invalid_trace_zip');
+          if (info.size > BigInt(traceMaxBytes)) {
             response = {event:'error',nonce:input.nonce,reason:'trace_too_large',result:flowResult};
           } else {
-            // A size preflight followed by readFileSync(fd) is NOT a
-            // bounded read if another same-UID process grows the inode
-            // concurrently. Allocate exactly the proven cap, then read
-            // only that many bytes. Reject short reads and extra bytes.
-            payload = Buffer.allocUnsafe(info.size);
+            const scan = Buffer.allocUnsafe(traceScanBytes);
+            const digest = createHash('sha256');
+            const size = Number(info.size);
             let offset = 0;
-            while (offset < payload.length) {
-              const n = readSync(fd, payload, offset, payload.length - offset, null);
-              if (n <= 0) throw Error('trace_zip_short_read');
-              offset += n;
+            while (offset < size) {
+              const count = readSync(fd, scan, 0, Math.min(scan.length,size-offset),offset);
+              if (count <= 0) throw Error('trace_zip_short_read');
+              if (offset === 0 && (scan[0] !== 0x50 || scan[1] !== 0x4b))
+                throw Error('invalid_trace_zip');
+              digest.update(scan.subarray(0,count));
+              offset += count;
             }
-            const extra = Buffer.allocUnsafe(1);
-            if (readSync(fd, extra, 0, 1, null) !== 0 ||
-                payload[0] !== 0x50 || payload[1] !== 0x4b)
-              throw Error('invalid_or_grown_trace_zip');
-            const digest = createHash('sha256').update(payload).digest('hex');
-            traceData = payload; traceDigest = digest;
-            response = {event:'trace_meta',nonce:input.nonce,mime:'application/zip',size:payload.length,
-              sha256:digest,result:flowResult};
+            const end = Buffer.allocUnsafe(1);
+            if (readSync(fd,end,0,1,size) !== 0) throw Error('grown_trace_zip');
+            const after = fstatSync(fd, {bigint:true});
+            if (info.dev !== after.dev || info.ino !== after.ino ||
+                info.size !== after.size || info.mtimeNs !== after.mtimeNs ||
+                info.ctimeNs !== after.ctimeNs || after.nlink !== 1n)
+              throw Error('mutated_trace_zip');
+            traceIdentity = after;
+            traceSize = size;
+            traceDigest = digest.digest('hex');
+            traceFile = fd;
+            traceDir = dir;
+            dir = '';
+            keepFD = true;
+            response = {event:'trace_meta',nonce:input.nonce,mime:'application/zip',
+              size:traceSize,sha256:traceDigest,result:flowResult};
           }
-        } finally { closeSync(fd); }
+        } finally { if (!keepFD) closeSync(fd); }
       } catch {
         if (started) { try { await context.tracing.stop(); } catch {} }
-        traceData = null; traceDigest = '';
+        try { discardTrace(); } catch {}
         response = {event:'error',nonce:input.nonce,reason:'trace_record_unknown'};
       } finally {
         clearTimeout(watchdog);
         try { if (dir) rmSync(dir,{recursive:true,force:true}); }
-        catch { traceData = null; traceDigest = ''; response = {event:'error',nonce:input.nonce,reason:'trace_cleanup_unknown'}; }
+        catch { try { discardTrace(); } catch {} response = {event:'error',nonce:input.nonce,reason:'trace_cleanup_unknown'}; }
       }
       reply(response);
       continue;
     }
     if (input?.type === 'trace_read' && typeof input.nonce === 'string' && /^[0-9a-f]{32}$/.test(input.nonce) &&
         Number.isSafeInteger(input.offset) && input.offset >= 0 && typeof input.file_version === 'string') {
-      if (!traceData) {
+      if (traceFile === null) {
         reply({event:'error',nonce:input.nonce,reason:'trace_unavailable'});
       } else if (input.file_version !== 'sha256:' + traceDigest) {
         reply({event:'error',nonce:input.nonce,reason:'trace_stale'});
-      } else if (input.offset > traceData.length) {
+      } else if (input.offset > traceSize) {
         reply({event:'error',nonce:input.nonce,reason:'trace_invalid_offset'});
       } else {
-        const chunk = traceData.subarray(input.offset,Math.min(traceData.length,input.offset+traceReadBytes));
-        reply({event:'trace_chunk',nonce:input.nonce,mime:'application/zip',size:traceData.length,
-          sha256:traceDigest,offset:input.offset,
-          chunk_sha256:createHash('sha256').update(chunk).digest('hex'),data:chunk.toString('base64')});
+        try {
+          if (!sameTraceFile(fstatSync(traceFile, {bigint:true}))) throw Error('trace_stale');
+          const count = Math.min(traceReadBytes,traceSize-input.offset);
+          const chunk = Buffer.allocUnsafe(count);
+          if (count && readSync(traceFile,chunk,0,count,input.offset) !== count)
+            throw Error('trace_window_short_read');
+          if (!sameTraceFile(fstatSync(traceFile, {bigint:true}))) throw Error('trace_stale');
+          reply({event:'trace_chunk',nonce:input.nonce,mime:'application/zip',size:traceSize,
+            sha256:traceDigest,offset:input.offset,
+            chunk_sha256:createHash('sha256').update(chunk).digest('hex'),data:chunk.toString('base64')});
+        } catch {
+          try {
+            discardTrace();
+            reply({event:'error',nonce:input.nonce,reason:'trace_stale'});
+          } catch { reply({event:'error',nonce:input.nonce,reason:'trace_cleanup_unknown'}); }
+        }
       }
       continue;
     }
     if (input?.type === 'trace_discard' && typeof input.nonce === 'string' && /^[0-9a-f]{32}$/.test(input.nonce) &&
         typeof input.file_version === 'string') {
-      if (!traceData || input.file_version !== 'sha256:' + traceDigest) {
+      if (traceFile === null || input.file_version !== 'sha256:' + traceDigest) {
         reply({event:'error',nonce:input.nonce,reason:'trace_stale'});
       } else {
-        traceData = null; traceDigest = '';
-        reply({event:'trace_discarded',nonce:input.nonce});
+        try {
+          discardTrace();
+          reply({event:'trace_discarded',nonce:input.nonce});
+        } catch { reply({event:'error',nonce:input.nonce,reason:'trace_cleanup_unknown'}); }
       }
       continue;
     }
@@ -294,6 +346,7 @@ try {
   }
 } finally {
   clearInterval(diskMonitor);
+  try { discardTrace(); } catch {}
   await context.close();
   cleanupProfile();
   process.exit(0);

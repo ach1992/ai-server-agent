@@ -197,6 +197,7 @@ func (s *Server) browserReclaimScratch() error {
 // Exact per-session/run reclamation follows verified whole-cgroup termination.
 func (s *Server) browserReclaimNamedScratch(name string) error {
 	if !browserScratchName(name) || !(strings.HasPrefix(name, "asa-profile-") && len(name) == len("asa-profile-")+32 ||
+		strings.HasPrefix(name, "asa-trace-") && len(name) == len("asa-trace-")+32 ||
 		strings.HasPrefix(name, "run.") && len(name) == len("run.")+32) {
 		return errors.New("invalid Executor Browser scratch identity")
 	}

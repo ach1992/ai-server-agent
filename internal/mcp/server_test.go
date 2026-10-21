@@ -489,7 +489,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 						t.Fatalf("trace schema missing %s: %s", field, input)
 					}
 				}
-				for _, field := range []string{"512 KiB", "8192", "SHA256", "discard", "session"} {
+				for _, field := range []string{"16 MiB", "8192", "SHA256", "discard", "session", "disk"} {
 					if !strings.Contains(tool.Description, field) {
 						t.Fatalf("trace description missing %s", field)
 					}
