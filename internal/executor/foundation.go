@@ -391,7 +391,13 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 				// an untrusted launcher before containing its descendants.
 				abortErr := browserGroup.abortBeforeLaunch()
 				if abortErr != nil {
+					// A failed whole-group stop retains Browser admission.
+					// Best-effort stop of the unreaped original process
+					// prevents a hung synchronous worker, but is not proof
+					// that detached Chromium descendants have exited.
 					browserTerminationProven = false
+					_, groupErr := terminateProcessGroup(cmd.Process.Pid)
+					abortErr = errors.Join(abortErr, groupErr)
 				}
 				err = errors.Join(verifyErr, abortErr, cmd.Wait())
 			} else {

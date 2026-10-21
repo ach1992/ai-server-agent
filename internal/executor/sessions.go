@@ -621,6 +621,14 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 			// BEFORE waiting for child stdout pipes; a PGID stop alone is
 			// insufficient and could deadlock waiting for inherited fds.
 			stopErr := containment.abortBeforeLaunch()
+			if stopErr != nil {
+				// A failed cgroup kill cannot permit indefinite wait on the
+				// original Node/adapter. Stop its still-unreaped direct group
+				// as a best-effort fallback, but NEVER call that a whole-
+				// Browser cleanup proof or free the reservation.
+				_, groupErr := terminateProcessGroup(cmd.Process.Pid)
+				stopErr = errors.Join(stopErr, groupErr)
+			}
 			waitErr := cmd.Wait()
 			failure := errors.Join(membershipErr, stopErr, waitErr)
 			s.finishActionAudit(req, "session_create", "worker", kind+"\x00"+cwd+"\x00"+binary, "developer_session", start, Response{Error: failure.Error()})
@@ -636,6 +644,10 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 		var stopErr error
 		if containment != nil {
 			stopErr = containment.abortBeforeLaunch()
+			if stopErr != nil {
+				_, groupErr := terminateProcessGroup(cmd.Process.Pid)
+				stopErr = errors.Join(stopErr, groupErr)
+			}
 		} else {
 			_, stopErr = terminateProcessGroup(cmd.Process.Pid)
 		}
