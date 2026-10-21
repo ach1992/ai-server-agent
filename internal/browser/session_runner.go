@@ -59,20 +59,21 @@ const diskSafe = () => {
   } catch { return false; }
 };
 if (!diskSafe()) throw new Error('browser_session_disk_reserve_unavailable');
-// At session open, the executor's exclusive Browser profile lease proves
-// no prior managed worker is alive. Reclaim only our own randomly named
-// abandoned trace directories, including those from SIGKILL/crash. Never
-// traverse an arbitrary browser profile/worktree or follow a symlink.
-for (const entry of readdirSync(downloads, {withFileTypes:true})) {
-  if (!entry.isDirectory() ||
-      !(/^asa-trace-[A-Za-z0-9]{6}$/.test(entry.name) ||
-        /^asa-profile-[A-Za-z0-9]{6}$/.test(entry.name))) continue;
-  rmSync(join(downloads,entry.name),{recursive:true,force:true});
+// When run through the Executor, the broker's empty-to-first admission
+// already reclaimed stale disposable directories *before* allowing peers.
+// Independent CLI/standalone acceptance fixtures keep their legacy cleanup;
+// they never share an Executor-owned concurrent admission domain.
+if (process.env.ASA_BROWSER_RECLAIM_BY_EXECUTOR !== '1') {
+  for (const entry of readdirSync(downloads, {withFileTypes:true})) {
+    if (!entry.isDirectory() ||
+        !(/^asa-trace-[A-Za-z0-9]{6}$/.test(entry.name) ||
+          /^asa-profile-[A-Za-z0-9]{6}$/.test(entry.name))) continue;
+    rmSync(join(downloads,entry.name),{recursive:true,force:true});
+  }
 }
 
-// One exclusive Browser lease also protects admission and stale-profile
-// reclamation. A private profile stays under Agent-owned disposable state;
-// unlike the shared profile it is never reused by another session.
+// Each isolated profile is per-session private; it can never be reclaimed
+// from another active session or reused as a shared browser profile.
 const isolatedProfile = profileMode === 'isolated' ? mkdtempSync(join(downloads, 'asa-profile-')) : '';
 // Bounded private profile retention: no extra monitor process, host scheduler,
 // or arbitrary project cleanup. Never follow symlinks; fail closed if the

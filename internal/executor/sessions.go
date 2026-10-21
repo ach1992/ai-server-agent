@@ -469,6 +469,13 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 		}
 	}
 	cmd.Env = sanitizedSessionEnv(home)
+	if kind == "browser" {
+		// The shared Executor admission lock already reclaims disposable
+		// Browser scratch before the first process can launch. Suppress the
+		// standalone JS runner's own global sweep, which could otherwise
+		// delete a different *live* isolated Browser's profile or trace.
+		cmd.Env = append(cmd.Env, "ASA_BROWSER_RECLAIM_BY_EXECUTOR=1")
+	}
 	if rootControlledWorkerTmux {
 		// Do not supply worker-writable HOME/XDG paths to the root tmux server.
 		cmd.Env = sanitizedSessionEnv("/root")

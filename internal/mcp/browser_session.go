@@ -12,7 +12,7 @@ import (
 )
 
 type BrowserSessionOpenInput struct {
-	ProfileMode       string `json:"profile_mode,omitempty" jsonschema:"shared (default) or isolated ephemeral Browser cookies/localStorage, with one global admission"`
+	ProfileMode       string `json:"profile_mode,omitempty" jsonschema:"shared (default) uses exclusive shared profile; isolated uses independently bounded concurrent ephemeral Browser cookies/localStorage"`
 	Workspace         string `json:"workspace" jsonschema:"Exact absolute worker workspace/worktree used to bind session authorization"`
 	IgnoreHTTPSErrors bool   `json:"ignore_https_errors,omitempty" jsonschema:"Explicit TLS validation exception for an isolated development site; default is secure HTTPS validation"`
 }
@@ -45,7 +45,7 @@ type BrowserSessionFlowInput struct {
 }
 
 func (s *Server) registerBrowserSessionTools() {
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_open", Description: "Open a workspace-scoped Chromium session using a shared or isolated profile. One Browser session/run at a time. A session_id is not authorization; sessions survive client disconnects, not Executor restarts.", Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionOpenInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_open", Description: "Open a workspace-scoped Chromium session using a shared or isolated profile. Default shared profile is exclusive; isolated profiles can run concurrently up to configured browser_concurrent_slots and available shared session capacity. session_id alone is not authorization. Sessions survive client disconnects, not Executor restarts.", Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionOpenInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := s.browser.SessionOpen(ctx, browser.SessionOptions{Workspace: in.Workspace, IgnoreHTTPSErrors: in.IgnoreHTTPSErrors, ProfileMode: in.ProfileMode})
 		if err != nil {
 			return executorTransportErrorResult(err)
@@ -105,7 +105,7 @@ func (s *Server) registerBrowserSessionTools() {
 		}
 		return s.responseResult(resp)
 	})
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_close", Description: "Close own managed Browser session; free the shared Browser profile only after the executor verifies pinned process-group termination. An uncertain cleanup remains reserved and requires recovery.", Annotations: annotations(false, true, false, false)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionIDInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_close", Description: "Close own managed Browser session; free this Browser session's exact shared/isolated admission reservation only after the executor verifies pinned process-group termination. An uncertain cleanup remains reserved and requires recovery.", Annotations: annotations(false, true, false, false)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionIDInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := s.browser.SessionClose(ctx, browser.SessionOptions{Workspace: in.Workspace, SessionID: in.SessionID})
 		if err != nil {
 			return executorTransportErrorResult(err)

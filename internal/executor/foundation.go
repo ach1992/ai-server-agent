@@ -114,10 +114,7 @@ func (s *Server) dispatchContext(ctx context.Context, req Request) Response {
 		}
 		switch req.Action {
 		case "browser_admission_status":
-			if s.browserAdmission.reserved() {
-				return Response{OK: true, Status: "reserved"}
-			}
-			return Response{OK: true, Status: "available"}
+			return s.browserAdmissionResponse()
 		case "browser_session_open", "browser_session_flow", "browser_session_capture", "browser_session_trace", "browser_session_status", "browser_session_close":
 			return s.browserSessionAction(ctx, req)
 		case "run":
@@ -273,12 +270,6 @@ func runCapacityResponse(root bool) Response {
 
 func (s *Server) runContext(parent context.Context, req Request) Response {
 	started := time.Now()
-	if req.AuditAction == "browser_run" || req.AuditAction == "browser_setup" || req.AuditAction == "browser_cleanup" {
-		if !s.browserAdmission.acquireRun() {
-			return fileError("resource_limit", "resource", errors.New("shared Browser profile is in use by a managed session or run"))
-		}
-		defer s.browserAdmission.releaseRun()
-	}
 	if bad := commandInputError(req.Command); bad != nil {
 		bad.DurationMS = time.Since(started).Milliseconds()
 		return *bad
@@ -308,6 +299,43 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 	if dec.RequiresApproval && !req.Approval {
 		return Response{Error: "approval_required", ReasonCode: "approval_required", ErrorCode: "approval_required", ErrorClass: "approval", Approval: dec, DurationMS: time.Since(started).Milliseconds()}
 	}
+	browserReservation := ""
+	browserTerminationProven := true
+	if req.AuditAction == "browser_run" || req.AuditAction == "browser_setup" || req.AuditAction == "browser_cleanup" {
+		mode := "maintenance"
+		if req.AuditAction == "browser_run" {
+			var valid bool
+			mode, valid = browserProfileMode(req.BrowserProfileMode)
+			if !valid {
+				return fileError("invalid_browser_profile_mode", "validation", errors.New("Browser profile mode must be shared or isolated"))
+			}
+		} else if req.BrowserProfileMode != "" {
+			return fileError("invalid_browser_profile_mode", "validation", errors.New("Browser maintenance cannot request a profile mode"))
+		}
+		holder, err := browserReservationID()
+		if err != nil {
+			return fileError("browser_admission_unavailable", "state", err)
+		}
+		granted, err := s.browserAcquire(holder, mode)
+		if err != nil {
+			return fileError("browser_scratch_reconciliation_failed", "state", err)
+		}
+		if !granted {
+			return fileError("resource_limit", "resource", errors.New("Browser profile, process slots or setup/cleanup capacity busy"))
+		}
+		browserReservation = holder
+		defer func() {
+			// If the group-stop outcome is unknown, do not release its
+			// profile/process slot: a still-running Chromium may exist.
+			// Executor restart / inspected host recovery remains the
+			// explicitly bounded failure path for this rare one-shot case.
+			if browserTerminationProven {
+				s.browserAdmission.release(browserReservation)
+			}
+		}()
+	} else if req.BrowserProfileMode != "" {
+		return fileError("invalid_browser_profile_mode", "validation", errors.New("Browser profile mode belongs only to managed Browser runs"))
+	}
 	release, ok := s.runs.acquire(req.Root)
 	if !ok {
 		resp := runCapacityResponse(req.Root)
@@ -327,7 +355,14 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 	lingeringGroup := false
 	var cleanupErr error
 	if cmd.Process != nil {
-		lingeringGroup, cleanupErr = terminateProcessGroup(cmd.Process.Pid)
+		terminator := terminateProcessGroup
+		if browserReservation != "" && s.browserRunTerminateTestHook != nil {
+			terminator = s.browserRunTerminateTestHook // private test-only fault injection
+		}
+		lingeringGroup, cleanupErr = terminator(cmd.Process.Pid)
+		if browserReservation != "" && cleanupErr != nil {
+			browserTerminationProven = false
+		}
 	}
 	code := 0
 	if err != nil {

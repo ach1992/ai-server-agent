@@ -140,7 +140,7 @@ func (m *Manager) Flow(ctx context.Context, opts FlowOptions) (executor.Response
 	if err != nil {
 		return browserError("invalid_browser_flow", "validation", err.Error()), nil
 	}
-	// Intentionally reuse Run: its shared profile, fail-fast admission, TLS,
+	// Intentionally reuse Run: its typed profile mode, bounded admission, TLS,
 	// executor resource/time bounds and disposable-data cleanup own this flow.
 	return m.Run(ctx, RunOptions{
 		Script: script, TimeoutMS: opts.TimeoutMS,

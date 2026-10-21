@@ -36,8 +36,9 @@ type Server struct {
 	sessions                          *stdioSessionBroker
 	phpIndexMu                        sync.Mutex              // single fresh index/build/lookup at a time; bounded, no second broker
 	terminalAdmissionMu               sync.Mutex              // serializes disk-backed terminal capacity and scope creation
-	browserAdmission                  browserSessionAdmission // exclusive shared profile lease
+	browserAdmission                  browserSessionAdmission // shared, isolated and maintenance admission
 	browserNodeBinary                 string                  // test-only private fixture override; production always uses root-owned pinned Node
+	browserRunTerminateTestHook       func(int) (bool, error) // private one-shot Browser uncertain-stop test hook
 	jobsMu                            sync.Mutex
 	jobUnknownBeforeWriteTestHook     func() // test-only deterministic status reconciliation interleaving
 	lifecycleLockPath                 string
@@ -216,10 +217,7 @@ func (s *Server) dispatch(req Request) Response {
 	case "terminal_open", "terminal_read", "terminal_write", "terminal_interrupt", "terminal_resize", "terminal_close", "terminal_reconnect":
 		return s.terminalAction(req)
 	case "browser_admission_status":
-		if s.browserAdmission.reserved() {
-			return Response{OK: true, Status: "reserved"}
-		}
-		return Response{OK: true, Status: "available"}
+		return s.browserAdmissionResponse()
 	case "browser_session_open", "browser_session_flow", "browser_session_capture", "browser_session_trace", "browser_session_status", "browser_session_close":
 		return s.browserSessionAction(context.Background(), req)
 	default:
