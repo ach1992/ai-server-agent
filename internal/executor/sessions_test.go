@@ -576,3 +576,32 @@ func TestNonterminalExpiredAccessCannotReviveProcess(t *testing.T) {
 	s.expireProcessSession(e)
 	waitForStdioExit(t, e)
 }
+
+func TestNonterminalLateAuthenticatedCloseReclaimsExpiredProcess(t *testing.T) {
+	s, owner, workspace := testStdioBroker(t)
+	id, err := s.workerStdioSession(owner, "lsp", workspace, "/bin/cat")
+	if err != nil {
+		t.Fatal(err)
+	}
+	e, err := s.sessions.get(owner, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	e.mu.Lock()
+	e.lastAuthenticatedAction = time.Now().Add(-maxStdioSessionAge - time.Second)
+	e.mu.Unlock()
+	if _, err := s.sessions.get(owner, id); !errors.Is(err, errSessionStopped) {
+		t.Fatalf("expired access unexpectedly accepted: %v", err)
+	}
+	foreign := owner
+	foreign.PrincipalID = "cross-principal"
+	if err := s.workerStdioClose(foreign, id); !errors.Is(err, errSessionNotFound) {
+		t.Fatalf("expired close crossed principal boundary: %v", err)
+	}
+	if err := s.workerStdioClose(owner, id); err != nil {
+		t.Fatalf("late authorized cleanup rejected: %v", err)
+	}
+	if _, err := s.sessions.get(owner, id); !errors.Is(err, errSessionNotFound) {
+		t.Fatalf("verified terminal cleanup retained expired broker ID: %v", err)
+	}
+}

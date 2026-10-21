@@ -188,6 +188,16 @@ func (e *stdioSession) nonterminalIdleLeaseStillValid(now time.Time) bool {
 }
 
 func (b *stdioSessionBroker) get(req Request, id string) (*stdioSession, error) {
+	return b.getWithIdlePolicy(req, id, true)
+}
+
+// A verified explicit stop is allowed to clean a genuinely expired process;
+// it never revives the session by extending its idle deadline.
+func (b *stdioSessionBroker) getForCleanup(req Request, id string) (*stdioSession, error) {
+	return b.getWithIdlePolicy(req, id, false)
+}
+
+func (b *stdioSessionBroker) getWithIdlePolicy(req Request, id string, renew bool) (*stdioSession, error) {
 	if b == nil || id == "" || req.PrincipalID == "" || req.PrincipalClass == "" {
 		return nil, errSessionNotFound
 	}
@@ -200,7 +210,7 @@ func (b *stdioSessionBroker) get(req Request, id string) (*stdioSession, error) 
 	}
 	// Internal or user-requested exact stop/close must remain possible after
 	// expiry, but cannot accidentally extend a lease while cleaning it up.
-	if req.Action != "browser_session_close" && req.Action != "debug_stop" && req.Action != "terminal_close" &&
+	if renew && req.Action != "browser_session_close" && req.Action != "debug_stop" && req.Action != "terminal_close" &&
 		!session.refreshNonterminalIdleLease() {
 		return nil, errSessionStopped
 	}
@@ -936,7 +946,7 @@ func (b *stdioSessionBroker) removeAndStop(entry *stdioSession) error {
 }
 
 func (b *stdioSessionBroker) close(req Request, id string) error {
-	e, err := b.get(req, id)
+	e, err := b.getForCleanup(req, id)
 	if err != nil {
 		return err
 	}
@@ -987,7 +997,7 @@ func (s *Server) workerStdioWrite(req Request, id string, data []byte) error {
 }
 
 func (s *Server) workerStdioClose(req Request, id string) error {
-	if _, err := s.sessions.get(req, id); err != nil {
+	if _, err := s.sessions.getForCleanup(req, id); err != nil {
 		return err
 	}
 	if blocked := s.beginActionAudit(req, "session_close", "worker", id, "developer_session"); blocked != nil {
