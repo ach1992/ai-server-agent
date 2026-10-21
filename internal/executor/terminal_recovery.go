@@ -545,7 +545,9 @@ func (s *Server) renewTerminalLeaseLocked(req Request, e *stdioSession) error {
 	cached := e.terminalLeaseExpiresAt
 	e.mu.Unlock()
 	if cached.After(time.Now().Add(maxStdioSessionAge - terminalLeaseRenewInterval)) {
-		return nil
+		// An independently reaped/failed PID1 timer must not be masked by the
+		// Executor's still-fresh in-memory lease cache.
+		return verifyTerminalLeaseTimer(name)
 	}
 	rec, err := s.readOwnedTerminalRecord(req, false)
 	if err != nil {
@@ -561,6 +563,9 @@ func (s *Server) renewTerminalLeaseLocked(req Request, e *stdioSession) error {
 		return errors.New("terminal lease version unsupported")
 	}
 	if rec.ExpiresAt.After(time.Now().Add(maxStdioSessionAge - terminalLeaseRenewInterval)) {
+		if err := verifyTerminalLeaseTimer(name); err != nil {
+			return err
+		}
 		e.mu.Lock()
 		e.terminalLeaseExpiresAt = rec.ExpiresAt
 		e.mu.Unlock()

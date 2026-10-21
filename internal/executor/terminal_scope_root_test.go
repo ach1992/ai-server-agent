@@ -323,6 +323,20 @@ func TestApprovedWorkerTmuxScopeSurvivesBrokerStop(t *testing.T) {
 	}
 	goneName := goneEntry.terminal.name
 	t.Cleanup(func() { _ = stopScopedTerminalBackend(goneName) })
+	// Losing the independently managed timer while the scope still lives
+	// must fail the next authenticated I/O and reconnect closed, including if
+	// the in-memory record still claims almost one hour of idle capacity.
+	if err := stopTerminalLeaseTimer(goneName); err != nil {
+		t.Fatalf("could not simulate disappeared PID1 idle timer: %v", err)
+	}
+	gone.Action = "terminal_read"
+	if blocked := s2.terminalAction(gone); blocked.OK || blocked.ErrorCode != "terminal_lease_unverified" {
+		t.Fatalf("missing PID1 fallback was masked by cached lease: %+v", blocked)
+	}
+	gone.Action = "terminal_reconnect"
+	if blocked := s2.terminalAction(gone); blocked.OK || blocked.ErrorCode != "terminal_lease_unverified" {
+		t.Fatalf("reconnect hid missing PID1 timer: %+v", blocked)
+	}
 	if err := stopScopedTerminalBackend(goneName); err != nil {
 		t.Fatalf("could not simulate PID1 backend deadline: %v", err)
 	}
