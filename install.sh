@@ -518,17 +518,17 @@ verify_isolated_browser_account_ids(){
     IFS=: read -r account_name account_password account_uid account_gid account_info account_home account_shell <<< "$account_record"
     [ "$account_name" = "$BROWSER_USER" ] && [[ "$account_uid" =~ ^[0-9]+$ ]] &&
       [[ "$account_gid" =~ ^[0-9]+$ ]] || die "Invalid dedicated Browser account identity."
-    browser_uid="$(id -u "$BROWSER_USER")" || die "Browser UID unavailable."
-    browser_gid="$(id -g "$BROWSER_USER")" || die "Browser GID unavailable."
-    [ "$browser_uid" -ne 0 ] && [ "$browser_gid" -ne 0 ] &&
-      [ "$browser_uid" -eq "$account_uid" ] && [ "$browser_gid" -eq "$account_gid" ] ||
+    # Named passwd entries are authoritative even if libc/id resolves a
+    # duplicate numeric UID back to another user. Reject protected aliases
+    # by those raw numeric IDs BEFORE the secondary id consistency check.
+    browser_uid="$account_uid"
+    browser_gid="$account_gid"
+    [ "$browser_uid" -ne 0 ] && [ "$browser_gid" -ne 0 ] ||
       die "Invalid or inconsistent Browser numeric UID/GID."
     [ "$account_home" = "$BROWSER_HOME" ] && [ "$account_shell" = /usr/sbin/nologin ] ||
       die "Existing Browser account HOME/shell differs from the dedicated service identity."
     [ -n "$browser_group_gid" ] && [ "$browser_gid" -eq "$browser_group_gid" ] ||
       die "Existing Browser account must use its own dedicated primary group."
-    [ "$(id -G "$BROWSER_USER")" = "$browser_gid" ] ||
-      die "Dedicated Browser account has unexpected supplementary groups."
   fi
   for role in "$AGENT_USER" "$WORKER_USER"; do
     role_uid=""
@@ -556,6 +556,13 @@ verify_isolated_browser_account_ids(){
       fi
     done
   done
+  if [ -n "$browser_uid" ]; then
+    [ "$(id -u "$BROWSER_USER")" -eq "$browser_uid" ] &&
+    [ "$(id -g "$BROWSER_USER")" -eq "$browser_gid" ] ||
+      die "Invalid or inconsistent Browser numeric UID/GID."
+    [ "$(id -G "$BROWSER_USER")" = "$browser_gid" ] ||
+      die "Dedicated Browser account has unexpected supplementary groups."
+  fi
 }
 
 verify_isolated_browser_account_ids

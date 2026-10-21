@@ -34,7 +34,11 @@ cleanup_case(){
     created_user=0
   fi
   if [ "$created_group" -eq 1 ]; then
-    groupdel -f aibrowser || return 1
+    # Debian shadow-utils may automatically remove a user's matching
+    # private group at userdel; that is an already-completed cleanup.
+    if getent group aibrowser >/dev/null 2>&1; then
+      groupdel -f aibrowser || return 1
+    fi
     created_group=0
   fi
 }
@@ -95,6 +99,11 @@ run_case(){
   if [ "$user_kind" != group-only ]; then make_user "$user_kind"; fi
   expect_refused "$label" "$expected"
   cleanup_case
+  for account in aiagent aiworker; do
+    id "$account" >/dev/null && getent group "$account" >/dev/null || {
+      echo "Protected peer identity lost during $label cleanup" >&2; exit 1
+    }
+  done
 }
 run_case 'UID aliases aiagent' default agent 'Browser UID aliases protected aiagent'
 run_case 'UID aliases aiworker' default worker 'Browser UID aliases protected aiworker'
