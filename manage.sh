@@ -2639,10 +2639,10 @@ run_uninstall(){
   local purge="${1:-0}"
   [ -x "$UNINSTALL_HELPER" ] || die "Uninstall helper is missing: $UNINSTALL_HELPER"
   if [ "$purge" = "1" ]; then
-    printf '%sPURGE removes Agent-owned config/state/log/runtime and the aiagent identity.%s\n' "$RED" "$RESET"
+    printf '%sPURGE removes Agent-owned config/state/log/runtime and the aiagent/aibrowser identities.%s\n' "$RED" "$RESET"
     printf 'It still preserves /srv/ai-workspace and the aiworker identity.\n'
     if [ -s "$CF_TXN_STATE" ] || [ -n "$(managed_get '.cloudflare.zone_id')" ] || [ -n "$(managed_get '.cloudflare_previous.zone_id')" ] || [ -n "$(managed_get '.cloudflare_previous_certificate.origin_certificate_id')" ]; then warn "Cloudflare-managed resources or recovery state are still recorded. Use Cloudflare cleanup first if you want them removed too."; fi
-    confirm "Purge Agent-owned config/state/logs/runtime and aiagent identity? Workspace and aiworker are preserved." no || { ui_notice info 'Cancelled; purge not started.'; return 20; }
+    confirm "Purge Agent-owned config/state/logs/runtime and aiagent/aibrowser identities? Workspace and aiworker are preserved." no || { ui_notice info 'Cancelled; purge not started.'; return 20; }
     AI_SERVER_AGENT_YES=1 "$UNINSTALL_HELPER" --purge
   else
     ui_wrap '' 'Safe uninstall removes services, binary, and management command while preserving config/state/users/workspace.'

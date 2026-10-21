@@ -32,6 +32,10 @@ type Server struct {
 	auditBeforeCompletionHook         func()             // test-only completion-path failure/interleaving injection
 	workerUID                         uint32
 	workerGID                         uint32
+	agentUID                          uint32 // privileged Executor socket/credential peer identity
+	agentGID                          uint32
+	browserUID                        uint32 // dedicated isolated Browser account; never the worker/Agent identity
+	browserGID                        uint32
 	runs                              *runLimiter
 	sessions                          *stdioSessionBroker
 	phpIndexMu                        sync.Mutex              // single fresh index/build/lookup at a time; bounded, no second broker
@@ -96,6 +100,41 @@ func NewServer(cfg config.Config, token string) (*Server, error) {
 	}
 	uid64, _ := strconv.ParseUint(u.Uid, 10, 32)
 	gid64, _ := strconv.ParseUint(u.Gid, 10, 32)
+	// Existing CI/source-only and older installations must still start and
+	// retain shared Browser/worker operations. The isolated launch fails
+	// closed if dedicated Browser and Agent identities cannot be proved.
+	// Numeric Linux permissions, not account names, protect the Executor
+	// socket and its root:aiagent credential material.
+	var agentUID, agentGID, browserUID, browserGID uint64
+	if agentUser, lookupErr := user.Lookup(cfg.AgentUser); lookupErr == nil {
+		agentUID, _ = strconv.ParseUint(agentUser.Uid, 10, 32)
+		agentGID, _ = strconv.ParseUint(agentUser.Gid, 10, 32)
+	}
+	if browserUser, lookupErr := user.Lookup("aibrowser"); lookupErr == nil {
+		browserUID, _ = strconv.ParseUint(browserUser.Uid, 10, 32)
+		browserGID, _ = strconv.ParseUint(browserUser.Gid, 10, 32)
+	}
+	if !distinctIsolatedBrowserIdentity(uint32(browserUID), uint32(browserGID),
+		uint32(uid64), uint32(gid64), uint32(agentUID), uint32(agentGID)) {
+		browserUID, browserGID = 0, 0
+	}
+	// A named group may not equal an account's primary GID on hosts with
+	// pre-existing NSS entries. Reject aliases to either protected group,
+	// including the actual aiagent socket/credential group.
+	for _, groupName := range []string{cfg.AgentUser, cfg.WorkerUser, "aibrowser"} {
+		group, groupErr := user.LookupGroup(groupName)
+		if groupErr != nil {
+			browserUID, browserGID = 0, 0
+			break
+		}
+		namedGID, parseErr := strconv.ParseUint(group.Gid, 10, 32)
+		if parseErr != nil || namedGID == 0 ||
+			(groupName == "aibrowser" && namedGID != browserGID) ||
+			(groupName != "aibrowser" && namedGID == browserGID) {
+			browserUID, browserGID = 0, 0
+			break
+		}
+	}
 	protected := []string{"ai-server-agent", "/usr/local/bin/ai-server-agent", "/etc/ai-server-agent", cfg.StateDir, cfg.LogDir, cfg.ExecutorSocket, cfg.ListenAddress}
 	// Audit reserves against configured and observed surviving task/service logs
 	// across a managed restart. Unknown inventory fails to a hard-bound reserve.
@@ -106,6 +145,10 @@ func NewServer(cfg config.Config, token string) (*Server, error) {
 		audit:             audit.NewWithKeyAndReserve(filepath.Join(cfg.LogDir, "audit.jsonl"), filepath.Join(filepath.Dir(cfg.ExecutorToken), "audit-fingerprint.key"), jobAuditSafetyReserveAtStartup(cfg)),
 		workerUID:         uint32(uid64),
 		workerGID:         uint32(gid64),
+		agentUID:          uint32(agentUID),
+		agentGID:          uint32(agentGID),
+		browserUID:        uint32(browserUID),
+		browserGID:        uint32(browserGID),
 		runs:              newRunLimiterForSlots(cfg.EffectiveRuntime().WorkerCommandSlots),
 		sessions:          newStdioSessionBrokerForSlots(cfg.EffectiveRuntime().StdioSessionSlots),
 		lifecycleLockPath: lifecycleManagementLockPath,

@@ -15,7 +15,7 @@ import (
 )
 
 const (
-	browserTraceMaxBytes  = 512 << 10
+	browserTraceMaxBytes  = 16 << 20
 	browserTraceReadBytes = 8192
 )
 
@@ -34,6 +34,9 @@ func (s *Server) browserSessionTrace(ctx context.Context, req Request) Response 
 	entry, err := s.browserSessionEntry(req)
 	if err != nil {
 		return browserSessionError("browser_session_not_found", "authorization", errSessionNotFound)
+	}
+	if entry.browserMode != "isolated" || !entry.browserPrivate {
+		return browserSessionError("browser_trace_requires_isolated_profile", "security", errors.New("private ZIP traces require an OS-isolated Browser session"))
 	}
 	if len(req.Content) == 0 || len(req.Content) > 16384 || req.TimeoutMS != 0 {
 		return browserSessionError("invalid_browser_trace", "validation", errors.New("bounded trace parameters required"))
@@ -120,6 +123,15 @@ func (s *Server) browserSessionTrace(ctx context.Context, req Request) Response 
 	}
 	if frame.Event == "error" {
 		switch frame.Reason {
+		case "trace_read_budget_exhausted":
+			if p.Operation != "read" {
+				return uncertain()
+			}
+			r := browserSessionError("trace_read_budget_exhausted", "resource",
+				errors.New("Browser trace session has exhausted its finite 8192 read-window allowance; no bytes delivered; close and open a new session for further recordings"))
+			r.SessionID = entry.id
+			r.Status = "not_delivered"
+			return r
 		case "trace_unavailable", "trace_stale", "trace_invalid_offset":
 			// These known lookup refusals are valid only for data retrieval
 			// and explicit retirement. During record, Browser actions may
@@ -143,7 +155,7 @@ func (s *Server) browserSessionTrace(ctx context.Context, req Request) Response 
 			}
 			// Flow steps were already executed; do NOT imply that retrying
 			// record is idempotent or that a ZIP is available to read.
-			r := browserSessionError("too_large", "resource", errors.New("flow executed; resulting trace ZIP exceeded 512 KiB; no artifact retained; do not blindly replay actions"))
+			r := browserSessionError("too_large", "resource", errors.New("flow executed; resulting trace ZIP exceeded 16 MiB; no artifact retained; do not blindly replay actions"))
 			r.SessionID = entry.id
 			r.Status = "flow_executed_trace_unavailable"
 			r.Output = string(frame.Result)

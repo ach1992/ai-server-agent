@@ -49,7 +49,13 @@ func (m *Manager) SessionOpen(ctx context.Context, opts SessionOptions) (executo
 		m.mu.RUnlock()
 		return browserError("browser_runtime_not_ready", "state", "pinned Browser runtime is not ready: "+status.Reason), nil
 	}
-	script, err := managedSessionRunner(m.engineDir(), filepath.Join(m.dataDir(), "profile"), filepath.Join(m.dataDir(), "tmp"), opts.IgnoreHTTPSErrors, mode)
+	scratch := filepath.Join(m.dataDir(), "tmp")
+	if mode == "isolated" {
+		// Browser trace bytes are never created under the aiworker-owned
+		// temporary root, even before the retained ZIP is pinned.
+		scratch = filepath.Join(m.dataDir(), "isolated")
+	}
+	script, err := managedSessionRunner(m.engineDir(), filepath.Join(m.dataDir(), "profile"), scratch, opts.IgnoreHTTPSErrors, mode)
 	m.mu.RUnlock()
 	if err != nil {
 		return browserError("invalid_browser_session", "validation", err.Error()), nil
@@ -160,7 +166,7 @@ func (m *Manager) SessionTrace(ctx context.Context, opts SessionOptions) (execut
 		}{Operation: "record", Steps: opts.Steps}
 		limit = 40 * time.Second
 	case "read", "discard":
-		if len(opts.Steps) != 0 || opts.TraceOffset < 0 || opts.TraceOffset > 512<<10 ||
+		if len(opts.Steps) != 0 || opts.TraceOffset < 0 || opts.TraceOffset > 16<<20 ||
 			!strings.HasPrefix(opts.TraceVersion, "sha256:") || len(opts.TraceVersion) != 71 {
 			return browserError("invalid_browser_trace", "validation", "read/discard require version sha256:<64-hex> and bounded offset"), nil
 		}

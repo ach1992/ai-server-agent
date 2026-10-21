@@ -12,7 +12,7 @@ import (
 )
 
 type BrowserSessionOpenInput struct {
-	ProfileMode       string `json:"profile_mode,omitempty" jsonschema:"shared (default) uses exclusive shared profile; isolated uses independently bounded concurrent ephemeral Browser cookies/localStorage"`
+	ProfileMode       string `json:"profile_mode,omitempty" jsonschema:"shared (default) uses exclusive shared aiworker profile; isolated uses dedicated aibrowser OS identity, private ephemeral cookies/localStorage and no worker workspace access; ZIP traces require isolated"`
 	Workspace         string `json:"workspace" jsonschema:"Exact absolute worker workspace/worktree used to bind session authorization"`
 	IgnoreHTTPSErrors bool   `json:"ignore_https_errors,omitempty" jsonschema:"Explicit TLS validation exception for an isolated development site; default is secure HTTPS validation"`
 }
@@ -45,7 +45,7 @@ type BrowserSessionFlowInput struct {
 }
 
 func (s *Server) registerBrowserSessionTools() {
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_open", Description: "Open a workspace-scoped Chromium session using a shared or isolated profile. Default shared profile is exclusive; isolated profiles can run concurrently up to configured browser_concurrent_slots and available shared session capacity. session_id alone is not authorization. Sessions survive client disconnects, not Executor restarts.", Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionOpenInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_open", Description: "Open a principal/workspace-bound Chromium session. Default shared uses the exclusive worker profile; isolated uses a dedicated Browser OS identity and private scratch without worker workspace file access. Trace ZIPs require isolated mode. session_id alone is not authorization; sessions survive client disconnects, not Executor restart.", Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionOpenInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := s.browser.SessionOpen(ctx, browser.SessionOptions{Workspace: in.Workspace, IgnoreHTTPSErrors: in.IgnoreHTTPSErrors, ProfileMode: in.ProfileMode})
 		if err != nil {
 			return executorTransportErrorResult(err)
@@ -91,7 +91,7 @@ func (s *Server) registerBrowserSessionTools() {
 		summary := fmt.Sprintf("Browser JPEG screenshot captured: %d bytes, %s, digest %s. If no image is visible in this client, retry with representation=base64, quality=15 and max_width=320 (text-only cap 16 KiB). No persistent artifact was created.", len(raw), resp.MIMEType, resp.FileVersion)
 		return &mcpsdk.CallToolResult{Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: summary}, &mcpsdk.ImageContent{Data: raw, MIMEType: "image/jpeg"}}}, meta, nil
 	})
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_trace", Description: "Record one Browser flow to a private ZIP (max 512 KiB), read base64 windows (max 8192 raw bytes, offset/SHA256), or discard. Recording can change the page: do not replay uncertain actions. May contain sensitive data; held in session memory only until discard/close/expiry.", Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionTraceInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_trace", Description: "Only for isolated Browser sessions: record one flow to an OS-private ZIP (max 16 MiB on disk), read SHA256-pinned base64 windows (8192 raw bytes per call; up to 8192 finite reads per session, separately from 128 Browser actions), or discard. Recording may change the page: never replay uncertain actions. The ZIP is retained only within the Browser session; no public URL or whole-ZIP memory copy.", Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionTraceInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := s.browser.SessionTrace(ctx, browser.SessionOptions{Workspace: in.Workspace, SessionID: in.SessionID, Steps: in.Steps, TraceOperation: in.Operation, TraceOffset: in.Offset, TraceVersion: in.FileVersion})
 		if err != nil {
 			return executorTransportErrorResult(err)

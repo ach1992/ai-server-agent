@@ -29,6 +29,12 @@ LEGACY
 chown aiagent:aiagent "$STATE_DIR/install-state.env"
 rm -f /tmp/ai-server-agent-legacy-state-executed
 
+# Negative real-account fixtures run only when GitHub explicitly opts in,
+# before this disposable runner's first real Agent installation.
+if [ "${ASA_DISPOSABLE_BROWSER_ALIAS_ACCEPTANCE:-0}" = 1 ]; then
+  bash "$ROOT/tests/browser_account_identity_root.sh"
+fi
+
 AI_SERVER_AGENT_BINARY="$BINARY" AI_SERVER_AGENT_NONINTERACTIVE=1 bash "$ROOT/install.sh"
 
 test ! -e /tmp/ai-server-agent-legacy-state-executed
@@ -36,7 +42,26 @@ test ! -L "$STATE_DIR/runtime"
 test ! -L "$STATE_DIR/jobs"
 test ! -L "$STATE_DIR/AI_ENVIRONMENT.json"
 test -d "$STATE_DIR/runtime" && test -d "$STATE_DIR/jobs"
-test ! -e "$STATE_DIR/runtime/browser"
+# A symlinked LEGACY browser parent is removed without following it, then
+# safely replaced by the new root-owned container for the isolated Browser.
+test ! -L "$STATE_DIR/runtime/browser"
+test "$(stat -c '%U:%G:%a' "$STATE_DIR/runtime/browser")" = root:root:755
+test "$(stat -c '%U:%G:%a' "$STATE_DIR/runtime/browser/isolated")" = aibrowser:aibrowser:700
+test "$(stat -c '%U:%G:%a' "$STATE_DIR/browser-home")" = aibrowser:aibrowser:700
+test "$(getent passwd aibrowser | cut -d: -f6-7)" = "$STATE_DIR/browser-home:/usr/sbin/nologin"
+test "$(id -G aibrowser)" = "$(id -g aibrowser)"
+test "$(id -u aibrowser)" != "$(id -u aiworker)"
+test "$(id -g aibrowser)" != "$(id -g aiworker)"
+test "$(id -u aibrowser)" != "$(id -u aiagent)"
+test "$(id -g aibrowser)" != "$(id -g aiagent)"
+test "$(id -g aibrowser)" != "$(getent group aiagent | cut -d: -f3)"
+# Account-scoped files are invisible to an otherwise authorized worker UID.
+runuser -u aibrowser -- /usr/bin/sh -c 'printf private > /var/lib/ai-server-agent/runtime/browser/isolated/private.marker'
+if runuser -u aiworker -- /usr/bin/cat "$STATE_DIR/runtime/browser/isolated/private.marker" >/dev/null 2>&1; then
+  echo "isolated Browser data readable from worker UID" >&2
+  exit 1
+fi
+
 test "$(stat -c '%U:%G:%a' "$STATE_DIR")" = root:root:711
 test "$(stat -c '%U:%G:%a' "$STATE_DIR/runtime")" = root:root:711
 test "$(stat -c '%U:%G:%a' "$STATE_DIR/jobs")" = root:root:711

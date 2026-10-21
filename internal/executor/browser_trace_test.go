@@ -17,9 +17,17 @@ import (
 func openTraceFixture(t *testing.T, mode string) (*Server, Request, string, []byte) {
 	t.Helper()
 	s, owner, _ := browserAuditFixture(t)
+	owner.BrowserProfileMode = "isolated"
 	raw := append([]byte{'P', 'K', 3, 4}, bytes.Repeat([]byte("bounded-playwright-zip-window"), 40)...)
+	if mode == "large" {
+		raw = append([]byte{'P', 'K', 3, 4}, bytes.Repeat([]byte("sufficiently-large-private-trace-evidence"), 17000)...)
+	}
 	full := sha256.Sum256(raw)
-	chunk := sha256.Sum256(raw)
+	firstWindow := raw
+	if len(firstWindow) > browserTraceReadBytes {
+		firstWindow = firstWindow[:browserTraceReadBytes]
+	}
+	chunk := sha256.Sum256(firstWindow)
 	chunkHash := hex.EncodeToString(chunk[:])
 	if mode == "bad_digest" {
 		chunkHash = strings.Repeat("0", 64)
@@ -57,7 +65,7 @@ while IFS= read -r line; do
       printf 'ASA_BROWSER_SESSION {"event":"trace_discarded","nonce":"%%s"}\n' "$nonce" ;;
   esac
 done
-`, recordFrame, version, len(raw), version, chunkHash, base64.StdEncoding.EncodeToString(raw))
+`, recordFrame, version, len(raw), version, chunkHash, base64.StdEncoding.EncodeToString(firstWindow))
 	if err := os.WriteFile(s.browserNodeBinary, []byte(shell), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -67,6 +75,15 @@ done
 	if !opened.OK {
 		t.Fatalf("open trace fixture: %+v", opened)
 	}
+	// The fake executable never writes a ZIP, and CI's unprivileged tests
+	// cannot create a second OS UID. Model only the verified private-session
+	// state gate; real confidentiality is exercised by the protected root
+	// Chromium two-principal acceptance.
+	entry, err := s.sessions.get(owner, opened.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry.browserPrivate = true
 	return s, owner, opened.SessionID, raw
 }
 
@@ -150,8 +167,8 @@ func TestBrowserTraceMismatchedChunkDigestPoisonsSession(t *testing.T) {
 	if again := s.browserSessionAction(ctx, read); again.OK || again.ErrorCode != "browser_session_uncertain" {
 		t.Fatalf("unknown completion replayable: %+v", again)
 	}
-	if s.browserAdmission.acquireRun() {
-		t.Fatal("poisoned Browser released profile admission")
+	if !s.browserAdmission.matches(id) {
+		t.Fatal("poisoned isolated Browser released its exact admission")
 	}
 }
 
@@ -205,5 +222,65 @@ func TestBrowserTraceKnownFlowFailureRetainsEvidence(t *testing.T) {
 	read := traceReq(owner, id, fmt.Sprintf(`{"operation":"read","offset":0,"file_version":%q}`, recorded.FileVersion))
 	if got := s.browserSessionAction(ctx, read); !got.OK || got.BytesReturned <= 0 {
 		t.Fatalf("trace of known failed action was lost: %+v", got)
+	}
+}
+
+// The previous 512 KiB whole-ZIP limit must no longer reject a bounded
+// session-private archive. The Executor never loads full ZIP bytes: each
+// response is still a SHA-pinned 8 KiB window with an explicit continuation.
+func TestBrowserTraceOverPreviousCapUsesBoundedWindows(t *testing.T) {
+	s, owner, id, raw := openTraceFixture(t, "large")
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	defer func() { _ = s.browserSessionAction(ctx, browserOwnerControl(owner, id, "browser_session_close")) }()
+	if len(raw) <= 512<<10 || len(raw) >= browserTraceMaxBytes {
+		t.Fatalf("bad bounded large fixture size %d", len(raw))
+	}
+	created := s.browserSessionAction(ctx, traceReq(owner, id, "{\"operation\":\"record\",\"steps\":[{\"action\":\"snapshot\"}]}"))
+	full := sha256.Sum256(raw)
+	version := "sha256:" + hex.EncodeToString(full[:])
+	if !created.OK || created.FileVersion != version || created.FileSize == nil ||
+		*created.FileSize != int64(len(raw)) || created.BytesReturned != 0 || created.BytesSeen != int64(len(raw)) {
+		t.Fatalf("large metadata was refused or copied into the result: %+v", created)
+	}
+	read := traceReq(owner, id, fmt.Sprintf("{\"operation\":\"read\",\"offset\":0,\"file_version\":%q}", version))
+	got := s.browserSessionAction(ctx, read)
+	chunk, err := base64.StdEncoding.Strict().DecodeString(got.Output)
+	if err != nil || !got.OK || !bytes.Equal(chunk, raw[:browserTraceReadBytes]) ||
+		got.NextOffset == nil || *got.NextOffset != browserTraceReadBytes ||
+		got.EOF == nil || *got.EOF || !got.Truncated ||
+		got.BytesReturned != browserTraceReadBytes || got.BytesSeen != int64(len(raw)) {
+		t.Fatalf("large trace window invalid: %+v err=%v", got, err)
+	}
+	bad := traceReq(owner, id, fmt.Sprintf("{\"operation\":\"read\",\"offset\":%d,\"file_version\":%q}", browserTraceMaxBytes+1, version))
+	if denied := s.browserSessionAction(ctx, bad); denied.OK || denied.ErrorCode != "invalid_browser_trace" {
+		t.Fatalf("unbounded trace offset accepted: %+v", denied)
+	}
+	if again := s.browserSessionAction(ctx, read); !again.OK {
+		t.Fatalf("bounded offset validation poisoned healthy session: %+v", again)
+	}
+}
+
+// A shared/default Browser remains fully usable for ordinary flow/capture,
+// but cannot record any disk-backed ZIP under the aiworker security identity.
+func TestBrowserTraceSharedSessionRefusedBeforeNodeExecution(t *testing.T) {
+	s, owner, _ := browserAuditFixture(t)
+	owner.BrowserProfileMode = "shared"
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	opened := s.browserSessionAction(ctx, owner)
+	if !opened.OK {
+		t.Fatalf("shared Browser fixture open: %+v", opened)
+	}
+	defer func() {
+		_ = s.browserSessionAction(ctx, browserOwnerControl(owner, opened.SessionID, "browser_session_close"))
+	}()
+	record := traceReq(owner, opened.SessionID, "{\"operation\":\"record\",\"steps\":[{\"action\":\"snapshot\"}]}")
+	if denied := s.browserSessionAction(ctx, record); denied.OK ||
+		denied.ErrorCode != "browser_trace_requires_isolated_profile" || denied.Output != "" {
+		t.Fatalf("same-UID shared Browser trace must fail before any writes: %+v", denied)
+	}
+	if still := s.browserSessionAction(ctx, browserOwnerControl(owner, opened.SessionID, "browser_session_status")); !still.OK {
+		t.Fatalf("trace refusal poisoned a healthy shared Browser: %+v", still)
 	}
 }

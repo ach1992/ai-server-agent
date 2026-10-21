@@ -434,7 +434,7 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 			}
 		}
 		if cleanupErr == nil && browserScratch != "" {
-			cleanupErr = s.browserReclaimNamedScratch(browserScratch)
+			cleanupErr = s.browserReclaimNamedScratch(browserScratch, false)
 		}
 		if cleanupErr != nil {
 			browserTerminationProven = false

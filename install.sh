@@ -29,6 +29,9 @@ LEGACY_MCP_TOKEN_FILE="$CONFIG_DIR/mcp.token"
 AUDIT_FINGERPRINT_KEY="$CONFIG_DIR/audit-fingerprint.key"
 AGENT_USER="aiagent"
 WORKER_USER="aiworker"
+# Separate unprivileged UID for isolated Browser sessions and private Trace ZIPs.
+BROWSER_USER="aibrowser"
+BROWSER_HOME="$STATE_DIR/browser-home"
 # Developer Runtime HOME is Agent-managed state, never the project checkout.
 WORKER_HOME="$STATE_DIR/worker-home"
 PORT="${AI_SERVER_AGENT_PORT:-3210}"
@@ -364,6 +367,74 @@ json_string_value(){
   sed -n "s/.*\"$key\"[[:space:]]*:[[:space:]]*\"\([^\"]*\)\".*/\1/p" "$CONFIG_FILE" | head -n1
 }
 
+# Fail closed on PRE-EXISTING numeric ID aliases before account creation or
+# writing Agent credentials/state. Bash account names are not Linux isolation:
+# group IDs on the Executor credential/socket are the actual access boundary.
+# The second invocation verifies freshly provisioned users before install -d.
+verify_isolated_browser_account_ids(){
+  local role role_uid role_gid role_group_gid browser_uid="" browser_gid="" browser_group_gid=""
+  local group_record account_record account_name account_password account_uid account_gid account_info account_home account_shell
+  if getent group "$BROWSER_USER" >/dev/null 2>&1; then
+    group_record="$(getent group "$BROWSER_USER")" || die "Cannot resolve dedicated Browser group."
+    [[ "$group_record" != *$'\n'* ]] || die "Ambiguous dedicated Browser group resolution."
+    IFS=: read -r account_name account_password browser_group_gid account_info <<< "$group_record"
+    [ "$account_name" = "$BROWSER_USER" ] && [[ "$browser_group_gid" =~ ^[0-9]+$ ]] &&
+      [ "$browser_group_gid" -ne 0 ] || die "Invalid dedicated Browser group identity."
+  fi
+  if getent passwd "$BROWSER_USER" >/dev/null 2>&1; then
+    account_record="$(getent passwd "$BROWSER_USER")" || die "Cannot resolve dedicated Browser account."
+    [[ "$account_record" != *$'\n'* ]] || die "Ambiguous dedicated Browser account resolution."
+    IFS=: read -r account_name account_password account_uid account_gid account_info account_home account_shell <<< "$account_record"
+    [ "$account_name" = "$BROWSER_USER" ] && [[ "$account_uid" =~ ^[0-9]+$ ]] &&
+      [[ "$account_gid" =~ ^[0-9]+$ ]] || die "Invalid dedicated Browser account identity."
+    # Named passwd entries are authoritative even if libc/id resolves a
+    # duplicate numeric UID back to another user. Reject protected aliases
+    # by those raw numeric IDs BEFORE the secondary id consistency check.
+    browser_uid="$account_uid"
+    browser_gid="$account_gid"
+    [ "$browser_uid" -ne 0 ] && [ "$browser_gid" -ne 0 ] ||
+      die "Invalid or inconsistent Browser numeric UID/GID."
+    [ "$account_home" = "$BROWSER_HOME" ] && [ "$account_shell" = /usr/sbin/nologin ] ||
+      die "Existing Browser account HOME/shell differs from the dedicated service identity."
+    [ -n "$browser_group_gid" ] && [ "$browser_gid" -eq "$browser_group_gid" ] ||
+      die "Existing Browser account must use its own dedicated primary group."
+  fi
+  for role in "$AGENT_USER" "$WORKER_USER"; do
+    role_uid=""
+    role_gid=""
+    role_group_gid=""
+    if getent passwd "$role" >/dev/null 2>&1; then
+      role_uid="$(id -u "$role")" || die "Peer account UID unavailable: $role"
+      role_gid="$(id -g "$role")" || die "Peer account GID unavailable: $role"
+    fi
+    if getent group "$role" >/dev/null 2>&1; then
+      group_record="$(getent group "$role")" || die "Peer group identity unavailable: $role"
+      [[ "$group_record" != *$'\n'* ]] || die "Ambiguous peer group resolution: $role"
+      IFS=: read -r account_name account_password role_group_gid account_info <<< "$group_record"
+      [ "$account_name" = "$role" ] && [[ "$role_group_gid" =~ ^[0-9]+$ ]] ||
+        die "Invalid peer group identity: $role"
+    fi
+    if [ -n "$browser_uid" ] && [ -n "$role_uid" ] && [ "$browser_uid" -eq "$role_uid" ]; then
+      die "Browser UID aliases protected $role account; refusing existing identities without mutation."
+    fi
+    for protected_gid in "$role_gid" "$role_group_gid"; do
+      [ -z "$protected_gid" ] && continue
+      if { [ -n "$browser_gid" ] && [ "$browser_gid" -eq "$protected_gid" ]; } ||
+         { [ -n "$browser_group_gid" ] && [ "$browser_group_gid" -eq "$protected_gid" ]; }; then
+        die "Browser GID aliases protected $role account/group; refusing existing identities without mutation."
+      fi
+    done
+  done
+  if [ -n "$browser_uid" ]; then
+    [ "$(id -u "$BROWSER_USER")" -eq "$browser_uid" ] &&
+    [ "$(id -g "$BROWSER_USER")" -eq "$browser_gid" ] ||
+      die "Invalid or inconsistent Browser numeric UID/GID."
+    [ "$(id -G "$BROWSER_USER")" = "$browser_gid" ] ||
+      die "Dedicated Browser account has unexpected supplementary groups."
+  fi
+}
+
+
 # Root-mode platform probes must not bypass command-search preflight: their
 # status formatter itself uses 'tr'. Unprivileged platform checks retain the
 # existing compatibility contract without requiring root path validation.
@@ -401,6 +472,10 @@ if [ "$RESOLVE_REF_ONLY" -eq 1 ]; then resolve_source_ref "$REF"; exit 0; fi
 # Fail before the lock, packages, users, credentials, executable replacement
 # or service changes. --check also provides a read-only operator preflight.
 verify_privileged_install_targets
+# Resolve existing NSS aliases through trusted commands BEFORE the lifecycle
+# lock, apt update/install, account creation, credentials or service restart.
+# A bad pre-existing Browser account must produce a truly read-only refusal.
+verify_isolated_browser_account_ids
 if [ "$CHECK_ONLY" -eq 1 ]; then log "Compatibility and privileged install-path checks passed: $PRETTY_NAME, $ARCH, systemd available."; exit 0; fi
 
 acquire_lifecycle_lock
@@ -497,8 +572,11 @@ fi
 
 if ! getent group "$AGENT_USER" >/dev/null 2>&1; then groupadd --system "$AGENT_USER"; fi
 if ! getent group "$WORKER_USER" >/dev/null 2>&1; then groupadd --system "$WORKER_USER"; fi
+if ! getent group "$BROWSER_USER" >/dev/null 2>&1; then groupadd --system "$BROWSER_USER"; fi
 if ! id "$AGENT_USER" >/dev/null 2>&1; then useradd --system --gid "$AGENT_USER" --home "$STATE_DIR" --shell /usr/sbin/nologin "$AGENT_USER"; fi
 if ! id "$WORKER_USER" >/dev/null 2>&1; then useradd --system --gid "$WORKER_USER" --home-dir "$WORKER_HOME" --shell /bin/bash "$WORKER_USER"; fi
+if ! id "$BROWSER_USER" >/dev/null 2>&1; then useradd --system --gid "$BROWSER_USER" --home-dir "$BROWSER_HOME" --shell /usr/sbin/nologin "$BROWSER_USER"; fi
+verify_isolated_browser_account_ids
 
 install -d -m 0750 -o root -g "$AGENT_USER" "$CONFIG_DIR"
 install -d -m 0700 -o root -g root "$CONTROL_DIR"
@@ -509,6 +587,22 @@ install -d -m 0750 -o "$WORKER_USER" -g "$WORKER_USER" "$WORKSPACE_DIR"
 [ ! -L "$WORKER_HOME" ] || die "Refusing symlinked worker HOME."
 [ ! -e "$WORKER_HOME" ] || [ -d "$WORKER_HOME" ] || die "Worker HOME must be a directory."
 install -d -m 0700 -o "$WORKER_USER" -g "$WORKER_USER" "$WORKER_HOME"
+[ ! -L "$BROWSER_HOME" ] || die "Refusing symlinked isolated Browser HOME."
+[ ! -e "$BROWSER_HOME" ] || [ -d "$BROWSER_HOME" ] || die "Isolated Browser HOME must be a directory."
+[ "$(id -u "$BROWSER_USER")" != "$(id -u "$WORKER_USER")" ] || die "Browser identity must differ from worker."
+[ "$(id -g "$BROWSER_USER")" != "$(id -g "$WORKER_USER")" ] || die "Browser group must differ from worker."
+browser_passwd="$(getent passwd "$BROWSER_USER")" || die "Browser account lookup failed."
+IFS=: read -r _ _ _ _ _ browser_login_home browser_shell <<< "$browser_passwd"
+[ "$browser_login_home" = "$BROWSER_HOME" ] && [ "$browser_shell" = /usr/sbin/nologin ] ||
+  die "Existing Browser account HOME/shell differs from the dedicated service identity."
+browser_identity="$(id -u "$BROWSER_USER"):$(id -g "$BROWSER_USER")"
+[ "$(id -G "$BROWSER_USER")" = "$(id -g "$BROWSER_USER")" ] ||
+  die "Dedicated Browser account has unexpected supplementary groups."
+if [ -d "$BROWSER_HOME" ]; then
+  [ "$(stat -c '%u:%g:%a' "$BROWSER_HOME")" = "$browser_identity:700" ] ||
+    die "Existing Browser HOME identity/mode is unsafe."
+fi
+install -d -m 0700 -o "$BROWSER_USER" -g "$BROWSER_USER" "$BROWSER_HOME"
 # Existing installs may still record WorkspaceDir as the account's login
 # home. Change only that known legacy value; never move/delete project data.
 # An active job can make shadow-utils usermod return E_USER_BUSY (8). The
@@ -601,6 +695,17 @@ if [ -d "$STATE_DIR/runtime/browser" ]; then
   # preserves its existing children and Browser profile data.
   install -d -m 0755 -o root -g root "$STATE_DIR/runtime/browser"
 fi
+# A root-controlled Browser parent prevents the isolated UID from replacing
+# its 0700 scratch root. Never reuse the worker's tmp or persistent profile.
+install -d -m 0755 -o root -g root "$STATE_DIR/runtime/browser"
+browser_private="$STATE_DIR/runtime/browser/isolated"
+[ ! -L "$browser_private" ] || die "Isolated Browser state must not be a symlink."
+[ ! -e "$browser_private" ] || [ -d "$browser_private" ] || die "Isolated Browser state must be a real directory."
+if [ -d "$browser_private" ]; then
+  [ "$(stat -c '%u:%g:%a' "$browser_private")" = "$browser_identity:700" ] ||
+    die "Existing isolated Browser state identity/mode is unsafe."
+fi
+install -d -m 0700 -o "$BROWSER_USER" -g "$BROWSER_USER" "$browser_private"
 # Existing job outputs from the older worker-owned container are never trusted
 # as symlinks after migration.
 find "$STATE_DIR/jobs" -mindepth 1 -maxdepth 1 -type l -delete

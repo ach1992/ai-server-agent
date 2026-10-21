@@ -82,8 +82,11 @@ type stdioSession struct {
 	dapStdout               *dapStdoutQueue          // bounded independent stdio transport; only selected DAP adapter
 	browser                 *browserStdioState       // managed Browser consumer; never a second process broker
 	browserLease            *browserSessionAdmission // release only after verified process cleanup, before broker deletion
+	browserMode             string                   // opening mode, immutable per session
+	browserPrivate          bool                     // isolated-only OS identity, not available to ordinary worker commands
 	browserGroup            *dapCgroup               // original Node + detached Chromium; cgroup.kill/empty proof required before lease release
 	browserScratchName      string                   // exact Executor-issued isolated-profile basename
+	browserTraceScratchName string                   // exact Executor-issued private trace directory for every managed Browser
 	browserScratchCleanup   func() error             // rooted exact removal only after whole-cgroup proof
 }
 
@@ -452,12 +455,26 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 		// audit. Even a post-spawn audit failure must leave the Browser
 		// entry addressable for status/close/expiry reconciliation.
 		entry.browser = &browserStdioState{}
+		entry.browserMode = req.BrowserProfileMode
+		entry.browserPrivate = req.BrowserProfileMode == "isolated" && s.browserUID != 0 && s.browserUID != s.workerUID
 		entry.browserLease = &s.browserAdmission
 		entry.browserGroup = containment
-		if containment != nil && req.BrowserProfileMode == "isolated" {
-			entry.browserScratchName = "asa-profile-" + hex.EncodeToString(nonce[:])
-			name := entry.browserScratchName
-			entry.browserScratchCleanup = func() error { return s.browserReclaimNamedScratch(name) }
+		if containment != nil {
+			// Both shared and isolated Browser sessions can retain private
+			// trace ZIPs across requests. The Executor, not a surviving peer,
+			// must reclaim the exact trace directory after cgroup stop proof.
+			entry.browserTraceScratchName = "asa-trace-" + hex.EncodeToString(nonce[:])
+			if req.BrowserProfileMode == "isolated" {
+				entry.browserScratchName = "asa-profile-" + hex.EncodeToString(nonce[:])
+			}
+			traceName, profileName, private := entry.browserTraceScratchName, entry.browserScratchName, entry.browserPrivate
+			entry.browserScratchCleanup = func() error {
+				var cleanupErr error
+				if profileName != "" {
+					cleanupErr = errors.Join(cleanupErr, s.browserReclaimNamedScratch(profileName, private))
+				}
+				return errors.Join(cleanupErr, s.browserReclaimNamedScratch(traceName, private))
+			}
 		}
 	}
 	if err := s.reserveProcessSession(entry); err != nil {
@@ -541,9 +558,18 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 	}
 	cmd := exec.Command(binary, args...)
 	cmd.Dir = cwd
+	if entry.browserPrivate {
+		// Workspace remains an authorization label, never the CWD of the
+		// isolated Browser process. Its OS identity cannot traverse projects.
+		cmd.Dir = "/"
+	}
 	home := "/root"
 	if !req.Root {
-		home, err = s.workerSessionHome()
+		if entry.browserPrivate {
+			home, err = s.isolatedBrowserHome()
+		} else {
+			home, err = s.workerSessionHome()
+		}
 		if err != nil {
 			return "", err
 		}
@@ -555,8 +581,14 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 		// standalone JS runner's own global sweep, which could otherwise
 		// delete a different *live* isolated Browser's profile or trace.
 		cmd.Env = append(cmd.Env, "ASA_BROWSER_RECLAIM_BY_EXECUTOR=1")
+		if entry.browserPrivate {
+			cmd.Env = append(cmd.Env, "TMPDIR="+s.isolatedBrowserScratchDir())
+		}
 		if entry.browserScratchName != "" {
 			cmd.Env = append(cmd.Env, "ASA_BROWSER_SESSION_PROFILE="+entry.browserScratchName)
+		}
+		if entry.browserTraceScratchName != "" {
+			cmd.Env = append(cmd.Env, "ASA_BROWSER_SESSION_TRACE="+entry.browserTraceScratchName)
 		}
 	}
 	if rootControlledWorkerTmux {
@@ -597,7 +629,11 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 		if req.Root || rootControlledWorkerTmux {
 			cmd.SysProcAttr.Credential = &syscall.Credential{Uid: 0, Gid: 0, Groups: []uint32{0}}
 		} else {
-			cmd.SysProcAttr.Credential = &syscall.Credential{Uid: s.workerUID, Gid: s.workerGID, Groups: []uint32{s.workerGID}}
+			if entry.browserPrivate {
+				cmd.SysProcAttr.Credential = &syscall.Credential{Uid: s.browserUID, Gid: s.browserGID, Groups: []uint32{s.browserGID}}
+			} else {
+				cmd.SysProcAttr.Credential = &syscall.Credential{Uid: s.workerUID, Gid: s.workerGID, Groups: []uint32{s.workerGID}}
+			}
 		}
 	}
 	stdin, pipeErr := cmd.StdinPipe()
