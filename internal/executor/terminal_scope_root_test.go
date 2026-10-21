@@ -131,6 +131,32 @@ func TestApprovedWorkerTmuxScopeSurvivesBrokerStop(t *testing.T) {
 	if err := verifyTerminalLeaseTimer(generation); err != nil {
 		t.Fatalf("independent PID1 idle timer missing: %v", err)
 	}
+	// Move a test-owned durable lease near expiry to exercise the real public
+	// terminal_read renewal, including persisted deadline and restarted PID1 timer.
+	// This never reduces the actual one-hour timer of a live Agent session.
+	old, err := s.readTerminalRecord(owner)
+	if err != nil || old.Version != 2 {
+		t.Fatalf("new scope lacks versioned lease: %+v %v", old, err)
+	}
+	old.ExpiresAt = time.Now().Add(20 * time.Second)
+	if _, err := s.writeTerminalRecord(old, true); err != nil {
+		t.Fatal(err)
+	}
+	e.mu.Lock()
+	e.terminalLeaseExpiresAt = old.ExpiresAt
+	e.mu.Unlock()
+	readLease := owner
+	readLease.Action, readLease.Limit = "terminal_read", 8192
+	if response := s.terminalAction(readLease); !response.OK {
+		t.Fatalf("authenticated read failed to renew near-expiry lease: %+v", response)
+	}
+	renewed, err := s.readTerminalRecord(owner)
+	if err != nil || !renewed.ExpiresAt.After(time.Now().Add(58*time.Minute)) || !renewed.CreatedAt.Equal(old.CreatedAt) {
+		t.Fatalf("renewal did not persist the same session with extended idle deadline: %+v %v", renewed, err)
+	}
+	if err := verifyTerminalLeaseTimer(generation); err != nil {
+		t.Fatalf("renewed PID1 timer failed verification: %v", err)
+	}
 	// Worker UID must NOT attach directly to another principal's root-owned
 	// socket, even when it knows the opaque socket path.
 	if err := exec.Command("/usr/bin/setpriv", "--reuid="+account.Uid, "--regid="+account.Gid,
