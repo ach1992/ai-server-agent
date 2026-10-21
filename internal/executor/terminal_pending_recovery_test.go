@@ -264,6 +264,12 @@ func TestPendingScopeExpiryAndConcurrentAdmission(t *testing.T) {
 		t.Fatal(err)
 	}
 	rec.ExpiresAt = time.Now().Add(-time.Minute)
+	// v2 binds the idle expiry to an immutable opening timestamp. This is
+	// an aged, expired, but otherwise internally valid fixture, so the
+	// reaper must actually attempt the exact protected scope stop.
+	if rec.Version == 2 {
+		rec.CreatedAt = rec.ExpiresAt.Add(-maxStdioSessionAge)
+	}
 	expired, err := json.Marshal(rec)
 	if err != nil {
 		t.Fatal(err)
@@ -374,5 +380,40 @@ func TestPendingScopeCleanupRejectsSocketSymlink(t *testing.T) {
 	b, err := os.ReadFile(marker)
 	if err != nil || string(b) != "preserve" {
 		t.Fatalf("followed unexpected symlink: data=%q err=%v", b, err)
+	}
+}
+
+// Corrupted v2 wall-clock chronology must not become permission to stop
+// a scope or silently free its protected reservation. This is the
+// counterpart of the valid-but-expired reaper fixture above.
+func TestInvalidV2ExpiryChronologyRemainsReserved(t *testing.T) {
+	s, req, _ := pendingRecoveryFixture(t, false)
+	path, err := s.terminalRecordPath(req.SessionID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rec terminalRecord
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		t.Fatal(err)
+	}
+	if rec.Version != 2 {
+		t.Fatalf("expected versioned root scope fixture, got %d", rec.Version)
+	}
+	rec.ExpiresAt = rec.CreatedAt.Add(-time.Minute) // forged invalid chronology
+	forged, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, forged, 0600); err != nil {
+		t.Fatal(err)
+	}
+	attempts := 0
+	count, err := s.terminalRecordCountWithStop(func(string) error { attempts++; return nil })
+	if err != nil || count != 1 || attempts != 0 {
+		t.Fatalf("invalid v2 record authorized scope stop or freed capacity: count=%d calls=%d err=%v", count, attempts, err)
 	}
 }
