@@ -162,7 +162,8 @@ func TestApprovedWorkerTmuxScopeSurvivesBrokerStop(t *testing.T) {
 	}
 	// Simulate loss of the Executor-owned Control Mode broker process.
 	// Unlike the former single-cgroup implementation, the server remains
-	// under PID1 ownership in a separate 1h-bounded scope.
+	// under PID1 ownership in a separately hard-capped scope with a
+	// renewable one-hour inactivity timer.
 	if err := s.sessions.removeAndStop(e); err != nil {
 		t.Fatal(err)
 	}
@@ -235,9 +236,6 @@ func TestApprovedWorkerTmuxScopeSurvivesBrokerStop(t *testing.T) {
 	}
 	if err := verifyScopedTerminalBackendForVersion(generation, 2); err == nil {
 		t.Fatal("systemd scope remained active after terminal_close")
-	}
-	if err := verifyTerminalLeaseTimer(generation); err == nil {
-		t.Fatal("PID1 idle timer survived verified close")
 	}
 	if err := verifyTerminalLeaseTimer(generation); err == nil {
 		t.Fatal("PID1 idle timer survived verified close")

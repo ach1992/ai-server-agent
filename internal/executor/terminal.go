@@ -685,8 +685,8 @@ func (s *Server) terminalControlEntry(req Request, e *stdioSession) Response {
 	}
 	err := s.terminalCommand(req, e, command)
 	if req.Action == "terminal_close" && t.scoped {
-		// At the one-hour PID1 deadline, the scoped backend may have gone
-		// away before our Go timer can send kill-server. A verified stop of
+		// At the PID1 idle deadline (or finite scope hard fallback),
+		// the backend may exit before Go can send kill-server. A verified stop of
 		// the exact session scope is sufficient to reconcile that close;
 		// never abandon its root-only record and capacity after expiry.
 		if scopeErr := stopScopedTerminalBackend(t.name); scopeErr != nil {

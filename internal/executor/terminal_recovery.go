@@ -182,9 +182,10 @@ func (s *Server) terminalReservationsWithStop(stop func(string) error) (terminal
 			reservations.ids[id] = struct{}{} // ambiguous record still charges
 			continue
 		}
-		// A dead Executor cannot fire its in-memory expiry timer. PID1's
-		// one-hour limit still owns the backend. Stop only the exact, random
-		// scoped unit from this trusted expired record, then fsync deletion.
+		// A dead Executor cannot fire its in-memory expiry timer. v1 scopes
+		// have an independent one-hour hard age; v2 scopes have a renewable
+		// PID1 idle timer plus a finite hard fallback. Stop the exact,
+		// root-owned scope before fsync-deleting this expired record.
 		if err := stop(rec.Name); err != nil {
 			return reservations, fmt.Errorf("expired terminal backend not cleaned: %w", err)
 		}
@@ -222,7 +223,8 @@ func (s *Server) persistPendingTerminalRecord(e *stdioSession) (bool, error) {
 
 // The same durable file transitions from PENDING to ACTIVE by a single atomic
 // rename. A crash sees one complete lifecycle state, never a missing record.
-// Do not reset expiry: PID1's hard scope TTL began at initial launch.
+// Preserve the PENDING record's initial expiry and immutable creation
+// time. v1 is hard-capped; v2 can renew only after ACTIVE publication.
 func (s *Server) persistTerminalRecord(req Request, e *stdioSession) error {
 	e.mu.Lock()
 	t := e.terminal
