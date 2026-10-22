@@ -93,7 +93,7 @@ func TestSharedRuntimeIsolatedConnectedMCPCatalog(t *testing.T) {
 		"runtime_list":         {"workspace", "kind"},
 		"browser_run":          {"script", "profile_mode"},
 		"browser_e2e":          {"steps", "profile_mode"},
-		"browser_session_open": {"workspace", "profile_mode"},
+		"browser_session_open": {"workspace", "profile_mode", "chromium_sandbox"},
 	}
 	seen := map[string]bool{}
 	for _, tool := range listed.Tools {
