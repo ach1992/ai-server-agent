@@ -401,6 +401,13 @@ func TestBrowserSetupCommandPinsAndConvergesRuntime(t *testing.T) {
 		browserPlaywrightVersion,
 		browserChromiumRevision,
 		browserChromiumVersion,
+		// These exact pinned Playwright paths must be embedded in the
+		// installation script for each architecture; the Executor consumes
+		// the same runtimepin contract.
+		"chromium_exec_rel='chrome-linux64/chrome'",
+		"headless_exec_rel='chrome-headless-shell-linux64/chrome-headless-shell'",
+		"chromium_exec_rel='chrome-linux/chrome'",
+		"headless_exec_rel='chrome-linux/headless_shell'",
 		desiredRuntimeManifest().ChromiumTreeSHA256,
 		desiredRuntimeManifest().HeadlessShellTreeSHA256,
 		desiredRuntimeManifest().FFmpegTreeSHA256,

@@ -6,9 +6,12 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/ach1992/ai-server-agent/internal/browser/runtimepin"
 )
 
 // Chromium's own --no-sandbox flag is insufficient evidence: a requested
@@ -114,30 +117,6 @@ func chromiumSandboxCommandFlags(cmdline []byte) (renderer, noSandbox bool) {
 	return renderer, noSandbox
 }
 
-// Attestation requires an executable from the pinned, root-owned Chromium
-// runtime. A differently owned process with spoofed argv, seccomp and
-// namespace values must not establish Chromium renderer enforcement.
-func pinnedChromiumExecutable(exe string) bool {
-	const root = "/opt/ai-server-agent/browser/browsers/"
-	if !strings.HasPrefix(exe, root) || filepath.Clean(exe) != exe {
-		return false
-	}
-	parts := strings.Split(strings.TrimPrefix(exe, root), "/")
-	if len(parts) != 3 {
-		return false
-	}
-	switch parts[2] {
-	case "chrome-headless-shell":
-		return strings.HasPrefix(parts[0], "chromium_headless_shell-") &&
-			strings.HasPrefix(parts[1], "chrome-headless-shell-")
-	case "chrome":
-		return strings.HasPrefix(parts[0], "chromium-") &&
-			strings.HasPrefix(parts[1], "chrome-")
-	default:
-		return false
-	}
-}
-
 // Only the original private cgroup is inspected. Never scan arbitrary host
 // processes to infer sandbox readiness from another browser. The Node PID is
 // the existing broker-pinned process, not a user-provided PID.
@@ -187,7 +166,7 @@ func (s *Server) verifyManagedBrowserSandbox(entry *stdioSession) error {
 			}
 			renderers++
 			exe, exeErr := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
-			if exeErr != nil || !pinnedChromiumExecutable(exe) {
+			if exeErr != nil || !runtimepin.IsPinnedChromiumExecutable(exe, runtime.GOARCH) {
 				allEnforced = false
 				continue
 			}

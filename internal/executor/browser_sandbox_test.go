@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/ach1992/ai-server-agent/internal/browser/runtimepin"
 )
 
 func TestBrowserSandboxStatusParserAndEnforcement(t *testing.T) {
@@ -72,20 +74,35 @@ func TestChromiumSandboxProcessTitleAndPinnedBinary(t *testing.T) {
 			}
 		})
 	}
+	// The literal expected layouts mirror the pinned Playwright v1.61.1
+	// registry, while the production matcher shares the installer's
+	// architecture/revision contract. Test both platforms on every runner.
+	const root = "/opt/ai-server-agent/browser/browsers/"
 	for _, tc := range []struct {
-		path    string
-		trusted bool
+		name, arch, path string
+		trusted          bool
 	}{
-		{"/opt/ai-server-agent/browser/browsers/chromium_headless_shell-1228/chrome-headless-shell-linux64/chrome-headless-shell", true},
-		{"/opt/ai-server-agent/browser/browsers/chromium-1228/chrome-linux64/chrome", true},
-		{"/tmp/chrome-headless-shell", false},
-		{"/opt/ai-server-agent/browser/browsers/chromium_headless_shell-1228/other/chrome", false},
-		{"/opt/ai-server-agent/browser/browsers/chromium_headless_shell-1228/chrome-headless-shell-linux64/chrome-headless-shell (deleted)", false},
-		{"/opt/ai-server-agent/browser/node/bin/node", false},
+		{"amd64_headless", "amd64", root + "chromium_headless_shell-1228/chrome-headless-shell-linux64/chrome-headless-shell", true},
+		{"arm64_headless", "arm64", root + "chromium_headless_shell-1228/chrome-linux/headless_shell", true},
+		{"amd64_chromium", "amd64", root + "chromium-1228/chrome-linux64/chrome", true},
+		{"arm64_chromium", "arm64", root + "chromium-1228/chrome-linux/chrome", true},
+		{"amd64_headless_on_arm64", "arm64", root + "chromium_headless_shell-1228/chrome-headless-shell-linux64/chrome-headless-shell", false},
+		{"arm64_headless_on_amd64", "amd64", root + "chromium_headless_shell-1228/chrome-linux/headless_shell", false},
+		{"wrong_revision", "arm64", root + "chromium_headless_shell-1227/chrome-linux/headless_shell", false},
+		{"revision_prefix", "amd64", root + "chromium-1228-extra/chrome-linux64/chrome", false},
+		{"wrong_binary", "arm64", root + "chromium_headless_shell-1228/chrome-linux/chrome", false},
+		{"wrong_directory", "amd64", root + "chromium_headless_shell-1228/other/chrome-headless-shell", false},
+		{"out_of_tree", "arm64", "/tmp/headless_shell", false},
+		{"deleted", "arm64", root + "chromium_headless_shell-1228/chrome-linux/headless_shell (deleted)", false},
+		{"path_traversal", "arm64", root + "chromium_headless_shell-1228/../chromium_headless_shell-1228/chrome-linux/headless_shell", false},
+		{"not_a_browser", "amd64", "/opt/ai-server-agent/browser/node/bin/node", false},
+		{"unsupported_platform", "mips64", root + "chromium_headless_shell-1228/chrome-linux/headless_shell", false},
 	} {
-		if got := pinnedChromiumExecutable(tc.path); got != tc.trusted {
-			t.Errorf("pinned Chromium executable identity %q: got %t, want %t", tc.path, got, tc.trusted)
-		}
+		t.Run(tc.name, func(t *testing.T) {
+			if got := runtimepin.IsPinnedChromiumExecutable(tc.path, tc.arch); got != tc.trusted {
+				t.Errorf("pinned Chromium executable identity %q (%s): got %t, want %t", tc.path, tc.arch, got, tc.trusted)
+			}
+		})
 	}
 }
 
