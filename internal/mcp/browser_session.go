@@ -33,6 +33,21 @@ type BrowserSessionCaptureInput struct {
 	Representation string `json:"representation,omitempty" jsonschema:"image (default): typed MCP image with small text metadata; base64: text-visible JPEG only when raw capture <=16 KiB, otherwise explicit too_large error"`
 }
 
+// A single private in-process JPEG at a time; no new storage service.
+type BrowserSessionImageInput struct {
+	Workspace   string `json:"workspace" jsonschema:"Exact authenticated Browser workspace"`
+	SessionID   string `json:"session_id" jsonschema:"Principal-bound Browser session identity"`
+	Operation   string `json:"operation" jsonschema:"capture stages one JPEG <=1 MiB; read returns <=8192 raw bytes with SHA256/offset/EOF; discard frees it"`
+	Quality     int    `json:"quality,omitempty" jsonschema:"Capture JPEG quality 15..70 (default 70), no implicit resize/fitting"`
+	MaxWidth    int    `json:"max_width,omitempty" jsonschema:"Capture viewport crop width 320..1024 (default 1024), no full-page stitching"`
+	MaxHeight   int    `json:"max_height,omitempty" jsonschema:"Capture viewport crop height 1..720 (default 720)"`
+	CropX       int    `json:"crop_x,omitempty" jsonschema:"Viewport-relative left offset (capture only)"`
+	CropY       int    `json:"crop_y,omitempty" jsonschema:"Viewport-relative top offset (capture only)"`
+	Offset      int64  `json:"offset,omitempty" jsonschema:"Read byte offset; follow next_offset, stop at EOF"`
+	Limit       int    `json:"limit,omitempty" jsonschema:"Read raw bytes 1..8192 (default 8192); choose <=2048 when text-only client fallback is configured to 4096 bytes"`
+	FileVersion string `json:"file_version,omitempty" jsonschema:"Required sha256:<64 lowercase hex> returned by capture for read/discard; stale versions never return bytes"`
+}
+
 type BrowserSessionTraceInput struct {
 	Workspace   string             `json:"workspace" jsonschema:"Exact authenticated Browser session workspace"`
 	SessionID   string             `json:"session_id" jsonschema:"Principal-bound managed Browser session ID"`
@@ -98,6 +113,13 @@ func (s *Server) registerBrowserSessionTools() {
 			summary = fmt.Sprintf("Browser viewport region x=%d,y=%d,width=%d,height=%d; %s", resp.CaptureCropX, resp.CaptureCropY, resp.CaptureWidth, resp.CaptureHeight, summary)
 		}
 		return &mcpsdk.CallToolResult{Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: summary}, &mcpsdk.ImageContent{Data: raw, MIMEType: "image/jpeg"}}}, meta, nil
+	})
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_image", Description: "For a JPEG larger than the 32 KiB inline screenshot cap: stage ONE <=1 MiB viewport JPEG inside the authenticated managed Browser process, retrieve pinned <=8192-byte Base64 windows (limit<=2048 for small text-only fallback) with next_offset/EOF and SHA-256, then explicitly discard or close the session. No public link, full-image broker buffer, persistent file or native ChatGPT download is created. Reads are finite (512 windows/session); use smaller regions if >1 MiB. Requires compatible installed Agent/Executor; image content remains client-dependent.", Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionImageInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+		resp, err := s.browser.SessionImage(ctx, browser.SessionOptions{Workspace: in.Workspace, SessionID: in.SessionID, ImageOperation: in.Operation, ImageOffset: in.Offset, ImageLimit: in.Limit, ImageVersion: in.FileVersion, CaptureQuality: in.Quality, CaptureMaxWidth: in.MaxWidth, CaptureMaxHeight: in.MaxHeight, CaptureCropX: in.CropX, CaptureCropY: in.CropY})
+		if err != nil {
+			return executorTransportErrorResult(err)
+		}
+		return s.responseResult(resp)
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_trace", Description: "Only for isolated Browser sessions: record one flow to an OS-private ZIP (max 16 MiB on disk), read SHA256-pinned base64 windows (8192 raw bytes per call; up to 8192 finite reads per session, separately from 128 Browser actions), or discard. Recording may change the page: never replay uncertain actions. The ZIP is retained only within the Browser session; no public URL or whole-ZIP memory copy.", Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionTraceInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := s.browser.SessionTrace(ctx, browser.SessionOptions{Workspace: in.Workspace, SessionID: in.SessionID, Steps: in.Steps, TraceOperation: in.Operation, TraceOffset: in.Offset, TraceVersion: in.FileVersion})

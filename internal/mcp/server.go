@@ -295,7 +295,15 @@ func responseResultWithLimit(resp executor.Response, maxTextFallbackBytes int) (
 			summary += fmt.Sprintf(" available_from_offset=%d current_end=%d retention_truncated=%t",
 				resp.AvailableFromOffset, resp.CurrentEnd, resp.RetentionTruncated)
 		}
-		summary += "; output omitted from text fallback: use structuredContent, or re-request the needed range starting at requested_offset with limit<=4096, then continue via next_offset (keep file_version for files)"
+		// The output byte limit is BEFORE Base64 expansion (4/3) and
+		// serialized JSON metadata. A 4096-raw-byte Base64 window cannot
+		// fit the minimum configured 4096-byte text-only MCP envelope.
+		// Use a conservative, already-tested 2048-raw-byte recovery window.
+		recoveryLimit := 4096
+		if resp.OutputEncoding == "base64" {
+			recoveryLimit = 2048
+		}
+		summary += fmt.Sprintf("; output omitted from text fallback: use structuredContent, or re-request the needed range starting at requested_offset with limit<=%d, then continue via next_offset (keep file_version for files)", recoveryLimit)
 	} else {
 		summary += "; output omitted from text fallback: use structuredContent; this output is not resumable, request focused output or use start_job for future high-output commands"
 	}

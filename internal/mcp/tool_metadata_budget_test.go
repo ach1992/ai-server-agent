@@ -64,7 +64,7 @@ func TestMCPToolMetadataFootprint(t *testing.T) {
 	const maxAverageDescriptionBytes = 260
 	// Inventory changes require an explicit count update and current
 	// tool-reference contract; installed Stable catalogs remain versioned.
-	const expectedCatalogCount = 60
+	const expectedCatalogCount = 61
 	if len(rows) != expectedCatalogCount {
 		t.Fatalf("MCP tools/list count = %d; expected %d (update docs/TOOL-REFERENCE.md on intentional change)", len(rows), expectedCatalogCount)
 	}

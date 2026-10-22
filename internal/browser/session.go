@@ -2,6 +2,7 @@ package browser
 
 import (
 	"context"
+	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"path/filepath"
@@ -28,6 +29,10 @@ type SessionOptions struct {
 	TraceOperation    string
 	TraceOffset       int64
 	TraceVersion      string
+	ImageOperation    string
+	ImageOffset       int64
+	ImageLimit        int
+	ImageVersion      string
 }
 
 // Managed sessions reuse the same pinned Browser runtime and Executor-owned
@@ -198,6 +203,83 @@ func (m *Manager) SessionCapture(ctx context.Context, opts SessionOptions) (exec
 		// Verified BASE Executor always captures at the requested quality.
 		// Normalize only successful legacy one-shot responses for MCP output.
 		resp.CaptureQuality = q
+	}
+	return resp, nil
+}
+
+// SessionImage stages one JPEG in the existing authenticated Browser process
+// and retrieves <=8 KiB SHA-pinned windows. The one-MiB budget belongs to the
+// session's Node memory, not the broker event ring, workspace or host disk.
+func (m *Manager) SessionImage(ctx context.Context, opts SessionOptions) (executor.Response, error) {
+	if opts.SessionID == "" || opts.Workspace == "" {
+		return browserError("invalid_browser_image", "validation", "workspace and session_id required"), nil
+	}
+	var payload any
+	limit := 10 * time.Second
+	switch opts.ImageOperation {
+	case "capture":
+		q, w, h := opts.CaptureQuality, opts.CaptureMaxWidth, opts.CaptureMaxHeight
+		if q == 0 {
+			q = 70
+		}
+		if w == 0 {
+			w = 1024
+		}
+		if h == 0 {
+			h = 720
+		}
+		if q < 15 || q > 70 || w < 320 || w > 1024 || h < 1 || h > 720 ||
+			opts.CaptureCropX < 0 || opts.CaptureCropY < 0 || opts.ImageOffset != 0 || opts.ImageVersion != "" || opts.ImageLimit != 0 {
+			return browserError("invalid_browser_image", "validation", "capture requires quality 15..70, viewport width 320..1024 and crop height 1..720"), nil
+		}
+		payload = map[string]any{"operation": "capture", "quality": q, "max_width": w, "max_height": h,
+			"crop_x": opts.CaptureCropX, "crop_y": opts.CaptureCropY}
+		limit = 25 * time.Second
+	case "read", "discard":
+		if opts.ImageLimit < 0 || opts.ImageLimit > 8192 ||
+			(opts.ImageOperation == "discard" && opts.ImageLimit != 0) {
+			return browserError("invalid_browser_image", "validation", "read limit must be 1..8192, discard accepts none"), nil
+		}
+		if opts.ImageOffset < 0 || opts.ImageOffset > 1<<20 ||
+			(opts.ImageOperation == "discard" && opts.ImageOffset != 0) ||
+			opts.CaptureQuality != 0 || opts.CaptureMaxWidth != 0 || opts.CaptureMaxHeight != 0 ||
+			opts.CaptureCropX != 0 || opts.CaptureCropY != 0 ||
+			len(opts.ImageVersion) != 71 || !strings.HasPrefix(opts.ImageVersion, "sha256:") {
+			return browserError("invalid_browser_image", "validation", "read/discard require pinned SHA-256 version and bounded offset"), nil
+		}
+		d, err := hex.DecodeString(opts.ImageVersion[len("sha256:"):])
+		if err != nil || hex.EncodeToString(d) != strings.TrimPrefix(opts.ImageVersion, "sha256:") {
+			return browserError("invalid_browser_image", "validation", "invalid lowercase SHA-256 file version"), nil
+		}
+		payload = map[string]any{"operation": opts.ImageOperation, "file_version": opts.ImageVersion, "offset": opts.ImageOffset}
+		if opts.ImageOperation == "read" {
+			limit := opts.ImageLimit
+			if limit == 0 {
+				limit = 8192
+			}
+			payload.(map[string]any)["limit"] = limit
+		}
+	default:
+		return browserError("invalid_browser_image", "validation", "operation must be capture, read or discard"), nil
+	}
+	raw, err := json.Marshal(payload)
+	if err != nil || len(raw) > 512 {
+		return browserError("invalid_browser_image", "validation", "image operation exceeds bounded input"), nil
+	}
+	ctx, _, err = executor.EnsureRequestCorrelationContext(ctx)
+	if err != nil {
+		return browserUnknown("Browser image correlation", err, false), nil
+	}
+	callCtx, cancel := context.WithTimeout(ctx, limit)
+	defer cancel()
+	resp, err := executor.ClientCallContext(callCtx, m.cfg.ExecutorSocket, m.token, executor.Request{
+		Action: "browser_session_image", Workspace: opts.Workspace, SessionID: opts.SessionID, Content: string(raw),
+	})
+	if err != nil {
+		return browserUnknown("Browser image transport", err, false), nil
+	}
+	if !resp.OK && resp.Error == "unknown action" {
+		return browserError("browser_image_unavailable", "compatibility", "installed Executor does not support staged JPEGs; upgrade both components"), nil
 	}
 	return resp, nil
 }

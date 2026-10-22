@@ -326,12 +326,13 @@ func (s *Server) browserAdmissionResponse() Response {
 }
 
 type browserStdioState struct {
-	mu                  sync.Mutex // single in-flight action / ordered stream cursor
-	cursor              uint64
-	partial             []byte
-	uncertain           bool
-	fitQualitySupported bool // advertised at ready by newer Agent-provided runners
-	regionSupported     bool // advertised at ready by region-aware runners
+	mu                    sync.Mutex // single in-flight action / ordered stream cursor
+	cursor                uint64
+	partial               []byte
+	uncertain             bool
+	fitQualitySupported   bool // advertised at ready by newer Agent-provided runners
+	regionSupported       bool // advertised at ready by region-aware runners
+	imageStagingSupported bool // optional <=1 MiB private per-session JPEG with pinned windows
 }
 
 const (
@@ -359,6 +360,8 @@ func (s *Server) browserSessionAction(ctx context.Context, req Request) Response
 		return s.browserSessionCapture(ctx, req)
 	case "browser_session_trace":
 		return s.browserSessionTrace(ctx, req)
+	case "browser_session_image":
+		return s.browserSessionImage(ctx, req)
 	case "browser_session_status":
 		return s.browserSessionStatus(req)
 	case "browser_session_close":
@@ -530,6 +533,7 @@ func (s *Server) browserSessionOpen(ctx context.Context, req Request) Response {
 	entry.browser.mu.Lock()
 	entry.browser.fitQualitySupported = reply.FitQuality
 	entry.browser.regionSupported = reply.CaptureRegion
+	entry.browser.imageStagingSupported = reply.ImageStaging
 	entry.browser.mu.Unlock()
 	if req.BrowserSandbox {
 		if verifyErr := s.verifyManagedBrowserSandbox(entry); verifyErr != nil {
@@ -551,6 +555,7 @@ type browserSessionFrame struct {
 	Mime          string          `json:"mime,omitempty"`
 	FitQuality    bool            `json:"fit_quality,omitempty"`
 	CaptureRegion bool            `json:"capture_region,omitempty"`
+	ImageStaging  bool            `json:"image_staging,omitempty"`
 	Region        json.RawMessage `json:"region,omitempty"`
 	Quality       json.RawMessage `json:"quality,omitempty"` // missing vs explicit zero/null matters for legacy compatibility
 	Size          int             `json:"size,omitempty"`
@@ -586,7 +591,8 @@ func (s *Server) browserSessionReadFrame(ctx context.Context, req Request, state
 			}
 		} else if frame.Nonce != nonce || (frame.Event != "result" && frame.Event != "error" &&
 			frame.Event != "capture_meta" && frame.Event != "capture_part" && frame.Event != "capture_done" &&
-			frame.Event != "trace_meta" && frame.Event != "trace_chunk" && frame.Event != "trace_discarded") {
+			frame.Event != "trace_meta" && frame.Event != "trace_chunk" && frame.Event != "trace_discarded" &&
+			frame.Event != "image_meta" && frame.Event != "image_chunk" && frame.Event != "image_discarded") {
 			return browserSessionFrame{}, true, errors.New("browser_session_unexpected_result")
 		}
 		return frame, true, nil
