@@ -837,5 +837,67 @@ func TestDirectMCPSQLSelectAliasClientAcceptance(t *testing.T) {
 			}
 		}
 	}
+	// Independently selected DML source behavior through the same actual
+	// bearer-authenticated MCP SDK -> Agent -> Executor -> Worker path.
+	// Insert these fixtures AFTER established SELECT reference-count tests,
+	// so they cannot redefine the previously accepted SELECT scope evidence.
+	for _, tc := range []struct {
+		path, source, token, column string
+	}{
+		{"queries/dml_update.sql", "UPDATE public.accounts SET name=id WHERE id>0;\n", "name=id", "name"},
+		{"queries/dml_update.sql", "UPDATE public.accounts SET name=id WHERE id>0;\n", "=id", "id"},
+		{"queries/dml_delete.sql", "DELETE FROM public.accounts WHERE id>0;\n", "WHERE id", "id"},
+	} {
+		writeSQL(tc.path, tc.source)
+		at := strings.Index(tc.source, tc.token) + strings.LastIndex(tc.token, tc.column)
+		if at < 0 {
+			t.Fatal("missing DML acceptance selection")
+		}
+		pinned := stat(tc.path)
+		args := map[string]any{"workspace": cfg.WorkspaceDir, "path": tc.path,
+			"file_version": pinned, "language": "sql", "sql_dialect": "postgres",
+			"line": 0, "character": at}
+		def := call("code_definition", args)
+		var targets []map[string]any
+		if !def.OK || def.FileVersion != pinned || json.Unmarshal([]byte(def.Output), &targets) != nil ||
+			len(targets) != 1 || targets[0]["uri"] != "migrations/001_accounts.sql" ||
+			targets[0]["file_version"] != stat("migrations/001_accounts.sql") {
+			t.Fatalf("real direct MCP DML %s failed column definition: %+v %+v", tc.path, def, targets)
+		}
+		refs := call("code_references", args)
+		if !refs.OK || json.Unmarshal([]byte(refs.Output), &targets) != nil {
+			t.Fatalf("real direct MCP DML %s lacked references: %+v", tc.path, refs)
+		}
+		var sourceUse, migrationDef bool
+		for _, loc := range targets {
+			path, _ := loc["uri"].(string)
+			if path == tc.path {
+				sourceUse = true
+			}
+			if path == "migrations/001_accounts.sql" {
+				migrationDef = true
+			}
+			if path == "" || loc["file_version"] != stat(path) {
+				t.Fatalf("direct MCP DML references contained stale file: %+v", loc)
+			}
+		}
+		if !sourceUse || !migrationDef {
+			t.Fatalf("DML source or migration declaration lost from MCP references: %+v", targets)
+		}
+	}
+	// Source version precondition is checked on the public MCP path too.
+	constSQL := "UPDATE public.accounts SET name=id WHERE id>0;\n"
+	stalePath := "queries/dml_update.sql"
+	staleDMLVersion := stat(stalePath)
+	writeSQL(stalePath, constSQL+"-- concurrent edit\n")
+	bad := call("code_definition", map[string]any{
+		"workspace": cfg.WorkspaceDir, "path": stalePath,
+		"file_version": staleDMLVersion, "language": "sql",
+		"sql_dialect": "postgres", "line": 0, "character": strings.Index(constSQL, "name"),
+	})
+	if bad.OK || bad.ErrorCode != "file_changed" {
+		t.Fatalf("direct MCP DML stale source version was accepted: %+v", bad)
+	}
+	t.Log("DIRECT_SQL_DML_MCP_PASS updated_and_deleted_columns=true definitions=true references=true source_version_guard=true no_database=true")
 	t.Log("DIRECT_REAL_SQL_ALIAS_MCP_PASS using_qualified=true r1_r2_r3_r4_r5_root_emission_proved=true definitions=2 references=5 versions=3 stale_rejected=true no_db=true malformed_on_rejected=true functions_excluded=true source_literals_rejected=true unconsumed_source_gaps_rejected=true pg_on_reserved_rejected=true pg_only_modifier_rejected=true pg_quoted_only_resolved=true mysql_only_resolved=true mariadb_only_resolved=true mysql_mariadb_join_only_resolved=true r1_r2_r3_crossfile_rejected=true f1_f2_f3_proven_emission_rejected=true f4_f5_pre_review_invariants=true n4_table_level_modifier_rejected=true n4_no_false_crossfile_refs=true")
 }
