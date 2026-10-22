@@ -238,6 +238,46 @@ func TestTerminalReadWaitObservesLifecycleAndProtocolFaults(t *testing.T) {
 	})
 }
 
+// A true reconnect permanently marks the new attachment as recovered to
+// disclose loss of the prior epoch. That flag must not disable waiting for
+// future events on the new epoch, including after the initial post-reconnect
+// output was observed. An earlier draft accidentally skipped the wait forever.
+func TestTerminalReadWaitAfterRecoveredAttachment(t *testing.T) {
+	s, req, e := terminalWaitFixture(t)
+	e.mu.Lock()
+	e.terminal.recovered = true
+	e.terminal.accept([]byte("%output %3 AFTER_RECONNECT\n"))
+	e.mu.Unlock()
+
+	first := s.terminalRead(req)
+	if !first.OK || !first.RetentionTruncated || first.NextCursor != 1 ||
+		len(first.TerminalEvents) != 1 || first.TerminalEvents[0].PaneID != "%3" {
+		t.Fatalf("first recovered read lost gap or output identity: %+v", first)
+	}
+	req.Cursor, req.WaitMS = first.NextCursor, 1400
+	results := make(chan Response, 1)
+	go func() { results <- s.terminalRead(req) }()
+	waitForTerminalWaiter(t, e) // fails if recovered:true permanently disables waiting
+
+	e.mu.Lock()
+	e.terminal.accept([]byte("%output %3 NEW_EPOCH_PROOF\n"))
+	e.mu.Unlock()
+	select {
+	case got := <-results:
+		if !got.OK || got.NextCursor != 2 || !got.RetentionTruncated ||
+			!got.ReadWaitSupported || len(got.TerminalEvents) != 1 ||
+			got.TerminalEvents[0].PaneID != "%3" {
+			t.Fatalf("recovered session cannot await subsequent new-epoch bytes: %+v", got)
+		}
+		data, err := base64.StdEncoding.DecodeString(got.Output)
+		if err != nil || !bytes.Equal(data, []byte("NEW_EPOCH_PROOF")) {
+			t.Fatalf("recovered-session new output not returned: data=%q err=%v", data, err)
+		}
+	case <-time.After(1100 * time.Millisecond):
+		t.Fatal("recovered session waiting read did not wake")
+	}
+}
+
 // Source-level fixture, not a claim of installed Executor/root PTY admission.
 // Opens real isolated worker tmux and proves the optional read waits for a
 // new event without blocking a simultaneous terminal_write.

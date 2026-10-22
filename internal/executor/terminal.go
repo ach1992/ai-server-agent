@@ -513,10 +513,15 @@ func (s *Server) terminalRead(req Request) Response {
 	// but it must never hold e.mu or t.actionMu while waiting: the writer,
 	// parser, and close/reconnect lifecycle must continue independently.
 	//
+	// The recovered flag means old-epoch output was lost, not that the new
+	// epoch can never produce new output. Reconnected sessions must be able
+	// to wait for fresh output; the gap remains disclosed separately via
+	// RetentionTruncated and the reconnect response.
+	//
 	// Use a single waiter per session to bound outstanding idle work. Unlike
 	// a session-wide consumption cursor, each caller owns its own cursor, so
 	// an ordinary read remains available while another client is waiting.
-	if req.WaitMS > 0 && req.Cursor == t.latest && !t.recovered &&
+	if req.WaitMS > 0 && req.Cursor == t.latest &&
 		!e.exited && !e.closed && !t.exited && t.protocolError == "" {
 		if t.readWaiter {
 			return Response{SessionID: e.id, SessionEpoch: t.epoch,
