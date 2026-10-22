@@ -138,6 +138,10 @@ func sqlNavColumns(statement []sqlDDLToken, dialect string) []sqlNavOccurrence {
 	case "SELECT":
 		_, columns := sqlNavSelectAnalysis(statement, dialect)
 		return columns
+	case "UPDATE", "DELETE":
+		// Whole-statement DML proof is shared with the table emitter. The
+		// single-target column supplement must not invent another SQL scope.
+		return sqlNavDirectDMLColumns(statement, dialect)
 	case "INSERT":
 		if statement[1].keyword() != "INTO" {
 			return nil
