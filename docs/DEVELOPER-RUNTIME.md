@@ -442,7 +442,7 @@ Masters, but each individual project has only one active Master at a time;
 successor chats recover from GitHub. The Agent is a bounded runtime
 execution/discovery plane, not a project database or Master-election service.
 
-| Planned minimal behavior | Reused boundary |
+| Implemented/accepted behavior | Reused boundary |
 | --- | --- |
 | Workspace-aware commands | Optional canonical existing worker CWD on `run_command` and `start_job`; default CWD remains the workspace root. All worker Command/Job/PTY/LSP/DAP paths reuse the **same private Agent-managed worker HOME/XDG cache** outside project worktrees (already present for sessions), not per-project HOME; root paths stay unchanged. Non-Git directories are valid; check Git identity only for Git-backed work and reject worker-only `workspace` on root jobs. |
 | Recoverable Job records | One small protected record **for every new job**, even without caller `operation_id`; retain principal, CWD, kind, bounded status, a short required service label (optional for task) and new-baseline material idempotency; callers sharing a principal choose distinct project/task operation IDs. A verified `job_stop` persists protected `stopped` proof in the root-owned recovery claim (not a successful command exit); natural numeric exits stay `completed`, while unverified termination remains `unknown` and is not automatically replayed. Only a durable `claimed` record proves no systemd dispatch occurred and permits pre-launch reconstruction; `launching` is persisted **before** dispatch and must fail closed on unknown delivery across retries, restarts or staleness (a currently missing transient unit does not prove non-execution). Reconcile started/unit/numeric evidence without re-dispatching. Admission systemd inventory shares bounded command/pipe waits. |
@@ -460,22 +460,13 @@ server-side data.
 A successor chat recovers the owning Issue/PR from GitHub, verifies exact
 remote/HEAD/dirty worktree, reads the bounded runtime snapshot and connects
 only to a valid same-owner session before starting new side effects.
-Terminal lifetime is still bounded to one hour. Unpushed work, expired PTYs
-and lost-host Browser sessions cannot be reconstructed automatically.
+Terminal v2 has a renewable authenticated one-hour **idle** timer plus a finite 24-hour hard systemd fallback; older Terminal v1 scopes keep their fixed one-hour lifetime. The actual installed release and timer/cgroup prerequisites govern availability. Unpushed work, expired PTYs and lost-host Browser sessions cannot be reconstructed automatically.
 Reuse the existing Go executor, session broker and Playwright runner;
 **no replacement platform, extra daemon, new
 queue/database, generic port broker, duplicate Browser or historical
 compatibility matrix**.
 
-Fresh installation is a **product target**, not authorization to erase
-an occupied development host. Preserve unrelated live jobs/workspaces;
-test on an authorized disposable clean host. New-baseline process-restart
-recovery and finite resource lifetime remain necessary, but upgrading an
-earlier installed Agent is **not** a completion gate. Bounded shared-runtime
-verification was accepted in #137; the additional exhaustive #59 test program
-was discontinued by the Owner, not passed. Terminal substrate remains under
-#60/#66, Browser base under #63, runtime settings under #118, and conditional
-typed attachment rendering under #99.
+Fresh installation is a **product target**, not authorization to erase an occupied development host. Preserve unrelated jobs/workspaces and use disposable clean fixtures. The completed original Phase A baseline did **not** require migrating unsupported older Agent generations; subsequent published Stable upgrades retain their separate, real protected-update compatibility and authorization gates. Finite process lifetime and restart recovery remain required. Bounded shared-runtime verification was accepted in #137; the additional exhaustive #59 test program was discontinued by the Owner, not passed. Terminal-specific residual acceptance belongs to #60, Browser sandbox delivery to #203, resource/media bounds to #197, and conditional native client attachments to #99.
 
 ## 17. Implementation and delivery boundaries
 
