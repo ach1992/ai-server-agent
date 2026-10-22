@@ -28,6 +28,7 @@ type TerminalReadInput struct {
 	SessionID    string `json:"session_id" jsonschema:"Opaque session identity"`
 	Cursor       uint64 `json:"cursor,omitempty" jsonschema:"Last successfully consumed output cursor; zero reads from available beginning"`
 	Limit        int    `json:"limit,omitempty" jsonschema:"Bounded decoded output bytes 4096..32768; default 8192"`
+	WaitMS       int    `json:"wait_ms,omitempty" jsonschema:"Optional 0..2000 milliseconds to wait for NEW terminal output at the supplied latest cursor; default 0 reads immediately; at most one waiting reader per session, does not block terminal writes or close"`
 }
 type TerminalWriteInput struct {
 	SessionEpoch string `json:"session_epoch,omitempty" jsonschema:"Per-attachment output/control epoch from terminal_open/reconnect; reject stale epochs after executor restart"`
@@ -59,12 +60,19 @@ func (s *Server) registerTerminalTools() {
 		return s.responseResult(resp)
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-		Name: "terminal_read", Description: "Read incremental base64 PTY output with next_cursor, retention_truncated and disconnected markers. The process may still run.",
+		Name: "terminal_read", Description: "Read incremental base64 PTY output with next_cursor, retention_truncated and disconnected markers; optional wait_ms=0..2000 waits once for new output without blocking terminal writes. The process may still run.",
 		Annotations: annotations(true, false, true, false),
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, input TerminalReadInput) (*mcpsdk.CallToolResult, executor.Response, error) {
-		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "terminal_read", Workspace: input.Workspace, SessionID: input.SessionID, Root: input.Root, Approval: input.Approval, SessionEpoch: input.SessionEpoch, Cursor: input.Cursor, Limit: input.Limit})
+		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "terminal_read", Workspace: input.Workspace, SessionID: input.SessionID, Root: input.Root, Approval: input.Approval, SessionEpoch: input.SessionEpoch, Cursor: input.Cursor, Limit: input.Limit, WaitMS: input.WaitMS})
 		if err != nil {
 			return executorTransportErrorResult(err)
+		}
+		if input.WaitMS > 0 && resp.OK && !resp.ReadWaitSupported {
+			// BASE Executors silently ignore unknown request fields. Their
+			// immediate response cannot be represented as an honored wait.
+			return s.responseResult(executor.Response{Error: "Executor does not support terminal_read wait_ms; update Executor or omit wait_ms",
+				ReasonCode: "terminal_read_wait_unavailable", ErrorCode: "terminal_read_wait_unavailable",
+				ErrorClass: "compatibility", SessionID: input.SessionID, SessionEpoch: input.SessionEpoch})
 		}
 		return s.responseResult(resp)
 	})
