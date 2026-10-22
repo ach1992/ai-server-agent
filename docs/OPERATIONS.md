@@ -29,7 +29,7 @@ curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/script
 To install a **specific published Stable**, for example `v0.1.17`:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | bash -s -- v0.1.17
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | bash -s -- v0.1.20
 ```
 
 **Fresh installations only:** both commands reject a machine with Agent-owned
