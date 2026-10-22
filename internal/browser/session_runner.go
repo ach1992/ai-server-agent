@@ -190,7 +190,9 @@ const diskMonitor = setInterval(() => {
 }, 1000);
 const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const reply = data => process.stdout.write('ASA_BROWSER_SESSION ' + JSON.stringify(data) + '\n');
-reply({ event: 'ready' });
+// The ready handshake advertises explicit quality-fitting support. Older
+// runners omit this flag; their default screenshot protocol remains valid.
+reply({ event: 'ready', fit_quality: true });
 try {
   // Browser actions remain capped at 128. Read-only 8 KiB ZIP windows have
   // a distinct *finite* budget: 8192 windows = at most 64 MiB of streamed
@@ -229,18 +231,26 @@ try {
         const vp = page.viewportSize();
         if (!vp || vp.width < 1 || vp.height < 1) throw Error('viewport_unavailable');
         const clip = {x:0,y:0,width:Math.min(vp.width,input.max_width),height:Math.min(vp.height,720)};
-        const qualities = input.fit_quality
+        const fitting = input.fit_quality === true;
+        const qualities = fitting
           ? [...new Set([input.quality, Math.max(15,Math.floor((input.quality+15)/2)),15])]
           : [input.quality];
         const start = Date.now();
         let jpeg, actualQuality;
         for (const quality of qualities) {
-          const remaining = 16000-(Date.now()-start);
-          if (remaining < 1000) throw Error('capture_timeout');
+          // The legacy default remains ONE screenshot with its original
+          // 10000ms Playwright timeout. Only explicit fitting enables the
+          // separate 16000ms aggregate / <=8000ms per-attempt budget.
+          let attemptTimeout = 10000;
+          if (fitting) {
+            const remaining = 16000-(Date.now()-start);
+            if (remaining < 1000) throw Error('capture_timeout');
+            attemptTimeout = Math.min(8000,remaining);
+          }
           // Preserve the scrolled viewport and avoid animation fast-forward:
           // animations:'disabled' can fire transitionend page handlers.
           jpeg = await page.screenshot({type:'jpeg',quality,animations:'allow',caret:'hide',
-            fullPage:false,clip,timeout:Math.min(8000,remaining)});
+            fullPage:false,clip,timeout:attemptTimeout});
           actualQuality = quality;
           if (jpeg.length >= 4 && jpeg.length <= 32768) break;
         }

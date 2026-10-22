@@ -326,10 +326,11 @@ func (s *Server) browserAdmissionResponse() Response {
 }
 
 type browserStdioState struct {
-	mu        sync.Mutex // single in-flight action / ordered stream cursor
-	cursor    uint64
-	partial   []byte
-	uncertain bool
+	mu                  sync.Mutex // single in-flight action / ordered stream cursor
+	cursor              uint64
+	partial             []byte
+	uncertain           bool
+	fitQualitySupported bool // advertised at ready by newer Agent-provided runners
 }
 
 const (
@@ -525,6 +526,9 @@ func (s *Server) browserSessionOpen(ctx context.Context, req Request) Response {
 	if err != nil || reply.Event != "ready" {
 		return failedStart("browser_session_start_failed", "runtime", "Browser worker did not report a bounded ready handshake")
 	}
+	entry.browser.mu.Lock()
+	entry.browser.fitQualitySupported = reply.FitQuality
+	entry.browser.mu.Unlock()
 	if req.BrowserSandbox {
 		if verifyErr := s.verifyManagedBrowserSandbox(entry); verifyErr != nil {
 			return failedStart("browser_sandbox_unverified", "security", "Chromium OS sandbox enforcement could not be proven; check renderer seccomp-BPF, separate user/PID namespaces and host policy: "+verifyErr.Error())
@@ -543,7 +547,8 @@ type browserSessionFrame struct {
 	Reason      string          `json:"reason,omitempty"`
 	Result      json.RawMessage `json:"result,omitempty"`
 	Mime        string          `json:"mime,omitempty"`
-	Quality     int             `json:"quality,omitempty"`
+	FitQuality  bool            `json:"fit_quality,omitempty"`
+	Quality     json.RawMessage `json:"quality,omitempty"` // missing vs explicit zero/null matters for legacy compatibility
 	Size        int             `json:"size,omitempty"`
 	SHA256      string          `json:"sha256,omitempty"`
 	Parts       int             `json:"parts,omitempty"`

@@ -65,10 +65,10 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 	}
 	defer ln.Close()
 	small, large := makeClientCaptureJPEG(t, false), makeClientCaptureJPEG(t, true)
-	observed := make(chan executor.Request, 5)
+	observed := make(chan executor.Request, 6)
 	serverErrors := make(chan error, 1)
 	go func() {
-		for i := 0; i < 5; i++ {
+		for i := 0; i < 6; i++ {
 			c, er := ln.Accept()
 			if er != nil {
 				serverErrors <- er
@@ -82,7 +82,7 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 			}
 			observed <- req
 			payload := small
-			if i >= 2 {
+			if i >= 2 && i != 4 {
 				payload = large
 			}
 			sha := sha256.Sum256(payload)
@@ -91,6 +91,11 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 				r.CaptureQuality = 15 // opt-in fit metadata (the real-Node fixture proves JPEG policy)
 			}
 			if i == 4 {
+				// The BASE Executor's successful response omitted capture_quality.
+				// The new Agent must infer only the legacy requested one-shot quality.
+				r.CaptureQuality = 0
+			}
+			if i == 5 {
 				// Executor proved the transfer was complete but the JPEG scan
 				// was not fully decodable. MCP MUST never synthesize image content
 				// or success from this explicit upstream failure.
@@ -158,6 +163,7 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 		{"base64", false, small, false, false},
 		{"base64", false, large, true, false},
 		{"image", false, large, false, true},
+		{"image", false, small, false, true}, // verified BASE Executor response has no capture_quality
 	} {
 		got := call(test.mode, test.fit)
 		if got.IsError != test.wantError {
@@ -185,6 +191,9 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 			}
 			if test.fit && (!strings.Contains(string(js), `"capture_quality":15`) || !strings.Contains(text, "quality=15")) {
 				t.Fatalf("fitted actual JPEG quality missing from typed MCP output: %s / %s", js, text)
+			}
+			if !test.fit && (!strings.Contains(string(js), `"capture_quality":40`) || !strings.Contains(text, "quality=40") || strings.Contains(text, "quality=0")) {
+				t.Fatalf("HEAD Agent displayed fabricated legacy Executor quality: %s / %s", js, text)
 			}
 		} else if test.wantError {
 			if len(got.Content) != 1 || !strings.Contains(string(js), "too_large") || strings.Contains(string(js), encoded) {

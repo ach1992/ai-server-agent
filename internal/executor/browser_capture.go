@@ -55,6 +55,14 @@ func (s *Server) browserSessionCapture(ctx context.Context, req Request) Respons
 	if state.uncertain {
 		return browserSessionError("browser_session_uncertain", "state", errors.New("previous Browser action completion unknown; close first"))
 	}
+	if p.FitQuality && !state.fitQualitySupported {
+		// A pre-upgrade runner ignores the new input flag and would otherwise
+		// silently return an unfitted one-shot capture. Reject BEFORE sending.
+		resp := browserSessionError("browser_capture_fit_unavailable", "compatibility", errors.New("Browser session runner does not support fit_quality; reopen after upgrading the Agent"))
+		resp.SessionID = entry.id
+		resp.Status = "not_captured"
+		return resp
+	}
 	uncertain := func() Response {
 		state.uncertain = true
 		r := browserSessionError("browser_session_action_uncertain", "state", errors.New("Screenshot completion or transport integrity unknown; inspect status and close before further actions"))
@@ -98,9 +106,28 @@ func (s *Server) browserSessionCapture(ctx context.Context, req Request) Respons
 		resp.Status = "not_captured"
 		return resp
 	}
+	// Old Agent runners emit capture_meta without quality. Only runners
+	// authenticated at session open as legacy and used in one-shot mode may
+	// inherit the requested quality (the legacy screenshot protocol uses
+	// exactly that value). A new runner omitting quality is a corrupt frame.
+	var actualQuality int
+	if len(start.Quality) == 0 {
+		if !p.FitQuality && !state.fitQualitySupported {
+			actualQuality = p.Quality
+		}
+	} else if err = json.Unmarshal(start.Quality, &actualQuality); err != nil {
+		// Explicit quality:0/null/string is NOT an old missing field.
+		return uncertain()
+	}
+	qualityValid := actualQuality == p.Quality
+	if p.FitQuality {
+		// Match the exact finite ladder used by the pinned runner, not any
+		// value below the requested ceiling.
+		qualityValid = qualityValid || actualQuality == max(15, (p.Quality+15)/2) || actualQuality == 15
+	}
 	expectedParts := (base64.StdEncoding.EncodedLen(start.Size) + browserCapturePartChars - 1) / browserCapturePartChars
 	if start.Event != "capture_meta" || start.Mime != "image/jpeg" || start.Size < 4 || start.Size > browserCaptureMaxBytes ||
-		start.Quality < 15 || start.Quality > p.Quality || (!p.FitQuality && start.Quality != p.Quality) ||
+		!qualityValid || actualQuality < 15 || actualQuality > p.Quality ||
 		start.Parts != expectedParts || expectedParts < 1 || expectedParts > 6 || len(start.SHA256) != 64 {
 		return uncertain()
 	}
@@ -148,6 +175,6 @@ func (s *Server) browserSessionCapture(ctx context.Context, req Request) Respons
 		return resp
 	}
 	return Response{OK: true, Status: "captured", SessionID: entry.id,
-		Output: b64.String(), OutputEncoding: "base64", MIMEType: "image/jpeg", CaptureQuality: start.Quality, BytesSeen: int64(len(payload)), BytesReturned: int64(len(payload)),
+		Output: b64.String(), OutputEncoding: "base64", MIMEType: "image/jpeg", CaptureQuality: actualQuality, BytesSeen: int64(len(payload)), BytesReturned: int64(len(payload)),
 		FileVersion: "sha256:" + start.SHA256}
 }

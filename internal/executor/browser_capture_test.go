@@ -49,38 +49,52 @@ func makeCaptureScript(t *testing.T, raw []byte, mode string) string {
 		quality = 15
 	} else if mode == "wrong_quality" {
 		quality = 80
+	} else if mode == "fit_non_ladder" {
+		quality = 39 // below 40 but not one of 40, 27, 15
+	}
+	ready := `{"event":"ready","fit_quality":true}`
+	if mode == "legacy_meta" || mode == "legacy_zero_quality" || mode == "legacy_null_quality" {
+		ready = `{"event":"ready"}` // exact pre-feature readiness protocol
+	}
+	qualityField := fmt.Sprintf(`,"quality":%d`, quality)
+	if mode == "legacy_meta" || mode == "new_no_quality" {
+		qualityField = "" // missing field, NOT an explicit quality:0
+	} else if mode == "legacy_zero_quality" {
+		qualityField = `,"quality":0`
+	} else if mode == "legacy_null_quality" {
+		qualityField = `,"quality":null`
 	}
 	if mode == "wrong_index" {
 		return fmt.Sprintf(`#!/bin/sh
-printf 'ASA_BROWSER_SESSION {"event":"ready"}\n'
+printf 'ASA_BROWSER_SESSION %s\n'
 while IFS= read -r line; do
   case "$line" in *'"type":"close"'*) exit 0;; esac
   nonce=$(printf '%%s' "$line" | sed -n 's/.*"nonce":"\([0-9a-f]*\)".*/\1/p')
-  printf 'ASA_BROWSER_SESSION {"event":"capture_meta","nonce":"%%s","mime":"image/jpeg","quality":%d,"size":%d,"sha256":"%s","parts":1}\n' "$nonce"
+  printf 'ASA_BROWSER_SESSION {"event":"capture_meta","nonce":"%%s","mime":"image/jpeg"%s,"size":%d,"sha256":"%s","parts":1}\n' "$nonce"
   printf 'ASA_BROWSER_SESSION {"event":"capture_part","nonce":"%%s","index":1,"data":"%s"}\n' "$nonce"
 done
-`, quality, len(raw), sha, b64)
+`, ready, qualityField, len(raw), sha, b64)
 	}
 	if mode == "known_too_large" {
-		return `#!/bin/sh
-printf 'ASA_BROWSER_SESSION {"event":"ready"}\n'
-while IFS= read -r line; do
-  case "$line" in *'"type":"close"'*) exit 0;; esac
-  nonce=$(printf '%s' "$line" | sed -n 's/.*"nonce":"\([0-9a-f]*\)".*/\1/p')
-  printf 'ASA_BROWSER_SESSION {"event":"error","nonce":"%s","reason":"capture_too_large"}\n' "$nonce"
-done
-`
-	}
-	return fmt.Sprintf(`#!/bin/sh
-printf 'ASA_BROWSER_SESSION {"event":"ready"}\n'
+		return fmt.Sprintf(`#!/bin/sh
+printf 'ASA_BROWSER_SESSION %s\n'
 while IFS= read -r line; do
   case "$line" in *'"type":"close"'*) exit 0;; esac
   nonce=$(printf '%%s' "$line" | sed -n 's/.*"nonce":"\([0-9a-f]*\)".*/\1/p')
-  printf 'ASA_BROWSER_SESSION {"event":"capture_meta","nonce":"%%s","mime":"image/jpeg","quality":%d,"size":%d,"sha256":"%s","parts":1}\n' "$nonce"
+  printf 'ASA_BROWSER_SESSION {"event":"error","nonce":"%%s","reason":"capture_too_large"}\n' "$nonce"
+done
+`, ready)
+	}
+	return fmt.Sprintf(`#!/bin/sh
+printf 'ASA_BROWSER_SESSION %s\n'
+while IFS= read -r line; do
+  case "$line" in *'"type":"close"'*) exit 0;; esac
+  nonce=$(printf '%%s' "$line" | sed -n 's/.*"nonce":"\([0-9a-f]*\)".*/\1/p')
+  printf 'ASA_BROWSER_SESSION {"event":"capture_meta","nonce":"%%s","mime":"image/jpeg"%s,"size":%d,"sha256":"%s","parts":1}\n' "$nonce"
   printf 'ASA_BROWSER_SESSION {"event":"capture_part","nonce":"%%s","index":0,"data":"%s"}\n' "$nonce"
   printf 'ASA_BROWSER_SESSION {"event":"capture_done","nonce":"%%s"}\n' "$nonce"
 done
-`, quality, len(raw), sha, b64)
+`, ready, qualityField, len(raw), sha, b64)
 }
 
 func openCaptureFixture(t *testing.T, mode string) (*Server, Request, string, []byte) {
@@ -183,6 +197,57 @@ func TestBrowserSessionCapturePrincipalAndBoundedIntegrity(t *testing.T) {
 	s.browserAdmission.releaseRun()
 }
 
+// Legacy Agent-provided Browser runners lack both the ready capability and
+// quality metadata. The original one-shot path is still byte-accurate; an
+// opt-in fitting request is rejected BEFORE writing to the legacy runner and
+// does not leave unread frames or poison a valid session.
+func TestBrowserSessionCaptureLegacyRunnerOneShotCompatibility(t *testing.T) {
+	s, owner, id, raw := openCaptureFixture(t, "legacy_meta")
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+	defer cancel()
+	defer func() { _ = s.browserSessionAction(ctx, browserOwnerControl(owner, id, "browser_session_close")) }()
+	oneShot := browserCaptureRequest(owner, id)
+	for n := 0; n < 2; n++ {
+		got := s.browserSessionAction(ctx, oneShot)
+		payload, err := base64.StdEncoding.Strict().DecodeString(got.Output)
+		if !got.OK || got.Status != "captured" || got.CaptureQuality != 40 ||
+			got.BytesReturned != int64(len(raw)) || err != nil || !bytes.Equal(payload, raw) {
+			t.Fatalf("BASE runner -> HEAD Executor legacy one-shot %d failed: %+v decode=%v", n, got, err)
+		}
+		if n == 0 {
+			fitted := oneShot
+			fitted.Content = `{"quality":40,"max_width":640,"fit_quality":true}`
+			refusal := s.browserSessionAction(ctx, fitted)
+			if refusal.OK || refusal.ErrorCode != "browser_capture_fit_unavailable" ||
+				refusal.Status != "not_captured" || refusal.Output != "" || refusal.SessionID != id {
+				t.Fatalf("legacy runner wrongly advertised fitted screenshot: %+v", refusal)
+			}
+		}
+	}
+	status := s.browserSessionAction(ctx, browserOwnerControl(owner, id, "browser_session_status"))
+	if !status.OK || status.Status != "running" {
+		t.Fatalf("a known unsupported opt-in stranded legacy Browser session: %+v", status)
+	}
+}
+
+// Only ABSENT quality metadata belongs to the old runner contract. An
+// explicit zero/null (even from a runner without feature support) is malformed
+// and must not be mapped to the requested quality.
+func TestBrowserSessionCaptureLegacyMetadataRequiresMissingQuality(t *testing.T) {
+	for _, mode := range []string{"legacy_zero_quality", "legacy_null_quality"} {
+		t.Run(mode, func(t *testing.T) {
+			s, owner, id, _ := openCaptureFixture(t, mode)
+			ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
+			defer cancel()
+			defer func() { _ = s.browserSessionAction(ctx, browserOwnerControl(owner, id, "browser_session_close")) }()
+			got := s.browserSessionAction(ctx, browserCaptureRequest(owner, id))
+			if got.OK || got.ErrorCode != "browser_session_action_uncertain" || got.Output != "" {
+				t.Fatalf("malformed explicit legacy quality was inferred as success: %+v", got)
+			}
+		})
+	}
+}
+
 // A lower-quality JPEG is accepted only after the authenticated caller opted
 // into quality fitting; the actual output quality is never inferred from the
 // requested upper bound. Malformed/unexpected worker claims fail closed.
@@ -210,6 +275,8 @@ func TestBrowserSessionCaptureFitQualityExplicitAndBounded(t *testing.T) {
 	}{
 		{"not_opted_in", "fit_low", `{"quality":40,"max_width":640}`},
 		{"outside_upper_bound", "wrong_quality", `{"quality":40,"max_width":640,"fit_quality":true}`},
+		{"in_range_but_not_ladder", "fit_non_ladder", `{"quality":40,"max_width":640,"fit_quality":true}`},
+		{"new_runner_missing_quality", "new_no_quality", `{"quality":40,"max_width":640}`},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			s, owner, id, _ := openCaptureFixture(t, tc.mode)

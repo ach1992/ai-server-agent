@@ -150,6 +150,27 @@ func (m *Manager) SessionCapture(ctx context.Context, opts SessionOptions) (exec
 	if err != nil {
 		return browserUnknown("Browser screenshot transport", err, false), nil
 	}
+	if opts.CaptureFitQuality && !resp.OK && resp.ErrorCode == "invalid_browser_capture" {
+		// Older Executors reject the new fit_quality input field via strict
+		// JSON decoding. Their validation failure is not a user quality error.
+		refusal := browserError("browser_capture_fit_unavailable", "compatibility", "Executor does not support fit_quality; update the Executor or request a default screenshot")
+		refusal.SessionID = opts.SessionID
+		refusal.Status = "not_captured"
+		return refusal, nil
+	}
+	if resp.OK && resp.CaptureQuality == 0 {
+		if opts.CaptureFitQuality {
+			// A legacy Executor cannot prove any quality reduction. Never
+			// present an unversioned one-shot image as an accepted fitted result.
+			refusal := browserError("browser_capture_fit_unavailable", "compatibility", "Executor returned a legacy screenshot without verified capture quality")
+			refusal.SessionID = opts.SessionID
+			refusal.Status = "not_captured"
+			return refusal, nil
+		}
+		// Verified BASE Executor always captures at the requested quality.
+		// Normalize only successful legacy one-shot responses for MCP output.
+		resp.CaptureQuality = q
+	}
 	return resp, nil
 }
 

@@ -138,11 +138,33 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Only this disposable pinned-runtime fixture wraps page.screenshot:
+	// introduce a controlled 8.5-second capture and enforce the exact
+	// Playwright timeout argument of the original one-shot contract. The
+	// actual JPEG is still produced by the real Chromium/Playwright page.
+	// Without this regression the refactored default wrongly used 8000ms.
+	constPage := "const page = context.pages()[0] || await context.newPage();"
+	if strings.Count(src, constPage) != 1 {
+		t.Fatal("cannot insert test-only slow screenshot hook into pinned worker")
+	}
+	src = strings.Replace(src, constPage, constPage+`
+const realScreenshot = page.screenshot.bind(page);
+let slowDefaultCalls = 0;
+page.screenshot = async options => {
+  if (page.url().endsWith('/slow-capture')) {
+    if (++slowDefaultCalls !== 1 || options.timeout !== 10000) {
+      throw Error('default_10_second_timeout_or_one_attempt_regressed');
+    }
+    await new Promise(resolve => setTimeout(resolve, 8500));
+  }
+  return realScreenshot(options);
+};
+`, 1)
 	file := filepath.Join(dir, "session.mjs")
 	if err = os.WriteFile(file, []byte(src), 0600); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, filepath.Join(engine, "node/bin/node"), file)
 	cmd.Env = append(os.Environ(), "PLAYWRIGHT_BROWSERS_PATH="+filepath.Join(engine, "browsers"))
@@ -209,8 +231,8 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 			t.Fatal(er)
 		}
 	}
-	if got := read(); got["event"] != "ready" {
-		t.Fatalf("ready: %v", got)
+	if got := read(); got["event"] != "ready" || got["fit_quality"] != true {
+		t.Fatalf("pinned worker did not advertise real fitting support: %v", got)
 	}
 	goTo := func(target string, nonce string) {
 		send(map[string]any{"type": "flow", "nonce": nonce, "steps": []map[string]any{{"action": "goto", "url": target}}})
@@ -270,6 +292,20 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 	meta, payload := capture(strings.Repeat("b", 32), 40, 640)
 	if meta["event"] != "capture_meta" || len(payload) == 0 || len(payload) > 32<<10 {
 		t.Fatalf("missing bounded capture: %v", meta)
+	}
+	// A real pinned Chromium JPEG after a controlled 8.5s screenshot delay
+	// must succeed on the default (non-fitting) path. The test-only hook
+	// above also asserts exactly ONE attempt with timeout:10000, whereas
+	// the old regression used 8000ms and would fail here.
+	goTo(web.URL+"/slow-capture", strings.Repeat("a", 32))
+	slowStart := time.Now()
+	slowMeta, slowJPEG := capture(strings.Repeat("b", 32), 40, 640)
+	if elapsed := time.Since(slowStart); slowMeta["event"] != "capture_meta" ||
+		len(slowJPEG) == 0 || len(slowJPEG) > 32<<10 || elapsed < 8*time.Second || elapsed >= 16*time.Second {
+		t.Fatalf("8.5s default screenshot timeout regression: elapsed=%s meta=%v jpeg=%d", elapsed, slowMeta, len(slowJPEG))
+	}
+	if _, err := jpeg.Decode(bytes.NewReader(slowJPEG)); err != nil {
+		t.Fatalf("controlled slow Chromium screenshot is invalid: %v", err)
 	}
 	entries, err := nonProfileEntries()
 	if err != nil || len(entries) != 0 {
