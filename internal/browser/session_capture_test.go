@@ -93,6 +93,13 @@ moving.addEventListener('transitionend', () => {
 const c=document.querySelector('#x'),ctx=c.getContext('2d'),p=ctx.createImageData(1024,720);
 let z=123456789;for(let i=0;i<p.data.length;i+=4){z=(Math.imul(1664525,z)+1013904223)>>>0;p.data[i]=z&255;p.data[i+1]=(z>>>8)&255;p.data[i+2]=(z>>>16)&255;p.data[i+3]=255;}
 ctx.putImageData(p,0,0);</script></body></html>`)
+		} else if r.URL.Path == "/fit-noise" {
+			// A small deterministic entropy patch amid a flat page crosses
+			// 32 KiB at high JPEG quality but can fit after quality reduction.
+			fmt.Fprint(w, `<!doctype html><html><body style="margin:0;background:white"><canvas id="x" width="320" height="256"></canvas><script>
+const c=document.querySelector('#x'),ctx=c.getContext('2d'),p=ctx.createImageData(320,256);
+let z=123456789;for(let i=0;i<p.data.length;i+=4){z=(Math.imul(1664525,z)+1013904223)>>>0;p.data[i]=z&255;p.data[i+1]=(z>>>8)&255;p.data[i+2]=(z>>>16)&255;p.data[i+3]=255;}
+ctx.putImageData(p,0,0);</script></body></html>`)
 		} else {
 			fmt.Fprint(w, `<!doctype html><html><body><h1>Bounded screenshot evidence</h1><button>Review</button></body></html>`)
 		}
@@ -131,11 +138,33 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 	if err != nil {
 		t.Fatal(err)
 	}
+	// Only this disposable pinned-runtime fixture wraps page.screenshot:
+	// introduce a controlled 8.5-second capture and enforce the exact
+	// Playwright timeout argument of the original one-shot contract. The
+	// actual JPEG is still produced by the real Chromium/Playwright page.
+	// Without this regression the refactored default wrongly used 8000ms.
+	constPage := "const page = context.pages()[0] || await context.newPage();"
+	if strings.Count(src, constPage) != 1 {
+		t.Fatal("cannot insert test-only slow screenshot hook into pinned worker")
+	}
+	src = strings.Replace(src, constPage, constPage+`
+const realScreenshot = page.screenshot.bind(page);
+let slowDefaultCalls = 0;
+page.screenshot = async options => {
+  if (page.url().endsWith('/slow-capture')) {
+    if (++slowDefaultCalls !== 1 || options.timeout !== 10000) {
+      throw Error('default_10_second_timeout_or_one_attempt_regressed');
+    }
+    await new Promise(resolve => setTimeout(resolve, 8500));
+  }
+  return realScreenshot(options);
+};
+`, 1)
 	file := filepath.Join(dir, "session.mjs")
 	if err = os.WriteFile(file, []byte(src), 0600); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, filepath.Join(engine, "node/bin/node"), file)
 	cmd.Env = append(os.Environ(), "PLAYWRIGHT_BROWSERS_PATH="+filepath.Join(engine, "browsers"))
@@ -202,8 +231,8 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 			t.Fatal(er)
 		}
 	}
-	if got := read(); got["event"] != "ready" {
-		t.Fatalf("ready: %v", got)
+	if got := read(); got["event"] != "ready" || got["fit_quality"] != true {
+		t.Fatalf("pinned worker did not advertise real fitting support: %v", got)
 	}
 	goTo := func(target string, nonce string) {
 		send(map[string]any{"type": "flow", "nonce": nonce, "steps": []map[string]any{{"action": "goto", "url": target}}})
@@ -213,9 +242,10 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 		}
 	}
 	goTo(web.URL, strings.Repeat("a", 32))
-	capture := func(nonce string, quality, width int) (map[string]any, []byte) {
+	capture := func(nonce string, quality, width int, fit ...bool) (map[string]any, []byte) {
 		t.Helper()
-		send(map[string]any{"type": "capture", "nonce": nonce, "quality": quality, "max_width": width})
+		optIn := len(fit) == 1 && fit[0]
+		send(map[string]any{"type": "capture", "nonce": nonce, "quality": quality, "max_width": width, "fit_quality": optIn})
 		head := read()
 		if head["nonce"] != nonce {
 			t.Fatalf("capture nonce mismatch: %v", head)
@@ -225,6 +255,10 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 		}
 		if head["event"] != "capture_meta" || head["mime"] != "image/jpeg" {
 			t.Fatalf("capture metadata: %v", head)
+		}
+		usedQuality, ok := head["quality"].(float64)
+		if !ok || usedQuality < 15 || usedQuality > float64(quality) || (!optIn && usedQuality != float64(quality)) {
+			t.Fatalf("capture used unspecified quality: got %v requested %d fit=%v", head["quality"], quality, optIn)
 		}
 		var b64 strings.Builder
 		for i := 0; i < int(head["parts"].(float64)); i++ {
@@ -258,6 +292,20 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 	meta, payload := capture(strings.Repeat("b", 32), 40, 640)
 	if meta["event"] != "capture_meta" || len(payload) == 0 || len(payload) > 32<<10 {
 		t.Fatalf("missing bounded capture: %v", meta)
+	}
+	// A real pinned Chromium JPEG after a controlled 8.5s screenshot delay
+	// must succeed on the default (non-fitting) path. The test-only hook
+	// above also asserts exactly ONE attempt with timeout:10000, whereas
+	// the old regression used 8000ms and would fail here.
+	goTo(web.URL+"/slow-capture", strings.Repeat("a", 32))
+	slowStart := time.Now()
+	slowMeta, slowJPEG := capture(strings.Repeat("b", 32), 40, 640)
+	if elapsed := time.Since(slowStart); slowMeta["event"] != "capture_meta" ||
+		len(slowJPEG) == 0 || len(slowJPEG) > 32<<10 || elapsed < 8*time.Second || elapsed >= 16*time.Second {
+		t.Fatalf("8.5s default screenshot timeout regression: elapsed=%s meta=%v jpeg=%d", elapsed, slowMeta, len(slowJPEG))
+	}
+	if _, err := jpeg.Decode(bytes.NewReader(slowJPEG)); err != nil {
+		t.Fatalf("controlled slow Chromium screenshot is invalid: %v", err)
 	}
 	entries, err := nonProfileEntries()
 	if err != nil || len(entries) != 0 {
@@ -476,6 +524,29 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 	fail, img := capture(strings.Repeat("d", 32), 70, 1024)
 	if fail["event"] != "error" || fail["reason"] != "capture_too_large" || img != nil {
 		t.Fatalf("oversize capture was not explicit: %v", fail)
+	}
+	impossible, out := capture(strings.Repeat("a", 32), 70, 1024, true)
+	if impossible["event"] != "error" || impossible["reason"] != "capture_too_large" || out != nil {
+		t.Fatalf("incompressible screenshot bypassed finite quality fitting: %v", impossible)
+	}
+	// Quality fitting is explicitly opt-in: a high-detail but limited-area
+	// page is rejected unchanged, while the same requested viewport clip
+	// fits under the SAME 32 KiB raw-byte budget with lower JPEG quality.
+	goTo(web.URL+"/fit-noise", strings.Repeat("0", 32))
+	normal, ordinary := capture(strings.Repeat("c", 32), 70, 640)
+	if normal["event"] != "error" || normal["reason"] != "capture_too_large" || ordinary != nil {
+		t.Fatalf("fit fixture did not exercise default refusal: %v (%d bytes)", normal, len(ordinary))
+	}
+	fitted, fittedBytes := capture(strings.Repeat("d", 32), 70, 640, true)
+	if fitted["event"] != "capture_meta" || len(fittedBytes) == 0 || len(fittedBytes) > 32768 ||
+		fitted["quality"].(float64) >= 70 {
+		t.Fatalf("real JPEG fit failed to reduce quality inside budget: %v (%d bytes)", fitted, len(fittedBytes))
+	}
+	if _, er := jpeg.Decode(bytes.NewReader(fittedBytes)); er != nil {
+		t.Fatalf("real fitted JPEG not decodable: %v", er)
+	}
+	if leftovers, er := nonProfileEntries(); er != nil || len(leftovers) != 0 {
+		t.Fatalf("fitted capture unexpectedly wrote artifact scratch: %v %v", leftovers, er)
 	}
 	// Known oversize is not transport uncertainty; same session is usable.
 	goTo(web.URL, strings.Repeat("e", 32))
