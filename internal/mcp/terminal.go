@@ -63,6 +63,16 @@ func (s *Server) registerTerminalTools() {
 		Name: "terminal_read", Description: "Read incremental base64 PTY output with next_cursor, retention_truncated and disconnected markers; optional wait_ms=0..2000 waits once for new output without blocking terminal writes. The process may still run.",
 		Annotations: annotations(true, false, true, false),
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, input TerminalReadInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+		// An old Executor silently discards unknown request fields. Validate
+		// the advertised public range before transport, while retaining the
+		// Executor's independent validation for direct/older Agents.
+		if input.WaitMS < 0 || input.WaitMS > 2000 {
+			return s.responseResult(executor.Response{
+				Error:      "terminal read wait_ms must be 0..2000 milliseconds",
+				ReasonCode: "invalid_wait", ErrorCode: "invalid_wait", ErrorClass: "validation",
+				SessionID: input.SessionID, SessionEpoch: input.SessionEpoch,
+			})
+		}
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "terminal_read", Workspace: input.Workspace, SessionID: input.SessionID, Root: input.Root, Approval: input.Approval, SessionEpoch: input.SessionEpoch, Cursor: input.Cursor, Limit: input.Limit, WaitMS: input.WaitMS})
 		if err != nil {
 			return executorTransportErrorResult(err)
