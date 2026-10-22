@@ -63,6 +63,7 @@ type tmuxTerminalState struct {
 	latest         uint64
 	ack            uint64
 	ackFailed      bool
+	readWaiter     bool // at most one bounded sleeping reader, never blocks writes
 	exited         bool
 	protocolError  string
 }
@@ -475,6 +476,12 @@ func (s *Server) terminalRead(req Request) Response {
 	if limit < maxStdioEventBytes || limit > terminalMaxOutput {
 		return terminalError("invalid_limit", errors.New("terminal read limit must be 4096..32768 bytes"))
 	}
+	// Zero preserves legacy immediate reads, including against old Agents.
+	// Limit the optional wait to a finite single-call budget: this is NOT a
+	// durable subscription, unbounded queue, or long-lived broker lease.
+	if req.WaitMS < 0 || req.WaitMS > 2000 {
+		return terminalError("invalid_wait", errors.New("terminal read wait_ms must be 0..2000 milliseconds"))
+	}
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	t := e.terminal
@@ -501,11 +508,62 @@ func (s *Server) terminalRead(req Request) Response {
 	if t.scopeUncertain {
 		return Response{SessionID: e.id, SessionEpoch: t.epoch, Error: "scope creation remains unverified; explicit close/reconciliation required", ErrorCode: "terminal_start_uncertain", ErrorClass: "state"}
 	}
+	// A terminal can emit a prompt or a REPL result shortly after the
+	// consumer reads its cursor. An OPTIONAL finite wait avoids busy polling,
+	// but it must never hold e.mu or t.actionMu while waiting: the writer,
+	// parser, and close/reconnect lifecycle must continue independently.
+	//
+	// The recovered flag means old-epoch output was lost, not that the new
+	// epoch can never produce new output. Reconnected sessions must be able
+	// to wait for fresh output; the gap remains disclosed separately via
+	// RetentionTruncated and the reconnect response.
+	//
+	// Use a single waiter per session to bound outstanding idle work. Unlike
+	// a session-wide consumption cursor, each caller owns its own cursor, so
+	// an ordinary read remains available while another client is waiting.
+	if req.WaitMS > 0 && req.Cursor == t.latest &&
+		!e.exited && !e.closed && !t.exited && t.protocolError == "" {
+		if t.readWaiter {
+			return Response{SessionID: e.id, SessionEpoch: t.epoch,
+				Error:      "one bounded terminal output waiter already active",
+				ReasonCode: "terminal_read_busy", ErrorCode: "terminal_read_busy",
+				ErrorClass: "resource", Status: "busy", Retryable: true}
+		}
+		t.readWaiter = true
+		defer func() { t.readWaiter = false }() // e.mu locked before all returns
+		deadline := time.Now().Add(time.Duration(req.WaitMS) * time.Millisecond)
+		for req.Cursor == t.latest && !e.exited && !e.closed && !t.exited &&
+			!t.scopeUncertain && t.protocolError == "" && t.epoch == req.SessionEpoch {
+			remaining := time.Until(deadline)
+			if remaining <= 0 {
+				break
+			}
+			if remaining > 25*time.Millisecond {
+				remaining = 25 * time.Millisecond
+			}
+			e.mu.Unlock()
+			time.Sleep(remaining)
+			e.mu.Lock()
+		}
+	}
+	// Concurrent producer errors, lifecycle changes, and reconnects during
+	// the unlocked interval must never be turned into successful output.
+	if t.scopeUncertain {
+		return Response{SessionID: e.id, SessionEpoch: t.epoch, Error: "terminal lifecycle remains pending; explicit close required", ErrorCode: "terminal_start_uncertain", ErrorClass: "state"}
+	}
+	if t.protocolError != "" {
+		return terminalError(t.protocolError, errors.New("tmux control protocol became unusable"))
+	}
+	if req.SessionEpoch != t.epoch {
+		return Response{Error: "terminal output epoch changed; resume from cursor zero with returned session_epoch",
+			ReasonCode: "terminal_epoch_changed", ErrorCode: "terminal_epoch_changed",
+			ErrorClass: "state", SessionID: e.id, SessionEpoch: t.epoch, RetentionTruncated: t.recovered}
+	}
 	earliest := t.latest + 1
 	if len(t.chunks) > 0 {
 		earliest = t.chunks[0].seq
 	}
-	result := Response{OK: true, Status: "running", SessionID: e.id, SessionEpoch: t.epoch, Earliest: earliest, Latest: t.latest, NextCursor: req.Cursor, Running: boolPtr(!e.exited && !t.exited && !e.closed), Rows: t.rows, Columns: t.columns, OutputEncoding: "base64"}
+	result := Response{OK: true, Status: "running", SessionID: e.id, SessionEpoch: t.epoch, Earliest: earliest, Latest: t.latest, NextCursor: req.Cursor, Running: boolPtr(!e.exited && !t.exited && !e.closed), Rows: t.rows, Columns: t.columns, OutputEncoding: "base64", ReadWaitSupported: req.WaitMS > 0}
 	result.Truncated = req.Cursor < earliest-1
 	output := make([]byte, 0, limit)
 	for _, chunk := range t.chunks {

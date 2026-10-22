@@ -49,7 +49,7 @@ func TestTerminalMCPAuthorizationEpochForwarding(t *testing.T) {
 				return
 			}
 			received <- req
-			_ = json.NewEncoder(conn).Encode(executor.Response{OK: true, Status: "wire_proof"})
+			_ = json.NewEncoder(conn).Encode(executor.Response{OK: true, Status: "wire_proof", ReadWaitSupported: req.Action == "terminal_read" && req.WaitMS > 0})
 			_ = conn.Close()
 		}
 	}()
@@ -97,7 +97,7 @@ func TestTerminalMCPAuthorizationEpochForwarding(t *testing.T) {
 		extra map[string]any
 	}{
 		{"terminal_open", map[string]any{"columns": 80, "rows": 24}},
-		{"terminal_read", map[string]any{"limit": 8192, "cursor": uint64(0)}},
+		{"terminal_read", map[string]any{"limit": 8192, "cursor": uint64(0), "wait_ms": 350}},
 		{"terminal_write", map[string]any{"content": largePaste}},
 		{"terminal_interrupt", nil},
 		{"terminal_resize", map[string]any{"columns": 65, "rows": 20}},
@@ -135,6 +135,9 @@ func TestTerminalMCPAuthorizationEpochForwarding(t *testing.T) {
 			}
 			if task.name == "terminal_write" && req.Content != largePaste {
 				t.Fatal("large literal terminal paste changed across MCP/Executor transport")
+			}
+			if task.name == "terminal_read" && req.WaitMS != 350 {
+				t.Fatalf("optional terminal read wait_ms lost through MCP/Executor: %+v", req)
 			}
 			if task.name != "terminal_open" && req.SessionID != shared["session_id"] {
 				t.Fatalf("%s lost session identity", task.name)

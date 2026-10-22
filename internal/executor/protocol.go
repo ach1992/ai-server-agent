@@ -24,6 +24,7 @@ type Request struct {
 	SessionID          string              `json:"session_id,omitempty"`
 	SessionEpoch       string              `json:"session_epoch,omitempty"`
 	Cursor             uint64              `json:"cursor,omitempty"`
+	WaitMS             int                 `json:"wait_ms,omitempty"`
 	Columns            int                 `json:"columns,omitempty"`
 	Rows               int                 `json:"rows,omitempty"`
 	Offset             int64               `json:"offset,omitempty"`
@@ -109,6 +110,7 @@ type Response struct {
 	SessionID           string                     `json:"session_id,omitempty"`
 	SessionEpoch        string                     `json:"session_epoch,omitempty"`
 	TerminalEvents      []TerminalOutputEvent      `json:"terminal_events,omitempty"`
+	ReadWaitSupported   bool                       `json:"terminal_read_wait_supported,omitempty"`
 	Earliest            uint64                     `json:"earliest,omitempty"`
 	Latest              uint64                     `json:"latest,omitempty"`
 	NextCursor          uint64                     `json:"next_cursor,omitempty"`
