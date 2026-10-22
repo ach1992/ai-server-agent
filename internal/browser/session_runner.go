@@ -62,6 +62,19 @@ let traceDir = '';
 let traceSize = 0;
 let traceDigest = '';
 let traceIdentity = null;
+// An explicitly staged, per-session JPEG is never sent as one broker frame,
+// exported as a file/URL, or retained outside this bounded Node process.
+let imageBytes = null;
+let imageDigest = '';
+const discardImage = () => {
+  if (imageBytes !== null) imageBytes.fill(0);
+  imageBytes = null;
+  imageDigest = '';
+};
+let imageReads = 0;
+const imageMaxBytes = 1024 * 1024;
+const maxImageReads = 512; // four complete 1 MiB downloads
+const imageReadBytes = 8192;
 const traceMaxBytes = 16 * 1024 * 1024;
 const traceReadBytes = 8192;
 const traceScanBytes = 65536;
@@ -192,7 +205,7 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const reply = data => process.stdout.write('ASA_BROWSER_SESSION ' + JSON.stringify(data) + '\n');
 // The ready handshake advertises explicit quality-fitting support. Older
 // runners omit this flag; their default screenshot protocol remains valid.
-reply({ event: 'ready', fit_quality: true, capture_region: true });
+reply({ event: 'ready', fit_quality: true, capture_region: true, image_staging: true });
 try {
   // Browser actions remain capped at 128. Read-only 8 KiB ZIP windows have
   // a distinct *finite* budget: 8192 windows = at most 64 MiB of streamed
@@ -213,6 +226,11 @@ try {
     if (input?.type === 'trace_read') {
       if (++traceReads > maxTraceReads) {
         reply({event:'error',nonce:input.nonce,reason:'trace_read_budget_exhausted'});
+        continue;
+      }
+    } else if (input?.type === 'image_read') {
+      if (++imageReads > maxImageReads) {
+        reply({event:'error',nonce:input.nonce,reason:'image_read_budget_exhausted'});
         continue;
       }
     } else if (++actions > 128) {
@@ -277,6 +295,73 @@ try {
           data:payload.slice(i*8192,(i+1)*8192)});
         reply({event:'capture_done',nonce:input.nonce});
       } catch { reply({event:'error',nonce:input.nonce,reason:'capture_failed'}); }
+      continue;
+    }
+    // High-detail screenshot continuation is opt-in. It uses one bounded
+    // JPEG buffer per authenticated Browser session, separate from the
+    // private trace ZIP, with version-pinned 8 KiB reads and explicit discard.
+    // Replacing a capture first retires the old bytes, even on too_large.
+    if (input?.type === 'image_capture' && typeof input.nonce === 'string' && /^[0-9a-f]{32}$/.test(input.nonce) &&
+        Number.isInteger(input.quality) && input.quality >= 15 && input.quality <= 70 &&
+        Number.isInteger(input.max_width) && input.max_width >= 320 && input.max_width <= 1024 &&
+        Number.isInteger(input.max_height) && input.max_height >= 1 && input.max_height <= 720 &&
+        Number.isSafeInteger(input.crop_x) && input.crop_x >= 0 &&
+        Number.isSafeInteger(input.crop_y) && input.crop_y >= 0) {
+      discardImage();
+      try {
+        const vp = page.viewportSize();
+        if (!vp || input.crop_x >= vp.width || input.crop_y >= vp.height) {
+          reply({event:'error',nonce:input.nonce,reason:'image_invalid_region'}); continue;
+        }
+        const clip = {x:input.crop_x,y:input.crop_y,
+          width:Math.min(input.max_width,vp.width-input.crop_x),
+          height:Math.min(input.max_height,vp.height-input.crop_y)};
+        const jpeg = await page.screenshot({type:'jpeg',quality:input.quality,
+          animations:'allow',caret:'hide',fullPage:false,clip,timeout:16000});
+        if (jpeg.length < 4 || jpeg.length > imageMaxBytes) {
+          reply({event:'error',nonce:input.nonce,reason:'image_too_large'}); continue;
+        }
+        if (jpeg[0] !== 0xff || jpeg[1] !== 0xd8 ||
+            jpeg[jpeg.length-2] !== 0xff || jpeg[jpeg.length-1] !== 0xd9)
+          throw Error('invalid_jpeg');
+        const digest = createHash('sha256').update(jpeg).digest('hex');
+        imageBytes = jpeg;
+        imageDigest = digest;
+        reply({event:'image_meta',nonce:input.nonce,mime:'image/jpeg',
+          size:jpeg.length,quality:input.quality,sha256:digest,
+          region:{...clip,viewport_width:vp.width,viewport_height:vp.height}});
+      } catch {
+        discardImage();
+        reply({event:'error',nonce:input.nonce,reason:'image_capture_failed'});
+      }
+      continue;
+    }
+    if (input?.type === 'image_read' && typeof input.nonce === 'string' && /^[0-9a-f]{32}$/.test(input.nonce) &&
+        typeof input.file_version === 'string' &&
+        Number.isSafeInteger(input.offset) && input.offset >= 0 &&
+        Number.isInteger(input.limit) && input.limit >= 1 && input.limit <= imageReadBytes) {
+      if (imageBytes === null) {
+        reply({event:'error',nonce:input.nonce,reason:'image_unavailable'});
+      } else if (input.file_version !== 'sha256:' + imageDigest) {
+        reply({event:'error',nonce:input.nonce,reason:'image_stale'});
+      } else if (input.offset > imageBytes.length) {
+        reply({event:'error',nonce:input.nonce,reason:'image_invalid_offset'});
+      } else {
+        const chunk = imageBytes.subarray(input.offset,Math.min(imageBytes.length,input.offset+input.limit));
+        reply({event:'image_chunk',nonce:input.nonce,mime:'image/jpeg',
+          size:imageBytes.length,sha256:imageDigest,offset:input.offset,
+          chunk_sha256:createHash('sha256').update(chunk).digest('hex'),data:chunk.toString('base64')});
+      }
+      continue;
+    }
+    if (input?.type === 'image_discard' && typeof input.nonce === 'string' && /^[0-9a-f]{32}$/.test(input.nonce) &&
+        typeof input.file_version === 'string') {
+      if (imageBytes === null || input.file_version !== 'sha256:' + imageDigest) {
+        reply({event:'error',nonce:input.nonce,reason:'image_stale'});
+      } else {
+        discardImage();
+        reply({event:'image_discarded',nonce:input.nonce});
+      }
       continue;
     }
     // A trace encloses exactly ONE bounded flow, rather than an unbounded

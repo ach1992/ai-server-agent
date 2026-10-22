@@ -452,7 +452,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 					t.Fatalf("browser_status output schema missing %q: %s", field, out)
 				}
 			}
-		case "browser_session_open", "browser_session_flow", "browser_session_capture", "browser_session_trace", "browser_session_status", "browser_session_close":
+		case "browser_session_open", "browser_session_flow", "browser_session_capture", "browser_session_trace", "browser_session_image", "browser_session_status", "browser_session_close":
 			foundBrowserSessions[tool.Name] = true
 			if tool.Annotations == nil {
 				t.Fatalf("%s lacks annotations", tool.Name)
@@ -484,6 +484,18 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 				for _, field := range []string{"profile_mode", "chromium_sandbox"} {
 					if !strings.Contains(string(input), `"`+field+`"`) {
 						t.Fatalf("browser_session_open %s not exposed: %s", field, input)
+					}
+				}
+			}
+			if tool.Name == "browser_session_image" {
+				for _, field := range []string{"operation", "quality", "max_width", "max_height", "crop_x", "crop_y", "file_version", "offset", "limit", "session_id"} {
+					if !strings.Contains(string(input), `"`+field+`"`) {
+						t.Fatalf("image staging schema missing %s: %s", field, input)
+					}
+				}
+				for _, label := range []string{"1 MiB", "8192", "SHA-256", "discard", "client-dependent"} {
+					if !strings.Contains(tool.Description, label) {
+						t.Fatalf("image staging description missing %s: %s", label, tool.Description)
 					}
 				}
 			}
@@ -563,7 +575,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			}
 		}
 	}
-	for _, name := range []string{"browser_session_open", "browser_session_flow", "browser_session_capture", "browser_session_trace", "browser_session_status", "browser_session_close"} {
+	for _, name := range []string{"browser_session_open", "browser_session_flow", "browser_session_capture", "browser_session_trace", "browser_session_image", "browser_session_status", "browser_session_close"} {
 		if !foundBrowserSessions[name] {
 			t.Errorf("missing managed Browser tool %s", name)
 		}
