@@ -264,9 +264,19 @@ preserving the active binary, config, credential/identity state and services.
 The historical source-built `v0.1.14` binary remains a separate fixture for
 credential and configuration compatibility testing; it is neither a published
 release artifact nor proof that a legacy Stable downgrade is supported.
-No published Stable rollback candidate currently has the new marker; a later
-version must first be published immutably before a genuine compatible published
-Stable rollback can be demonstrated.
+Published immutable Stable `v0.1.19` and `v0.1.20` contain the
+`INSTALLED_PRIVILEGED_LIFECYCLE_TRUST_V1` contract; earlier unguarded targets,
+including `v0.1.14` and `v0.1.18`, remain ineligible for the protected updater.
+The marker is **necessary but not sufficient** for rollback eligibility: the
+installed protected updater must authenticate the exact published immutable
+target installer and digest, require its privileged lifecycle/startup trust
+contract, and validate compatibility with the actual installed credentials,
+configuration, persistent state and supported updater/target contract. The
+historical `v0.1.14` negative test proves refusal of one unguarded target; it
+is **not** positive rollback acceptance for every marker-bearing release or
+occupied installation. Check each selected target and installed host separately
+before any Owner-authorized rollback; do not bypass trust guards or infer
+legacy migrations from this CI fixture.
 
 ### Release-scoped installer
 
