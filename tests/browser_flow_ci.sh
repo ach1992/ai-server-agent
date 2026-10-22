@@ -11,14 +11,23 @@ read -r node_version node_sha playwright_version chromium_revision < <(python3 -
 import re
 from pathlib import Path
 source = Path('internal/browser/browser.go').read_text()
-keys = ['browserNodeVersion','browserNodeSHA256X64',
-        'browserPlaywrightVersion','browserChromiumRevision']
+keys = ['browserNodeVersion', 'browserNodeSHA256X64', 'browserPlaywrightVersion']
 values = []
 for key in keys:
     m = re.search(r'^\s*'+key+r'\s*=\s*"([^"]+)"', source, flags=re.MULTILINE)
     if m is None:
         raise SystemExit('Missing pinned browser identity: '+key)
     values.append(m.group(1))
+# The installer and the Executor share one pinned revision/path contract.
+# Reject drift instead of silently resolving a different Playwright binary.
+if not re.search(r'^\s*browserChromiumRevision\s*=\s*runtimepin\.ChromiumRevision\s*$',
+                 source, flags=re.MULTILINE):
+    raise SystemExit('Browser Chromium revision is not bound to runtimepin')
+pins = Path('internal/browser/runtimepin/paths.go').read_text()
+m = re.search(r'^\s*ChromiumRevision\s*=\s*"([^"]+)"', pins, flags=re.MULTILINE)
+if m is None:
+    raise SystemExit('Missing pinned browser identity: runtimepin.ChromiumRevision')
+values.append(m.group(1))
 print(' '.join(values))
 PY
 )
