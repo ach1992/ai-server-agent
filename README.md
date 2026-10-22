@@ -57,13 +57,13 @@ Use the [ChatGPT connection guide](docs/CONNECT_CHATGPT.md) to set up a custom M
 | --- | --- |
 | Server operations | Run worker commands, request authorized root operations, inspect files and services |
 | Projects and Git | Discover repositories/worktrees, search and edit source safely, use Git CLI |
-| Longer tasks | Run persistent jobs, inspect bounded output, use interactive terminal sessions |
-| Testing and browsers | Run tests and Playwright-backed browser automation when provisioned |
-| Code intelligence | Use Go/gopls and optional language-aware analysis when compatible tools are installed |
+| Longer tasks | Run persistent jobs and bounded interactive worker/root terminals; newer installed builds support longer pastes and optional output waiting |
+| Testing and browsers | Run tests, managed Browser sessions, isolated profiles, bounded screenshots and private traces when supported by the installed build |
+| Code intelligence | Use Go/gopls and optional language-aware analysis; supported SQL source navigation stays offline and never executes SQL |
 | Debugging | Use Go/Delve and supported optional debuggers; check actual adapter readiness |
 | File transfer | Transfer and inspect files in bounded, integrity-aware chunks |
 
-Features, language adapters, and file/image presentation can vary with the **installed Agent version**, host tools, and AI client. The authenticated `agent_environment` result and tool status report the available capabilities. See the [MCP tool reference](docs/TOOL-REFERENCE.md) for exact operations and limitations.
+Managed Browser concurrency, private trace, opt-in Chromium OS sandbox, image quality/region selection, long Terminal input/output wait, and additional SQL navigation are **version-dependent**; some are present in source before the next Stable publication. Features, optional adapters, and native file/image presentation vary with the **installed Agent version**, host tools, and AI client. Check the [latest published Stable](https://github.com/ach1992/ai-server-agent/releases/latest), the authenticated `agent_environment` result, and per-tool readiness; neither a merged PR nor publication upgrades an installed host or proves native client attachment rendering. See the [MCP tool reference](docs/TOOL-REFERENCE.md) for exact operations and limitations.
 
 ## Server purpose: Development, Validation or Production
 
