@@ -21,6 +21,9 @@ type SessionOptions struct {
 	ChromiumSandbox   bool
 	CaptureQuality    int
 	CaptureMaxWidth   int
+	CaptureMaxHeight  int
+	CaptureCropX      int
+	CaptureCropY      int
 	CaptureFitQuality bool
 	TraceOperation    string
 	TraceOffset       int64
@@ -130,6 +133,16 @@ func (m *Manager) SessionCapture(ctx context.Context, opts SessionOptions) (exec
 	if q < 15 || q > 70 || w < 320 || w > 1024 {
 		return browserError("invalid_browser_capture", "validation", "quality must be 15..70 and max_width 320..1024"), nil
 	}
+	// A bounded viewport region is additive; the original zero-origin/full-
+	// height request must remain byte-for-byte compatible with older Executors.
+	region := opts.CaptureCropX != 0 || opts.CaptureCropY != 0 || (opts.CaptureMaxHeight != 0 && opts.CaptureMaxHeight != 720)
+	h := opts.CaptureMaxHeight
+	if h == 0 {
+		h = 720
+	}
+	if opts.CaptureCropX < 0 || opts.CaptureCropY < 0 || h < 1 || h > 720 {
+		return browserError("invalid_browser_capture", "validation", "crop_x/crop_y must be nonnegative and max_height 1..720"), nil
+	}
 	ctx, _, err := executor.EnsureRequestCorrelationContext(ctx)
 	if err != nil {
 		return browserUnknown("Browser screenshot correlation", err, false), nil
@@ -137,6 +150,9 @@ func (m *Manager) SessionCapture(ctx context.Context, opts SessionOptions) (exec
 	params := map[string]any{"quality": q, "max_width": w}
 	if opts.CaptureFitQuality {
 		params["fit_quality"] = true
+	}
+	if region {
+		params["crop_x"], params["crop_y"], params["max_height"] = opts.CaptureCropX, opts.CaptureCropY, h
 	}
 	payload, err := json.Marshal(params)
 	if err != nil {
@@ -149,6 +165,18 @@ func (m *Manager) SessionCapture(ctx context.Context, opts SessionOptions) (exec
 	})
 	if err != nil {
 		return browserUnknown("Browser screenshot transport", err, false), nil
+	}
+	if region && !resp.OK && resp.ErrorCode == "invalid_browser_capture" {
+		// Old Executors validate the legacy JSON strictly. Do not claim that
+		// an explicitly selected area was captured by an older component.
+		refusal := browserError("browser_capture_region_unavailable", "compatibility", "Executor does not support viewport regions; upgrade Executor or omit crop_x/crop_y/max_height")
+		refusal.SessionID, refusal.Status = opts.SessionID, "not_captured"
+		return refusal, nil
+	}
+	if region && resp.OK && !resp.RegionVerified {
+		refusal := browserError("browser_capture_region_unavailable", "compatibility", "Executor did not verify the requested viewport region")
+		refusal.SessionID, refusal.Status = opts.SessionID, "not_captured"
+		return refusal, nil
 	}
 	if opts.CaptureFitQuality && !resp.OK && resp.ErrorCode == "invalid_browser_capture" {
 		// Older Executors reject the new fit_quality input field via strict

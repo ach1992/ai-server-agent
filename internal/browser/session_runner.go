@@ -192,7 +192,7 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const reply = data => process.stdout.write('ASA_BROWSER_SESSION ' + JSON.stringify(data) + '\n');
 // The ready handshake advertises explicit quality-fitting support. Older
 // runners omit this flag; their default screenshot protocol remains valid.
-reply({ event: 'ready', fit_quality: true });
+reply({ event: 'ready', fit_quality: true, capture_region: true });
 try {
   // Browser actions remain capped at 128. Read-only 8 KiB ZIP windows have
   // a distinct *finite* budget: 8192 windows = at most 64 MiB of streamed
@@ -230,7 +230,18 @@ try {
       try {
         const vp = page.viewportSize();
         if (!vp || vp.width < 1 || vp.height < 1) throw Error('viewport_unavailable');
-        const clip = {x:0,y:0,width:Math.min(vp.width,input.max_width),height:Math.min(vp.height,720)};
+        const region = Object.hasOwn(input,'crop_x') || Object.hasOwn(input,'crop_y') || Object.hasOwn(input,'max_height');
+        if (region && !(Number.isSafeInteger(input.crop_x) && input.crop_x >= 0 &&
+            Number.isSafeInteger(input.crop_y) && input.crop_y >= 0 &&
+            Number.isInteger(input.max_height) && input.max_height >= 1 && input.max_height <= 720)) {
+          reply({event:'error',nonce:input.nonce,reason:'capture_invalid_region'}); continue;
+        }
+        const x = region ? input.crop_x : 0;
+        const y = region ? input.crop_y : 0;
+        if (x >= vp.width || y >= vp.height) {
+          reply({event:'error',nonce:input.nonce,reason:'capture_invalid_region'}); continue;
+        }
+        const clip = {x,y,width:Math.min(vp.width-x,input.max_width),height:Math.min(vp.height-y,region?input.max_height:720)};
         const fitting = input.fit_quality === true;
         const qualities = fitting
           ? [...new Set([input.quality, Math.max(15,Math.floor((input.quality+15)/2)),15])]
@@ -260,7 +271,8 @@ try {
         const payload = jpeg.toString('base64');
         const parts = Math.ceil(payload.length/8192);
         reply({event:'capture_meta',nonce:input.nonce,mime:'image/jpeg',quality:actualQuality,size:jpeg.length,
-          sha256:createHash('sha256').update(jpeg).digest('hex'),parts});
+          sha256:createHash('sha256').update(jpeg).digest('hex'),parts,
+          ...(region ? {region:{...clip,viewport_width:vp.width,viewport_height:vp.height}} : {})});
         for (let i=0;i<parts;i++) reply({event:'capture_part',nonce:input.nonce,index:i,
           data:payload.slice(i*8192,(i+1)*8192)});
         reply({event:'capture_done',nonce:input.nonce});

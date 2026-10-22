@@ -65,10 +65,10 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 	}
 	defer ln.Close()
 	small, large := makeClientCaptureJPEG(t, false), makeClientCaptureJPEG(t, true)
-	observed := make(chan executor.Request, 6)
+	observed := make(chan executor.Request, 7)
 	serverErrors := make(chan error, 1)
 	go func() {
-		for i := 0; i < 6; i++ {
+		for i := 0; i < 7; i++ {
 			c, er := ln.Accept()
 			if er != nil {
 				serverErrors <- er
@@ -82,7 +82,7 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 			}
 			observed <- req
 			payload := small
-			if i >= 2 && i != 4 {
+			if i >= 2 && i != 4 && i != 5 {
 				payload = large
 			}
 			sha := sha256.Sum256(payload)
@@ -96,6 +96,10 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 				r.CaptureQuality = 0
 			}
 			if i == 5 {
+				r.RegionVerified, r.CaptureCropX, r.CaptureCropY = true, 800, 40
+				r.CaptureWidth, r.CaptureHeight = 48, 48
+			}
+			if i == 6 {
 				// Executor proved the transfer was complete but the JPEG scan
 				// was not fully decodable. MCP MUST never synthesize image content
 				// or success from this explicit upstream failure.
@@ -125,12 +129,16 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer session.Close()
-	call := func(mode string, fit bool) *mcpsdk.CallToolResult {
+	call := func(mode string, fit bool, region bool) *mcpsdk.CallToolResult {
 		t.Helper()
-		got, er := session.CallTool(ctx, &mcpsdk.CallToolParams{Name: "browser_session_capture", Arguments: map[string]any{
+		params := map[string]any{
 			"workspace": "/srv/ai-workspace/reviewed-worktree", "session_id": "stdio_image_fixture",
 			"quality": 40, "max_width": 640, "representation": mode, "fit_quality": fit,
-		}})
+		}
+		if region {
+			params["crop_x"], params["crop_y"], params["max_height"] = 800, 40, 200
+		}
+		got, er := session.CallTool(ctx, &mcpsdk.CallToolParams{Name: "browser_session_capture", Arguments: params})
 		if er != nil {
 			t.Fatal(er)
 		}
@@ -141,8 +149,13 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 			}
 			var params struct {
 				FitQuality bool `json:"fit_quality"`
+				CropX      int  `json:"crop_x"`
+				CropY      int  `json:"crop_y"`
+				MaxHeight  int  `json:"max_height"`
 			}
-			if err := json.Unmarshal([]byte(req.Content), &params); err != nil || params.FitQuality != fit {
+			if err := json.Unmarshal([]byte(req.Content), &params); err != nil || params.FitQuality != fit ||
+				(region && (params.CropX != 800 || params.CropY != 40 || params.MaxHeight != 200)) ||
+				(!region && (params.CropX != 0 || params.CropY != 0 || params.MaxHeight != 0)) {
 				t.Fatalf("fit_quality option lost in authenticated MCP/Executor forwarding: %+v err=%v", req, err)
 			}
 		case e := <-serverErrors:
@@ -158,14 +171,16 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 		payload   []byte
 		wantError bool
 		wantTyped bool
+		region    bool
 	}{
-		{"image", true, small, false, true},
-		{"base64", false, small, false, false},
-		{"base64", false, large, true, false},
-		{"image", false, large, false, true},
-		{"image", false, small, false, true}, // verified BASE Executor response has no capture_quality
+		{"image", true, small, false, true, false},
+		{"base64", false, small, false, false, false},
+		{"base64", false, large, true, false, false},
+		{"image", false, large, false, true, false},
+		{"image", false, small, false, true, false}, // verified BASE Executor response has no capture_quality
+		{"image", false, small, false, true, true},  // explicit selected region through real SDK and authenticated Executor IPC
 	} {
-		got := call(test.mode, test.fit)
+		got := call(test.mode, test.fit, test.region)
 		if got.IsError != test.wantError {
 			t.Fatalf("mode=%s len=%d IsError=%t want %t", test.mode, len(test.payload), got.IsError, test.wantError)
 		}
@@ -189,6 +204,10 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 			if len(text) > 700 || !strings.Contains(text, "base64") {
 				t.Fatalf("fallback guidance missing: %q", text)
 			}
+			if test.region && (!strings.Contains(string(js), `"capture_region_verified":true`) ||
+				!strings.Contains(text, "x=800,y=40,width=48,height=48")) {
+				t.Fatalf("selected Browser region missing from typed MCP delivery: %s / %s", js, text)
+			}
 			if test.fit && (!strings.Contains(string(js), `"capture_quality":15`) || !strings.Contains(text, "quality=15")) {
 				t.Fatalf("fitted actual JPEG quality missing from typed MCP output: %s / %s", js, text)
 			}
@@ -205,7 +224,7 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 			}
 		}
 	}
-	invalid := call("image", false)
+	invalid := call("image", false, false)
 	if !invalid.IsError || len(invalid.Content) != 1 {
 		t.Fatalf("invalid JPEG must be a single text-only MCP failure, not ImageContent: %+v", invalid)
 	}

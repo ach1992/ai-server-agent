@@ -88,6 +88,8 @@ moving.addEventListener('transitionend', () => {
 </script></body></html>`)
 		} else if r.URL.Path == "/scroll" {
 			fmt.Fprint(w, `<!doctype html><html><body style="margin:0"><div style="height:1050px;background:rgb(230,15,15)"><button id="go" onclick="window.scrollTo(0,1100)">Go down</button></div><div style="height:1050px;background:rgb(15,15,230)"></div></body></html>`)
+		} else if r.URL.Path == "/regions" {
+			fmt.Fprint(w, `<!doctype html><html><body style="margin:0"><div style="position:fixed;left:0;top:0;width:1600px;height:720px;background:linear-gradient(to right, rgb(235,20,20) 0 600px, rgb(20,20,235) 600px 1600px)"></div></body></html>`)
 		} else if r.URL.Path == "/noise" {
 			fmt.Fprint(w, `<!doctype html><html><body style="margin:0"><canvas id="x" width="1024" height="720"></canvas><script>
 const c=document.querySelector('#x'),ctx=c.getContext('2d'),p=ctx.createImageData(1024,720);
@@ -231,8 +233,8 @@ page.screenshot = async options => {
 			t.Fatal(er)
 		}
 	}
-	if got := read(); got["event"] != "ready" || got["fit_quality"] != true {
-		t.Fatalf("pinned worker did not advertise real fitting support: %v", got)
+	if got := read(); got["event"] != "ready" || got["fit_quality"] != true || got["capture_region"] != true {
+		t.Fatalf("pinned worker did not advertise real bounded screenshot support: %v", got)
 	}
 	goTo := func(target string, nonce string) {
 		send(map[string]any{"type": "flow", "nonce": nonce, "steps": []map[string]any{{"action": "goto", "url": target}}})
@@ -242,10 +244,14 @@ page.screenshot = async options => {
 		}
 	}
 	goTo(web.URL, strings.Repeat("a", 32))
-	capture := func(nonce string, quality, width int, fit ...bool) (map[string]any, []byte) {
+	captureWith := func(nonce string, quality, width int, region map[string]any, fit ...bool) (map[string]any, []byte) {
 		t.Helper()
 		optIn := len(fit) == 1 && fit[0]
-		send(map[string]any{"type": "capture", "nonce": nonce, "quality": quality, "max_width": width, "fit_quality": optIn})
+		params := map[string]any{"type": "capture", "nonce": nonce, "quality": quality, "max_width": width, "fit_quality": optIn}
+		for name, value := range region {
+			params[name] = value
+		}
+		send(params)
 		head := read()
 		if head["nonce"] != nonce {
 			t.Fatalf("capture nonce mismatch: %v", head)
@@ -289,9 +295,55 @@ page.screenshot = async options => {
 		}
 		return head, payload
 	}
+	capture := func(nonce string, quality, width int, fit ...bool) (map[string]any, []byte) {
+		return captureWith(nonce, quality, width, nil, fit...)
+	}
 	meta, payload := capture(strings.Repeat("b", 32), 40, 640)
 	if meta["event"] != "capture_meta" || len(payload) == 0 || len(payload) > 32<<10 {
 		t.Fatalf("missing bounded capture: %v", meta)
+	}
+	// Region selection reuses the same managed Chromium, no second process,
+	// file storage or change to the default screenshot. Both opposite-color
+	// tiles must decode and report their actual viewport-relative rectangle.
+	goTo(web.URL+"/regions", strings.Repeat("b", 32))
+	regionMeta := map[string]any{"crop_x": 800, "crop_y": 50, "max_height": 200}
+	blueMeta, blueBytes := captureWith(strings.Repeat("c", 32), 40, 320, regionMeta)
+	if blueMeta["event"] != "capture_meta" || len(blueBytes) == 0 || len(blueBytes) > 32<<10 {
+		t.Fatalf("region screenshot unavailable: %v", blueMeta)
+	}
+	chosen, ok := blueMeta["region"].(map[string]any)
+	if !ok || chosen["x"] != float64(800) || chosen["y"] != float64(50) ||
+		chosen["width"] != float64(320) || chosen["height"] != float64(200) {
+		t.Fatalf("selected region not acknowledged with exact coordinates: %v", blueMeta)
+	}
+	blueImage, err := jpeg.Decode(bytes.NewReader(blueBytes))
+	if err != nil {
+		t.Fatalf("real off-origin Chromium crop decode: %v", err)
+	}
+	if blueImage.Bounds().Dx() != 320 || blueImage.Bounds().Dy() != 200 {
+		t.Fatalf("real off-origin Chromium crop dimensions: %v", blueImage.Bounds())
+	}
+	redMeta, redBytes := captureWith(strings.Repeat("d", 32), 40, 320,
+		map[string]any{"crop_x": 0, "crop_y": 50, "max_height": 200})
+	if redMeta["event"] != "capture_meta" || len(redBytes) == 0 || len(redBytes) > 32<<10 {
+		t.Fatalf("left region screenshot unavailable: %v", redMeta)
+	}
+	redImage, err := jpeg.Decode(bytes.NewReader(redBytes))
+	if err != nil {
+		t.Fatal(err)
+	}
+	blueR, _, blueB, _ := blueImage.At(150, 100).RGBA()
+	redR, _, redB, _ := redImage.At(150, 100).RGBA()
+	if blueB < blueR*3 || redR < redB*3 {
+		t.Fatalf("Chromium did not crop selected off-origin region: right red=%d blue=%d left red=%d blue=%d", blueR, blueB, redR, redB)
+	}
+	invalid, invalidImage := captureWith(strings.Repeat("e", 32), 40, 320,
+		map[string]any{"crop_x": 4096, "crop_y": 50, "max_height": 200})
+	if invalid["event"] != "error" || invalid["reason"] != "capture_invalid_region" || len(invalidImage) != 0 {
+		t.Fatalf("off-viewport crop must fail without leaking JPEG: %v", invalid)
+	}
+	if after, bytesAfter := captureWith(strings.Repeat("f", 32), 40, 320, regionMeta); after["event"] != "capture_meta" || len(bytesAfter) == 0 {
+		t.Fatalf("known invalid region poisoned existing Browser session: %v", after)
 	}
 	// A real pinned Chromium JPEG after a controlled 8.5s screenshot delay
 	// must succeed on the default (non-fitting) path. The test-only hook

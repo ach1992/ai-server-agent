@@ -40,12 +40,16 @@ func TestBrowserSessionCaptureLegacyExecutorCompatibility(t *testing.T) {
 		name        string
 		quality     int
 		fit         bool
+		cropX       int
+		cropY       int
+		maxHeight   int
 		wantQuality int
 		wantError   string
 	}{
 		{name: "default_quality", quality: 0, wantQuality: 40},
 		{name: "explicit_quality", quality: 31, wantQuality: 31},
 		{name: "unsupported_opt_in", quality: 40, fit: true, wantError: "browser_capture_fit_unavailable"},
+		{name: "unsupported_region", quality: 40, cropX: 800, cropY: 50, maxHeight: 200, wantError: "browser_capture_region_unavailable"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			m := testBrowserManager(t)
@@ -95,9 +99,9 @@ func TestBrowserSessionCaptureLegacyExecutorCompatibility(t *testing.T) {
 					FileVersion:    "sha256:" + hex.EncodeToString(digest[:]),
 					// The BASE Executor NEVER supplied capture_quality.
 				}
-				if tc.fit {
+				if tc.wantError != "" {
 					if e == nil {
-						done <- fmt.Errorf("BASE decoder silently accepted fit_quality")
+						done <- fmt.Errorf("BASE decoder silently accepted unsupported opt-in %s", tc.wantError)
 						return
 					}
 					response = executor.Response{ErrorCode: "invalid_browser_capture", ErrorClass: "validation",
@@ -113,6 +117,7 @@ func TestBrowserSessionCaptureLegacyExecutorCompatibility(t *testing.T) {
 			got, err := m.SessionCapture(ctx, SessionOptions{
 				Workspace: m.cfg.WorkspaceDir, SessionID: "legacy_session",
 				CaptureQuality: tc.quality, CaptureFitQuality: tc.fit,
+				CaptureCropX: tc.cropX, CaptureCropY: tc.cropY, CaptureMaxHeight: tc.maxHeight,
 			})
 			if err != nil {
 				t.Fatal(err)
