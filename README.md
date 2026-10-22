@@ -25,7 +25,7 @@ curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/script
 To install a specific published Stable version (example):
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | bash -s -- v0.1.17
+curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | bash -s -- v0.1.20
 ```
 
 The short bootstrap URL intentionally uses the project's **reviewed, mutable `main` branch**; the installed version comes from an **immutable Stable Release**. The release installer is SHA-256-verified before its privileged execution and verified again in protected root staging. On supported systems, the bootstrap may run `sudo apt-get` to install missing `jq` and CA-certificate prerequisites *before* release verification. Review the bootstrap before running it. **Run it as shown, not through `sudo bash`.** Both bootstrap commands are **fresh-install only**: they refuse an existing or partial Agent installation, even with an explicit version. For an installed Agent, use `sudo ai-server-agent-manage update`; see [Operations](docs/OPERATIONS.md) for credential-safe version rollback.
@@ -57,13 +57,13 @@ Use the [ChatGPT connection guide](docs/CONNECT_CHATGPT.md) to set up a custom M
 | --- | --- |
 | Server operations | Run worker commands, request authorized root operations, inspect files and services |
 | Projects and Git | Discover repositories/worktrees, search and edit source safely, use Git CLI |
-| Longer tasks | Run persistent jobs, inspect bounded output, use interactive terminal sessions |
-| Testing and browsers | Run tests and Playwright-backed browser automation when provisioned |
-| Code intelligence | Use Go/gopls and optional language-aware analysis when compatible tools are installed |
+| Longer tasks | Run persistent jobs and bounded interactive worker/root terminals; newer installed builds support longer pastes and optional output waiting |
+| Testing and browsers | Run tests, managed Browser sessions, isolated profiles, bounded screenshots and private traces when supported by the installed build |
+| Code intelligence | Use Go/gopls and optional language-aware analysis; supported SQL source navigation stays offline and never executes SQL |
 | Debugging | Use Go/Delve and supported optional debuggers; check actual adapter readiness |
 | File transfer | Transfer and inspect files in bounded, integrity-aware chunks |
 
-Features, language adapters, and file/image presentation can vary with the **installed Agent version**, host tools, and AI client. The authenticated `agent_environment` result and tool status report the available capabilities. See the [MCP tool reference](docs/TOOL-REFERENCE.md) for exact operations and limitations.
+Browser concurrency, private traces, opt-in Chromium OS sandbox, image fitting/region selection, longer Terminal input/output waiting and offline SQL navigation depend on the **installed Agent build**; `main` may be ahead of the latest published Stable. Optional adapters and native file/image presentation also depend on the host and AI client. Check the [latest published Stable](https://github.com/ach1992/ai-server-agent/releases/latest), authenticated `agent_environment`, per-tool readiness and freshly discovered client tools. Merging source or publishing a Release does not upgrade an installed host or prove native client attachment rendering. See the [MCP tool reference](docs/TOOL-REFERENCE.md) for detailed boundaries.
 
 ## Server purpose: Development, Validation or Production
 

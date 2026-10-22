@@ -77,9 +77,7 @@ Use mature external CLIs, language servers, debuggers, and browser tools directl
 
 Installation, configuration, ordinary maintenance, troubleshooting, safe update, and repair must be understandable and reproducible, with verifiable release identities.
 
-**Current development baseline:** new feature acceptance targets a clean first installation. Migration from *older previously installed Agent generations* is not a requirement for the active first-install workstreams. This is not permission to modify an occupied host or discard unrelated state.
-
-**Forward requirement:** from the newly established baseline onward, supported updates must preserve relevant user configuration, credentials, workspace data, and declared operational contracts according to the applicable release policy. Do not pre-build a speculative multi-version migration framework.
+**Installation and supported-update contract:** verify clean first installation on an authorized disposable host and, for each new supported Stable release, verify the existing protected updater/rollback trust and preservation requirements affected by that release. Migration from unsupported pre-baseline Agent generations is **not** promised; ordinary upgrades from eligible published Stable installations must preserve applicable credentials, configuration, workspace data, and operational contracts. A source-only test or an immutable release publication does not verify an occupied host was upgraded. Never alter an occupied host or discard unrelated state merely for acceptance, and do not invent a universal old-version migration framework.
 
 Errors should identify the failed operation, likely cause, and actionable recovery or diagnostic path without exposing secrets. Agent operations must preserve unrelated services, files, listening ports, and network configuration except where the owner explicitly authorizes the change.
 
