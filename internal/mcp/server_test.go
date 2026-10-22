@@ -480,8 +480,12 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			if tool.Name != "browser_session_open" && !strings.Contains(string(input), `"session_id"`) {
 				t.Fatalf("%s lacks opaque session identity: %s", tool.Name, input)
 			}
-			if tool.Name == "browser_session_open" && !strings.Contains(string(input), `"profile_mode"`) {
-				t.Fatalf("browser_session_open profile_mode not exposed: %s", input)
+			if tool.Name == "browser_session_open" {
+				for _, field := range []string{"profile_mode", "chromium_sandbox"} {
+					if !strings.Contains(string(input), `"`+field+`"`) {
+						t.Fatalf("browser_session_open %s not exposed: %s", field, input)
+					}
+				}
 			}
 			if tool.Name == "browser_session_trace" {
 				for _, field := range []string{"operation", "steps", "file_version", "offset", "session_id"} {

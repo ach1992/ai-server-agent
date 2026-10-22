@@ -18,6 +18,7 @@ type SessionOptions struct {
 	Steps             []FlowStep
 	TimeoutMS         int64
 	IgnoreHTTPSErrors bool
+	ChromiumSandbox   bool
 	CaptureQuality    int
 	CaptureMaxWidth   int
 	TraceOperation    string
@@ -34,6 +35,9 @@ func (m *Manager) SessionOpen(ctx context.Context, opts SessionOptions) (executo
 	mode, err := normalizeProfileMode(opts.ProfileMode)
 	if err != nil {
 		return browserError("invalid_browser_profile_mode", "validation", err.Error()), nil
+	}
+	if opts.ChromiumSandbox && mode != "isolated" {
+		return browserError("browser_sandbox_requires_isolated_profile", "validation", "chromium_sandbox requires profile_mode=isolated; shared Browser and browser_run retain their existing behavior"), nil
 	}
 	if opts.Workspace == "" || !filepath.IsAbs(opts.Workspace) || filepath.Clean(opts.Workspace) != opts.Workspace {
 		return browserError("invalid_browser_workspace", "validation", "exact absolute workspace is required"), nil
@@ -55,7 +59,7 @@ func (m *Manager) SessionOpen(ctx context.Context, opts SessionOptions) (executo
 		// temporary root, even before the retained ZIP is pinned.
 		scratch = filepath.Join(m.dataDir(), "isolated")
 	}
-	script, err := managedSessionRunner(m.engineDir(), filepath.Join(m.dataDir(), "profile"), scratch, opts.IgnoreHTTPSErrors, mode)
+	script, err := managedSessionRunnerWithSandbox(m.engineDir(), filepath.Join(m.dataDir(), "profile"), scratch, opts.IgnoreHTTPSErrors, mode, opts.ChromiumSandbox)
 	m.mu.RUnlock()
 	if err != nil {
 		return browserError("invalid_browser_session", "validation", err.Error()), nil
@@ -67,7 +71,7 @@ func (m *Manager) SessionOpen(ctx context.Context, opts SessionOptions) (executo
 	callCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 	defer cancel()
 	resp, err := executor.ClientCallContext(callCtx, m.cfg.ExecutorSocket, m.token, executor.Request{
-		Action: "browser_session_open", Workspace: opts.Workspace, Content: script, BrowserProfileMode: mode,
+		Action: "browser_session_open", Workspace: opts.Workspace, Content: script, BrowserProfileMode: mode, BrowserSandbox: opts.ChromiumSandbox,
 	})
 	if err != nil {
 		return browserUnknown("browser session open", err, false), nil

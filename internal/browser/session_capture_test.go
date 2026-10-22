@@ -619,9 +619,13 @@ func TestExportApprovedRootManagedBrowserTraceRunner(t *testing.T) {
 		t.Skip("requires approved exact disposable root fixture")
 	}
 	engine := "/opt/ai-server-agent/browser"
-	script, err := managedSessionRunner(engine,
+	// Preserve the already accepted #202 exporter by default. A separate
+	// explicitly gated #203 root acceptance uses the exact production source
+	// with an enabled Chromium Sandbox and no artificial detached descendant.
+	sandbox := os.Getenv("ASA_203_BROWSER_SANDBOX_GENERATOR") == "1"
+	script, err := managedSessionRunnerWithSandbox(engine,
 		filepath.Join(root, "state", "runtime", "browser", "profile"),
-		filepath.Join(root, "state", "runtime", "browser", "isolated"), false, "isolated")
+		filepath.Join(root, "state", "runtime", "browser", "isolated"), false, "isolated", sandbox)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -633,7 +637,9 @@ func TestExportApprovedRootManagedBrowserTraceRunner(t *testing.T) {
 	if strings.Count(script, anchor) != 1 {
 		t.Fatal("generated managed runner anchor drifted")
 	}
-	script = strings.Replace(script, anchor, anchor+addon, 1)
+	if !sandbox {
+		script = strings.Replace(script, anchor, anchor+addon, 1)
+	}
 	path := filepath.Join(root, "sources", "workspace", "production-managed.mjs")
 	if err := os.WriteFile(path, []byte(script), 0600); err != nil {
 		t.Fatal(err)

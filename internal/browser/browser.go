@@ -15,6 +15,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/ach1992/ai-server-agent/internal/browser/runtimepin"
 	"github.com/ach1992/ai-server-agent/internal/config"
 	"github.com/ach1992/ai-server-agent/internal/executor"
 )
@@ -26,7 +27,7 @@ const (
 	browserNodeSHA256X64     = "d6c664df3f3f61458e8c277585571328522d705166723a7c7823a9253a4d15a0"
 	browserNodeSHA256ARM64   = "7201e3a09dc825bac57867c81913e2b8f0ef87d04cb9082af4cda82f6ff3d88c"
 	browserPlaywrightVersion = "1.61.1"
-	browserChromiumRevision  = "1228"
+	browserChromiumRevision  = runtimepin.ChromiumRevision
 	browserChromiumVersion   = "149.0.7827.55"
 	chromiumTreeSHA256AMD64  = "67eacbbb82f9f75dc8a7a0ddcf59c7efed18bfe10199a73b7cd929e66a5e1b80"
 	chromiumTreeSHA256ARM64  = "febb6527bb52cfe5af2ff1c45bbb64b12415343c6331de8d0e1bc35517721a7c"
@@ -113,7 +114,7 @@ func (m *Manager) engineDir() string {
 	if m.enginePath != "" {
 		return m.enginePath
 	}
-	return "/opt/ai-server-agent/browser"
+	return runtimepin.EngineDir
 }
 
 func (m *Manager) dataDir() string {
@@ -229,15 +230,8 @@ func shellQuote(s string) string {
 }
 
 func browserRuntimeExecutablePaths(engine string, desired RuntimeManifest) ([]string, bool) {
-	var chromiumRel, headlessRel string
-	switch desired.Platform {
-	case "amd64":
-		chromiumRel = filepath.FromSlash("chrome-linux64/chrome")
-		headlessRel = filepath.FromSlash("chrome-headless-shell-linux64/chrome-headless-shell")
-	case "arm64":
-		chromiumRel = filepath.FromSlash("chrome-linux/chrome")
-		headlessRel = filepath.FromSlash("chrome-linux/headless_shell")
-	default:
+	chromiumRel, headlessRel, ok := runtimepin.ChromiumRelativeExecutables(desired.Platform)
+	if !ok {
 		return nil, false
 	}
 	return []string{
@@ -565,6 +559,14 @@ rm -rf -- "$engine/.npm-cache"`, shellQuote(m.engineDir()), shellQuote(m.dataDir
 }
 func (m *Manager) setupCommand() (string, error) {
 	desired := desiredRuntimeManifest()
+	amd64Chrome, amd64Headless, ok := runtimepin.ChromiumRelativeExecutables("amd64")
+	if !ok {
+		return "", errors.New("pinned amd64 Chromium layout unavailable")
+	}
+	arm64Chrome, arm64Headless, ok := runtimepin.ChromiumRelativeExecutables("arm64")
+	if !ok {
+		return "", errors.New("pinned arm64 Chromium layout unavailable")
+	}
 	manifest, err := json.MarshalIndent(desired, "", "  ")
 	if err != nil {
 		return "", err
@@ -637,14 +639,14 @@ case "$arch" in
   x86_64)
     node_arch=x64
     node_sha=%s
-    chromium_exec_rel=chrome-linux64/chrome
-    headless_exec_rel=chrome-headless-shell-linux64/chrome-headless-shell
+    chromium_exec_rel=%s
+    headless_exec_rel=%s
     ;;
   aarch64|arm64)
     node_arch=arm64
     node_sha=%s
-    chromium_exec_rel=chrome-linux/chrome
-    headless_exec_rel=chrome-linux/headless_shell
+    chromium_exec_rel=%s
+    headless_exec_rel=%s
     ;;
   *) fail "unsupported architecture: $arch" ;;
 esac
@@ -738,7 +740,11 @@ printf 'browser runtime converged: node=%%s playwright=%%s chromium=%%s/%%s\n' "
 		browserSetupMinFreeBytes/1024,
 		browserDiskPressureExit,
 		shellQuote(browserNodeSHA256X64),
+		shellQuote(amd64Chrome),
+		shellQuote(amd64Headless),
 		shellQuote(browserNodeSHA256ARM64),
+		shellQuote(arm64Chrome),
+		shellQuote(arm64Headless),
 		shellQuote(package64),
 		shellQuote(lock64),
 		browserPlaywrightVersion,
