@@ -125,6 +125,32 @@ jobs:
       - name: Unit tests
         if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
         run: go test -race -vet=off ./...
+      - name: Non-skipped real tmux long-paste acceptance
+        if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
+        run: |
+          set -Eeuo pipefail
+          printf 'REAL_TMUX_PASTE_HEAD=%s\n' "$(git rev-parse HEAD)"
+          # tmux is an optional host dependency; provision only the signed
+          # distribution package on this disposable CI runner if missing.
+          if [ ! -e /usr/bin/tmux ] && [ ! -L /usr/bin/tmux ]; then
+            sudo apt-get update -qq
+            sudo env DEBIAN_FRONTEND=noninteractive apt-get install -yq --no-install-recommends tmux
+          fi
+          for path in / /usr /usr/bin /usr/bin/tmux; do
+            test -e "$path" && test ! -L "$path"
+            test "$(stat -c '%u' "$path")" = 0
+          done
+          test -x /usr/bin/tmux
+          log="$(mktemp)"
+          trap 'rm -f -- "$log"' EXIT
+          ASA_TEST_TMUX_BIN=/usr/bin/tmux go test -race -vet=off -v ./internal/executor \
+            -run '^TestWorkerTmuxLongPasteByteIntegrity$' -count=1 -timeout=90s 2>&1 | tee "$log"
+          grep -Fq -- '--- PASS: TestWorkerTmuxLongPasteByteIntegrity (' "$log"
+          if grep -Fq -- '--- SKIP: TestWorkerTmuxLongPasteByteIntegrity' "$log"; then
+            echo 'Required real tmux long-paste acceptance was skipped' >&2
+            exit 1
+          fi
+          echo 'REAL_TMUX_LONG_PASTE_CI_PASS'
       - name: Shell DAP root-provisioned IPC same-UID denial
         if: ${{ needs.change-scope.outputs.root_trust_security_changed != 'false' }}
         run: |

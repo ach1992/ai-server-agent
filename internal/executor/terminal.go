@@ -20,7 +20,8 @@ import (
 // broker, not a second process supervisor. All tmux commands travel over the
 // same bounded authenticated executor/stdio path used by other consumers.
 const (
-	terminalMaxInput          = 4096
+	terminalInputChunk        = 4096     // each hex-encoded tmux command fits the 16 KiB broker frame
+	terminalMaxInput          = 64 << 10 // 16 ordered chunks per MCP call
 	terminalMaxOutput         = 32 << 10
 	terminalMaxLine           = 128 << 10
 	terminalCommandTimeout    = 3 * time.Second
@@ -641,25 +642,53 @@ func (s *Server) terminalControl(req Request) Response {
 
 // Caller owns terminalAdmissionMu for a scoped close, otherwise the action
 // renews its validated idle lease under that lock before issuing tmux I/O.
+// terminalPasteCommands encodes a bounded literal paste as a sequence of
+// independently framed tmux send-keys commands. The chunks are applied under
+// one actionMu lock; this does not make PTY input transactional on failure.
+func terminalPasteCommands(name string, data []byte) ([]string, error) {
+	if len(data) == 0 || len(data) > terminalMaxInput {
+		return nil, fmt.Errorf("terminal input must be 1..%d bytes", terminalMaxInput)
+	}
+	commands := make([]string, 0, (len(data)+terminalInputChunk-1)/terminalInputChunk)
+	const hexDigits = "0123456789abcdef"
+	for len(data) > 0 {
+		n := len(data)
+		if n > terminalInputChunk {
+			n = terminalInputChunk
+		}
+		var b strings.Builder
+		b.Grow(len(name) + 20 + 3*n)
+		b.WriteString("send-keys -t ")
+		b.WriteString(name)
+		b.WriteString(":0.0 -H")
+		// Exact hex tokens prevent quotes, newlines and control bytes from
+		// becoming tmux command syntax. Preserve byte order between chunks.
+		for _, v := range data[:n] {
+			b.WriteByte(' ')
+			b.WriteByte(hexDigits[v>>4])
+			b.WriteByte(hexDigits[v&15])
+		}
+		command := b.String()
+		if len(command)+1 > maxStdioInputBytes {
+			return nil, errors.New("terminal input chunk exceeds broker frame")
+		}
+		commands = append(commands, command)
+		data = data[n:]
+	}
+	return commands, nil
+}
+
 func (s *Server) terminalControlEntry(req Request, e *stdioSession) Response {
 	t := e.terminal
 	var command string
+	var commands []string
 	switch req.Action {
 	case "terminal_write":
-		data := []byte(req.Content)
-		if len(data) == 0 || len(data) > terminalMaxInput {
-			return terminalError("invalid_input", errors.New("terminal input must be 1..4096 bytes"))
+		var inputErr error
+		commands, inputErr = terminalPasteCommands(t.name, []byte(req.Content))
+		if inputErr != nil {
+			return terminalError("invalid_input", inputErr)
 		}
-		// Hex keys prevent untrusted terminal input from ever becoming tmux
-		// command-language syntax, even for quotes/newlines/control bytes.
-		var b strings.Builder
-		b.WriteString("send-keys -t ")
-		b.WriteString(t.name)
-		b.WriteString(":0.0 -H")
-		for _, v := range data {
-			fmt.Fprintf(&b, " %02x", v)
-		}
-		command = b.String()
 	case "terminal_interrupt":
 		command = "send-keys -t " + t.name + ":0.0 C-c"
 	case "terminal_resize":
@@ -683,7 +712,10 @@ func (s *Server) terminalControlEntry(req Request, e *stdioSession) Response {
 				Response{SessionID: e.id, SessionEpoch: t.epoch, Error: "Terminal idle lease renewal unverified: " + err.Error(), ErrorCode: "terminal_lease_unverified", ErrorClass: "state"})
 		}
 	}
-	err := s.terminalCommand(req, e, command)
+	if len(commands) == 0 {
+		commands = []string{command}
+	}
+	err := s.terminalCommands(req, e, commands)
 	if req.Action == "terminal_close" && t.scoped {
 		// At the PID1 idle deadline (or finite scope hard fallback),
 		// the backend may exit before Go can send kill-server. A verified stop of
@@ -720,10 +752,43 @@ func (s *Server) terminalControlEntry(req Request, e *stdioSession) Response {
 	return s.finishActionAudit(req, req.Action, auditMode(req.Root), e.id, "developer_terminal", started, result)
 }
 
+// One logical terminal write may require multiple bounded tmux commands.
+// Keep the Control Mode action lock across the entire sequence: a concurrent
+// write/interrupt/close must never interleave between paste fragments.
 func (s *Server) terminalCommand(req Request, e *stdioSession, command string) error {
+	return s.terminalCommands(req, e, []string{command})
+}
+
+func (s *Server) terminalCommands(req Request, e *stdioSession, commands []string) error {
+	if len(commands) == 0 {
+		return errors.New("empty terminal command")
+	}
+	// Validate the complete request before writing any fragment.
+	for _, command := range commands {
+		if len(command)+1 > maxStdioInputBytes {
+			return errors.New("terminal_command_too_large")
+		}
+	}
 	t := e.terminal
 	t.actionMu.Lock()
 	defer t.actionMu.Unlock()
+	for i, command := range commands {
+		if err := s.terminalCommandLocked(req, e, command); err != nil {
+			if len(commands) > 1 {
+				// A tmux acknowledgement proves the command was accepted,
+				// not that the foreground program consumed the input.
+				// Never replay an ambiguous suffix automatically.
+				return fmt.Errorf("terminal paste incomplete/uncertain after %d of %d tmux chunks acknowledged; inspect terminal state before retry: %w", i, len(commands), err)
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+// Called only with actionMu held, for a single bounded tmux control command.
+func (s *Server) terminalCommandLocked(req Request, e *stdioSession, command string) error {
+	t := e.terminal
 	e.mu.Lock()
 	if e.exited || e.closed || t.exited || t.protocolError != "" {
 		e.mu.Unlock()

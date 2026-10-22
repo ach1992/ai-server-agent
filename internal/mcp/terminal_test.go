@@ -7,6 +7,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -90,13 +91,14 @@ func TestTerminalMCPAuthorizationEpochForwarding(t *testing.T) {
 		"workspace": "/srv/ai-workspace/project", "session_id": "stdio_00000000000000000000000000000001",
 		"session_epoch": "root-epoch-proof", "root": true, "approval": true,
 	}
+	largePaste := strings.Repeat("ABcd1234", 8<<10) // full 64 KiB through the real MCP/Executor wire
 	tasks := []struct {
 		name  string
 		extra map[string]any
 	}{
 		{"terminal_open", map[string]any{"columns": 80, "rows": 24}},
 		{"terminal_read", map[string]any{"limit": 8192, "cursor": uint64(0)}},
-		{"terminal_write", map[string]any{"content": "hello"}},
+		{"terminal_write", map[string]any{"content": largePaste}},
 		{"terminal_interrupt", nil},
 		{"terminal_resize", map[string]any{"columns": 65, "rows": 20}},
 		{"terminal_reconnect", nil},
@@ -130,6 +132,9 @@ func TestTerminalMCPAuthorizationEpochForwarding(t *testing.T) {
 			}
 			if req.Workspace != "/srv/ai-workspace/project" {
 				t.Fatalf("%s lost workspace identity", task.name)
+			}
+			if task.name == "terminal_write" && req.Content != largePaste {
+				t.Fatal("large literal terminal paste changed across MCP/Executor transport")
 			}
 			if task.name != "terminal_open" && req.SessionID != shared["session_id"] {
 				t.Fatalf("%s lost session identity", task.name)
