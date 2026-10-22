@@ -175,9 +175,9 @@ func TestWorkerTmuxLongPasteByteIntegrity(t *testing.T) {
 		req.Action, req.Content = "terminal_write", content
 		return s.terminalAction(req)
 	}
-	// A noncanonical, no-echo reader consumes a long byte stream directly
-	// from the PTY rather than relying on the shell's 4 KiB canonical line.
-	const n = 12 << 10
+	// A noncanonical, no-echo reader consumes the full 64 KiB per-call
+	// budget directly from the PTY, not a shell's 4 KiB canonical line.
+	const n = 64 << 10
 	if resp := send("stty -echo\n"); !resp.OK {
 		t.Fatalf("disable terminal echo: %+v", resp)
 	}

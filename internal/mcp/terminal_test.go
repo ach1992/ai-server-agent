@@ -91,7 +91,7 @@ func TestTerminalMCPAuthorizationEpochForwarding(t *testing.T) {
 		"workspace": "/srv/ai-workspace/project", "session_id": "stdio_00000000000000000000000000000001",
 		"session_epoch": "root-epoch-proof", "root": true, "approval": true,
 	}
-	largePaste := strings.Repeat("ABcd1234", 2<<10) // 16 KiB through the real MCP/Executor wire
+	largePaste := strings.Repeat("ABcd1234", 8<<10) // full 64 KiB through the real MCP/Executor wire
 	tasks := []struct {
 		name  string
 		extra map[string]any
