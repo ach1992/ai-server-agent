@@ -65,10 +65,10 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 	}
 	defer ln.Close()
 	small, large := makeClientCaptureJPEG(t, false), makeClientCaptureJPEG(t, true)
-	observed := make(chan executor.Request, 5)
+	observed := make(chan executor.Request, 6)
 	serverErrors := make(chan error, 1)
 	go func() {
-		for i := 0; i < 5; i++ {
+		for i := 0; i < 6; i++ {
 			c, er := ln.Accept()
 			if er != nil {
 				serverErrors <- er
@@ -82,12 +82,20 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 			}
 			observed <- req
 			payload := small
-			if i >= 2 {
+			if i >= 2 && i != 4 {
 				payload = large
 			}
 			sha := sha256.Sum256(payload)
-			r := executor.Response{OK: true, Status: "captured", SessionID: "stdio_image_fixture", MIMEType: "image/jpeg", OutputEncoding: "base64", Output: base64.StdEncoding.EncodeToString(payload), BytesSeen: int64(len(payload)), BytesReturned: int64(len(payload)), FileVersion: "sha256:" + hex.EncodeToString(sha[:])}
+			r := executor.Response{OK: true, Status: "captured", SessionID: "stdio_image_fixture", MIMEType: "image/jpeg", CaptureQuality: 40, OutputEncoding: "base64", Output: base64.StdEncoding.EncodeToString(payload), BytesSeen: int64(len(payload)), BytesReturned: int64(len(payload)), FileVersion: "sha256:" + hex.EncodeToString(sha[:])}
+			if i == 0 {
+				r.CaptureQuality = 15 // opt-in fit metadata (the real-Node fixture proves JPEG policy)
+			}
 			if i == 4 {
+				// The BASE Executor's successful response omitted capture_quality.
+				// The new Agent must infer only the legacy requested one-shot quality.
+				r.CaptureQuality = 0
+			}
+			if i == 5 {
 				// Executor proved the transfer was complete but the JPEG scan
 				// was not fully decodable. MCP MUST never synthesize image content
 				// or success from this explicit upstream failure.
@@ -117,11 +125,11 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer session.Close()
-	call := func(mode string) *mcpsdk.CallToolResult {
+	call := func(mode string, fit bool) *mcpsdk.CallToolResult {
 		t.Helper()
 		got, er := session.CallTool(ctx, &mcpsdk.CallToolParams{Name: "browser_session_capture", Arguments: map[string]any{
 			"workspace": "/srv/ai-workspace/reviewed-worktree", "session_id": "stdio_image_fixture",
-			"quality": 40, "max_width": 640, "representation": mode,
+			"quality": 40, "max_width": 640, "representation": mode, "fit_quality": fit,
 		}})
 		if er != nil {
 			t.Fatal(er)
@@ -130,6 +138,12 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 		case req := <-observed:
 			if req.Action != "browser_session_capture" || req.Token != "exec-token" || req.PrincipalID != "direct-default" || req.PrincipalClass != "direct" || req.Root || req.Approval || req.Workspace != "/srv/ai-workspace/reviewed-worktree" || req.SessionID != "stdio_image_fixture" || !strings.Contains(req.Content, `"max_width":640`) {
 				t.Fatalf("public screenshot identity/bounds lost: %+v", req)
+			}
+			var params struct {
+				FitQuality bool `json:"fit_quality"`
+			}
+			if err := json.Unmarshal([]byte(req.Content), &params); err != nil || params.FitQuality != fit {
+				t.Fatalf("fit_quality option lost in authenticated MCP/Executor forwarding: %+v err=%v", req, err)
 			}
 		case e := <-serverErrors:
 			t.Fatal(fmt.Errorf("executor fixture: %w", e))
@@ -140,16 +154,18 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 	}
 	for _, test := range []struct {
 		mode      string
+		fit       bool
 		payload   []byte
 		wantError bool
 		wantTyped bool
 	}{
-		{"image", small, false, true},
-		{"base64", small, false, false},
-		{"base64", large, true, false},
-		{"image", large, false, true},
+		{"image", true, small, false, true},
+		{"base64", false, small, false, false},
+		{"base64", false, large, true, false},
+		{"image", false, large, false, true},
+		{"image", false, small, false, true}, // verified BASE Executor response has no capture_quality
 	} {
-		got := call(test.mode)
+		got := call(test.mode, test.fit)
 		if got.IsError != test.wantError {
 			t.Fatalf("mode=%s len=%d IsError=%t want %t", test.mode, len(test.payload), got.IsError, test.wantError)
 		}
@@ -173,6 +189,12 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 			if len(text) > 700 || !strings.Contains(text, "base64") {
 				t.Fatalf("fallback guidance missing: %q", text)
 			}
+			if test.fit && (!strings.Contains(string(js), `"capture_quality":15`) || !strings.Contains(text, "quality=15")) {
+				t.Fatalf("fitted actual JPEG quality missing from typed MCP output: %s / %s", js, text)
+			}
+			if !test.fit && (!strings.Contains(string(js), `"capture_quality":40`) || !strings.Contains(text, "quality=40") || strings.Contains(text, "quality=0")) {
+				t.Fatalf("HEAD Agent displayed fabricated legacy Executor quality: %s / %s", js, text)
+			}
 		} else if test.wantError {
 			if len(got.Content) != 1 || !strings.Contains(string(js), "too_large") || strings.Contains(string(js), encoded) {
 				t.Fatalf("text-only oversize disclosure or silent success: %+v", got)
@@ -183,7 +205,7 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 			}
 		}
 	}
-	invalid := call("image")
+	invalid := call("image", false)
 	if !invalid.IsError || len(invalid.Content) != 1 {
 		t.Fatalf("invalid JPEG must be a single text-only MCP failure, not ImageContent: %+v", invalid)
 	}
