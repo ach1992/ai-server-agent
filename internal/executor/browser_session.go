@@ -543,6 +543,7 @@ type browserSessionFrame struct {
 	Reason      string          `json:"reason,omitempty"`
 	Result      json.RawMessage `json:"result,omitempty"`
 	Mime        string          `json:"mime,omitempty"`
+	Quality     int             `json:"quality,omitempty"`
 	Size        int             `json:"size,omitempty"`
 	SHA256      string          `json:"sha256,omitempty"`
 	Parts       int             `json:"parts,omitempty"`

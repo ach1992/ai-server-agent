@@ -93,6 +93,13 @@ moving.addEventListener('transitionend', () => {
 const c=document.querySelector('#x'),ctx=c.getContext('2d'),p=ctx.createImageData(1024,720);
 let z=123456789;for(let i=0;i<p.data.length;i+=4){z=(Math.imul(1664525,z)+1013904223)>>>0;p.data[i]=z&255;p.data[i+1]=(z>>>8)&255;p.data[i+2]=(z>>>16)&255;p.data[i+3]=255;}
 ctx.putImageData(p,0,0);</script></body></html>`)
+		} else if r.URL.Path == "/fit-noise" {
+			// A small deterministic entropy patch amid a flat page crosses
+			// 32 KiB at high JPEG quality but can fit after quality reduction.
+			fmt.Fprint(w, `<!doctype html><html><body style="margin:0;background:white"><canvas id="x" width="320" height="256"></canvas><script>
+const c=document.querySelector('#x'),ctx=c.getContext('2d'),p=ctx.createImageData(320,256);
+let z=123456789;for(let i=0;i<p.data.length;i+=4){z=(Math.imul(1664525,z)+1013904223)>>>0;p.data[i]=z&255;p.data[i+1]=(z>>>8)&255;p.data[i+2]=(z>>>16)&255;p.data[i+3]=255;}
+ctx.putImageData(p,0,0);</script></body></html>`)
 		} else {
 			fmt.Fprint(w, `<!doctype html><html><body><h1>Bounded screenshot evidence</h1><button>Review</button></body></html>`)
 		}
@@ -213,9 +220,10 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 		}
 	}
 	goTo(web.URL, strings.Repeat("a", 32))
-	capture := func(nonce string, quality, width int) (map[string]any, []byte) {
+	capture := func(nonce string, quality, width int, fit ...bool) (map[string]any, []byte) {
 		t.Helper()
-		send(map[string]any{"type": "capture", "nonce": nonce, "quality": quality, "max_width": width})
+		optIn := len(fit) == 1 && fit[0]
+		send(map[string]any{"type": "capture", "nonce": nonce, "quality": quality, "max_width": width, "fit_quality": optIn})
 		head := read()
 		if head["nonce"] != nonce {
 			t.Fatalf("capture nonce mismatch: %v", head)
@@ -225,6 +233,10 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 		}
 		if head["event"] != "capture_meta" || head["mime"] != "image/jpeg" {
 			t.Fatalf("capture metadata: %v", head)
+		}
+		usedQuality, ok := head["quality"].(float64)
+		if !ok || usedQuality < 15 || usedQuality > float64(quality) || (!optIn && usedQuality != float64(quality)) {
+			t.Fatalf("capture used unspecified quality: got %v requested %d fit=%v", head["quality"], quality, optIn)
 		}
 		var b64 strings.Builder
 		for i := 0; i < int(head["parts"].(float64)); i++ {
@@ -476,6 +488,29 @@ ctx.putImageData(p,0,0);</script></body></html>`)
 	fail, img := capture(strings.Repeat("d", 32), 70, 1024)
 	if fail["event"] != "error" || fail["reason"] != "capture_too_large" || img != nil {
 		t.Fatalf("oversize capture was not explicit: %v", fail)
+	}
+	impossible, out := capture(strings.Repeat("a", 32), 70, 1024, true)
+	if impossible["event"] != "error" || impossible["reason"] != "capture_too_large" || out != nil {
+		t.Fatalf("incompressible screenshot bypassed finite quality fitting: %v", impossible)
+	}
+	// Quality fitting is explicitly opt-in: a high-detail but limited-area
+	// page is rejected unchanged, while the same requested viewport clip
+	// fits under the SAME 32 KiB raw-byte budget with lower JPEG quality.
+	goTo(web.URL+"/fit-noise", strings.Repeat("0", 32))
+	normal, ordinary := capture(strings.Repeat("c", 32), 70, 640)
+	if normal["event"] != "error" || normal["reason"] != "capture_too_large" || ordinary != nil {
+		t.Fatalf("fit fixture did not exercise default refusal: %v (%d bytes)", normal, len(ordinary))
+	}
+	fitted, fittedBytes := capture(strings.Repeat("d", 32), 70, 640, true)
+	if fitted["event"] != "capture_meta" || len(fittedBytes) == 0 || len(fittedBytes) > 32768 ||
+		fitted["quality"].(float64) >= 70 {
+		t.Fatalf("real JPEG fit failed to reduce quality inside budget: %v (%d bytes)", fitted, len(fittedBytes))
+	}
+	if _, er := jpeg.Decode(bytes.NewReader(fittedBytes)); er != nil {
+		t.Fatalf("real fitted JPEG not decodable: %v", er)
+	}
+	if leftovers, er := nonProfileEntries(); er != nil || len(leftovers) != 0 {
+		t.Fatalf("fitted capture unexpectedly wrote artifact scratch: %v %v", leftovers, er)
 	}
 	// Known oversize is not transport uncertainty; same session is usable.
 	goTo(web.URL, strings.Repeat("e", 32))

@@ -22,8 +22,9 @@ const (
 )
 
 type browserCaptureParams struct {
-	Quality  int `json:"quality"`
-	MaxWidth int `json:"max_width"`
+	Quality    int  `json:"quality"`
+	MaxWidth   int  `json:"max_width"`
+	FitQuality bool `json:"fit_quality"`
 }
 
 // Screenshot is an opt-in visual read of the same authenticated Browser
@@ -66,7 +67,12 @@ func (s *Server) browserSessionCapture(ctx context.Context, req Request) Respons
 		return browserSessionError("browser_nonce_unavailable", "security", err)
 	}
 	nonce := hex.EncodeToString(n[:])
+	// Preserve the original default worker wire format across rolling
+	// Agent/Executor upgrades. Only an explicit opt-in sends the new key.
 	msg := fmt.Sprintf(`{"type":"capture","nonce":%q,"quality":%d,"max_width":%d}`+"\n", nonce, p.Quality, p.MaxWidth)
+	if p.FitQuality {
+		msg = fmt.Sprintf(`{"type":"capture","nonce":%q,"quality":%d,"max_width":%d,"fit_quality":true}`+"\n", nonce, p.Quality, p.MaxWidth)
+	}
 	if err = s.workerStdioWrite(req, entry.id, []byte(msg)); err != nil {
 		return uncertain()
 	}
@@ -94,6 +100,7 @@ func (s *Server) browserSessionCapture(ctx context.Context, req Request) Respons
 	}
 	expectedParts := (base64.StdEncoding.EncodedLen(start.Size) + browserCapturePartChars - 1) / browserCapturePartChars
 	if start.Event != "capture_meta" || start.Mime != "image/jpeg" || start.Size < 4 || start.Size > browserCaptureMaxBytes ||
+		start.Quality < 15 || start.Quality > p.Quality || (!p.FitQuality && start.Quality != p.Quality) ||
 		start.Parts != expectedParts || expectedParts < 1 || expectedParts > 6 || len(start.SHA256) != 64 {
 		return uncertain()
 	}
@@ -141,6 +148,6 @@ func (s *Server) browserSessionCapture(ctx context.Context, req Request) Respons
 		return resp
 	}
 	return Response{OK: true, Status: "captured", SessionID: entry.id,
-		Output: b64.String(), OutputEncoding: "base64", MIMEType: "image/jpeg", BytesSeen: int64(len(payload)), BytesReturned: int64(len(payload)),
+		Output: b64.String(), OutputEncoding: "base64", MIMEType: "image/jpeg", CaptureQuality: start.Quality, BytesSeen: int64(len(payload)), BytesReturned: int64(len(payload)),
 		FileVersion: "sha256:" + start.SHA256}
 }

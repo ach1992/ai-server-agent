@@ -44,16 +44,22 @@ func makeCaptureScript(t *testing.T, raw []byte, mode string) string {
 		}
 	}
 	b64 := base64.StdEncoding.EncodeToString(raw)
+	quality := 40
+	if mode == "fit_low" {
+		quality = 15
+	} else if mode == "wrong_quality" {
+		quality = 80
+	}
 	if mode == "wrong_index" {
 		return fmt.Sprintf(`#!/bin/sh
 printf 'ASA_BROWSER_SESSION {"event":"ready"}\n'
 while IFS= read -r line; do
   case "$line" in *'"type":"close"'*) exit 0;; esac
   nonce=$(printf '%%s' "$line" | sed -n 's/.*"nonce":"\([0-9a-f]*\)".*/\1/p')
-  printf 'ASA_BROWSER_SESSION {"event":"capture_meta","nonce":"%%s","mime":"image/jpeg","size":%d,"sha256":"%s","parts":1}\n' "$nonce"
+  printf 'ASA_BROWSER_SESSION {"event":"capture_meta","nonce":"%%s","mime":"image/jpeg","quality":%d,"size":%d,"sha256":"%s","parts":1}\n' "$nonce"
   printf 'ASA_BROWSER_SESSION {"event":"capture_part","nonce":"%%s","index":1,"data":"%s"}\n' "$nonce"
 done
-`, len(raw), sha, b64)
+`, quality, len(raw), sha, b64)
 	}
 	if mode == "known_too_large" {
 		return `#!/bin/sh
@@ -70,11 +76,11 @@ printf 'ASA_BROWSER_SESSION {"event":"ready"}\n'
 while IFS= read -r line; do
   case "$line" in *'"type":"close"'*) exit 0;; esac
   nonce=$(printf '%%s' "$line" | sed -n 's/.*"nonce":"\([0-9a-f]*\)".*/\1/p')
-  printf 'ASA_BROWSER_SESSION {"event":"capture_meta","nonce":"%%s","mime":"image/jpeg","size":%d,"sha256":"%s","parts":1}\n' "$nonce"
+  printf 'ASA_BROWSER_SESSION {"event":"capture_meta","nonce":"%%s","mime":"image/jpeg","quality":%d,"size":%d,"sha256":"%s","parts":1}\n' "$nonce"
   printf 'ASA_BROWSER_SESSION {"event":"capture_part","nonce":"%%s","index":0,"data":"%s"}\n' "$nonce"
   printf 'ASA_BROWSER_SESSION {"event":"capture_done","nonce":"%%s"}\n' "$nonce"
 done
-`, len(raw), sha, b64)
+`, quality, len(raw), sha, b64)
 }
 
 func openCaptureFixture(t *testing.T, mode string) (*Server, Request, string, []byte) {
@@ -149,9 +155,13 @@ func TestBrowserSessionCapturePrincipalAndBoundedIntegrity(t *testing.T) {
 	if got := s.browserSessionAction(ctx, invalid); got.OK || got.ErrorCode != "invalid_browser_capture" {
 		t.Fatalf("extra field bypassed strict schema: %+v", got)
 	}
+	invalid.Content = `{"quality":40,"max_width":640,"fit_quality":"true"}`
+	if got := s.browserSessionAction(ctx, invalid); got.OK || got.ErrorCode != "invalid_browser_capture" {
+		t.Fatalf("nonboolean fit_quality bypassed strict schema: %+v", got)
+	}
 	capture := s.browserSessionAction(ctx, req)
 	sum := sha256.Sum256(raw)
-	if !capture.OK || capture.Status != "captured" || capture.MIMEType != "image/jpeg" || capture.OutputEncoding != "base64" || capture.SessionID != id || capture.FileVersion != "sha256:"+hex.EncodeToString(sum[:]) {
+	if !capture.OK || capture.Status != "captured" || capture.MIMEType != "image/jpeg" || capture.CaptureQuality != 40 || capture.OutputEncoding != "base64" || capture.SessionID != id || capture.FileVersion != "sha256:"+hex.EncodeToString(sum[:]) {
 		t.Fatalf("capture missing bounded metadata: %+v", capture)
 	}
 	decoded, err := base64.StdEncoding.Strict().DecodeString(capture.Output)
@@ -171,6 +181,49 @@ func TestBrowserSessionCapturePrincipalAndBoundedIntegrity(t *testing.T) {
 		t.Fatal("verified screenshot session close held Browser profile")
 	}
 	s.browserAdmission.releaseRun()
+}
+
+// A lower-quality JPEG is accepted only after the authenticated caller opted
+// into quality fitting; the actual output quality is never inferred from the
+// requested upper bound. Malformed/unexpected worker claims fail closed.
+func TestBrowserSessionCaptureFitQualityExplicitAndBounded(t *testing.T) {
+	t.Run("explicit_opt_in", func(t *testing.T) {
+		s, owner, id, raw := openCaptureFixture(t, "fit_low")
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		defer func() { _ = s.browserSessionAction(ctx, browserOwnerControl(owner, id, "browser_session_close")) }()
+		req := browserCaptureRequest(owner, id)
+		req.Content = `{"quality":40,"max_width":640,"fit_quality":true}`
+		got := s.browserSessionAction(ctx, req)
+		if !got.OK || got.CaptureQuality != 15 || got.BytesReturned != int64(len(raw)) {
+			t.Fatalf("explicit quality fit not acknowledged: %+v", got)
+		}
+		data, err := base64.StdEncoding.DecodeString(got.Output)
+		if err != nil || !bytes.Equal(data, raw) {
+			t.Fatalf("fitted screenshot payload changed: %v", err)
+		}
+	})
+	for _, tc := range []struct {
+		name    string
+		mode    string
+		content string
+	}{
+		{"not_opted_in", "fit_low", `{"quality":40,"max_width":640}`},
+		{"outside_upper_bound", "wrong_quality", `{"quality":40,"max_width":640,"fit_quality":true}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s, owner, id, _ := openCaptureFixture(t, tc.mode)
+			ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+			defer cancel()
+			defer func() { _ = s.browserSessionAction(ctx, browserOwnerControl(owner, id, "browser_session_close")) }()
+			req := browserCaptureRequest(owner, id)
+			req.Content = tc.content
+			got := s.browserSessionAction(ctx, req)
+			if got.OK || got.ErrorCode != "browser_session_action_uncertain" || got.Output != "" {
+				t.Fatalf("unexpected capture quality claim accepted: %+v", got)
+			}
+		})
+	}
 }
 
 func TestBrowserSessionCaptureSelfConsistentCorruptJPEGRejected(t *testing.T) {

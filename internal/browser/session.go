@@ -21,6 +21,7 @@ type SessionOptions struct {
 	ChromiumSandbox   bool
 	CaptureQuality    int
 	CaptureMaxWidth   int
+	CaptureFitQuality bool
 	TraceOperation    string
 	TraceOffset       int64
 	TraceVersion      string
@@ -133,7 +134,11 @@ func (m *Manager) SessionCapture(ctx context.Context, opts SessionOptions) (exec
 	if err != nil {
 		return browserUnknown("Browser screenshot correlation", err, false), nil
 	}
-	payload, err := json.Marshal(map[string]int{"quality": q, "max_width": w})
+	params := map[string]any{"quality": q, "max_width": w}
+	if opts.CaptureFitQuality {
+		params["fit_quality"] = true
+	}
+	payload, err := json.Marshal(params)
 	if err != nil {
 		return browserError("invalid_browser_capture", "validation", "cannot serialize bounded capture"), nil
 	}

@@ -91,6 +91,7 @@ type Response struct {
 	Output              string                     `json:"output"`
 	OutputEncoding      string                     `json:"output_encoding"`
 	MIMEType            string                     `json:"mime_type,omitempty"`
+	CaptureQuality      int                        `json:"capture_quality,omitempty"`
 	BytesSeen           int64                      `json:"bytes_seen"`
 	BytesReturned       int64                      `json:"bytes_returned"`
 	Truncated           bool                       `json:"truncated"`

@@ -216,31 +216,40 @@ try {
     } else if (++actions > 128) {
       reply({event:'error',nonce:input?.nonce,reason:'session_input_limit'}); break;
     }
-    // Screenshot is an explicit, bounded image consumer. Frames stay below
-    // the existing 64 KiB broker event ring; no image is saved to disk,
-    // no page bytes enter audit, and the profile remains session-owned.
+    // Screenshot is an explicit, bounded image consumer. Opt-in fit_quality
+    // keeps the SAME viewport clip but tries at most three JPEG qualities.
+    // The default retains exactly one attempt at the requested quality.
+    // No oversized image is emitted into the 64 KiB broker event ring,
+    // written to disk, included in audit, or silently cropped/rescaled.
     if (input?.type === 'capture' && typeof input.nonce === 'string' && /^[0-9a-f]{32}$/.test(input.nonce) &&
         Number.isInteger(input.quality) && input.quality >= 15 && input.quality <= 70 &&
-        Number.isInteger(input.max_width) && input.max_width >= 320 && input.max_width <= 1024) {
+        Number.isInteger(input.max_width) && input.max_width >= 320 && input.max_width <= 1024 &&
+        (input.fit_quality === undefined || typeof input.fit_quality === 'boolean')) {
       try {
         const vp = page.viewportSize();
         if (!vp || vp.width < 1 || vp.height < 1) throw Error('viewport_unavailable');
-        // A viewport-only screenshot with origin (0,0) follows the current
-        // scrolled view; shifting its clip by window.scrollY would cause a
-        // viewport-relative double-offset and an invalid clipped region.
-        // Capture the current page state without fast-forwarding finite
-        // CSS transitions/animations. 'disabled' would fire transitionend
-        // handlers and can cause page-side effects on an otherwise read-only
-        // open-world screenshot tool.
-        const jpeg = await page.screenshot({type:'jpeg',quality:input.quality,animations:'allow',caret:'hide',
-          fullPage:false,clip:{x:0,y:0,width:Math.min(vp.width,input.max_width),height:Math.min(vp.height,720)},
-          timeout:10000});
+        const clip = {x:0,y:0,width:Math.min(vp.width,input.max_width),height:Math.min(vp.height,720)};
+        const qualities = input.fit_quality
+          ? [...new Set([input.quality, Math.max(15,Math.floor((input.quality+15)/2)),15])]
+          : [input.quality];
+        const start = Date.now();
+        let jpeg, actualQuality;
+        for (const quality of qualities) {
+          const remaining = 16000-(Date.now()-start);
+          if (remaining < 1000) throw Error('capture_timeout');
+          // Preserve the scrolled viewport and avoid animation fast-forward:
+          // animations:'disabled' can fire transitionend page handlers.
+          jpeg = await page.screenshot({type:'jpeg',quality,animations:'allow',caret:'hide',
+            fullPage:false,clip,timeout:Math.min(8000,remaining)});
+          actualQuality = quality;
+          if (jpeg.length >= 4 && jpeg.length <= 32768) break;
+        }
         if (jpeg.length < 4 || jpeg.length > 32768) {
           reply({event:'error',nonce:input.nonce,reason:'capture_too_large'}); continue;
         }
         const payload = jpeg.toString('base64');
         const parts = Math.ceil(payload.length/8192);
-        reply({event:'capture_meta',nonce:input.nonce,mime:'image/jpeg',size:jpeg.length,
+        reply({event:'capture_meta',nonce:input.nonce,mime:'image/jpeg',quality:actualQuality,size:jpeg.length,
           sha256:createHash('sha256').update(jpeg).digest('hex'),parts});
         for (let i=0;i<parts;i++) reply({event:'capture_part',nonce:input.nonce,index:i,
           data:payload.slice(i*8192,(i+1)*8192)});
