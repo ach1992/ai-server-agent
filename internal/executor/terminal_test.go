@@ -1,9 +1,13 @@
 package executor
 
 import (
+	"bufio"
 	"bytes"
+	"crypto/sha256"
 	"encoding/base64"
+	"encoding/hex"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -13,6 +17,215 @@ import (
 	"github.com/ach1992/ai-server-agent/internal/config"
 	"time"
 )
+
+func TestTerminalPasteCommandsBoundedAndLossless(t *testing.T) {
+	for _, length := range []int{1, terminalInputChunk - 1, terminalInputChunk, terminalInputChunk + 1, 8192, terminalMaxInput} {
+		t.Run(fmt.Sprintf("length_%d", length), func(t *testing.T) {
+			in := make([]byte, length)
+			for i := range in {
+				in[i] = byte(i) // includes NUL, control bytes, invalid UTF-8 and tmux syntax characters
+			}
+			commands, err := terminalPasteCommands("asa_test", in)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if want := (length + terminalInputChunk - 1) / terminalInputChunk; len(commands) != want {
+				t.Fatalf("fragments = %d, want %d", len(commands), want)
+			}
+			var decoded []byte
+			for _, command := range commands {
+				const prefix = "send-keys -t asa_test:0.0 -H"
+				if !strings.HasPrefix(command, prefix+" ") || len(command)+1 > maxStdioInputBytes {
+					t.Fatalf("non-hex tmux command or oversized frame: %d bytes", len(command))
+				}
+				for _, field := range strings.Fields(strings.TrimPrefix(command, prefix)) {
+					if len(field) != 2 {
+						t.Fatalf("non-hex byte token %q", field)
+					}
+					b, err := hex.DecodeString(field)
+					if err != nil || len(b) != 1 {
+						t.Fatalf("invalid byte token %q: %v", field, err)
+					}
+					decoded = append(decoded, b[0])
+				}
+			}
+			if !bytes.Equal(decoded, in) {
+				t.Fatalf("fragmented PTY data changed: got %d, want %d bytes", len(decoded), len(in))
+			}
+		})
+	}
+	for _, bad := range [][]byte{nil, {}, make([]byte, terminalMaxInput+1)} {
+		if commands, err := terminalPasteCommands("asa_test", bad); err == nil || len(commands) != 0 {
+			t.Fatalf("out-of-range paste accepted: bytes=%d commands=%d err=%v", len(bad), len(commands), err)
+		}
+	}
+}
+
+// A failed tmux acknowledgement after an earlier accepted fragment is never
+// reported as complete; the client must inspect state rather than retrying
+// the whole paste and duplicating the already accepted prefix.
+func TestTerminalPastePartialAckIsExplicitlyUncertain(t *testing.T) {
+	s, owner, _ := testStdioBroker(t)
+	reader, writer, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	defer writer.Close()
+	const id = "stdio_0123456789abcdef0123456789abcdef"
+	entry := &stdioSession{
+		id: id, kind: "terminal", ownerID: owner.PrincipalID,
+		ownerClass: owner.PrincipalClass, workspace: owner.Workspace,
+		stdin: writer, terminal: &tmuxTerminalState{},
+	}
+	if err := s.sessions.reserve(entry); err != nil {
+		t.Fatal(err)
+	}
+	defer s.sessions.remove(entry)
+	owner.Action, owner.SessionID = "terminal_write", id
+
+	commandOne, commandTwo := "send-keys -t term:0.0 -H 61", "send-keys -t term:0.0 -H 62"
+	observed := make(chan []string, 1)
+	go func() {
+		input := bufio.NewReader(reader)
+		var commands []string
+		for i := 0; i < 2; i++ {
+			command, err := input.ReadString('\n')
+			if err != nil {
+				observed <- commands
+				return
+			}
+			commands = append(commands, strings.TrimSuffix(command, "\n"))
+			entry.mu.Lock()
+			if i == 0 {
+				entry.terminal.accept([]byte("%begin 1 2 3\n%end 1 2 3\n"))
+			} else {
+				entry.terminal.accept([]byte("%begin 2 2 3\n%error 2 2 3\n"))
+			}
+			entry.mu.Unlock()
+		}
+		observed <- commands
+	}()
+	err = s.terminalCommands(owner, entry, []string{commandOne, commandTwo})
+	if err == nil || !strings.Contains(err.Error(), "after 1 of 2 tmux chunks acknowledged") {
+		t.Fatalf("partially sent input incorrectly acknowledged: %v", err)
+	}
+	select {
+	case cmds := <-observed:
+		if len(cmds) != 2 || cmds[0] != commandOne || cmds[1] != commandTwo {
+			t.Fatalf("fragment order changed or retried: %q", cmds)
+		}
+	case <-time.After(time.Second):
+		t.Fatal("fixture did not receive bounded terminal commands")
+	}
+}
+
+func TestWorkerTmuxLongPasteByteIntegrity(t *testing.T) {
+	bin := os.Getenv("ASA_TEST_TMUX_BIN")
+	if bin == "" {
+		t.Skip("requires disposable isolated tmux fixture, not an occupied installed Agent")
+	}
+	s, owner, _ := testStdioBroker(t)
+	s.terminalBinary = bin
+	owner.Action = "terminal_open"
+	owner.Columns, owner.Rows = 80, 24
+	opened := s.terminalAction(owner)
+	if !opened.OK {
+		t.Fatalf("open: %+v", opened)
+	}
+	owner.SessionID, owner.SessionEpoch = opened.SessionID, opened.SessionEpoch
+	t.Cleanup(func() {
+		closeReq := owner
+		closeReq.Action = "terminal_close"
+		_ = s.terminalAction(closeReq)
+	})
+
+	readReq := owner
+	readReq.Action = "terminal_read"
+	readReq.Limit = 8192
+	var cursor uint64
+	await := func(wants ...string) {
+		t.Helper()
+		deadline := time.Now().Add(8 * time.Second)
+		var output []byte
+		for time.Now().Before(deadline) {
+			readReq.Cursor = cursor
+			got := s.terminalAction(readReq)
+			if !got.OK {
+				t.Fatalf("terminal read: %+v", got)
+			}
+			cursor = got.NextCursor
+			part, err := base64.StdEncoding.DecodeString(got.Output)
+			if err != nil {
+				t.Fatal(err)
+			}
+			output = append(output, part...)
+			for _, want := range wants {
+				if bytes.Contains(output, []byte(want)) {
+					return
+				}
+			}
+			time.Sleep(15 * time.Millisecond)
+		}
+		t.Fatalf("none of %q found in bounded terminal output %q", wants, output)
+	}
+	send := func(content string) Response {
+		t.Helper()
+		req := owner
+		req.Action, req.Content = "terminal_write", content
+		return s.terminalAction(req)
+	}
+	// A noncanonical, no-echo reader consumes the full 64 KiB per-call
+	// budget directly from the PTY, not a shell's 4 KiB canonical line.
+	const n = 64 << 10
+	if resp := send("stty -echo\n"); !resp.OK {
+		t.Fatalf("disable terminal echo: %+v", resp)
+	}
+	command := fmt.Sprintf("stty -icanon min 1 time 0; printf PASTE_READY; head -c %d | sha256sum; stty sane\n", n)
+	if resp := send(command); !resp.OK {
+		t.Fatalf("reader setup: %+v", resp)
+	}
+	await("PASTE_READY")
+	payload := strings.Repeat("abCD0123", n/8)
+	hash := sha256.Sum256([]byte(payload))
+	if resp := send(payload); !resp.OK {
+		t.Fatalf("long paste: %+v", resp)
+	}
+	await(fmt.Sprintf("%x", hash))
+	// Concurrent long writes must remain contiguous as complete batches:
+	// otherwise 4 KiB fragments from different writers can interleave.
+	const concurrentBytes = 12 << 10
+	if resp := send("stty -echo\n"); !resp.OK {
+		t.Fatalf("disable terminal echo before concurrent input: %+v", resp)
+	}
+	if resp := send(fmt.Sprintf("stty -icanon min 1 time 0; printf PASTE_READY2; head -c %d | sha256sum; stty sane\n", 2*concurrentBytes)); !resp.OK {
+		t.Fatalf("concurrent reader setup: %+v", resp)
+	}
+	await("PASTE_READY2")
+	first := strings.Repeat("ABcd1234", concurrentBytes/8)
+	second := strings.Repeat("xyZW9876", concurrentBytes/8)
+	start := make(chan struct{})
+	answers := make(chan Response, 2)
+	for _, part := range []string{first, second} {
+		go func(data string) {
+			<-start
+			answers <- send(data)
+		}(part)
+	}
+	close(start)
+	for range 2 {
+		if response := <-answers; !response.OK {
+			t.Fatalf("concurrent terminal write: %+v", response)
+		}
+	}
+	sumFirst := sha256.Sum256([]byte(first + second))
+	sumSecond := sha256.Sum256([]byte(second + first))
+	await(fmt.Sprintf("%x", sumFirst), fmt.Sprintf("%x", sumSecond))
+	// No silent partial acknowledgement for an oversized input request.
+	if resp := send(strings.Repeat("x", terminalMaxInput+1)); resp.OK || resp.ErrorCode != "invalid_input" {
+		t.Fatalf("oversized paste was accepted or falsely claimed: %+v", resp)
+	}
+}
 
 func TestTmuxControlModeDecoderAndBounds(t *testing.T) {
 	b, err := decodeTmuxOutput(`test\015\012\033[31m`)

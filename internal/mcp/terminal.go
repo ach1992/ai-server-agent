@@ -35,7 +35,7 @@ type TerminalWriteInput struct {
 	Approval     bool   `json:"approval,omitempty" jsonschema:"Explicit approval for root-mode terminal operation; always false for worker"`
 	Workspace    string `json:"workspace" jsonschema:"Exact workspace used when the terminal was opened"`
 	SessionID    string `json:"session_id" jsonschema:"Opaque session identity"`
-	Content      string `json:"content" jsonschema:"Literal terminal input (including newline or control bytes), max 4096 UTF-8 bytes"`
+	Content      string `json:"content" jsonschema:"Literal terminal input including control bytes; max 65536 UTF-8 bytes per call, delivered in ordered bounded tmux chunks; on uncertain failure inspect state before retry"`
 }
 type TerminalResizeInput struct {
 	SessionEpoch string `json:"session_epoch,omitempty" jsonschema:"Per-attachment output/control epoch from terminal_open/reconnect; reject stale epochs after executor restart"`
@@ -69,7 +69,7 @@ func (s *Server) registerTerminalTools() {
 		return s.responseResult(resp)
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-		Name: "terminal_write", Description: "Send literal input to an existing PTY across MCP calls. Acknowledgement does not prove command success; inspect terminal_read.",
+		Name: "terminal_write", Description: "Send up to 64 KiB literal input to an existing PTY in ordered bounded chunks; acknowledgements do not prove foreground consumption. On partial/unknown failure inspect state before any retry.",
 		Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, input TerminalWriteInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "terminal_write", Workspace: input.Workspace, SessionID: input.SessionID, Root: input.Root, Approval: input.Approval, SessionEpoch: input.SessionEpoch, Content: input.Content})
