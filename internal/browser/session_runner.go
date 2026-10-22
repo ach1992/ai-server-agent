@@ -17,8 +17,17 @@ func managedSessionRunner(engine, profile, downloads string, ignoreHTTPS bool, m
 	if len(modes) > 0 {
 		mode = modes[0]
 	}
+	return managedSessionRunnerWithSandbox(engine, profile, downloads, ignoreHTTPS, mode, false)
+}
+
+// Chromium's Linux sandbox is opt-in for isolated managed sessions until
+// supported-host namespace and AppArmor compatibility is established.
+func managedSessionRunnerWithSandbox(engine, profile, downloads string, ignoreHTTPS bool, mode string, chromiumSandbox bool) (string, error) {
 	if _, err := normalizeProfileMode(mode); err != nil {
 		return "", err
+	}
+	if chromiumSandbox && mode != "isolated" {
+		return "", errors.New("Chromium sandbox requires isolated Browser profile")
 	}
 	if !filepath.IsAbs(engine) || !filepath.IsAbs(profile) || !filepath.IsAbs(downloads) ||
 		filepath.Clean(engine) != engine || filepath.Clean(profile) != profile || filepath.Clean(downloads) != downloads {
@@ -43,6 +52,7 @@ const profile = %s;
 const downloads = %s;
 const flowTemplate = %s;
 const profileMode = %s;
+const chromiumSandbox = %t;
 const state = { refs: new Map(), sequence: 0 };
 // One short-lived, principal/session-bound ZIP slot. Playwright writes into a
 // private directory; retain one pinned read-only fd, NOT the whole ZIP in RAM.
@@ -141,15 +151,30 @@ const privateProfileSafe = () => {
 let context;
 try {
   context = await chromium.launchPersistentContext(isolatedProfile || profile, {
-    headless: true, ignoreHTTPSErrors: %t, acceptDownloads: false, downloadsPath: downloads,
+    headless: true, ignoreHTTPSErrors: %t, chromiumSandbox, acceptDownloads: false, downloadsPath: downloads,
     args: ['--disk-cache-size=67108864', '--media-cache-size=33554432']
   });
 } catch (error) {
+  // A requested OS sandbox is never silently retried with --no-sandbox.
+  // Emit only a bounded stable reason; raw Chromium stderr remains private.
+  if (chromiumSandbox) process.stdout.write('ASA_BROWSER_SESSION ' +
+    JSON.stringify({event:'startup_error',reason:'browser_sandbox_unavailable'}) + '\n');
   cleanupProfile();
   throw error;
 }
 const browser = context.browser();
 const page = context.pages()[0] || await context.newPage();
+if (chromiumSandbox) {
+  // Force a real renderer before the root Executor verifies namespace/seccomp.
+  try { await page.evaluate(() => true); }
+  catch (error) {
+    process.stdout.write('ASA_BROWSER_SESSION ' +
+      JSON.stringify({event:'startup_error',reason:'browser_sandbox_unavailable'}) + '\n');
+    await context.close();
+    cleanupProfile();
+    throw error;
+  }
+}
 // Bounded persistent sessions need the same filesystem safety reserve as
 // browser_run, including while a page is busy between client calls.
 let diskPressure = false;
@@ -377,5 +402,5 @@ try {
   cleanupProfile();
   process.exit(0);
 }
-`, items[3], items[0], items[1], items[2], items[4], items[5], ignoreHTTPS), nil
+`, items[3], items[0], items[1], items[2], items[4], items[5], chromiumSandbox, ignoreHTTPS), nil
 }

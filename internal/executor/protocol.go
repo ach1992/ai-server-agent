@@ -14,6 +14,7 @@ type Request struct {
 	ApprovalID         string              `json:"approval_id,omitempty"`
 	AuditAction        string              `json:"audit_action,omitempty"`
 	BrowserProfileMode string              `json:"browser_profile_mode,omitempty"`
+	BrowserSandbox     bool                `json:"browser_chromium_sandbox,omitempty"`
 	PrincipalID        string              `json:"principal_id,omitempty"`
 	PrincipalClass     string              `json:"principal_class,omitempty"`
 	PrincipalName      string              `json:"principal_name,omitempty"`

@@ -386,6 +386,9 @@ func (s *Server) browserSessionOpen(ctx context.Context, req Request) Response {
 	if !valid {
 		return browserSessionError("invalid_browser_profile_mode", "validation", errors.New("profile mode must be shared or isolated"))
 	}
+	if req.BrowserSandbox && mode != "isolated" {
+		return browserSessionError("browser_sandbox_requires_isolated_profile", "validation", errors.New("Chromium OS sandbox is only available for isolated managed Browser sessions"))
+	}
 	// CI's private fake-executable fixtures do not provision host accounts.
 	// Installed Executor instances always have the configured Agent identity,
 	// and MUST prove the dedicated Browser account/state before admission.
@@ -504,18 +507,34 @@ func (s *Server) browserSessionOpen(ctx context.Context, req Request) Response {
 	readyCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	reply, err := s.browserSessionReadFrame(readyCtx, req, entry.browser, id, "")
-	if err != nil || reply.Event != "ready" {
-		// Never automatically retry launch, and do not release profile until
-		// the exact process-group cleanup is proved.
+	// A failure must never leave a falsely released reservation or a child
+	// running after an unsuccessful sandbox request. Close uses the existing
+	// verified whole-cgroup stop and exact scratch reclamation.
+	failedStart := func(code, class, message string) Response {
 		cleanup := s.browserSessionClose(Request{Action: "browser_session_close", PrincipalID: req.PrincipalID, PrincipalClass: req.PrincipalClass, Workspace: req.Workspace, SessionID: id, RequestID: req.RequestID})
-		resp := browserSessionError("browser_session_start_failed", "runtime", errors.New("Browser worker did not report a bounded ready handshake"))
+		resp := browserSessionError(code, class, errors.New(message))
 		if !cleanup.OK {
 			resp.SessionID = id
 			resp.Status = "cleanup_unverified"
 		}
 		return resp
 	}
-	return Response{OK: true, Status: "ready", SessionID: id, OutputEncoding: "json", Output: `{"scope":"authenticated_principal_and_workspace","refs":"cross_call_until_navigation_or_next_snapshot","reconnect":"same_executor_lifetime","ttl_seconds":3600}`}
+	if req.BrowserSandbox && err == nil && reply.Event == "startup_error" && reply.Reason == "browser_sandbox_unavailable" {
+		return failedStart("browser_sandbox_unavailable", "dependency", "Chromium OS sandbox launch failed. Check unprivileged user namespaces, seccomp and the pinned Chromium binary's AppArmor userns policy; no unsandboxed retry was attempted")
+	}
+	if err != nil || reply.Event != "ready" {
+		return failedStart("browser_session_start_failed", "runtime", "Browser worker did not report a bounded ready handshake")
+	}
+	if req.BrowserSandbox {
+		if verifyErr := s.verifyManagedBrowserSandbox(entry); verifyErr != nil {
+			return failedStart("browser_sandbox_unverified", "security", "Chromium OS sandbox enforcement could not be proven; check renderer seccomp-BPF, separate user/PID namespaces and host policy: "+verifyErr.Error())
+		}
+	}
+	output := `{"scope":"authenticated_principal_and_workspace","refs":"cross_call_until_navigation_or_next_snapshot","reconnect":"same_executor_lifetime","ttl_seconds":3600}`
+	if req.BrowserSandbox {
+		output = `{"scope":"authenticated_principal_and_workspace","refs":"cross_call_until_navigation_or_next_snapshot","reconnect":"same_executor_lifetime","ttl_seconds":3600,"chromium_sandbox":"verified_at_start"}`
+	}
+	return Response{OK: true, Status: "ready", SessionID: id, OutputEncoding: "json", Output: output}
 }
 
 type browserSessionFrame struct {
@@ -552,7 +571,7 @@ func (s *Server) browserSessionReadFrame(ctx context.Context, req Request, state
 			return browserSessionFrame{}, true, errors.New("browser_session_invalid_json")
 		}
 		if nonce == "" {
-			if frame.Event != "ready" {
+			if frame.Event != "ready" && (frame.Event != "startup_error" || frame.Reason != "browser_sandbox_unavailable") {
 				return browserSessionFrame{}, true, errors.New("browser_session_not_ready")
 			}
 		} else if frame.Nonce != nonce || (frame.Event != "result" && frame.Event != "error" &&

@@ -15,6 +15,7 @@ type BrowserSessionOpenInput struct {
 	ProfileMode       string `json:"profile_mode,omitempty" jsonschema:"shared (default) uses exclusive shared aiworker profile; isolated uses dedicated aibrowser OS identity, private ephemeral cookies/localStorage and no worker workspace access; ZIP traces require isolated"`
 	Workspace         string `json:"workspace" jsonschema:"Exact absolute worker workspace/worktree used to bind session authorization"`
 	IgnoreHTTPSErrors bool   `json:"ignore_https_errors,omitempty" jsonschema:"Explicit TLS validation exception for an isolated development site; default is secure HTTPS validation"`
+	ChromiumSandbox   bool   `json:"chromium_sandbox,omitempty" jsonschema:"Opt-in Linux Chromium namespace/seccomp sandbox, supported only with profile_mode=isolated; fails closed if unsupported or unverified. Default false for host compatibility."`
 }
 type BrowserSessionIDInput struct {
 	Workspace string `json:"workspace" jsonschema:"Exact workspace used when session was opened"`
@@ -45,8 +46,8 @@ type BrowserSessionFlowInput struct {
 }
 
 func (s *Server) registerBrowserSessionTools() {
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_open", Description: "Open a principal/workspace-bound Chromium session. Default shared uses the exclusive worker profile; isolated uses a dedicated Browser OS identity and private scratch without worker workspace file access. Trace ZIPs require isolated mode. session_id alone is not authorization; sessions survive client disconnects, not Executor restart.", Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionOpenInput) (*mcpsdk.CallToolResult, executor.Response, error) {
-		resp, err := s.browser.SessionOpen(ctx, browser.SessionOptions{Workspace: in.Workspace, IgnoreHTTPSErrors: in.IgnoreHTTPSErrors, ProfileMode: in.ProfileMode})
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_open", Description: "Open a principal/workspace-bound Chromium session. Default shared uses the exclusive worker profile; isolated uses a dedicated Browser OS identity and private scratch without worker workspace file access. Trace ZIPs require isolated mode. chromium_sandbox=true explicitly requests verified Chromium OS sandboxing only for isolated sessions; incompatible hosts fail closed (user namespaces, seccomp, AppArmor). Default off; shared Browser unchanged. session_id alone is not authorization; sessions survive client disconnects, not Executor restart.", Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionOpenInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+		resp, err := s.browser.SessionOpen(ctx, browser.SessionOptions{Workspace: in.Workspace, IgnoreHTTPSErrors: in.IgnoreHTTPSErrors, ProfileMode: in.ProfileMode, ChromiumSandbox: in.ChromiumSandbox})
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
