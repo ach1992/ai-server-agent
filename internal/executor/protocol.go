@@ -93,6 +93,11 @@ type Response struct {
 	OutputEncoding      string                     `json:"output_encoding"`
 	MIMEType            string                     `json:"mime_type,omitempty"`
 	CaptureQuality      int                        `json:"capture_quality,omitempty"`
+	RegionVerified      bool                       `json:"capture_region_verified,omitempty"`
+	CaptureCropX        int                        `json:"capture_crop_x,omitempty"`
+	CaptureCropY        int                        `json:"capture_crop_y,omitempty"`
+	CaptureWidth        int                        `json:"capture_width,omitempty"`
+	CaptureHeight       int                        `json:"capture_height,omitempty"`
 	BytesSeen           int64                      `json:"bytes_seen"`
 	BytesReturned       int64                      `json:"bytes_returned"`
 	Truncated           bool                       `json:"truncated"`

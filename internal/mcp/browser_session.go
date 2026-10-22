@@ -26,7 +26,10 @@ type BrowserSessionCaptureInput struct {
 	SessionID      string `json:"session_id" jsonschema:"Principal-bound Browser session identity from browser_session_open"`
 	Quality        int    `json:"quality,omitempty" jsonschema:"JPEG quality 15..70, default 40; with fit_quality=true this is the maximum permitted quality"`
 	FitQuality     bool   `json:"fit_quality,omitempty" jsonschema:"Optional, default false: try at most three decreasing JPEG qualities in one bounded capture if over 32 KiB; preserves requested viewport crop and reports actual capture_quality; if all fail, returns too_large"`
-	MaxWidth       int    `json:"max_width,omitempty" jsonschema:"Optional left-edge viewport crop width 320..1024 CSS pixels, default 640, height at most 720; this crops rather than resizes the current viewport"`
+	MaxWidth       int    `json:"max_width,omitempty" jsonschema:"Optional viewport crop width 320..1024 CSS pixels (default 640), never rescaled"`
+	MaxHeight      int    `json:"max_height,omitempty" jsonschema:"Optional viewport crop height 1..720 CSS pixels (default 720); smaller regions help fit detailed pages within 32 KiB"`
+	CropX          int    `json:"crop_x,omitempty" jsonschema:"Optional nonnegative viewport-relative left offset in CSS pixels, default 0; must be inside the current viewport"`
+	CropY          int    `json:"crop_y,omitempty" jsonschema:"Optional nonnegative viewport-relative top offset in CSS pixels, default 0; must be inside the current viewport"`
 	Representation string `json:"representation,omitempty" jsonschema:"image (default): typed MCP image with small text metadata; base64: text-visible JPEG only when raw capture <=16 KiB, otherwise explicit too_large error"`
 }
 
@@ -61,12 +64,12 @@ func (s *Server) registerBrowserSessionTools() {
 		}
 		return s.responseResult(resp)
 	})
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_capture", Description: "Capture a viewport JPEG, max 1024x720 pixels and 32 KiB raw. fit_quality=true tries up to three bounded lower JPEG qualities without shrinking the selected crop, and returns actual capture_quality. Default unchanged. Typed image or <=16 KiB base64 text fallback; reduce max_width if still too_large. Returns SHA256; sensitive image is never stored as a file.", Annotations: annotations(true, false, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionCaptureInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_capture", Description: "Capture a viewport JPEG, max 1024x720 pixels and 32 KiB raw. fit_quality=true tries at most three lower qualities. Optional crop_x/crop_y/max_height select a bounded viewport region (no resizing, no full-page image); unsupported older runners/Executors explicitly refuse regions. Defaults unchanged. Typed image or <=16 KiB base64 text fallback; reduce max_width if still too_large. Returns SHA256; sensitive image is never stored as a file.", Annotations: annotations(true, false, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionCaptureInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		if in.Representation != "" && in.Representation != "image" && in.Representation != "base64" {
 			resp := executor.Response{Error: "representation must be image or base64", ErrorCode: "invalid_browser_capture", ErrorClass: "validation"}
 			return s.responseResult(resp)
 		}
-		resp, err := s.browser.SessionCapture(ctx, browser.SessionOptions{Workspace: in.Workspace, SessionID: in.SessionID, CaptureQuality: in.Quality, CaptureMaxWidth: in.MaxWidth, CaptureFitQuality: in.FitQuality})
+		resp, err := s.browser.SessionCapture(ctx, browser.SessionOptions{Workspace: in.Workspace, SessionID: in.SessionID, CaptureQuality: in.Quality, CaptureMaxWidth: in.MaxWidth, CaptureMaxHeight: in.MaxHeight, CaptureCropX: in.CropX, CaptureCropY: in.CropY, CaptureFitQuality: in.FitQuality})
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}
@@ -91,6 +94,9 @@ func (s *Server) registerBrowserSessionTools() {
 		meta.Output = ""
 		meta.OutputEncoding = "none"
 		summary := fmt.Sprintf("Browser JPEG screenshot captured: %d bytes, %s, quality=%d, digest %s. If no image is visible in this client, retry with representation=base64, quality=15 and max_width=320 (text-only cap 16 KiB). No persistent artifact was created.", len(raw), resp.MIMEType, resp.CaptureQuality, resp.FileVersion)
+		if resp.RegionVerified {
+			summary = fmt.Sprintf("Browser viewport region x=%d,y=%d,width=%d,height=%d; %s", resp.CaptureCropX, resp.CaptureCropY, resp.CaptureWidth, resp.CaptureHeight, summary)
+		}
 		return &mcpsdk.CallToolResult{Content: []mcpsdk.Content{&mcpsdk.TextContent{Text: summary}, &mcpsdk.ImageContent{Data: raw, MIMEType: "image/jpeg"}}}, meta, nil
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_trace", Description: "Only for isolated Browser sessions: record one flow to an OS-private ZIP (max 16 MiB on disk), read SHA256-pinned base64 windows (8192 raw bytes per call; up to 8192 finite reads per session, separately from 128 Browser actions), or discard. Recording may change the page: never replay uncertain actions. The ZIP is retained only within the Browser session; no public URL or whole-ZIP memory copy.", Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionTraceInput) (*mcpsdk.CallToolResult, executor.Response, error) {

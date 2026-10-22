@@ -331,6 +331,7 @@ type browserStdioState struct {
 	partial             []byte
 	uncertain           bool
 	fitQualitySupported bool // advertised at ready by newer Agent-provided runners
+	regionSupported     bool // advertised at ready by region-aware runners
 }
 
 const (
@@ -528,6 +529,7 @@ func (s *Server) browserSessionOpen(ctx context.Context, req Request) Response {
 	}
 	entry.browser.mu.Lock()
 	entry.browser.fitQualitySupported = reply.FitQuality
+	entry.browser.regionSupported = reply.CaptureRegion
 	entry.browser.mu.Unlock()
 	if req.BrowserSandbox {
 		if verifyErr := s.verifyManagedBrowserSandbox(entry); verifyErr != nil {
@@ -542,20 +544,22 @@ func (s *Server) browserSessionOpen(ctx context.Context, req Request) Response {
 }
 
 type browserSessionFrame struct {
-	Event       string          `json:"event"`
-	Nonce       string          `json:"nonce,omitempty"`
-	Reason      string          `json:"reason,omitempty"`
-	Result      json.RawMessage `json:"result,omitempty"`
-	Mime        string          `json:"mime,omitempty"`
-	FitQuality  bool            `json:"fit_quality,omitempty"`
-	Quality     json.RawMessage `json:"quality,omitempty"` // missing vs explicit zero/null matters for legacy compatibility
-	Size        int             `json:"size,omitempty"`
-	SHA256      string          `json:"sha256,omitempty"`
-	Parts       int             `json:"parts,omitempty"`
-	Index       int             `json:"index,omitempty"`
-	Data        string          `json:"data,omitempty"`
-	Offset      int64           `json:"offset,omitempty"`
-	ChunkSHA256 string          `json:"chunk_sha256,omitempty"`
+	Event         string          `json:"event"`
+	Nonce         string          `json:"nonce,omitempty"`
+	Reason        string          `json:"reason,omitempty"`
+	Result        json.RawMessage `json:"result,omitempty"`
+	Mime          string          `json:"mime,omitempty"`
+	FitQuality    bool            `json:"fit_quality,omitempty"`
+	CaptureRegion bool            `json:"capture_region,omitempty"`
+	Region        json.RawMessage `json:"region,omitempty"`
+	Quality       json.RawMessage `json:"quality,omitempty"` // missing vs explicit zero/null matters for legacy compatibility
+	Size          int             `json:"size,omitempty"`
+	SHA256        string          `json:"sha256,omitempty"`
+	Parts         int             `json:"parts,omitempty"`
+	Index         int             `json:"index,omitempty"`
+	Data          string          `json:"data,omitempty"`
+	Offset        int64           `json:"offset,omitempty"`
+	ChunkSHA256   string          `json:"chunk_sha256,omitempty"`
 }
 
 // The same broker event ring/cursor used by LSP/DAP is the sole output owner.

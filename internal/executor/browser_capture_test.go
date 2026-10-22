@@ -53,6 +53,9 @@ func makeCaptureScript(t *testing.T, raw []byte, mode string) string {
 		quality = 39 // below 40 but not one of 40, 27, 15
 	}
 	ready := `{"event":"ready","fit_quality":true}`
+	if strings.HasPrefix(mode, "region_") {
+		ready = `{"event":"ready","fit_quality":true,"capture_region":true}`
+	}
 	if mode == "legacy_meta" || mode == "legacy_zero_quality" || mode == "legacy_null_quality" {
 		ready = `{"event":"ready"}` // exact pre-feature readiness protocol
 	}
@@ -63,6 +66,24 @@ func makeCaptureScript(t *testing.T, raw []byte, mode string) string {
 		qualityField = `,"quality":0`
 	} else if mode == "legacy_null_quality" {
 		qualityField = `,"quality":null`
+	}
+	region := ""
+	if mode == "region_valid" {
+		region = `,"region":{"x":8,"y":10,"width":48,"height":36,"viewport_width":56,"viewport_height":46}`
+	} else if mode == "region_wrong_rect" {
+		region = `,"region":{"x":9,"y":10,"width":48,"height":36,"viewport_width":56,"viewport_height":46}`
+	} else if mode == "region_unrequested" {
+		region = `,"region":{"x":0,"y":0,"width":48,"height":36,"viewport_width":56,"viewport_height":46}`
+	}
+	if mode == "region_outside_viewport" {
+		return fmt.Sprintf(`#!/bin/sh
+printf 'ASA_BROWSER_SESSION %s\n'
+while IFS= read -r line; do
+  case "$line" in *'"type":"close"'*) exit 0;; esac
+  nonce=$(printf '%%s' "$line" | sed -n 's/.*"nonce":"\([0-9a-f]*\)".*/\1/p')
+  printf 'ASA_BROWSER_SESSION {"event":"error","nonce":"%%s","reason":"capture_invalid_region"}\n' "$nonce"
+done
+`, ready)
 	}
 	if mode == "wrong_index" {
 		return fmt.Sprintf(`#!/bin/sh
@@ -90,11 +111,11 @@ printf 'ASA_BROWSER_SESSION %s\n'
 while IFS= read -r line; do
   case "$line" in *'"type":"close"'*) exit 0;; esac
   nonce=$(printf '%%s' "$line" | sed -n 's/.*"nonce":"\([0-9a-f]*\)".*/\1/p')
-  printf 'ASA_BROWSER_SESSION {"event":"capture_meta","nonce":"%%s","mime":"image/jpeg"%s,"size":%d,"sha256":"%s","parts":1}\n' "$nonce"
+  printf 'ASA_BROWSER_SESSION {"event":"capture_meta","nonce":"%%s","mime":"image/jpeg"%s,"size":%d,"sha256":"%s","parts":1%s}\n' "$nonce"
   printf 'ASA_BROWSER_SESSION {"event":"capture_part","nonce":"%%s","index":0,"data":"%s"}\n' "$nonce"
   printf 'ASA_BROWSER_SESSION {"event":"capture_done","nonce":"%%s"}\n' "$nonce"
 done
-`, ready, qualityField, len(raw), sha, b64)
+`, ready, qualityField, len(raw), sha, region, b64)
 }
 
 func openCaptureFixture(t *testing.T, mode string) (*Server, Request, string, []byte) {
@@ -354,4 +375,93 @@ func TestBrowserSessionCaptureKnownTooLargeDoesNotPoisonSession(t *testing.T) {
 			t.Fatalf("known bounded screenshot refusal %d: %+v", i, got)
 		}
 	}
+}
+
+// Viewport selection is an opt-in extension of the existing authenticated
+// Browser capture path. It must not be silently ignored by a legacy runner.
+func TestBrowserSessionCaptureRegionStrictAndLegacyRunner(t *testing.T) {
+	requestJSON := `{"quality":40,"max_width":640,"crop_x":8,"crop_y":10,"max_height":64}`
+	t.Run("legacy_refused_without_poisoning", func(t *testing.T) {
+		s, owner, id, _ := openCaptureFixture(t, "")
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		defer func() { _ = s.browserSessionAction(ctx, browserOwnerControl(owner, id, "browser_session_close")) }()
+		req := browserCaptureRequest(owner, id)
+		req.Content = requestJSON
+		got := s.browserSessionAction(ctx, req)
+		if got.OK || got.ErrorCode != "browser_capture_region_unavailable" || got.Status != "not_captured" || got.Output != "" {
+			t.Fatalf("legacy runner silently accepted region: %+v", got)
+		}
+		if old := s.browserSessionAction(ctx, browserCaptureRequest(owner, id)); !old.OK || old.RegionVerified {
+			t.Fatalf("known unsupported region poisoned old one-shot: %+v", old)
+		}
+	})
+	t.Run("verified_offset_and_dimensions", func(t *testing.T) {
+		s, owner, id, raw := openCaptureFixture(t, "region_valid")
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		defer func() { _ = s.browserSessionAction(ctx, browserOwnerControl(owner, id, "browser_session_close")) }()
+		req := browserCaptureRequest(owner, id)
+		req.Content = requestJSON
+		got := s.browserSessionAction(ctx, req)
+		data, err := base64.StdEncoding.Strict().DecodeString(got.Output)
+		if !got.OK || !got.RegionVerified || got.CaptureCropX != 8 || got.CaptureCropY != 10 ||
+			got.CaptureWidth != 48 || got.CaptureHeight != 36 || err != nil || !bytes.Equal(data, raw) {
+			t.Fatalf("selected bounded viewport not verified: %+v decode=%v", got, err)
+		}
+		for _, bad := range []string{
+			`{"quality":40,"max_width":640,"crop_x":-1,"crop_y":10,"max_height":64}`,
+			`{"quality":40,"max_width":640,"crop_x":8,"crop_y":10,"max_height":721}`,
+			`{"quality":40,"max_width":640,"crop_x":8,"crop_y":10}`,
+			`{"quality":40,"max_width":640,"crop_x":8,"crop_y":10,"max_height":64,"foreign":1}`,
+		} {
+			req.Content = bad
+			if refused := s.browserSessionAction(ctx, req); refused.OK || refused.ErrorCode != "invalid_browser_capture" {
+				t.Fatalf("invalid region accepted or poisoned: %+v", refused)
+			}
+		}
+		req.Content = requestJSON
+		if next := s.browserSessionAction(ctx, req); !next.OK {
+			t.Fatalf("invalid input poisoned valid Browser region: %+v", next)
+		}
+	})
+	t.Run("known_outside_viewport_refused_without_uncertainty", func(t *testing.T) {
+		s, owner, id, _ := openCaptureFixture(t, "region_outside_viewport")
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		defer func() { _ = s.browserSessionAction(ctx, browserOwnerControl(owner, id, "browser_session_close")) }()
+		req := browserCaptureRequest(owner, id)
+		req.Content = requestJSON
+		got := s.browserSessionAction(ctx, req)
+		if got.OK || got.ErrorCode != "browser_capture_invalid_region" || got.Status != "not_captured" || got.Output != "" {
+			t.Fatalf("known out-of-viewport region not classified: %+v", got)
+		}
+		if status := s.browserSessionAction(ctx, browserOwnerControl(owner, id, "browser_session_status")); !status.OK || status.Status != "running" {
+			t.Fatalf("known region input rejection poisoned Browser session: %+v", status)
+		}
+	})
+	t.Run("wrong_rectangle_retains_uncertain_owner", func(t *testing.T) {
+		s, owner, id, _ := openCaptureFixture(t, "region_wrong_rect")
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		defer func() { _ = s.browserSessionAction(ctx, browserOwnerControl(owner, id, "browser_session_close")) }()
+		req := browserCaptureRequest(owner, id)
+		req.Content = requestJSON
+		got := s.browserSessionAction(ctx, req)
+		if got.OK || got.ErrorCode != "browser_session_action_uncertain" || got.Output != "" {
+			t.Fatalf("unverified rectangle delivered pixels: %+v", got)
+		}
+		if next := s.browserSessionAction(ctx, req); next.OK || next.ErrorCode != "browser_session_uncertain" {
+			t.Fatalf("unverified region silently replayed: %+v", next)
+		}
+	})
+	t.Run("unrequested_region_is_not_trusted", func(t *testing.T) {
+		s, owner, id, _ := openCaptureFixture(t, "region_unrequested")
+		ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
+		defer cancel()
+		defer func() { _ = s.browserSessionAction(ctx, browserOwnerControl(owner, id, "browser_session_close")) }()
+		if got := s.browserSessionAction(ctx, browserCaptureRequest(owner, id)); got.OK || got.ErrorCode != "browser_session_action_uncertain" {
+			t.Fatalf("unsolicited viewport metadata accepted: %+v", got)
+		}
+	})
 }

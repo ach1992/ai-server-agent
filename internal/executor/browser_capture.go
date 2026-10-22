@@ -25,6 +25,21 @@ type browserCaptureParams struct {
 	Quality    int  `json:"quality"`
 	MaxWidth   int  `json:"max_width"`
 	FitQuality bool `json:"fit_quality"`
+	CropX      int  `json:"crop_x"`
+	CropY      int  `json:"crop_y"`
+	MaxHeight  int  `json:"max_height"`
+}
+
+// Only explicit opt-in uses these fields; legacy screenshots preserve their
+// original wire and dimensional contract. A region is bounded to the actual
+// current viewport, with no implicit full-page capture or silent rescaling.
+type browserCaptureRegion struct {
+	X              int `json:"x"`
+	Y              int `json:"y"`
+	Width          int `json:"width"`
+	Height         int `json:"height"`
+	ViewportWidth  int `json:"viewport_width"`
+	ViewportHeight int `json:"viewport_height"`
 }
 
 // Screenshot is an opt-in visual read of the same authenticated Browser
@@ -47,6 +62,11 @@ func (s *Server) browserSessionCapture(ctx context.Context, req Request) Respons
 	if dec.Decode(&p) != nil || dec.Decode(new(any)) != io.EOF || p.Quality < 15 || p.Quality > 70 || p.MaxWidth < 320 || p.MaxWidth > 1024 {
 		return browserSessionError("invalid_browser_capture", "validation", errors.New("quality 15..70 and max_width 320..1024 required"))
 	}
+	regionRequested := p.CropX != 0 || p.CropY != 0 || p.MaxHeight != 0
+	if p.CropX < 0 || p.CropY < 0 ||
+		(regionRequested && (p.MaxHeight < 1 || p.MaxHeight > 720)) {
+		return browserSessionError("invalid_browser_capture", "validation", errors.New("crop_x/crop_y must be nonnegative and explicit max_height 1..720 required"))
+	}
 	state := entry.browser
 	if !state.mu.TryLock() {
 		return browserSessionBusy()
@@ -54,6 +74,13 @@ func (s *Server) browserSessionCapture(ctx context.Context, req Request) Respons
 	defer state.mu.Unlock()
 	if state.uncertain {
 		return browserSessionError("browser_session_uncertain", "state", errors.New("previous Browser action completion unknown; close first"))
+	}
+	if regionRequested && !state.regionSupported {
+		// A pre-upgrade runner would ignore the requested rectangle and send
+		// a successful top-left screenshot. Reject without writing to it.
+		resp := browserSessionError("browser_capture_region_unavailable", "compatibility", errors.New("Browser session runner does not support viewport region selection; reopen after upgrading the Agent"))
+		resp.SessionID, resp.Status = entry.id, "not_captured"
+		return resp
 	}
 	if p.FitQuality && !state.fitQualitySupported {
 		// A pre-upgrade runner ignores the new input flag and would otherwise
@@ -81,6 +108,10 @@ func (s *Server) browserSessionCapture(ctx context.Context, req Request) Respons
 	if p.FitQuality {
 		msg = fmt.Sprintf(`{"type":"capture","nonce":%q,"quality":%d,"max_width":%d,"fit_quality":true}`+"\n", nonce, p.Quality, p.MaxWidth)
 	}
+	if regionRequested {
+		msg = fmt.Sprintf(`{"type":"capture","nonce":%q,"quality":%d,"max_width":%d,"fit_quality":%t,"crop_x":%d,"crop_y":%d,"max_height":%d}`+"\n",
+			nonce, p.Quality, p.MaxWidth, p.FitQuality, p.CropX, p.CropY, p.MaxHeight)
+	}
 	if err = s.workerStdioWrite(req, entry.id, []byte(msg)); err != nil {
 		return uncertain()
 	}
@@ -98,6 +129,10 @@ func (s *Server) browserSessionCapture(ctx context.Context, req Request) Respons
 			code = "too_large"
 			class = "resource"
 			message = "Screenshot exceeds the 32 KiB raw-byte cap; reduce quality/max_width or use the advanced Browser workflow"
+		} else if start.Reason == "capture_invalid_region" && regionRequested {
+			code = "browser_capture_invalid_region"
+			class = "validation"
+			message = "Requested crop is outside the current Browser viewport; choose an in-viewport crop_x/crop_y"
 		} else if start.Reason != "capture_failed" {
 			return uncertain()
 		}
@@ -134,6 +169,25 @@ func (s *Server) browserSessionCapture(ctx context.Context, req Request) Respons
 	if _, err = hex.DecodeString(start.SHA256); err != nil {
 		return uncertain()
 	}
+	var selected browserCaptureRegion
+	if regionRequested {
+		if len(start.Region) == 0 || bytes.Equal(start.Region, []byte("null")) {
+			return uncertain()
+		}
+		dec := json.NewDecoder(bytes.NewReader(start.Region))
+		dec.DisallowUnknownFields()
+		if dec.Decode(&selected) != nil || dec.Decode(new(any)) != io.EOF ||
+			selected.ViewportWidth < 1 || selected.ViewportHeight < 1 ||
+			selected.X != p.CropX || selected.Y != p.CropY ||
+			selected.X >= selected.ViewportWidth || selected.Y >= selected.ViewportHeight ||
+			selected.Width != min(p.MaxWidth, selected.ViewportWidth-selected.X) ||
+			selected.Height != min(p.MaxHeight, selected.ViewportHeight-selected.Y) {
+			return uncertain()
+		}
+	} else if len(start.Region) > 0 {
+		// Non-opt-in responses must preserve the original known wire format.
+		return uncertain()
+	}
 	var b64 strings.Builder
 	b64.Grow(base64.StdEncoding.EncodedLen(start.Size))
 	for i := 0; i < start.Parts; i++ {
@@ -159,6 +213,9 @@ func (s *Server) browserSessionCapture(ctx context.Context, req Request) Respons
 	if err != nil || config.Width < 1 || config.Width > 2048 || config.Height < 1 || config.Height > 1440 {
 		return uncertain()
 	}
+	if regionRequested && (config.Width != selected.Width || config.Height != selected.Height) {
+		return uncertain() // SHA alone does not attest which viewport tile arrived.
+	}
 	// DecodeConfig validates only the JPEG headers/dimensions. A malicious or
 	// malfunctioning Browser worker can announce a matching SHA-256 for a
 	// truncated or corrupt scan, so the digest alone does not prove that an
@@ -176,5 +233,7 @@ func (s *Server) browserSessionCapture(ctx context.Context, req Request) Respons
 	}
 	return Response{OK: true, Status: "captured", SessionID: entry.id,
 		Output: b64.String(), OutputEncoding: "base64", MIMEType: "image/jpeg", CaptureQuality: actualQuality, BytesSeen: int64(len(payload)), BytesReturned: int64(len(payload)),
+		RegionVerified: regionRequested, CaptureCropX: selected.X, CaptureCropY: selected.Y,
+		CaptureWidth: selected.Width, CaptureHeight: selected.Height,
 		FileVersion: "sha256:" + start.SHA256}
 }
