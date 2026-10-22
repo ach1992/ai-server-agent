@@ -84,6 +84,60 @@ func (p browserSandboxProcess) confinedFrom(parent browserSandboxProcess, uid, g
 		p.pidNS != "" && parent.pidNS != "" && p.pidNS != parent.pidNS
 }
 
+// Chromium rewrites argv[0] into a space-delimited process title on some
+// Linux hosts (e.g. "chrome-headless-shell --type=renderer --headless=old").
+// Parse exact tokens from that title and from normal NUL-delimited argv;
+// never match arbitrary substrings inside unrelated argument values.
+func chromiumSandboxCommandFlags(cmdline []byte) (renderer, noSandbox bool) {
+	for i, raw := range bytes.Split(cmdline, []byte{0}) {
+		if len(raw) == 0 {
+			continue
+		}
+		var flags []string
+		if i == 0 {
+			fields := strings.Fields(string(raw))
+			if len(fields) > 1 {
+				flags = fields[1:] // omit executable name
+			}
+		} else {
+			flags = []string{string(raw)}
+		}
+		for _, flag := range flags {
+			if flag == "--type=renderer" {
+				renderer = true
+			}
+			if flag == "--no-sandbox" || strings.HasPrefix(flag, "--no-sandbox=") {
+				noSandbox = true
+			}
+		}
+	}
+	return renderer, noSandbox
+}
+
+// Attestation requires an executable from the pinned, root-owned Chromium
+// runtime. A differently owned process with spoofed argv, seccomp and
+// namespace values must not establish Chromium renderer enforcement.
+func pinnedChromiumExecutable(exe string) bool {
+	const root = "/opt/ai-server-agent/browser/browsers/"
+	if !strings.HasPrefix(exe, root) || filepath.Clean(exe) != exe {
+		return false
+	}
+	parts := strings.Split(strings.TrimPrefix(exe, root), "/")
+	if len(parts) != 3 {
+		return false
+	}
+	switch parts[2] {
+	case "chrome-headless-shell":
+		return strings.HasPrefix(parts[0], "chromium_headless_shell-") &&
+			strings.HasPrefix(parts[1], "chrome-headless-shell-")
+	case "chrome":
+		return strings.HasPrefix(parts[0], "chromium-") &&
+			strings.HasPrefix(parts[1], "chrome-")
+	default:
+		return false
+	}
+}
+
 // Only the original private cgroup is inspected. Never scan arbitrary host
 // processes to infer sandbox readiness from another browser. The Node PID is
 // the existing broker-pinned process, not a user-provided PID.
@@ -124,21 +178,19 @@ func (s *Server) verifyManagedBrowserSandbox(entry *stdioSession) error {
 			if readErr != nil {
 				continue
 			}
-			args := bytes.Split(cmdline, []byte{0})
-			renderer := false
-			for _, arg := range args {
-				if bytes.Equal(arg, []byte("--no-sandbox")) ||
-					bytes.HasPrefix(arg, []byte("--no-sandbox=")) {
-					return errors.New("Chromium disabled its sandbox despite the explicit request")
-				}
-				if bytes.Equal(arg, []byte("--type=renderer")) {
-					renderer = true
-				}
+			renderer, noSandbox := chromiumSandboxCommandFlags(cmdline)
+			if noSandbox {
+				return errors.New("Chromium disabled its sandbox despite the explicit request")
 			}
 			if !renderer {
 				continue
 			}
 			renderers++
+			exe, exeErr := os.Readlink(fmt.Sprintf("/proc/%d/exe", pid))
+			if exeErr != nil || !pinnedChromiumExecutable(exe) {
+				allEnforced = false
+				continue
+			}
 			proc, readErr := readBrowserSandboxProcess(pid)
 			if readErr != nil || !proc.confinedFrom(node, s.browserUID, s.browserGID) {
 				allEnforced = false

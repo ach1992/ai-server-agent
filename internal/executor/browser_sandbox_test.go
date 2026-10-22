@@ -52,6 +52,43 @@ func TestBrowserSandboxStatusParserAndEnforcement(t *testing.T) {
 	}
 }
 
+func TestChromiumSandboxProcessTitleAndPinnedBinary(t *testing.T) {
+	for _, tc := range []struct {
+		name, cmdline       string
+		renderer, noSandbox bool
+	}{
+		{"separate_flags", "chrome-headless-shell\x00--type=renderer\x00--headless=old\x00", true, false},
+		{"rewritten_argv0", "chrome-headless-shell --type=renderer --headless=old\x00/opt/chrome-headless-shell\x00", true, false},
+		{"rewritten_with_no_sandbox", "chrome-headless-shell --type=renderer --no-sandbox --headless\x00", true, true},
+		{"separate_no_sandbox", "chrome\x00--type=renderer\x00--no-sandbox=1\x00", true, true},
+		{"false_prefix", "chrome-headless-shell --type=renderer-extra --no-sandboxish\x00", false, false},
+		{"embedded_flag_in_unrelated_arg", "node\x00--input-type=module\x00const s='--type=renderer --no-sandbox'\x00", false, false},
+		{"no_flags", "chrome-headless-shell\x00--headless=old\x00", false, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			renderer, noSandbox := chromiumSandboxCommandFlags([]byte(tc.cmdline))
+			if renderer != tc.renderer || noSandbox != tc.noSandbox {
+				t.Fatalf("unexpected argv interpretation: renderer=%t noSandbox=%t", renderer, noSandbox)
+			}
+		})
+	}
+	for _, tc := range []struct {
+		path    string
+		trusted bool
+	}{
+		{"/opt/ai-server-agent/browser/browsers/chromium_headless_shell-1228/chrome-headless-shell-linux64/chrome-headless-shell", true},
+		{"/opt/ai-server-agent/browser/browsers/chromium-1228/chrome-linux64/chrome", true},
+		{"/tmp/chrome-headless-shell", false},
+		{"/opt/ai-server-agent/browser/browsers/chromium_headless_shell-1228/other/chrome", false},
+		{"/opt/ai-server-agent/browser/browsers/chromium_headless_shell-1228/chrome-headless-shell-linux64/chrome-headless-shell (deleted)", false},
+		{"/opt/ai-server-agent/browser/node/bin/node", false},
+	} {
+		if got := pinnedChromiumExecutable(tc.path); got != tc.trusted {
+			t.Errorf("pinned Chromium executable identity %q: got %t, want %t", tc.path, got, tc.trusted)
+		}
+	}
+}
+
 func TestBrowserSandboxOptInStartupRefusalAndCleanRelease(t *testing.T) {
 	s, owner, _ := browserAuditFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
