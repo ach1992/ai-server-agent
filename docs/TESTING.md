@@ -514,12 +514,15 @@ Measure representative workflow latency, remote/tool-call count, idle/active pro
 
 Optional code-server, managed Incus, Ctags, alternate terminal backends and generic provider/tool-manager frameworks are not Core-v1 acceptance requirements unless their contracts are explicitly reactivated from new evidence.
 
-### Shared-host first-install recovery target (Issue #137; verify the installed release)
+### Shared-host first-install recovery regression guidance (closed Issue #137)
 
-The authoritative acceptance cases are maintained only in
-[Issue #137](https://github.com/ach1992/ai-server-agent/issues/137).
-For each release where this source feature is included, validate on an **authorized clean disposable
-Agent host**, not by replacing an occupied service:
+Closed [Issue #137](https://github.com/ach1992/ai-server-agent/issues/137)
+preserves the accepted first-install baseline, its cases and verification limits.
+Select the relevant cases below for a material installation/recovery change or
+concrete regression; the completed baseline is not a blanket full-retest
+requirement for every release. Keep all affected release-specific acceptance
+and required CI gates. Use an **authorized clean disposable Agent host** where
+fresh-install evidence is needed, not by replacing an occupied service:
 two Git worktrees plus a valid non-Git workdir; correct worker CWD,
 shared private worker HOME/XDG across Command/Job/Terminal/LSP/DAP and
 root/workspace mismatch rejection;
@@ -534,8 +537,13 @@ deliberately discontinued by the Owner; it is not a remaining mandatory gate.
 Revisit individual gaps only when a real consumer or material risk justifies
 targeted validation.
 
-**Do not create historical upgrade/migration test fixtures** for previous
-Agent installations, claims, profiles, tool schemas or old client state.
+**Do not create speculative migration machinery or fixtures for unsupported
+pre-baseline Agent generations**, claims, profiles, tool schemas or client state.
+This does not exempt supported Stable upgrades or eligible rollbacks: validate
+the affected protected-updater trust, credential/configuration preservation,
+compatibility and recovery contracts described in
+[Stable installer and updater trust](#4-stable-installer-and-updater-trust) and
+[Operations](OPERATIONS.md).
 Observe exact candidate/installed identity, cross-project safety and
 resource footprint. The ~90% goal guides simple high-value scope, **not**
 permission to skip required acceptance items; security/data-loss defects block.
