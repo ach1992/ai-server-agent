@@ -14,6 +14,22 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+// shellDAPReadinessFailure only explains an already-enforced prerequisite.
+// The API remains passive; it must not run a debugger, install a dependency,
+// change Yama or leak raw host paths/errors while checking availability.
+func shellDAPReadinessFailure(runtimeErr, ipcErr error) (reason, hint string) {
+	switch {
+	case runtimeErr != nil:
+		return "shell_dap_runtime_unavailable", "Verify the original installed Agent executable and trusted system Bash; an occupied service update/restart requires separate authorization."
+	case errors.Is(ipcErr, errShellDAPPtracePolicyInsufficient):
+		return "shell_dap_ipc_ptrace_policy_insufficient", "Yama ptrace_scope must be 1..3. This is a host-wide security policy decision requiring separate operator approval; the Agent never changes it."
+	case errors.Is(ipcErr, errShellDAPRequiresRootExecutor):
+		return "shell_dap_ipc_requires_root_executor", "A trusted original root-owned Executor is required; unprivileged test processes cannot prove protected Shell DAP IPC."
+	default:
+		return "shell_dap_ipc_prerequisite_unavailable", "The original root-owned IPC and Yama policy could not be verified; inspect Executor diagnostics without weakening host security."
+	}
+}
+
 // Delve/DAP is worker-only, launch-only for the first reference adapter.
 // DAP protocol operations reuse the same #66 stdio process broker for process
 // identity, principal/workspace binding, bounded capacity, audit, and cleanup.
@@ -28,22 +44,28 @@ func (s *Server) debugAction(ctx context.Context, req Request) Response {
 	switch req.Action {
 	case "debug_adapter_status":
 		if req.Language == "shell" {
-			_, _, err := shellDAPTrustedRuntime()
-			if err == nil {
-				err = shellDAPIPCPrerequisite()
+			_, _, runtimeErr := shellDAPTrustedRuntime()
+			var ipcErr error
+			if runtimeErr == nil {
+				ipcErr = shellDAPIPCPrerequisite()
 			}
-			available := err == nil
-			payload, _ := json.Marshal(map[string]any{
+			available := runtimeErr == nil && ipcErr == nil
+			detail := map[string]any{
 				"adapter": "shell/bash-trap", "installed": available,
 				"modes": []string{"bash"}, "attach_supported": false, "privileged": false,
 				"evaluation_supported": false, "subshell_stepping": false,
 				"provisioning": "bundled_verified_agent_and_system_bash",
 				"containment":  "executor_owned_private_cgroup_v2_required",
-			})
+			}
 			state := "unavailable"
 			if available {
 				state = "installed_containment_unverified"
+			} else {
+				code, hint := shellDAPReadinessFailure(runtimeErr, ipcErr)
+				detail["unavailable_reason"] = code
+				detail["operator_hint"] = hint
 			}
+			payload, _ := json.Marshal(detail)
 			return Response{OK: true, Status: state, Output: string(payload), OutputEncoding: "json", BytesSeen: int64(len(payload)), BytesReturned: int64(len(payload))}
 		}
 		if req.Language == "javascript" || req.Language == "typescript" {

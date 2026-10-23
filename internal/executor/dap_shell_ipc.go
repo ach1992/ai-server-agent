@@ -10,6 +10,11 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+var (
+	errShellDAPRequiresRootExecutor     = errors.New("shell_dap_ipc_requires_root_executor")
+	errShellDAPPtracePolicyInsufficient = errors.New("shell_dap_ipc_ptrace_policy_insufficient: Yama ptrace_scope >= 1 required")
+)
+
 // A root-created pipe inode retains root ownership when its already-open
 // descriptors are inherited by an unprivileged child. /proc/PID/fd reopening
 // still performs inode permission checks. However pidfd_getfd can duplicate
@@ -18,7 +23,7 @@ import (
 // Do not silently rely on a distro default or modify the host-wide sysctl.
 func shellDAPIPCPrerequisite() error {
 	if os.Geteuid() != 0 {
-		return errors.New("shell_dap_ipc_requires_root_executor")
+		return errShellDAPRequiresRootExecutor
 	}
 	data, err := os.ReadFile("/proc/sys/kernel/yama/ptrace_scope")
 	if err != nil {
@@ -30,7 +35,7 @@ func shellDAPIPCPrerequisite() error {
 func validateShellDAPPtraceScope(data []byte) error {
 	scope, err := strconv.Atoi(strings.TrimSpace(string(data)))
 	if err != nil || scope < 1 || scope > 3 {
-		return errors.New("shell_dap_ipc_ptrace_policy_insufficient: Yama ptrace_scope >= 1 required")
+		return errShellDAPPtracePolicyInsufficient
 	}
 	return nil
 }
