@@ -214,7 +214,20 @@ for (const item of result.content ?? []) {
 
 This is client usage, not an Agent requirement or a helper available in every chat. Other MCP clients must use their own supported image-presentation path. Do not print raw image/Base64 data with a text helper. Distinguish screenshot generation, typed transport, model-visible perception, conversation presentation and downloadable attachments; success in one does not prove the others.
 
-If capture is too large, select the relevant region or explicitly use quality fitting before sacrificing needed detail. For the same session's higher-detail image, reuse `browser_session_image` capture/read/discard as described below. Follow exact `file_version`, `next_offset`, decoded lengths and terminal `eof`; independently verify the reconstructed whole-image SHA-256. In staged image windows, `truncated=true` means more source remains (`!eof`), not that the returned window was itself lost. Reconstructed bytes become visual evidence only when a supported client actually presents the image. Do not widen limits, create a public download endpoint or add another artifact service to compensate for client presentation.
+#### When native image blocks are unavailable
+
+Inspect the actual connected-tool result shape before forwarding. A successful capture with `output_encoding=none` and dimensions/hash metadata is not an empty screenshot: the native bytes belong in MCP image content, which a consuming adapter may not expose. If no usable `content` image block is available, the forwarding loop above has nothing to present. This identifies the observed consumer boundary; it does not by itself identify which upstream layer dropped the image or prove an Agent producer defect.
+
+The existing staged path is useful for both **higher-detail images and clients that hide native image content**, including captures below the inline size limit:
+
+1. In the same authorized session, call `browser_session_image(operation="capture")`; retain the returned `file_version`, `file_size` and actual region metadata.
+2. Read the pinned windows using exact `next_offset` until `eof=true`; use a smaller window when the client's text fallback requires it. Decode each Base64 window separately before joining its bytes, verify decoded lengths and whole-image SHA-256, then encode/present the complete JPEG through the client's supported image helper/viewer.
+3. In Work Code Mode or another environment advertising `image`, a reconstructed JPEG data URL can be passed to that helper. This is a client-side fallback, not native ImageContent or a new Agent file/download API. Do not emit Base64 as ordinary text or label bytes as visually inspected before the image is actually presented.
+4. Discard the staged image when finished. Record native delivery and fallback perception as separate outcomes; if the client has no supported image presentation at all, report that limitation rather than claiming success.
+
+The tested ordinary-chat case reproduced metadata-only native results on two hosts, including a small capture; changing host or repeatedly reducing quality is not an established fix for that presentation boundary. A new client-path or producer-boundary investigation is needed only when native support is actually required. A different crop, rendering failure or resource refusal still needs its own diagnosis.
+
+For a `too_large` capture, select the relevant region or explicitly use quality fitting while preserving needed detail. In staged image windows, `truncated=true` means more source remains (`!eof`), not that the returned window was itself lost. Reuse the bounded continuation contract below; do not widen limits, create a public download endpoint or add another artifact service to compensate for client presentation.
 
 See [client-visible visual workflow acceptance](TESTING.md#client-visible-visual-workflow-acceptance) for a repeatable perception check. [Issue #216](https://github.com/ach1992/ai-server-agent/issues/216) owns the accepted reuse decision and separately identified client results; [#99](https://github.com/ach1992/ai-server-agent/issues/99) retains artifact/presentation residuals.
 
