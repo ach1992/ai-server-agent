@@ -164,5 +164,8 @@ runtime limits, test command, output and failure cases next to Issue #99.
 For a real installed service, additionally verify Agent+Executor binary
 and settings identities, true root/worker separation, live client catalog,
 authorized credential principal/workspace, rollback, service restart and
-actual client rendering. Keep Issue #99 and parent #59 open until those
-independent acceptance gates are supported by observed evidence.
+actual client rendering. Issue #99 owns remaining conditional native client file/media presentation.
+Issue #59 is closed by Owner decision: its discontinued exhaustive test program
+must not be reopened solely for additional matrix coverage. Revisit a specific
+transfer gap only when a real consumer or material regression justifies
+bounded validation.
