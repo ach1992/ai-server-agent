@@ -172,6 +172,65 @@ Browser automation is optional and installed on demand. The core MCP service doe
 
 `browser_run` uses **server-side headless Chromium**, not the user's personal desktop browser. Scripts are limited to 128 KiB, handed to the worker-side browser process through the already bounded executor stdin path and a per-run temporary file rather than process argv, and execute with a 90-second default / five-minute maximum timeout. Combined output uses the same bounded structured UTF-8/base64 executor result contract as synchronous commands. Managed Browser execution is fail-fast but **not globally one-at-a-time**: the shared profile remains exclusive, while independent isolated profiles can run concurrently within the configured Browser budget (default 2, 1–64). Each one-shot run additionally consumes Worker command capacity, and cross-call sessions additionally consume shared stdio-session capacity. Setup/maintenance excludes all managed Browser activity. The Executor must prove the entire Browser-owned process cgroup empty (including detached Chromium process groups) before releasing admission or reclaiming a profile. Saturation returns `resource_limit` instead of queueing. HTTPS certificate validation is enabled by default. `ignore_https_errors=true` is an explicit request-scoped exception for local/self-signed development and does not change the default for later runs.
 
+### Visual development workflow
+
+Use existing Browser tools to inspect rendered web applications, diagnose a focused defect, make an independently authorized correction through ordinary development tools, and verify the result. The Agent supplies execution and evidence; the consuming client supplies image presentation, and the model/project workflow supplies design judgment. No separate visual service, platform adapter, artifact store or design API is required for this workflow.
+
+1. **Identify the target and authority.** Inspect `browser_status` and current installed/runtime identity. Use an authorized preview or read-only observation of the real page. A production URL does not authorize form submission, publication or site changes. Prefer an isolated ephemeral profile for unrelated projects; shared mode reuses Agent-wide cookies/state. Request the optional Chromium OS sandbox only on a compatible host and require its actual startup attestation.
+2. **Observe the same page state.** Use `browser_session_open` and `browser_session_flow` for across-call navigation, a focused accessibility snapshot, authorized interactions/assertions and console/network evidence. Select a legible viewport region with `browser_session_capture`; record its actual crop/dimensions, quality and version. A clipped region does not establish the appearance of the whole page.
+3. **Make the image visible.** Native capture returns image bytes in MCP `content` as `ImageContent`; `structuredContent` carries metadata without a duplicate Base64 payload. The client must preserve and present the image content. Reading only text/metadata or reporting a successful screenshot is not visual inspection. Use the client-specific forwarding example below only where that environment provides it.
+4. **Localize with technical evidence.** Compare the image with relevant DOM/accessibility, element geometry, computed styles and browser errors. Use repository search and available source maps to find plausible source; verify attribution before editing. Generated markup/CSS, bundled frameworks, CMS content, Canvas and shadow DOM do not provide a universal DOM-to-source mapping.
+5. **Inspect responsive and RTL behavior.** Use `browser_run` with Playwright `page.setViewportSize`, evaluation, scrolling or element screenshots when the compact managed flow lacks the needed action. Start with representative desktop/tablet/mobile widths, then the affected breakpoints and applicable RTL. A one-shot run has its own page and does not inherit an open managed session's page or refs. Authentication depends on its selected profile and explicit setup: shared-profile cookies may persist, while isolated runs do not inherit another session's private state. Browser emulation is not a physical-device/native-application test.
+6. **Correct and recheck within authority.** Edit only an authorized development target or owned disposable fixture. Re-render the affected state, inspect neighboring content and other at-risk viewports, and verify important behavior. Combine visual and deterministic assertions: a readable accessibility snapshot can hide low contrast, and passing bounding-box checks can miss overlap inside a Canvas. Pixel comparisons need controlled browser/OS/fonts/content and are not a design verdict.
+7. **Release owned resources.** Discard retained image/trace data when no longer needed, close the exact session, stop only task-owned preview jobs and remove only verified disposable files after stop. Verify released capacity. Preserve session/job identity and evidence when cleanup is uncertain; never replay an uncertain click/submission or reset shared state to make a test pass.
+
+A useful evidence bundle is a narrow screenshot plus URL/page state, viewport/crop/version, affected element/style/source evidence, relevant console/network errors, and before/after checks. Assemble it from existing responses; it is not another public API or storage format. Keep credentials, cookies and sensitive page content out of public evidence.
+
+#### Native capture and client forwarding
+
+For an existing authenticated session, this example requests a bounded region; replace the workspace/session placeholders and choose coordinates inside its current viewport:
+
+```json
+{
+  "workspace": "/absolute/authorized/worktree",
+  "session_id": "<session_id>",
+  "representation": "image",
+  "max_width": 1024,
+  "max_height": 540,
+  "crop_x": 0,
+  "crop_y": 0,
+  "quality": 55,
+  "fit_quality": true
+}
+```
+
+**ChatGPT Work Code Mode consumer example:** when its connected-tool result is available as `result` and the environment advertises the `image` helper, forward the actual image block:
+
+```javascript
+for (const item of result.content ?? []) {
+  if (item.type === "image") image(item);
+}
+```
+
+This is client usage, not an Agent requirement or a helper available in every chat. Other MCP clients must use their own supported image-presentation path. Do not print raw image/Base64 data with a text helper. Distinguish screenshot generation, typed transport, model-visible perception, conversation presentation and downloadable attachments; success in one does not prove the others.
+
+#### When native image blocks are unavailable
+
+Inspect the actual connected-tool result shape before forwarding. A successful capture with `output_encoding=none` and dimensions/hash metadata is not an empty screenshot: the native bytes belong in MCP image content, which a consuming adapter may not expose. If no usable `content` image block is available, the forwarding loop above has nothing to present. This identifies the observed consumer boundary; it does not by itself identify which upstream layer dropped the image or prove an Agent producer defect.
+
+The existing staged path is useful for both **higher-detail images and clients that hide native image content**, including captures below the inline size limit:
+
+1. In the same authorized session, call `browser_session_image(operation="capture")`; retain the returned `file_version`, `file_size` and actual region metadata.
+2. Read the pinned windows using exact `next_offset` until `eof=true`; use a smaller window when the client's text fallback requires it. Decode each Base64 window separately before joining its bytes, verify decoded lengths and whole-image SHA-256, then encode/present the complete JPEG through the client's supported image helper/viewer.
+3. In Work Code Mode or another environment advertising `image`, a reconstructed JPEG data URL can be passed to that helper. This is a client-side fallback, not native ImageContent or a new Agent file/download API. Do not emit Base64 as ordinary text or label bytes as visually inspected before the image is actually presented.
+4. Discard the staged image when finished. Record native delivery and fallback perception as separate outcomes; if the client has no supported image presentation at all, report that limitation rather than claiming success.
+
+The tested ordinary-chat case reproduced metadata-only native results on two hosts, including a small capture; changing host or repeatedly reducing quality is not an established fix for that presentation boundary. A new client-path or producer-boundary investigation is needed only when native support is actually required. A different crop, rendering failure or resource refusal still needs its own diagnosis.
+
+For a `too_large` capture, select the relevant region or explicitly use quality fitting while preserving needed detail. In staged image windows, `truncated=true` means more source remains (`!eof`), not that the returned window was itself lost. Reuse the bounded continuation contract below; do not widen limits, create a public download endpoint or add another artifact service to compensate for client presentation.
+
+See [client-visible visual workflow acceptance](TESTING.md#client-visible-visual-workflow-acceptance) for a repeatable perception check. [Issue #216](https://github.com/ach1992/ai-server-agent/issues/216) owns the accepted reuse decision and separately identified client results; [#99](https://github.com/ach1992/ai-server-agent/issues/99) retains artifact/presentation residuals.
+
 ### Playwright CLI compatibility and E2E acceptance
 
 The existing private Playwright runtime also bundles the compact agent-oriented `playwright cli` command (snapshot/element refs, interaction, console, network and tracing). It can be exercised by an unprivileged `run_command` without installing another npm package or browser. Unlike `browser_run`, the CLI maintains its own browser process and session across CLI invocations; **do not assume the two share a page or cookies**. A bare CLI open defaults to system Google Chrome, which can be absent. An explicit CLI configuration must select Chromium with the verified pinned engine executable; set `PLAYWRIGHT_BROWSERS_PATH` to the installed private engine's browsers directory. Keep CLI HOME/XDG, snapshots, traces and downloads in a worker-owned private location **outside Git worktrees**, then close the session.

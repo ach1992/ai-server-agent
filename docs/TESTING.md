@@ -234,6 +234,49 @@ A synthetic runtime fixture verifies that `browser_status` requires the desired 
 
 **Staged high-detail JPEG continuation (#197; published starting with Stable v0.1.22):** `TestManagedBrowserLargeImageContinuationPinnedChromium` with `AI_SERVER_AGENT_BROWSER_FLOW_RUNTIME=/opt/ai-server-agent/browser` drives a deterministic noisy local 1024×720 page through real pinned Chromium, verifies one JPEG larger than the 32 KiB inline cap yet within the new 1 MiB bound, fully reconstructs its Base64 <=8 KiB image windows, including a 2048-byte small-client window, checks each window SHA-256 and the complete decodable JPEG digest/dimensions, then verifies truthful exact EOF, invalid offset, replacement-version refusal, explicit discard, and no remaining session scratch. Executor fixtures test exact principal/workspace isolation, typed old-runner and oversized refusals, strict parameter rejection, attested crop metadata and irreversible session uncertainty on a forged image region or bad chunk digest. The authenticated Streamable HTTP MCP test verifies that capture exposes metadata but no raw image, an oversized 8192-raw-byte Base64 read produces an encoding-aware `limit<=2048` retry hint within the minimum 4096-byte text-only envelope (not an ineffective 4096-raw-byte recommendation), retrying the exact starting offset exposes complete pinned Base64 and next_offset, final-window EOF is truthful, and discard does not leak bytes. The disposable GitHub-hosted `tests/browser_flow_ci.sh` pinned-runtime gate must explicitly RUN and PASS `TestManagedBrowserLargeImageContinuationPinnedChromium` without SKIP for the exact candidate HEAD; a green ordinary Go unit suite alone does not establish real Chromium evidence. These source tests prove protocol correctness but **not** installed Executor/Agent behavior, actual model reconstruction, or native ChatGPT file rendering. Independent review, source integration and v0.1.22 publication are complete; they do **not** prove the real installed-client image path. When this consumer workflow is needed and separately authorized, verify actual managed-client stage/read/discard of a larger screenshot and exact owner/cgroup cleanup without restarting occupied services solely to test it.
 
+### Client-visible visual workflow acceptance
+
+This is a bounded consumer test of existing Browser capabilities, not a requirement to build a visual subsystem or repeat a platform/client matrix for every release. Use the [visual development workflow](TOOL-REFERENCE.md#visual-development-workflow) and an already-ready, authorized Dev/Test runtime. Real-site observation can be read-only; corrections belong to a separately authorized development target or disposable fixture. Do not install major toolchains, restart occupied services, relax host policy or modify a production page merely to obtain a PASS.
+
+The dated [ChatGPT Work receipt](https://github.com/ach1992/ai-server-agent/issues/216#issuecomment-6358679453) and [ordinary ChatGPT WordPress receipt](https://github.com/ach1992/ai-server-agent/issues/216#issuecomment-6359121108) identify different tested consumer paths. Both used Code Mode: Work received native image blocks and forwarded them to the model; the ordinary-chat wrapper exposed only flat capture metadata, while existing staged image reads plus image forwarding made actual pixels visible and passed a blind perception check. These receipts do not establish an independent direct-MCP invocation, universal client compatibility, native downloadable attachments or independently inspected end-user UI rendering/persistence. The ordinary-chat receipt additionally covers read-only real WordPress observation; the Work fixture alone does not prove that. Keep current per-path outcomes and exact experiment details in the [Issue #216 client table](https://github.com/ach1992/ai-server-agent/issues/216), without duplicating a changing status matrix here.
+
+#### Smallest repeatable check
+
+1. Record the actual client surface and invocation path (direct MCP versus a Code Mode/other adapter), exact host/runtime identity, target/page and authorized effects. Inspect readiness before creating a task-owned private workspace, loopback-only fixture server and isolated Browser session.
+2. On a generic HTML/JS fixture, draw a randomly chosen short code and ordered colored shapes into a Canvas. Generate choices on the host and retain the expected/observed answers outside the HTTP served root or prove they are not routable; verify a private path cannot be fetched by URL. Keep the chosen values out of tool output, DOM/accessibility text and source inspection until after perception. Capture through the client path under test; record the model's visual answer before reading the expected answer, then compare. This is one independent perception check, not a statistical accuracy benchmark.
+3. Exercise a simple labeled textbox/button/assertion and inspect deliberate console/network errors. For a WordPress consumer, also observe a real authorized WordPress page and collect its screenshot/DOM/errors; a Gutenberg-like HTML fixture alone does not prove an actual WordPress editor or theme.
+4. Establish before/after evidence for a known fixture-only defect, such as fixed-width overflow and low-contrast text. Locate the relevant source/style, make a focused reversible correction and re-render. Inspect neighboring content and verify behavior at representative 1280×720, 768×1024 and 390×844 viewports plus applicable RTL. Choose further cases only when the defect warrants them. Verify the final correction at the affected views; identify which checks preceded a later correction rather than claiming an unrun full rerun.
+5. Prefer native ImageContent. If it is missing or invisible, identify the exact failing layer before trying a supported bounded fallback. Verify offsets/EOF/whole-image hash for reconstructed images and separately verify actual presentation. Bytes, Base64, a valid MIME label or an empty metadata output do not prove the model saw an image.
+6. Close/discard the exact Browser resources, stop and verify only the test-owned server/job, and remove only its verified disposable files. Record cleanup/refused or uncertain operations truthfully. Do not fabricate a command exit code for a verified stopped job.
+
+Use each outcome's evidence independently:
+
+| Outcome | Required observation |
+|---|---|
+| Screenshot generation | Actual capture metadata and image identity/dimensions |
+| Typed image transport | ImageContent preserved at the observed tool/client boundary |
+| Model-visible image | Supported image presentation, not metadata/Base64 text alone |
+| Visual perception | Recorded answer before revealing the independently generated expected result |
+| Conversation presentation | Distinguish model/tool image output from independently observed end-user application UI rendering/persistence |
+| Downloadable attachment | Separately verified native download behavior, if needed; otherwise UNVERIFIED |
+| Diagnosis/correction | Image + technical/source attribution + actual authorized before/after recheck |
+| Cleanup | Exact stop/close evidence and capacity/resource release |
+
+#### One concise receipt per client path
+
+Keep current results and pending consumer work in the owning Issue, with exact experiment receipts as supporting evidence. The Work path and an ordinary ChatGPT WordPress conversation are separate entries even when they use the same Agent. Dispatch or an Owner-reported test request is PENDING, not proof the receiving chat ran. Use PASS/FAIL/CONDITIONAL for evaluated outcomes and UNVERIFIED for untested ones.
+
+A receipt needs:
+
+- Date; client/surface and direct/mediated invocation path; Agent host, source/installed identity and Browser versions.
+- Real page versus synthetic fixture; authority and actual state-changing actions.
+- Native/fallback presentation; screenshot MIME/dimensions/crop/bytes/version; observed/expected perception result and when the expected answer was revealed.
+- Supported defects and source attribution, viewport/RTL and interaction results, which rechecks ran after the final change, and explicit unverified claims.
+- Measured calls/duration/resources where useful, with sampling limitations; no inferred model token bill, universal accuracy or unsupported performance claim.
+- Exact cleanup outcome, blocker/resume condition if any, and evidence links without credentials/session material.
+
+When a later consumer result arrives, reconcile its identity and evidence, update only the affected current row/conclusion and link its receipt. Preserve materially different or failed invocation paths; do not accumulate duplicate timelines or replace them with a blanket compatibility claim. A concrete image/artifact residual remains with [#99](https://github.com/ach1992/ai-server-agent/issues/99); [#216](https://github.com/ach1992/ai-server-agent/issues/216) owns this workflow decision/consumer comparison.
+
 ## 4. Stable installer and updater trust
 
 ### Stable bootstrap
