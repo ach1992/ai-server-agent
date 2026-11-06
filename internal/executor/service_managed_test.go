@@ -2,8 +2,10 @@ package executor
 
 import (
 	"context"
+	"encoding/base64"
 	"encoding/json"
 	"github.com/ach1992/ai-server-agent/internal/managedincus"
+	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -99,7 +101,7 @@ func TestCredentialDerivedBrowserRevocationGate(t *testing.T) {
 			browser: &browserStdioState{credentialRef: meta.ID, credentialAuthOK: true}},
 	}
 	s.browserAdmission.holders = map[string]string{sid: "isolated"}
-	req := Request{Action: "browser_session_flow", SessionID: sid, Workspace: "/authorized/worktree", PrincipalID: "one", PrincipalClass: "direct"}
+	req := Request{Action: "browser_session_flow", Content: `[{"action":"assert_url","expected":"http://127.0.0.1:8080"}]`, SessionID: sid, Workspace: "/authorized/worktree", PrincipalID: "one", PrincipalClass: "direct"}
 	if g := s.credentialSessionGate(req); !g.OK {
 		t.Fatalf("valid credential denied: %+v", g)
 	}
@@ -156,5 +158,71 @@ func TestMissingOptionalIncusDoesNotReportMutationSuccess(t *testing.T) {
 	resp = s.managedEnvironmentAction(context.Background(), req)
 	if !resp.OK || !strings.Contains(resp.Output, "\"available\":false") {
 		t.Fatalf("status should honestly report missing optional Incus: %+v", resp)
+	}
+}
+
+// Protected login intentionally retains ordinary click/fill/assert/goto
+// interactions, but refuses evidence-bearing paths which cannot be proven
+// secret-free for arbitrary applications (including DOM/canvas/network caches).
+func TestCredentialDerivedBrowserEvidenceGate(t *testing.T) {
+	s := &Server{cfg: config.Config{StateDir: t.TempDir(), InstanceID: "asa_host"}}
+	st := serviceaccess.New(s.cfg.StateDir)
+	meta, err := st.Register(serviceaccess.Registration{HostID: s.cfg.InstanceID, Service: "aaPanel", Endpoint: "http://localhost:8080/login"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sentinel := "SENTINEL-POST-LOGIN-PASSWORD-142857"
+	if _, err := st.Enroll(meta.ID, "password", "admin", sentinel, 30, false); err != nil {
+		t.Fatal(err)
+	}
+	const sid = "stdio_0123456789abcdef0123456789abcdef"
+	s.sessions = newStdioSessionBrokerForSlots(2)
+	s.sessions.sessions = map[string]*stdioSession{
+		sid: {id: sid, kind: "browser", ownerID: "owner", ownerClass: "direct", workspace: "/authorized/worktree", browserMode: "isolated",
+			browser: &browserStdioState{credentialRef: meta.ID, credentialAuthOK: true}},
+	}
+	s.browserAdmission.holders = map[string]string{sid: "isolated"}
+	req := Request{SessionID: sid, Workspace: "/authorized/worktree", PrincipalID: "owner", PrincipalClass: "direct"}
+	for _, action := range []string{"browser_session_capture", "browser_session_image", "browser_session_trace"} {
+		req.Action = action
+		g := s.credentialSessionGate(req)
+		if g.OK || g.ErrorCode != "credential_browser_evidence_unavailable" || strings.Contains(g.Output, sentinel) {
+			t.Fatalf("raw %s exposed secret: %+v", action, g)
+		}
+	}
+	req.Action = "browser_session_flow"
+	for _, step := range []string{"snapshot", "console", "network"} {
+		req.Content = `[{"action":"` + step + `"}]`
+		g := s.credentialSessionGate(req)
+		if g.OK || g.ErrorCode != "credential_browser_evidence_unavailable" {
+			t.Fatalf("raw %s flow allowed: %+v", step, g)
+		}
+	}
+	for _, step := range []string{
+		`[{"action":"assert_text","selector":"#dashboard","expected":"Ready"}]`,
+		`[{"action":"click","selector":"#settings"}]`,
+		`[{"action":"goto","url":"http://localhost:8080/wp-admin/"}]`,
+	} {
+		req.Content = step
+		if g := s.credentialSessionGate(req); !g.OK {
+			t.Fatalf("bounded UI action blocked: %+v", g)
+		}
+	}
+	result := s.credentialFlowEvidenceGate(req, Response{OK: true, Output: `{"ok":true,"page_text":"` + sentinel + `"}`})
+	if result.OK || result.Output != "" || result.ErrorCode != "credential_browser_evidence_blocked" {
+		t.Fatalf("plaintext result not blocked: %+v", result)
+	}
+	result = s.credentialFlowEvidenceGate(req, Response{OK: true, Output: `{"ok":true,"observed":"` + url.QueryEscape(sentinel) + `"}`})
+	if result.OK || result.Output != "" {
+		t.Fatalf("URL-escaped secret not blocked: %+v", result)
+	}
+	result = s.credentialFlowEvidenceGate(req, Response{OK: true, Output: `{"ok":true,"output":"` + base64.StdEncoding.EncodeToString([]byte(sentinel)) + `"}`})
+	if result.OK || result.Output != "" {
+		t.Fatalf("encoded secret output not blocked: %+v", result)
+	}
+	s.sessions.sessions[sid].browser.credentialAuthOK = false
+	req.Content = `[{"action":"snapshot"}]`
+	if g := s.credentialSessionGate(req); g.OK || g.ErrorCode != "browser_credential_login_unverified" {
+		t.Fatalf("failed login allowed leaked evidence: %+v", g)
 	}
 }

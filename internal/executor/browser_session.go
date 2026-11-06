@@ -362,7 +362,7 @@ func (s *Server) browserSessionAction(ctx context.Context, req Request) Response
 	case "browser_session_open":
 		return s.browserSessionOpen(ctx, req)
 	case "browser_session_flow":
-		return s.browserSessionFlow(ctx, req)
+		return s.credentialFlowEvidenceGate(req, s.browserSessionFlow(ctx, req))
 	case "browser_session_capture":
 		return s.browserSessionCapture(ctx, req)
 	case "browser_session_trace":

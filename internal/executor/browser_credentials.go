@@ -3,10 +3,12 @@ package executor
 import (
 	"context"
 	"crypto/rand"
+	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
@@ -15,19 +17,20 @@ import (
 )
 
 type credentialLoginOptions struct {
-	UsernameSelector  string `json:"username_selector,omitempty"`
-	SecretSelector    string `json:"secret_selector"`
-	SubmitSelector    string `json:"submit_selector"`
-	SuccessSelector   string `json:"success_selector,omitempty"`
-	SuccessURL        string `json:"success_url,omitempty"`
-	ChallengeSelector string `json:"challenge_selector,omitempty"`
+	UsernameSelector   string `json:"username_selector,omitempty"`
+	SecretSelector     string `json:"secret_selector"`
+	SubmitSelector     string `json:"submit_selector"`
+	SuccessSelector    string `json:"success_selector,omitempty"`
+	SuccessURL         string `json:"success_url,omitempty"`
+	ChallengeSelector  string `json:"challenge_selector,omitempty"`
+	LoginErrorSelector string `json:"login_error_selector,omitempty"`
 }
 
 // Never let client-supplied selectors or service URLs contain a secret or
 // executable code. CSS is only used as Playwright locator input. The secret
 // itself only enters the protected executor and the pinned Browser's stdin.
 func (a credentialLoginOptions) validate(origin string) error {
-	for _, v := range []string{a.UsernameSelector, a.SecretSelector, a.SubmitSelector, a.SuccessSelector, a.ChallengeSelector} {
+	for _, v := range []string{a.UsernameSelector, a.SecretSelector, a.SubmitSelector, a.SuccessSelector, a.ChallengeSelector, a.LoginErrorSelector} {
 		if len(v) > 512 || strings.IndexFunc(v, func(r rune) bool { return r < 32 || r == 127 }) >= 0 {
 			return errors.New("invalid or oversized CSS selector")
 		}
@@ -110,6 +113,8 @@ func (s *Server) browserSessionCredentialLogin(ctx context.Context, req Request)
 		"username_selector": opts.UsernameSelector, "secret_selector": opts.SecretSelector,
 		"submit_selector": opts.SubmitSelector, "success_selector": opts.SuccessSelector,
 		"success_url": opts.SuccessURL, "challenge_selector": opts.ChallengeSelector,
+		"login_error_selector": opts.LoginErrorSelector,
+		"service_endpoint":     rec.Endpoint,
 	}
 	encoded, err := json.Marshal(payload)
 	if err != nil {
@@ -136,7 +141,7 @@ func (s *Server) browserSessionCredentialLogin(ctx context.Context, req Request)
 		// JavaScript errors, fields or URL/query data from this secret path.
 		reason := frame.Reason
 		switch reason {
-		case "credential_origin_mismatch", "credential_form_origin_mismatch", "credential_manual_intervention", "credential_login_not_confirmed", "credential_login_unreachable":
+		case "credential_origin_mismatch", "credential_form_origin_mismatch", "credential_manual_intervention", "credential_invalid_login", "credential_service_unreachable", "credential_service_not_ready", "credential_login_not_confirmed":
 		default:
 			reason = "credential_login_failed"
 		}
@@ -157,6 +162,78 @@ func (s *Server) browserSessionCredentialLogin(ctx context.Context, req Request)
 	state.credentialAuthOK = true
 	_ = serviceaccess.New(s.cfg.StateDir).MarkUsed(req.CredentialRef)
 	return Response{OK: true, Status: "authenticated", SessionID: entry.id, OutputEncoding: "json", Output: `{"status":"authenticated","credential_ref":"` + req.CredentialRef + `"}`}
+}
+
+// A bounded action may still return page-supplied URLs/assertion output.
+// Reject responses containing the stored secret or common escaping forms;
+// never return the offending bytes to the MCP client.
+func (s *Server) credentialFlowEvidenceGate(req Request, resp Response) Response {
+	if resp.Output == "" {
+		return resp
+	}
+	entry, err := s.browserSessionEntry(req)
+	if err != nil {
+		return resp
+	}
+	entry.browser.mu.Lock()
+	ref := entry.browser.credentialRef
+	entry.browser.mu.Unlock()
+	if ref == "" {
+		return resp
+	}
+	rec, err := serviceaccess.New(s.cfg.StateDir).Resolve(ref, s.cfg.InstanceID)
+	if err != nil {
+		return managedErr(err)
+	}
+	secret := rec.Secret
+	variants := []string{secret, url.QueryEscape(secret), url.PathEscape(secret),
+		base64.StdEncoding.EncodeToString([]byte(secret)),
+		base64.RawStdEncoding.EncodeToString([]byte(secret))}
+	escaped, _ := json.Marshal(secret)
+	if len(escaped) > 2 {
+		variants = append(variants, string(escaped[1:len(escaped)-1]))
+	}
+	containsSecret := func(value string) bool {
+		for _, v := range variants {
+			if v != "" && strings.Contains(value, v) {
+				return true
+			}
+		}
+		return false
+	}
+	leaked := containsSecret(resp.Output)
+	// JSON escaping can hide a password from raw substring searches.
+	// Traverse actual decoded string contents, not only their wire encoding.
+	if !leaked {
+		var decoded any
+		if json.Unmarshal([]byte(resp.Output), &decoded) == nil {
+			var visit func(any) bool
+			visit = func(node any) bool {
+				switch x := node.(type) {
+				case string:
+					return containsSecret(x)
+				case map[string]any:
+					for k, v := range x {
+						if containsSecret(k) || visit(v) {
+							return true
+						}
+					}
+				case []any:
+					for _, v := range x {
+						if visit(v) {
+							return true
+						}
+					}
+				}
+				return false
+			}
+			leaked = visit(decoded)
+		}
+	}
+	if leaked {
+		return browserSessionError("credential_browser_evidence_blocked", "security", errors.New("page action result contained protected credential material; no Browser evidence delivered"))
+	}
+	return resp
 }
 
 // Applies to all established credential-derived Browser sessions, not just
@@ -184,6 +261,27 @@ func (s *Server) credentialSessionGate(req Request) Response {
 	_, err = serviceaccess.New(s.cfg.StateDir).Resolve(ref, s.cfg.InstanceID)
 	if err != nil {
 		return managedErr(fmt.Errorf("credential-derived Browser access denied: %w", err))
+	}
+	// The original login request may remain in the page's DOM, JavaScript
+	// memory or network history. There is no reliable generic way to scrub
+	// pixel, ZIP, network and accessibility evidence from an arbitrary
+	// third-party application. Keep bounded UI actions/assertions usable,
+	// but never export raw evidence from a secret-bearing Browser session.
+	switch req.Action {
+	case "browser_session_capture", "browser_session_image", "browser_session_trace":
+		return browserSessionError("credential_browser_evidence_unavailable", "security", errors.New("raw Browser screenshots, images and traces are disabled for protected-login sessions; use bounded UI assertions"))
+	case "browser_session_flow":
+		var steps []struct {
+			Action string `json:"action"`
+		}
+		if err := json.Unmarshal([]byte(req.Content), &steps); err != nil {
+			return browserSessionError("invalid_browser_flow", "validation", errors.New("invalid protected Browser steps"))
+		}
+		for _, step := range steps {
+			if step.Action == "snapshot" || step.Action == "console" || step.Action == "network" {
+				return browserSessionError("credential_browser_evidence_unavailable", "security", errors.New("raw snapshots, network events and console logs are disabled for protected-login sessions; use click/fill/assert/goto"))
+			}
+		}
 	}
 	return Response{OK: true}
 }

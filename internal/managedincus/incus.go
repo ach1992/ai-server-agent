@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -32,17 +33,19 @@ type Request struct {
 	CPU         int      `json:"cpu,omitempty"`
 	MemoryMiB   int      `json:"memory_mib,omitempty"`
 	DiskGiB     int      `json:"disk_gib,omitempty"`
+	StoragePool string   `json:"storage_pool,omitempty"`
 	Command     []string `json:"command,omitempty"`
 	Snapshot    string   `json:"snapshot,omitempty"`
 }
 type Instance struct {
-	Name    string                       `json:"name"`
-	Project string                       `json:"project,omitempty"`
-	Type    string                       `json:"type,omitempty"`
-	Status  string                       `json:"status,omitempty"`
-	Config  map[string]string            `json:"config,omitempty"`
-	Devices map[string]map[string]string `json:"devices,omitempty"`
-	State   *struct {
+	Name            string                       `json:"name"`
+	Project         string                       `json:"project,omitempty"`
+	Type            string                       `json:"type,omitempty"`
+	Status          string                       `json:"status,omitempty"`
+	Config          map[string]string            `json:"config,omitempty"`
+	Devices         map[string]map[string]string `json:"devices,omitempty"`
+	ExpandedDevices map[string]map[string]string `json:"expanded_devices,omitempty"`
+	State           *struct {
 		Network map[string]struct {
 			Addresses []struct {
 				Address string `json:"address"`
@@ -64,31 +67,36 @@ type Summary struct {
 	OperationID string   `json:"operation_id,omitempty"`
 	CPU         string   `json:"cpu,omitempty"`
 	Memory      string   `json:"memory,omitempty"`
+	DiskLimit   string   `json:"disk_limit,omitempty"`
+	StoragePool string   `json:"storage_pool,omitempty"`
 	Addresses   []string `json:"addresses,omitempty"`
 	Managed     bool     `json:"managed"`
 }
 type Result struct {
-	Status          string    `json:"status"`
-	HostID          string    `json:"host_id"`
-	Available       bool      `json:"available"`
-	Diagnostic      string    `json:"diagnostic,omitempty"`
-	Instances       []Summary `json:"instances,omitempty"`
-	Instance        *Summary  `json:"instance,omitempty"`
-	Output          string    `json:"output,omitempty"`
-	ExitCode        int       `json:"exit_code,omitempty"`
-	Snapshots       []string  `json:"snapshots,omitempty"`
-	OutputTruncated bool      `json:"output_truncated,omitempty"`
+	Status          string         `json:"status"`
+	HostID          string         `json:"host_id"`
+	Available       bool           `json:"available"`
+	Diagnostic      string         `json:"diagnostic,omitempty"`
+	Instances       []Summary      `json:"instances,omitempty"`
+	Instance        *Summary       `json:"instance,omitempty"`
+	Output          string         `json:"output,omitempty"`
+	ExitCode        int            `json:"exit_code,omitempty"`
+	Snapshots       []string       `json:"snapshots,omitempty"`
+	Pending         []CreateIntent `json:"pending_creates,omitempty"`
+	OutputTruncated bool           `json:"output_truncated,omitempty"`
 }
 type Backend struct {
-	HostID        string
-	Binary        string               // absolute trusted CLI; test fixture overrides only in tests
-	StateDir      string               // lock directory already owned by root Executor
-	capacityProbe func(int, int) error // test-only; production always checks actual host capacity
+	HostID         string
+	Binary         string               // absolute trusted CLI; test fixture overrides only in tests
+	StateDir       string               // lock directory already owned by root Executor
+	capacityProbe  func(int, int) error // test-only; production always checks actual host capacity
+	beforeMutation func(Request)        // test-only adversarial interleaving before final identity check
 }
 
 const maxOutput = 64 << 10
 
 var namePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_.-]{0,119}$`)
+var uuidPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$`)
 var imagePattern = regexp.MustCompile(`^[a-zA-Z0-9][a-zA-Z0-9_./:@-]{0,255}$`)
 
 func validName(s string) bool { return namePattern.MatchString(s) }
@@ -171,6 +179,12 @@ func summarize(x Instance, host string) Summary {
 	}
 	c := x.Config
 	out := Summary{HostID: host, Project: p, Name: x.Name, UUID: c["volatile.uuid"], Generation: c["volatile.uuid.generation"], Type: x.Type, Status: x.Status, WorkID: c["user.asa.work"], OperationID: c["user.asa.operation"], CPU: c["limits.cpu"], Memory: c["limits.memory"], Managed: c["user.asa.host"] == host && host != ""}
+	root := x.ExpandedDevices["root"]
+	if len(root) == 0 {
+		root = x.Devices["root"]
+	}
+	out.DiskLimit = root["size"]
+	out.StoragePool = root["pool"]
 	if x.State != nil {
 		for _, iface := range x.State.Network {
 			for _, a := range iface.Addresses {
@@ -251,7 +265,7 @@ func (b Backend) inspect(ctx context.Context, project, name string) (Summary, bo
 	return Summary{}, false, nil
 }
 func (b Backend) selectInstance(ctx context.Context, req Request) (Summary, error) {
-	if !validName(req.Project) || !validName(req.Instance) || req.UUID == "" {
+	if !validName(req.Project) || !validName(req.Instance) || !uuidPattern.MatchString(req.UUID) {
 		return Summary{}, errors.New("project, instance and verified native UUID required")
 	}
 	native, found, err := b.inspect(ctx, req.Project, req.Instance)
@@ -261,13 +275,13 @@ func (b Backend) selectInstance(ctx context.Context, req Request) (Summary, erro
 	if !found {
 		return Summary{}, errors.New("instance_missing: rediscover native Incus state before retry")
 	}
-	if !native.Managed || native.UUID != req.UUID {
+	if !native.Managed || !uuidPattern.MatchString(native.UUID) || native.UUID != req.UUID {
 		return Summary{}, errors.New("instance_identity_mismatch: host/provider/UUID does not match this Agent-managed guest")
 	}
 	return native, nil
 }
 func (b Backend) Lock(fn func() (Result, error)) (Result, error) {
-	// Scoped OS lock serializes create/reconcile on this Agent host. It is NOT
+	// Scoped OS lock serializes Agent-owned create/reconcile and guest mutations. It is NOT
 	// a cluster lock, a project manager or a process/guest lifecycle registry.
 	dir := filepath.Join(b.StateDir, "managed-incus")
 	if err := os.MkdirAll(dir, 0700); err != nil {
@@ -309,6 +323,15 @@ func (b Backend) Ready(ctx context.Context) Result {
 	return r
 }
 func (b Backend) Run(ctx context.Context, req Request, approval bool, secret string) (Result, error) {
+	if req.Operation == "pending_creates" {
+		return b.Lock(func() (Result, error) {
+			journal, err := b.loadIntents()
+			if err != nil {
+				return Result{}, err
+			}
+			return Result{Status: "pending_creates_observed", HostID: b.HostID, Available: true, Pending: journal.Intents}, nil
+		})
+	}
 	if req.Operation == "status" {
 		return b.Ready(ctx), nil
 	}
@@ -343,8 +366,8 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 			if req.Type != "container" && req.Type != "virtual-machine" {
 				return base, errors.New("type must be container or virtual-machine")
 			}
-			if req.CPU < 1 || req.MemoryMiB < 128 || req.DiskGiB < 1 {
-				return base, errors.New("explicit positive cpu/memory_mib/disk_gib required")
+			if req.CPU < 1 || req.MemoryMiB < 128 || req.DiskGiB < 1 || !validName(req.StoragePool) {
+				return base, errors.New("explicit positive cpu/memory_mib/disk_gib and a native storage_pool required")
 			}
 			// An operation ID is an Agent-host-wide create idempotency key,
 			// not merely a name-scoped hint. A reconnect/new chat proposing
@@ -366,6 +389,21 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 			}
 			if found {
 				if x.Managed && x.OperationID == req.OperationID && x.WorkID == req.WorkID && x.Type == req.Type {
+					if x.StoragePool == "" || x.DiskLimit == "" {
+						return base, errors.New("native_root_device_unverified: selected pool or root disk limit absent from current Incus instance state")
+					}
+					if x.StoragePool != req.StoragePool {
+						return base, errors.New("instance_storage_pool_mismatch: native root pool no longer matches the creation intent")
+					}
+					if !uuidPattern.MatchString(x.UUID) {
+						return base, errors.New("native_uuid_unverified: Incus guest UUID missing or malformed")
+					}
+					if _, err := b.reserveCreate(req); err != nil {
+						return base, err
+					}
+					if err := b.confirmCreate(req.OperationID); err != nil {
+						return base, err
+					}
 					base.Instance = &x
 					base.Status = "reconciled_existing"
 					return base, nil
@@ -380,12 +418,24 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 			// Capacity is a measured preflight, not an arbitrary fleet/instance cap.
 			capacityFn := b.capacityProbe
 			if capacityFn == nil {
-				capacityFn = func(mem, disk int) error { return capacity(mem, disk, b.StateDir) }
+				capacityFn = func(mem, disk int) error { return capacity(mem) }
 			}
 			if err := capacityFn(req.MemoryMiB, req.DiskGiB); err != nil {
 				return base, err
 			}
-			args := []string{"launch", req.Image, req.Instance, "--project", req.Project,
+			if b.capacityProbe == nil {
+				if err := b.checkNativePool(ctx, req.StoragePool, req.DiskGiB); err != nil {
+					return base, err
+				}
+			}
+			previouslySubmitted, err := b.reserveCreate(req)
+			if err != nil {
+				return base, err
+			}
+			if previouslySubmitted {
+				return base, errors.New("create_outcome_uncertain: a prior submission exists; native guest is not yet visible. Do not resubmit; inspect Incus operations/guest state")
+			}
+			args := []string{"launch", req.Image, req.Instance, "--project", req.Project, "--storage", req.StoragePool,
 				"-c", "user.asa.host=" + b.HostID, "-c", "user.asa.work=" + req.WorkID,
 				"-c", "user.asa.operation=" + req.OperationID, "-c", "limits.cpu=" + strconv.Itoa(req.CPU),
 				"-c", "limits.memory=" + strconv.Itoa(req.MemoryMiB) + "MiB",
@@ -400,6 +450,18 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 				return base, errors.New("create_outcome_uncertain: native state could not be reconciled; inspect before retry")
 			}
 			if found && x.Managed && x.OperationID == req.OperationID && x.WorkID == req.WorkID && x.Type == req.Type {
+				if x.StoragePool == "" || x.DiskLimit == "" {
+					return base, errors.New("native_root_device_unverified: selected pool or root disk limit missing after launch")
+				}
+				if x.StoragePool != req.StoragePool {
+					return base, errors.New("create_outcome_uncertain: native root storage pool differs from requested pool")
+				}
+				if !uuidPattern.MatchString(x.UUID) {
+					return base, errors.New("native_uuid_unverified: created guest UUID missing or malformed")
+				}
+				if err := b.confirmCreate(req.OperationID); err != nil {
+					return base, errors.New("create_outcome_uncertain: native guest exists but local intent confirmation failed; do not retry")
+				}
 				base.Instance = &x
 				if launchErr == nil {
 					base.Status = "created"
@@ -412,135 +474,165 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 				return base, errors.New("create_collision_after_launch: unexpected guest identity")
 			}
 			if launchErr != nil {
-				return base, fmt.Errorf("launch_failed_no_instance: %w", launchErr)
+				return base, errors.New("create_outcome_uncertain: launch reported an error and no native guest is yet visible; submission remains durably reserved for reconciliation")
 			}
 			return base, errors.New("create_unverified: Incus reported success but instance not found")
 		})
 	case "start", "stop", "exec", "snapshots", "snapshot", "restore", "delete":
-		x, err := b.selectInstance(ctx, req)
-		if err != nil {
-			return base, err
-		}
-		base.Instance = &x
-		if req.Operation == "snapshots" {
-			list, err := b.Snapshots(ctx, req.Project, req.Instance)
-			base.Snapshots = list
-			if err == nil {
-				base.Status = "snapshots_observed"
-			}
-			return base, err
-		}
-		if req.Operation == "snapshot" || req.Operation == "restore" {
-			if !validName(req.Snapshot) {
-				return base, errors.New("snapshot name required")
-			}
-			list, err := b.Snapshots(ctx, req.Project, req.Instance)
+		return b.Lock(func() (Result, error) {
+			x, err := b.selectInstance(ctx, req)
 			if err != nil {
 				return base, err
 			}
-			if req.Operation == "snapshot" && hasSnapshot(list, req.Snapshot) {
-				return base, errors.New("snapshot_collision: snapshot name already exists")
+			base.Instance = &x
+			if req.Operation == "snapshots" {
+				list, err := b.Snapshots(ctx, req.Project, req.Instance)
+				base.Snapshots = list
+				if err == nil {
+					base.Status = "snapshots_observed"
+				}
+				return base, err
 			}
-			if req.Operation == "restore" && !hasSnapshot(list, req.Snapshot) {
-				return base, errors.New("snapshot_missing: restore target does not exist")
-			}
-		}
-		if (req.Operation == "delete" || req.Operation == "restore") && !approval {
-			return base, errors.New("approval_required: destructive guest operation requires explicit current Owner approval")
-		}
-		args := []string{}
-		switch req.Operation {
-		case "start":
-			args = []string{"start", req.Instance, "--project", req.Project}
-		case "stop":
-			args = []string{"stop", req.Instance, "--project", req.Project}
-		case "delete":
-			if x.Status != "Stopped" {
-				return base, errors.New("stop and inspect guest before deletion (no implicit force)")
-			}
-			args = []string{"delete", req.Instance, "--project", req.Project}
-		case "snapshot":
-			if !validName(req.Snapshot) {
-				return base, errors.New("snapshot name required")
-			}
-			args = []string{"snapshot", "create", req.Instance, req.Snapshot, "--project", req.Project}
-		case "restore":
-			if !validName(req.Snapshot) {
-				return base, errors.New("snapshot name required")
-			}
-			args = []string{"snapshot", "restore", req.Instance, req.Snapshot, "--project", req.Project}
-		case "exec":
-			if len(req.Command) == 0 || len(req.Command) > 64 {
-				return base, errors.New("guest command argv required (1..64)")
-			}
-			for _, s := range req.Command {
-				if s == "" || len(s) > 4096 || strings.IndexByte(s, 0) >= 0 {
-					return base, errors.New("invalid guest argv")
+			if req.Operation == "snapshot" || req.Operation == "restore" {
+				if !validName(req.Snapshot) {
+					return base, errors.New("snapshot name required")
+				}
+				list, err := b.Snapshots(ctx, req.Project, req.Instance)
+				if err != nil {
+					return base, err
+				}
+				if req.Operation == "snapshot" && hasSnapshot(list, req.Snapshot) {
+					return base, errors.New("snapshot_collision: snapshot name already exists")
+				}
+				if req.Operation == "restore" && !hasSnapshot(list, req.Snapshot) {
+					return base, errors.New("snapshot_missing: restore target does not exist")
 				}
 			}
-			args = []string{"exec", req.Instance, "--project", req.Project, "--mode", "non-interactive", "--"}
-			args = append(args, req.Command...)
-		}
-		timeout := time.Minute
-		if req.Operation == "exec" {
-			timeout = 4 * time.Minute
-		}
-		runCtx, cancel := context.WithTimeout(ctx, timeout)
-		defer cancel()
-		var input io.Reader
-		if secret != "" {
-			input = strings.NewReader(secret + "\n")
-		}
-		out, code, trunc, runErr := b.cli(runCtx, input, secret != "", args...)
-		base.Output = out
-		base.ExitCode = code
-		base.OutputTruncated = trunc
-		if runErr != nil {
-			if req.Operation == "exec" && x.Type == "virtual-machine" && strings.Contains(strings.ToLower(out), "agent") {
-				return base, errors.New("guest_agent_unavailable: Incus VM guest agent is required for native exec")
+			if (req.Operation == "delete" || req.Operation == "restore") && !approval {
+				return base, errors.New("approval_required: destructive guest operation requires explicit current Owner approval")
 			}
-			return base, fmt.Errorf("native operation failed, exit_code=%d: %w", code, runErr)
-		}
-		if req.Operation == "exec" {
-			base.Status = "guest_command_completed"
-			return base, nil
-		}
-		if req.Operation == "snapshot" {
-			list, err := b.Snapshots(ctx, req.Project, req.Instance)
-			if err != nil || !hasSnapshot(list, req.Snapshot) {
-				return base, errors.New("snapshot_outcome_uncertain: snapshot not verified in Incus")
+			args := []string{}
+			switch req.Operation {
+			case "start":
+				args = []string{"start", req.Instance, "--project", req.Project}
+			case "stop":
+				args = []string{"stop", req.Instance, "--project", req.Project}
+			case "delete":
+				if x.Status != "Stopped" {
+					return base, errors.New("stop and inspect guest before deletion (no implicit force)")
+				}
+				args = []string{"delete", req.Instance, "--project", req.Project}
+			case "snapshot":
+				if !validName(req.Snapshot) {
+					return base, errors.New("snapshot name required")
+				}
+				args = []string{"snapshot", "create", req.Instance, req.Snapshot, "--project", req.Project}
+			case "restore":
+				if !validName(req.Snapshot) {
+					return base, errors.New("snapshot name required")
+				}
+				args = []string{"snapshot", "restore", req.Instance, req.Snapshot, "--project", req.Project}
+			case "exec":
+				if len(req.Command) == 0 || len(req.Command) > 64 {
+					return base, errors.New("guest command argv required (1..64)")
+				}
+				for _, s := range req.Command {
+					if s == "" || len(s) > 4096 || strings.IndexByte(s, 0) >= 0 {
+						return base, errors.New("invalid guest argv")
+					}
+				}
+				args = []string{"exec", req.Instance, "--project", req.Project, "--mode", "non-interactive", "--"}
+				args = append(args, req.Command...)
 			}
-			base.Snapshots = list
-			base.Status = "snapshot_created"
-			return base, nil
-		}
-		if req.Operation == "delete" {
-			_, exists, err := b.inspect(ctx, req.Project, req.Instance)
+			timeout := time.Minute
+			if req.Operation == "exec" {
+				timeout = 4 * time.Minute
+			}
+			runCtx, cancel := context.WithTimeout(ctx, timeout)
+			defer cancel()
+			// Serialize Agent mutations and repeat native UUID/management checks
+			// immediately before the name-based CLI request. This closes
+			// Agent-to-Agent races and catches external replacements that have
+			// already occurred; Incus CLI offers no UUID-conditional mutation for
+			// these subcommands, so the final external race cannot be claimed
+			// atomic. Post-flight identity verification fails closed.
+			if b.beforeMutation != nil {
+				b.beforeMutation(req)
+			}
+			latest, err := b.selectInstance(ctx, req)
 			if err != nil {
-				return base, errors.New("delete_outcome_uncertain: inspect Incus state")
+				return base, errors.New("instance_identity_changed_before_mutation: refused name-based operation")
 			}
-			if exists {
-				return base, errors.New("delete_unverified: instance still exists")
+			if latest.UUID != x.UUID {
+				return base, errors.New("instance_identity_changed_before_mutation")
 			}
-			base.Instance = nil
-			base.Status = "deleted"
+			var input io.Reader
+			if secret != "" {
+				input = strings.NewReader(secret + "\n")
+			}
+			out, code, trunc, runErr := b.cli(runCtx, input, secret != "", args...)
+			base.Output = out
+			base.ExitCode = code
+			base.OutputTruncated = trunc
+			if runErr != nil {
+				if req.Operation == "exec" && x.Type == "virtual-machine" && strings.Contains(strings.ToLower(out), "agent") {
+					return base, errors.New("guest_agent_unavailable: Incus VM guest agent is required for native exec")
+				}
+				return base, fmt.Errorf("native operation failed, exit_code=%d: %w", code, runErr)
+			}
+			if req.Operation == "exec" {
+				verified, err := b.selectInstance(ctx, req)
+				if err != nil || verified.UUID != x.UUID {
+					base.Output = ""
+					return base, errors.New("guest_exec_outcome_uncertain: native guest identity changed during execution; no output delivered")
+				}
+				base.Status = "guest_command_completed"
+				return base, nil
+			}
+			if req.Operation == "snapshot" {
+				verified, err := b.selectInstance(ctx, req)
+				if err != nil || verified.UUID != x.UUID {
+					return base, errors.New("snapshot_outcome_uncertain: native guest identity changed")
+				}
+				list, err := b.Snapshots(ctx, req.Project, req.Instance)
+				if err != nil || !hasSnapshot(list, req.Snapshot) {
+					return base, errors.New("snapshot_outcome_uncertain: snapshot not verified in Incus")
+				}
+				base.Snapshots = list
+				base.Status = "snapshot_created"
+				return base, nil
+			}
+			if req.Operation == "delete" {
+				_, exists, err := b.inspect(ctx, req.Project, req.Instance)
+				if err != nil {
+					return base, errors.New("delete_outcome_uncertain: inspect Incus state")
+				}
+				if exists {
+					return base, errors.New("delete_unverified: instance still exists")
+				}
+				if err := b.retireDeleted(req.Project, req.Instance); err != nil {
+					return base, errors.New("delete_outcome_uncertain: native absence verified but local operation intent cleanup failed")
+				}
+				base.Instance = nil
+				base.Status = "deleted"
+				return base, nil
+			}
+			after, exists, err := b.inspect(ctx, req.Project, req.Instance)
+			if err != nil || !exists {
+				return base, errors.New("operation_outcome_uncertain: inspect current native state")
+			}
+			if after.UUID != x.UUID || !after.Managed {
+				return base, errors.New("instance_identity_changed: rediscover before further operations")
+			}
+			base.Instance = &after
+			base.Status = "completed_native"
 			return base, nil
-		}
-		after, exists, err := b.inspect(ctx, req.Project, req.Instance)
-		if err != nil || !exists {
-			return base, errors.New("operation_outcome_uncertain: inspect current native state")
-		}
-		if after.UUID != x.UUID || !after.Managed {
-			return base, errors.New("instance_identity_changed: rediscover before further operations")
-		}
-		base.Instance = &after
-		base.Status = "completed_native"
-		return base, nil
+		})
 	default:
 		return base, errors.New("unsupported managed environment operation")
 	}
 }
-func capacity(memoryMiB, diskGiB int, stateDir string) error {
+func capacity(memoryMiB int) error {
 	data, err := os.ReadFile("/proc/meminfo")
 	if err == nil {
 		for _, line := range strings.Split(string(data), "\n") {
@@ -556,16 +648,34 @@ func capacity(memoryMiB, diskGiB int, stateDir string) error {
 			}
 		}
 	}
-	diskPath := "/var/lib/incus"
-	if _, err := os.Stat(diskPath); err != nil {
-		diskPath = stateDir
+	return nil
+}
+
+// The only storage free-space preflight comes from the chosen native pool,
+// not from statfs(/var/lib/incus) which may be unrelated to ZFS/LVM/Ceph.
+// A zero/unknown capacity cannot be truthfully reported as sufficient.
+func (b Backend) checkNativePool(ctx context.Context, pool string, diskGiB int) error {
+	if !validName(pool) {
+		return errors.New("storage_pool_required")
 	}
-	var st syscall.Statfs_t
-	if err := syscall.Statfs(diskPath, &st); err == nil {
-		free := st.Bavail * uint64(st.Bsize)
-		if free < uint64(diskGiB+2)*(1<<30) {
-			return errors.New("host_capacity_disk_insufficient: inspect storage pool and real host free space")
-		}
+	path := "/1.0/storage-pools/" + url.PathEscape(pool) + "/resources"
+	raw, err := b.command(ctx, 20*time.Second, "query", path)
+	if err != nil {
+		return errors.New("incus_storage_unavailable: selected pool resources cannot be read; inspect Incus storage pool and driver")
+	}
+	var data struct {
+		Space struct {
+			Total uint64 `json:"total"`
+			Used  uint64 `json:"used"`
+		} `json:"space"`
+	}
+	if err := json.Unmarshal([]byte(raw), &data); err != nil || data.Space.Total == 0 || data.Space.Used > data.Space.Total {
+		return errors.New("incus_storage_capacity_unknown: storage pool resources did not report usable total/used space")
+	}
+	available := data.Space.Total - data.Space.Used
+	required := uint64(diskGiB) * (1 << 30)
+	if available < required {
+		return fmt.Errorf("incus_storage_capacity_insufficient: selected pool %s has %d free bytes, requested root limit %d bytes", pool, available, required)
 	}
 	return nil
 }

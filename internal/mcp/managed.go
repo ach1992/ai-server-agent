@@ -11,7 +11,7 @@ import (
 )
 
 type ManagedEnvironmentInput struct {
-	Operation     string   `json:"operation" jsonschema:"status, list, inspect, create, start, stop, exec, snapshots, snapshot, restore or delete"`
+	Operation     string   `json:"operation" jsonschema:"status, pending_creates, list, inspect, create, start, stop, exec, snapshots, snapshot, restore or delete"`
 	Project       string   `json:"project,omitempty" jsonschema:"Actual Incus project. Required for per-instance operations; list without project searches all projects"`
 	Instance      string   `json:"instance,omitempty" jsonschema:"Exact native Incus instance name"`
 	UUID          string   `json:"uuid,omitempty" jsonschema:"Native volatile.uuid obtained from inspect; required before mutating an existing guest"`
@@ -22,6 +22,7 @@ type ManagedEnvironmentInput struct {
 	CPU           int      `json:"cpu,omitempty" jsonschema:"Explicit CPU count at create; operator capacity also applies"`
 	MemoryMiB     int      `json:"memory_mib,omitempty" jsonschema:"Explicit guest memory size in MiB at create; checked against host capacity"`
 	DiskGiB       int      `json:"disk_gib,omitempty" jsonschema:"Explicit guest root disk size in GiB at create; checked against host capacity"`
+	StoragePool   string   `json:"storage_pool,omitempty" jsonschema:"Actual Incus storage pool for root disk; required on create to verify native free capacity"`
 	Command       []string `json:"command,omitempty" jsonschema:"Native guest exec argv, no shell interpretation and never include secret values"`
 	CredentialRef string   `json:"credential_ref,omitempty" jsonschema:"Optional service reference for confidential guest-exec stdin, bound to this exact host/project/guest/UUID; suppresses all guest stdout/stderr"`
 	Snapshot      string   `json:"snapshot,omitempty" jsonschema:"Exact snapshot name for snapshot/restore"`
@@ -48,7 +49,7 @@ func (s *Server) registerManagedTools() {
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "managed_environment",
 		Description: "Optional host-local native Incus system containers and KVM VMs. status reports readiness without changing the host; list/inspect reconcile actual provider state and Agent instance identity before create or resume. Create uses stable operation_id and real capacity checks, refuses collisions, never installs/initializes Incus. Guest exec uses native Incus agent and argv (no shell unless explicitly requested). Snapshot/restore/delete are identity-bound; restore/delete require explicit approval. Missing Incus degrades only this tool; ordinary root/worker operations remain available.",
 		Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in ManagedEnvironmentInput) (*mcpsdk.CallToolResult, executor.Response, error) {
-		native := managedincus.Request{Operation: in.Operation, Project: in.Project, Instance: in.Instance, UUID: in.UUID, Image: in.Image, Type: in.Type, WorkID: in.WorkID, OperationID: in.OperationID, CPU: in.CPU, MemoryMiB: in.MemoryMiB, DiskGiB: in.DiskGiB, Command: in.Command, Snapshot: in.Snapshot}
+		native := managedincus.Request{Operation: in.Operation, Project: in.Project, Instance: in.Instance, UUID: in.UUID, Image: in.Image, Type: in.Type, WorkID: in.WorkID, OperationID: in.OperationID, CPU: in.CPU, MemoryMiB: in.MemoryMiB, DiskGiB: in.DiskGiB, StoragePool: in.StoragePool, Command: in.Command, Snapshot: in.Snapshot}
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "managed_environment", ManagedEnv: native, CredentialRef: in.CredentialRef, Approval: in.Approval})
 		if err != nil {
 			return executorTransportErrorResult(err)
@@ -72,22 +73,23 @@ func (s *Server) registerManagedTools() {
 // opaque reference. The root Executor sends the credential directly to its
 // isolated pinned Chromium process over a private stdin frame.
 type BrowserCredentialLoginInput struct {
-	Workspace         string `json:"workspace" jsonschema:"Exact existing Browser session workspace"`
-	SessionID         string `json:"session_id" jsonschema:"Principal-bound isolated Browser session ID; never a durable credential"`
-	CredentialRef     string `json:"credential_ref" jsonschema:"Opaque service_access registration reference; credential value is never returned"`
-	UsernameSelector  string `json:"username_selector,omitempty" jsonschema:"CSS login user field locator; optional for token-only forms"`
-	SecretSelector    string `json:"secret_selector" jsonschema:"CSS login password/token field locator"`
-	SubmitSelector    string `json:"submit_selector" jsonschema:"CSS submit control locator"`
-	SuccessSelector   string `json:"success_selector,omitempty" jsonschema:"CSS element that becomes visible only after successful authenticated login"`
-	SuccessURL        string `json:"success_url,omitempty" jsonschema:"Alternative absolute same-origin URL prefix that is reached after a successful login"`
-	ChallengeSelector string `json:"challenge_selector,omitempty" jsonschema:"Optional CSS MFA/CAPTCHA/manual-intervention element locator to return an actionable challenge outcome"`
+	Workspace          string `json:"workspace" jsonschema:"Exact existing Browser session workspace"`
+	SessionID          string `json:"session_id" jsonschema:"Principal-bound isolated Browser session ID; never a durable credential"`
+	CredentialRef      string `json:"credential_ref" jsonschema:"Opaque service_access registration reference; credential value is never returned"`
+	UsernameSelector   string `json:"username_selector,omitempty" jsonschema:"CSS login user field locator; optional for token-only forms"`
+	SecretSelector     string `json:"secret_selector" jsonschema:"CSS login password/token field locator"`
+	SubmitSelector     string `json:"submit_selector" jsonschema:"CSS submit control locator"`
+	SuccessSelector    string `json:"success_selector,omitempty" jsonschema:"CSS element that becomes visible only after successful authenticated login"`
+	SuccessURL         string `json:"success_url,omitempty" jsonschema:"Alternative absolute same-origin URL prefix that is reached after a successful login"`
+	ChallengeSelector  string `json:"challenge_selector,omitempty" jsonschema:"Optional CSS MFA/CAPTCHA/manual-intervention element locator to return an actionable challenge outcome"`
+	LoginErrorSelector string `json:"login_error_selector,omitempty" jsonschema:"Optional CSS element visible only on failed sign-in; report invalid credentials only when this evidence is observed"`
 }
 
 func (s *Server) registerBrowserCredentialTool() {
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_credential_login",
 		Description: "Use a protected target-service credential reference inside an existing isolated managed Playwright session; first navigate via browser_session_flow to the actual registered origin and inspect page locators. No secret argument, response or trace. Checks native guest UUID, exact page/form origin, credential expiry/revocation and a concrete success selector or URL; reports MFA/manual intervention without bypass. Do not assume preexisting Browser sessions survive chat changes. Credential-derived sessions deny further actions after expiry/revocation.",
 		Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserCredentialLoginInput) (*mcpsdk.CallToolResult, executor.Response, error) {
-		opts := map[string]string{"username_selector": in.UsernameSelector, "secret_selector": in.SecretSelector, "submit_selector": in.SubmitSelector, "success_selector": in.SuccessSelector, "success_url": in.SuccessURL, "challenge_selector": in.ChallengeSelector}
+		opts := map[string]string{"username_selector": in.UsernameSelector, "secret_selector": in.SecretSelector, "submit_selector": in.SubmitSelector, "success_selector": in.SuccessSelector, "success_url": in.SuccessURL, "challenge_selector": in.ChallengeSelector, "login_error_selector": in.LoginErrorSelector}
 		data, err := json.Marshal(opts)
 		if err != nil {
 			return executorTransportErrorResult(err)

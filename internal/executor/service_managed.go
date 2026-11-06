@@ -214,7 +214,7 @@ func (s *Server) managedEnvironmentAction(ctx context.Context, req Request) Resp
 	var resp Response
 	if err != nil {
 		resp = managedErr(err)
-	} else if !result.Available && in.Operation != "status" {
+	} else if !result.Available && in.Operation != "status" && in.Operation != "pending_creates" {
 		resp = fileError("incus_unavailable", "dependency", errors.New(result.Diagnostic))
 	} else {
 		resp = managedJSON(result)

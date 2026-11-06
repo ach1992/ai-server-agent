@@ -501,7 +501,8 @@ try {
         typeof input.username === 'string' &&
         typeof input.secret_selector === 'string' && typeof input.submit_selector === 'string' &&
         typeof input.success_selector === 'string' && typeof input.success_url === 'string' &&
-        typeof input.username_selector === 'string' && typeof input.challenge_selector === 'string';
+        typeof input.username_selector === 'string' && typeof input.challenge_selector === 'string' &&
+        typeof input.login_error_selector === 'string' && typeof input.service_endpoint === 'string';
       if (!valid) { reply({event:'error', nonce, reason:'credential_login_failed'}); continue; }
       // Strict, origin-only comparison; no login to a page reached via a
       // redirect, with a misleading hostname, or with embedded URL userinfo.
@@ -514,6 +515,19 @@ try {
         if (!rightOrigin()) {
           reason = 'credential_origin_mismatch';
           throw new Error('refused');
+        }
+        // Non-secret transport/readiness check before the first credential
+        // byte reaches the page. Report transport failure and HTTP 5xx
+        // separately; never misclassify an unknown login as bad password.
+        if (new URL(input.service_endpoint).origin !== input.expected_origin) {
+          reason='credential_origin_mismatch'; throw new Error('refused');
+        }
+        try {
+          const ready = await page.request.get(input.service_endpoint,{timeout:5000,failOnStatusCode:false});
+          if (ready.status() >= 500) {reason='credential_service_not_ready';throw new Error('service not ready');}
+        } catch {
+          if (reason !== 'credential_service_not_ready') reason='credential_service_unreachable';
+          throw new Error('service unreachable');
         }
         // Require a meaningful success transition rather than accepting a
         // pre-existing body element or the same URL as evidence of login.
@@ -544,17 +558,41 @@ try {
         input.secret = '';
         input.username = '';
         state.refs.clear();
+        const events = [];
         if (input.success_selector) {
-          await page.locator(input.success_selector).first().waitFor({state:'visible',timeout:15000});
+          events.push(page.locator(input.success_selector).first().waitFor({state:'visible',timeout:15000}).then(()=> 'success'));
         } else {
-          await page.waitForURL(url => url.href.startsWith(input.success_url),{timeout:15000});
+          events.push(page.waitForURL(url => url.href.startsWith(input.success_url),{timeout:15000}).then(()=> 'success'));
         }
+        if (input.login_error_selector) {
+          events.push(page.locator(input.login_error_selector).first().waitFor({state:'visible',timeout:15000}).then(()=> 'invalid'));
+        }
+        if (input.challenge_selector) {
+          events.push(page.locator(input.challenge_selector).first().waitFor({state:'visible',timeout:15000}).then(()=> 'challenge'));
+        }
+        const observed = await Promise.any(events);
+        if (observed==='invalid') {reason='credential_invalid_login';throw new Error('login rejected');}
+        if (observed==='challenge') {reason='credential_manual_intervention';throw new Error('manual challenge');}
+        // Clear the live form's retained password value even when successful
+        // authentication did not navigate. This is defense in depth: raw
+        // screenshots/traces/snapshots remain blocked by Executor.
+        try {
+          await page.locator(input.secret_selector).first().evaluate(el => {
+            if ('value' in el) el.value='';
+            el.removeAttribute('value');
+          });
+        } catch {}
         if (!rightOrigin()) { reason='credential_origin_mismatch'; throw new Error('refused'); }
         reply({event:'result',nonce,result:{ok:true,status:'authenticated'}});
       } catch {
         input.secret = '';
         input.username = '';
         state.refs.clear();
+        if (reason === 'credential_login_not_confirmed' && input.login_error_selector) {
+          try {
+            if (await page.locator(input.login_error_selector).first().isVisible()) reason='credential_invalid_login';
+          } catch {}
+        }
         if (reason === 'credential_login_not_confirmed' && input.challenge_selector) {
           try {
             if (await page.locator(input.challenge_selector).first().isVisible()) reason='credential_manual_intervention';

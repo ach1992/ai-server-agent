@@ -39,6 +39,39 @@ func TestManagedCredentialLoginPinnedChromium(t *testing.T) {
 			fmt.Fprint(w, `<h1 id="dashboard">Dashboard authenticated</h1>`)
 			return
 		}
+		if r.URL.Path == "/unready" {
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, "maintenance")
+			return
+		}
+		if r.URL.Path == "/retain" {
+			fmt.Fprint(w, `<!doctype html>
+          <form id="retained">
+           <input id="user"><input id="secret" type="password">
+           <button id="submit">Sign in</button>
+          </form>
+          <div id="dashboard" style="display:none">Dashboard retained authenticated</div>
+          <div id="fieldstate">not-clean</div>
+          <script>
+           document.querySelector("#retained").addEventListener("submit",e=>{
+             e.preventDefault();
+             document.querySelector("#dashboard").style.display="block";
+           });
+           setInterval(()=>document.querySelector("#fieldstate").textContent=
+             document.querySelector("#secret").value ? "not-clean":"clean",10);
+          </script>`)
+			return
+		}
+		if r.URL.Path == "/mfa" {
+			fmt.Fprint(w, `<!doctype html><form id="login">
+            <input id="user"><input id="secret" type="password"><button id="submit">Sign in</button>
+          </form><div id="dashboard" style="display:none">Success</div>
+          <div id="mfa" style="display:none">Challenge required</div>
+          <script>document.querySelector("#login").addEventListener("submit",e=>{
+            e.preventDefault();document.querySelector("#mfa").style.display="block"
+          })</script>`)
+			return
+		}
 		if r.Method == "POST" {
 			_ = r.ParseForm()
 			if r.PostFormValue("user") == "testadmin" && r.PostFormValue("password") == secret {
@@ -47,12 +80,16 @@ func TestManagedCredentialLoginPinnedChromium(t *testing.T) {
 				return
 			}
 		}
+		errorNotice := ""
+		if r.Method == "POST" {
+			errorNotice = `<div id="login-error">Credentials rejected</div>`
+		}
 		fmt.Fprint(w, `<!doctype html><form action="/login" method="post">
     <input name="user" id="user" autocomplete="username">
     <input name="password" id="secret" type="password" autocomplete="current-password">
     <button type="submit" id="submit">Sign in</button>
     <span id="mfa" style="display:none">MFA required</span>
-  </form>`)
+  </form>`+errorNotice)
 	}))
 	defer app.Close()
 	d := t.TempDir()
@@ -67,7 +104,7 @@ func TestManagedCredentialLoginPinnedChromium(t *testing.T) {
 	if err := os.WriteFile(source, []byte(script), 0600); err != nil {
 		t.Fatal(err)
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 75*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 130*time.Second)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, node, source)
 	cmd.Env = append(os.Environ(), "PLAYWRIGHT_BROWSERS_PATH="+filepath.Join(engine, "browsers"))
@@ -131,7 +168,8 @@ func TestManagedCredentialLoginPinnedChromium(t *testing.T) {
 	request := func(nonce, pass string) map[string]any {
 		return map[string]any{"type": "credential_login", "nonce": nonce, "expected_origin": origin,
 			"username": "testadmin", "secret": pass, "username_selector": "#user", "secret_selector": "#secret",
-			"submit_selector": "#submit", "success_selector": "#dashboard", "success_url": "", "challenge_selector": "#mfa"}
+			"submit_selector": "#submit", "success_selector": "#dashboard", "success_url": "", "challenge_selector": "#mfa",
+			"login_error_selector": "#login-error", "service_endpoint": origin + "/login"}
 	}
 	navigate(app.URL+"/login", strings.Repeat("1", 32))
 	// Refuse to inject into an unrelated origin, even with a valid store ref.
@@ -144,7 +182,7 @@ func TestManagedCredentialLoginPinnedChromium(t *testing.T) {
 	// Invalid password cannot produce an authenticated result, even if the
 	// form submits and the page returns normal HTTP 200.
 	invalid := send(request(strings.Repeat("3", 32), "fixture-wrong-password"))
-	if invalid["event"] != "error" || invalid["reason"] != "credential_login_not_confirmed" {
+	if invalid["event"] != "error" || invalid["reason"] != "credential_invalid_login" {
 		t.Fatalf("false-positive auth: %+v", invalid)
 	}
 	navigate(app.URL+"/login", strings.Repeat("4", 32))
@@ -155,6 +193,44 @@ func TestManagedCredentialLoginPinnedChromium(t *testing.T) {
 	observed := send(map[string]any{"type": "flow", "nonce": strings.Repeat("6", 32), "steps": []FlowStep{{Action: "assert_text", Selector: "#dashboard", Expected: "Dashboard authenticated"}}})
 	if observed["event"] != "result" || observed["result"].(map[string]any)["ok"] != true {
 		t.Fatalf("authenticated navigation failed: %+v", observed)
+	}
+	navigate(app.URL+"/retain", strings.Repeat("7", 32))
+	retained := request(strings.Repeat("8", 32), secret)
+	retained["service_endpoint"] = origin + "/retain"
+	successRetained := send(retained)
+	if successRetained["event"] != "result" {
+		t.Fatalf("retained same-page login unverified: %+v", successRetained)
+	}
+	cleaned := send(map[string]any{"type": "flow", "nonce": strings.Repeat("9", 32),
+		"steps": []FlowStep{{Action: "assert_text", Selector: "#fieldstate", Expected: "clean"}}})
+	if cleaned["event"] != "result" || cleaned["result"].(map[string]any)["ok"] != true {
+		t.Fatalf("password field not wiped after successful same-page login: %+v", cleaned)
+	}
+	navigate(app.URL+"/mfa", strings.Repeat("a", 32))
+	mfa := request(strings.Repeat("b", 32), secret)
+	mfa["service_endpoint"] = origin + "/mfa"
+	mfaResult := send(mfa)
+	if mfaResult["event"] != "error" || mfaResult["reason"] != "credential_manual_intervention" {
+		t.Fatalf("MFA not distinguished: %+v", mfaResult)
+	}
+	navigate(app.URL+"/login", strings.Repeat("c", 32))
+	unready := request(strings.Repeat("d", 32), secret)
+	unready["service_endpoint"] = origin + "/unready"
+	unavailable := send(unready)
+	if unavailable["event"] != "error" || unavailable["reason"] != "credential_service_not_ready" {
+		t.Fatalf("server HTTP 503 not distinguished: %+v", unavailable)
+	}
+	dead := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprint(w, `<form><input id="user"><input id="secret" type="password"><button id="submit">Sign in</button></form>`)
+	}))
+	navigate(dead.URL+"/login", strings.Repeat("e", 32))
+	dead.Close()
+	broken := request(strings.Repeat("f", 32), secret)
+	broken["expected_origin"] = dead.URL
+	broken["service_endpoint"] = dead.URL + "/login"
+	refused := send(broken)
+	if refused["event"] != "error" || refused["reason"] != "credential_service_unreachable" {
+		t.Fatalf("unreachable endpoint misclassified: %+v", refused)
 	}
 	if strings.Contains(stderr.String(), secret) {
 		t.Fatal("credential leaked to Node stderr")
