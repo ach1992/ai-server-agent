@@ -30,13 +30,17 @@ func main() {
 	flag.Parse()
 	args := flag.Args()
 	if len(args) == 0 {
-		fatal("usage: ai-server-agent [serve|executor|print-config|validate-config|validate-credential-store|runtime-settings]")
+		fatal("usage: ai-server-agent [serve|executor|print-config|validate-config|validate-credential-store|runtime-settings|service-access enroll]")
 	}
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
 		fatal(err.Error())
 	}
 	switch args[0] {
+	case "service-access":
+		if err := enrollServiceCredential(cfg, args[1:]); err != nil {
+			fatal(err.Error())
+		}
 	case "serve":
 		if cfg.TLSConfigured() {
 			err = mcpserver.ServeTLS(cfg)

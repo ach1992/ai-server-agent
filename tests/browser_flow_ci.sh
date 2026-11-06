@@ -61,14 +61,14 @@ printf 'EXACT_BROWSER_ACCEPTANCE_HEAD=%s\n' "$(git rev-parse HEAD)"
 printf 'PINNED_RUNTIME node=%s playwright=%s chromium_revision=%s\n' "$node_version" "$playwright_version" "$chromium_revision"
 log="$root/browser-e2e-acceptance.log"
 export AI_SERVER_AGENT_BROWSER_FLOW_RUNTIME="$root"
-go test ./internal/browser -run '^(TestBrowserFlow(PinnedRuntimeAcceptance|ReviewAcceptance|RefLifecyclePinnedRuntime|SnapshotIssuanceRacePinnedRuntime|AccessibilityPrivacyPinnedRuntime)|TestManagedBrowserSession(RunnerPinnedRuntime|CrashCleanupPinnedRuntime|CapturePinnedRuntime)|TestManagedBrowserLargeImageContinuationPinnedChromium|TestIsolatedManagedBrowserRealProfileSeparation|TestIsolatedBrowserProfileReclaimedAfterSIGKILLPinnedRuntime)$' -v -count=1 | tee "$log"
+go test ./internal/browser -run '^(TestBrowserFlow(PinnedRuntimeAcceptance|ReviewAcceptance|RefLifecyclePinnedRuntime|SnapshotIssuanceRacePinnedRuntime|AccessibilityPrivacyPinnedRuntime)|TestManagedBrowserSession(RunnerPinnedRuntime|CrashCleanupPinnedRuntime|CapturePinnedRuntime)|TestManagedBrowserLargeImageContinuationPinnedChromium|TestIsolatedManagedBrowserRealProfileSeparation|TestIsolatedBrowserProfileReclaimedAfterSIGKILLPinnedRuntime|TestManagedCredentialLoginPinnedChromium)$' -v -count=1 | tee "$log"
 # Broker/audit fault injection needs no Chromium profile; run once here to
 # correlate the source-level recovery checks with the exact pinned runtime.
 # Ubuntu 22.04 disposable hosted runner: real pinned Chromium sandbox
 # compatibility as the runner UID. This is NOT the separate root/aibrowser
 # cgroup proof, and must never be reported as one.
 ASA_BROWSER_SANDBOX_PINNED_WORKER_TEST=1 go test ./internal/browser -run '^TestIsolatedChromiumSandboxPinnedWorkerCompatibility$' -v -count=1 | tee -a "$log"
-go test ./internal/executor -run '^(TestBrowserSession|TestBrowserAdmissionStatus|TestBrowserSandbox|TestChromiumSandboxProcessTitleAndPinnedBinary)' -v -count=1 | tee -a "$log"
+go test ./internal/executor -run '^(TestBrowserSession|TestBrowserAdmissionStatus|TestBrowserSandbox|TestChromiumSandboxProcessTitleAndPinnedBinary|TestCredentialDerivedBrowserEvidenceGate)' -v -count=1 | tee -a "$log"
 go test ./internal/mcp -run '^(TestOfficialSDKCanDiscoverTools|TestBrowserSessionKnownFlowFailureMCP|TestBrowserSessionCaptureMCP)' -v -count=1 | tee -a "$log"
 # A stale regex or environment cannot make a critical new Browser test
 # silently SKIP while the pinned acceptance job still reports SUCCESS.
@@ -83,6 +83,7 @@ for name in \
   TestManagedBrowserLargeImageContinuationPinnedChromium \
   TestIsolatedManagedBrowserRealProfileSeparation \
   TestIsolatedBrowserProfileReclaimedAfterSIGKILLPinnedRuntime \
+  TestManagedCredentialLoginPinnedChromium \
   TestBrowserSessionCapturePrincipalAndBoundedIntegrity \
   TestBrowserSessionCaptureFrameFailuresAreFailClosed \
   TestBrowserSessionCaptureKnownTooLargeDoesNotPoisonSession \
@@ -91,7 +92,8 @@ for name in \
   TestBrowserSessionCloseAuditDegradedDoesNotStrandProfile \
   TestBrowserSessionExitedRetentionGCAndExpiry \
   TestBrowserSessionKnownFlowFailurePreservesSession \
-  TestBrowserSessionKnownFlowFailureMCP; do
+  TestBrowserSessionKnownFlowFailureMCP \
+  TestCredentialDerivedBrowserEvidenceGate; do
   grep -Fq -- "--- PASS: $name (" "$log" || {
     echo "Missing pinned Browser gate result: $name" >&2
     exit 1

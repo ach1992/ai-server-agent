@@ -330,9 +330,11 @@ type browserStdioState struct {
 	cursor                uint64
 	partial               []byte
 	uncertain             bool
-	fitQualitySupported   bool // advertised at ready by newer Agent-provided runners
-	regionSupported       bool // advertised at ready by region-aware runners
-	imageStagingSupported bool // optional <=1 MiB private per-session JPEG with pinned windows
+	fitQualitySupported   bool   // advertised at ready by newer Agent-provided runners
+	regionSupported       bool   // advertised at ready by region-aware runners
+	imageStagingSupported bool   // optional <=1 MiB private per-session JPEG with pinned windows
+	credentialRef         string // isolated session derived from a protected service credential
+	credentialAuthOK      bool   // deny further Browser actions after an unverified credential login
 }
 
 const (
@@ -351,11 +353,16 @@ func (s *Server) browserSessionAction(ctx context.Context, req Request) Response
 	if req.Root || req.Approval || req.PrincipalID == "" || req.PrincipalClass == "" {
 		return browserSessionError("browser_session_requires_worker_principal", "authorization", errors.New("authenticated unprivileged principal required"))
 	}
+	if gate := s.credentialSessionGate(req); !gate.OK {
+		return gate
+	}
 	switch req.Action {
+	case "browser_session_credential_login":
+		return s.browserSessionCredentialLogin(ctx, req)
 	case "browser_session_open":
 		return s.browserSessionOpen(ctx, req)
 	case "browser_session_flow":
-		return s.browserSessionFlow(ctx, req)
+		return s.credentialFlowEvidenceGate(req, s.browserSessionFlow(ctx, req))
 	case "browser_session_capture":
 		return s.browserSessionCapture(ctx, req)
 	case "browser_session_trace":
