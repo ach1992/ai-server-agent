@@ -52,6 +52,21 @@ elif args[0]=='operation' and args[1]=='list':
     print('[]')
 elif args[0]=='list':
     if mode=='list_unavailable':sys.exit(48)
+    if '--all-projects' in args:
+        if mode=='list_null':print('null');sys.exit(0)
+        if mode=='list_null_row':print('[null]');sys.exit(0)
+        if mode=='list_missing_project':
+            print(json.dumps([{'name':'guest-other','type':'container'}]));sys.exit(0)
+        if mode=='list_bad_identity':
+            print(json.dumps([{'name':'guest/other','project':'other','type':'container'}]));sys.exit(0)
+        if mode=='list_bad_project':
+            print(json.dumps([{'name':'guest-other','project':'wrong/project','type':'container'}]));sys.exit(0)
+        if mode=='list_bad_name_type':
+            print(json.dumps([{'name':404,'project':'default','type':'container'}]));sys.exit(0)
+        if mode=='list_valid_unrelated':
+            print(json.dumps([{'name':'different-guest','project':'different-project','type':'container'}]));sys.exit(0)
+        if mode=='list_valid_empty':
+            print('[]');sys.exit(0)
     project=value('--project')
     result=state['instances']
     if project: result=[x for x in result if x['project']==project]
@@ -86,7 +101,10 @@ elif args[0] in ('start','stop','delete'):
     found=[x for x in state['instances'] if x['name']==name and x['project']==project]
     if not found:sys.exit(42)
     if args[0]=='delete':state['instances'].remove(found[0])
-    else: found[0]['status']='Running' if args[0]=='start' else 'Stopped'
+    else:
+        found[0]['status']='Running' if args[0]=='start' else 'Stopped'
+        if mode=='change_operation_during_stop' and args[0]=='stop':
+            found[0]['config'].pop('user.asa.operation',None)
     save()
 elif args[0]=='exec':
     # Deliberately reflect stdin into stdout to prove the Agent discards it
@@ -611,5 +629,176 @@ func TestMissingConfirmedUUIDNeverSilentlyRebinds(t *testing.T) {
 	}
 	if _, err := restarted.Run(context.Background(), Request{Operation: "stop", Project: req.Project, Instance: req.Instance, UUID: out.Instance.UUID}, false, ""); err == nil || !strings.Contains(err.Error(), "create_intent_uuid_unavailable") {
 		t.Fatalf("missing immutable UUID allowed guest mutation: %v", err)
+	}
+}
+
+func TestAbandonRejectsIncompleteSuccessfulNativeAllProjectInventory(t *testing.T) {
+	for _, tc := range []struct {
+		mode    string
+		allowed bool
+	}{
+		{"list_null", false},
+		{"list_null_row", false},
+		{"list_missing_project", false},
+		{"list_bad_identity", false},
+		{"list_bad_project", false},
+		{"list_bad_name_type", false},
+		{"list_valid_empty", true},
+		{"list_valid_unrelated", true},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			b := fixture(t)
+			ctx := context.Background()
+			native := filepath.Join(b.StateDir, "native.json")
+			if err := os.WriteFile(native+".mode", []byte("uncertain_launch"), 0600); err != nil {
+				t.Fatal(err)
+			}
+			req := createRequest()
+			if _, err := b.Run(ctx, req, false, ""); err == nil || !strings.Contains(err.Error(), "create_outcome_uncertain") {
+				t.Fatalf("failed native launch setup: %v", err)
+			}
+			if err := os.WriteFile(native+".mode", []byte(tc.mode), 0600); err != nil {
+				t.Fatal(err)
+			}
+			abandon := Request{Operation: "abandon_create", Project: req.Project, Instance: req.Instance, OperationID: req.OperationID, WorkID: req.WorkID}
+			result, err := b.Run(ctx, abandon, true, "")
+			journal, loadErr := b.loadIntents()
+			if loadErr != nil || len(journal.Intents) != 1 {
+				t.Fatalf("journal unavailable: %+v %v", journal, loadErr)
+			}
+			if tc.allowed {
+				if err != nil || result.Status != "create_intent_abandoned" || journal.Intents[0].State != "abandoned" {
+					t.Fatalf("valid native inventory refused: result=%+v err=%v journal=%+v", result, err, journal)
+				}
+			} else {
+				if err == nil || !strings.Contains(err.Error(), "create_abandon_outcome_uncertain") {
+					t.Fatalf("incomplete successful native inventory accepted: result=%+v err=%v", result, err)
+				}
+				if journal.Intents[0].State != "submitted" {
+					t.Fatalf("ambiguous inventory erased pending intent: %+v", journal)
+				}
+			}
+		})
+	}
+}
+
+func TestJournalBoundNativeIdentityRefusesReplacedGuestWithChangedTags(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		replaceUUID bool
+		operation   string
+		work        string
+		want        string
+	}{
+		{"same_tags_replaced_uuid", true, "unchanged", "unchanged", "create_intent_native_uuid_conflict"},
+		{"changed_operation_replaced_uuid", true, "changed", "unchanged", "create_intent_native_uuid_conflict"},
+		{"missing_operation_replaced_uuid", true, "missing", "unchanged", "create_intent_native_uuid_conflict"},
+		{"changed_work_replaced_uuid", true, "unchanged", "changed", "create_intent_native_uuid_conflict"},
+		{"changed_operation_same_uuid", false, "changed", "unchanged", "create_intent_identity_mismatch"},
+		{"missing_operation_same_uuid", false, "missing", "unchanged", "create_intent_identity_mismatch"},
+		{"changed_work_same_uuid", false, "unchanged", "changed", "create_intent_identity_mismatch"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			b := fixture(t)
+			ctx := context.Background()
+			req := createRequest()
+			original, err := b.Run(ctx, req, false, "")
+			if err != nil || original.Instance == nil {
+				t.Fatalf("create: %+v %v", original, err)
+			}
+			uuid := original.Instance.UUID
+			nativeFile := filepath.Join(b.StateDir, "native.json")
+			content, err := os.ReadFile(nativeFile)
+			if err != nil {
+				t.Fatal(err)
+			}
+			var native map[string]any
+			if err := json.Unmarshal(content, &native); err != nil {
+				t.Fatal(err)
+			}
+			entry := native["instances"].([]any)[0].(map[string]any)
+			cfg := entry["config"].(map[string]any)
+			if tc.replaceUUID {
+				uuid = "99887766-1234-1234-1234-123456789abc"
+				cfg["volatile.uuid"] = uuid
+			}
+			if tc.operation == "changed" {
+				cfg["user.asa.operation"] = "new-operation"
+			}
+			if tc.operation == "missing" {
+				delete(cfg, "user.asa.operation")
+			}
+			if tc.work == "changed" {
+				cfg["user.asa.work"] = "new-work"
+			}
+			// Native host ownership, project and name remain identical.
+			bytes, err := json.Marshal(native)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(nativeFile, bytes, 0600); err != nil {
+				t.Fatal(err)
+			}
+			result, err := b.Run(ctx, Request{Operation: "stop", Project: req.Project, Instance: req.Instance, UUID: uuid}, false, "")
+			if err == nil || !strings.Contains(err.Error(), tc.want) {
+				t.Fatalf("journal identity bypass allowed: result=%+v err=%v", result, err)
+			}
+			all, err := b.List(ctx, req.Project)
+			if err != nil || len(all) != 1 || all[0].Status != "Running" {
+				t.Fatalf("replacement guest mutated during refused action: %+v %v", all, err)
+			}
+		})
+	}
+}
+
+func TestFreshConfirmedNameReuseAfterVerifiedDeletion(t *testing.T) {
+	b := fixture(t)
+	ctx := context.Background()
+	req := createRequest()
+	first, err := b.Run(ctx, req, false, "")
+	if err != nil || first.Instance == nil {
+		t.Fatalf("first create: %+v %v", first, err)
+	}
+	uuid := first.Instance.UUID
+	if _, err := b.Run(ctx, Request{Operation: "stop", Project: req.Project, Instance: req.Instance, UUID: uuid}, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Run(ctx, Request{Operation: "delete", Project: req.Project, Instance: req.Instance, UUID: uuid}, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	newer := req
+	newer.OperationID = "new-after-delete"
+	fresh, err := b.Run(ctx, newer, false, "")
+	if err != nil || fresh.Status != "created" {
+		t.Fatalf("legitimate new create refused: %+v %v", fresh, err)
+	}
+	if _, err := b.Run(ctx, Request{Operation: "stop", Project: newer.Project, Instance: newer.Instance, UUID: fresh.Instance.UUID}, false, ""); err != nil {
+		t.Fatalf("fresh confirmed guest mutation refused: %v", err)
+	}
+}
+
+func TestMutationDetectsNativeTagChangeAfterCLI(t *testing.T) {
+	b := fixture(t)
+	ctx := context.Background()
+	req := createRequest()
+	created, err := b.Run(ctx, req, false, "")
+	if err != nil || created.Instance == nil {
+		t.Fatalf("fixture create failed: %+v %v", created, err)
+	}
+	if err := os.WriteFile(filepath.Join(b.StateDir, "native.json.mode"), []byte("change_operation_during_stop"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	out, err := b.Run(ctx, Request{Operation: "stop", Project: req.Project, Instance: req.Instance, UUID: created.Instance.UUID}, false, "")
+	if err == nil || !strings.Contains(err.Error(), "operation_outcome_uncertain") {
+		t.Fatalf("operation response claimed success after native identity tags changed: %+v %v", out, err)
+	}
+	// Native side effect occurred; do not pretend the command failed before mutation.
+	observed, found, err := b.inspect(ctx, req.Project, req.Instance)
+	if err != nil || !found || observed.Status != "Stopped" || observed.OperationID != "" {
+		t.Fatalf("test did not produce mid-flight native tag change: %+v %v", observed, err)
+	}
+	journal, err := b.loadIntents()
+	if err != nil || len(journal.Intents) != 1 || journal.Intents[0].State != "confirmed" || journal.Intents[0].NativeUUID != created.Instance.UUID {
+		t.Fatalf("mid-flight identity mutation changed confirmed journal: %+v %v", journal, err)
 	}
 }

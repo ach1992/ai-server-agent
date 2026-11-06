@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"github.com/ach1992/ai-server-agent/internal/managedincus"
 	"net/url"
 	"os"
@@ -224,5 +225,18 @@ func TestCredentialDerivedBrowserEvidenceGate(t *testing.T) {
 	req.Content = `[{"action":"snapshot"}]`
 	if g := s.credentialSessionGate(req); g.OK || g.ErrorCode != "browser_credential_login_unverified" {
 		t.Fatalf("failed login allowed leaked evidence: %+v", g)
+	}
+}
+
+func TestNativeIdentityConflictHasTypedManagedError(t *testing.T) {
+	for _, nativeError := range []string{
+		"create_intent_native_uuid_conflict: original native guest has been replaced",
+		"create_intent_abandoned_identity_conflict: retired operation was reused",
+		"create_intent_identity_mismatch: guest operation tags differ",
+	} {
+		r := managedErr(errors.New(nativeError))
+		if r.OK || r.ErrorCode != "identity_conflict" {
+			t.Fatalf("unexpected identity error classification for %q: %+v", nativeError, r)
+		}
 	}
 }

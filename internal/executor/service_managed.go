@@ -24,7 +24,7 @@ func managedErr(err error) Response {
 		switch {
 		case contains(err, "_missing", "not_found"):
 			code = "resource_missing"
-		case contains(err, "_mismatch", "_collision"):
+		case contains(err, "_mismatch", "_collision", "_conflict"):
 			code = "identity_conflict"
 		case contains(err, "_expired"):
 			code = "credential_expired"

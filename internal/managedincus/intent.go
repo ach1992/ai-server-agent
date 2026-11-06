@@ -220,24 +220,36 @@ func (b Backend) abandonIntent(req Request) (CreateIntent, error) {
 	return CreateIntent{}, errors.New("create_intent_missing: no matching submitted create operation")
 }
 
-// A current provider UUID alone is not sufficient to authorize mutations:
-// a same-name guest with copied Agent tags must not inherit an earlier
-// confirmed operation identity.
+// A journaled native identity owns a project/name regardless of what a
+// replacement guest claims in its operation/work tags. Call under Backend.Lock
+// immediately before name-based native guest operations.
 func (b Backend) checkConfirmedIdentity(x Summary) error {
 	d, err := b.loadIntents()
 	if err != nil {
 		return err
 	}
 	for _, intent := range d.Intents {
-		if intent.OperationID != x.OperationID {
+		if intent.HostID != b.HostID {
+			return errors.New("create_intent_host_mismatch: local journal belongs to a different Agent identity")
+		}
+		sameName := intent.Project == x.Project && intent.Instance == x.Name
+		sameOperation := intent.OperationID == x.OperationID
+		if intent.State == "abandoned" {
+			// An abandoned operation ID is permanently retired, but its
+			// former project/name may be legitimately reused with a fresh ID.
+			if sameOperation {
+				return errors.New("create_intent_abandoned_identity_conflict: retired native operation reappeared")
+			}
 			continue
 		}
-		if intent.HostID != b.HostID || intent.Project != x.Project || intent.Instance != x.Name || intent.WorkID != x.WorkID {
-			return errors.New("create_intent_identity_mismatch: native resource reused protected creation tags")
+		if !sameName && !sameOperation {
+			continue
 		}
-		if intent.State == "abandoned" {
-			return errors.New("create_intent_abandoned_identity_conflict: retired native operation reappeared")
+		if !sameName {
+			return errors.New("create_intent_identity_mismatch: native operation tag is bound to a different project/name")
 		}
+		// Prioritize immutable provider identity even when another native
+		// actor removed or changed the operation/work tags.
 		if intent.State == "confirmed" {
 			if intent.NativeUUID == "" {
 				return errors.New("create_intent_uuid_unavailable: confirmed record lacks original UUID")
@@ -246,12 +258,14 @@ func (b Backend) checkConfirmedIdentity(x Summary) error {
 				return errors.New("create_intent_native_uuid_conflict: guest was replaced after original confirmation")
 			}
 		}
+		if !sameOperation || intent.WorkID != x.WorkID {
+			return errors.New("create_intent_identity_mismatch: native work/operation tags differ from the protected project/name binding")
+		}
 		// A submitted intent can be reconciled through create, not silently
 		// taken over by a mutation while its native identity is still uncertain.
 		if intent.State == "submitted" {
 			return errors.New("create_intent_unconfirmed: finish create reconciliation before mutation")
 		}
-		return nil
 	}
 	return nil
 }

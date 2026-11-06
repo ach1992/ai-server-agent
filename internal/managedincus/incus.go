@@ -214,8 +214,18 @@ func (b Backend) List(ctx context.Context, project string) ([]Summary, error) {
 	if err := json.Unmarshal([]byte(out), &xs); err != nil {
 		return nil, errors.New("invalid native Incus list JSON")
 	}
+	// An authoritative inventory is never inferred from JSON null or a
+	// partially identified row. In all-project mode the native project MUST
+	// be present: summarize()'s legacy default-project fallback cannot prove
+	// the absence of an uncertain create in a different project.
+	if xs == nil {
+		return nil, errors.New("incus_native_inventory_unverified: native list must be a non-null array")
+	}
 	result := make([]Summary, 0, len(xs))
 	for _, x := range xs {
+		if !validName(x.Name) || (project == "" && !validName(x.Project)) {
+			return nil, errors.New("incus_native_inventory_unverified: native instance lacks a valid name or all-project identity")
+		}
 		if project != "" {
 			x.Project = project
 		}
@@ -690,6 +700,9 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 			}
 			if after.UUID != x.UUID || !after.Managed {
 				return base, errors.New("instance_identity_changed: rediscover before further operations")
+			}
+			if err := b.checkConfirmedIdentity(after); err != nil {
+				return base, errors.New("operation_outcome_uncertain: native guest no longer matches its durable journal identity")
 			}
 			base.Instance = &after
 			base.Status = "completed_native"
