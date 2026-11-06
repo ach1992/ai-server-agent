@@ -25,7 +25,13 @@ def save():
 def value(option,default=''):
     return args[args.index(option)+1] if option in args else default
 if args[0]=='info':
+    if '--format' in args:sys.exit(65)
     print('{}')
+elif args[0]=='query' and args[1]=='/1.0':
+    if mode=='api_unavailable':sys.exit(46)
+    if mode=='api_bad_json':print('{bad-json');sys.exit(0)
+    if mode=='api_missing_version':print('{}');sys.exit(0)
+    print(json.dumps({'api_version':'1.0'}))
 elif args[0]=='query' and '/1.0/storage-pools/' in args[1]:
     if mode=='pool_unavailable':sys.exit(43)
     total=16*(1<<30)
@@ -126,6 +132,25 @@ func fixture(t *testing.T) Backend {
 	}
 	return Backend{HostID: "asa_one_host", Binary: cli, StateDir: d, capacityProbe: func(int, int) error { return nil }}
 }
+func TestNativeReadinessQueriesSupportedAPI(t *testing.T) {
+	b := fixture(t)
+	ready := b.Ready(context.Background())
+	if !ready.Available || ready.Status != "ready" {
+		t.Fatalf("healthy native API rejected: %+v", ready)
+	}
+	for _, mode := range []string{"api_unavailable", "api_bad_json", "api_missing_version"} {
+		t.Run(mode, func(t *testing.T) {
+			if err := os.WriteFile(filepath.Join(b.StateDir, "native.json.mode"), []byte(mode), 0600); err != nil {
+				t.Fatal(err)
+			}
+			got := b.Ready(context.Background())
+			if got.Available || got.Status != "unavailable" || !strings.HasPrefix(got.Diagnostic, "incus_unready:") {
+				t.Fatalf("unavailable or malformed native API treated as ready: %+v", got)
+			}
+		})
+	}
+}
+
 func createRequest() Request {
 	return Request{Operation: "create", Project: "default", Instance: "guest-a", Image: "images:debian/13", Type: "container", WorkID: "issue65", OperationID: "stable-creation-id", CPU: 1, MemoryMiB: 128, DiskGiB: 1, StoragePool: "default"}
 }

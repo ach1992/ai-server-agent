@@ -324,8 +324,19 @@ func (b Backend) Ready(ctx context.Context) Result {
 		r.Diagnostic = err.Error()
 		return r
 	}
-	if _, err := b.command(ctx, 12*time.Second, "info", "--format", "json"); err != nil {
+	// "incus info" does not support --format=json in supported Incus
+	// releases. Query the native API instead; validate the response so a
+	// successful command with non-API output cannot falsely report readiness.
+	root, err := b.command(ctx, 12*time.Second, "query", "/1.0")
+	if err != nil {
 		r.Diagnostic = "incus_unready: native daemon/socket/project not initialized or unavailable; inspect incus admin status and initialization"
+		return r
+	}
+	var api struct {
+		Version string `json:"api_version"`
+	}
+	if json.Unmarshal([]byte(root), &api) != nil || api.Version == "" {
+		r.Diagnostic = "incus_unready: native API root returned invalid or incomplete JSON"
 		return r
 	}
 	r.Available = true
