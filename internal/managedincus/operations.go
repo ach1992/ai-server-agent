@@ -422,58 +422,134 @@ func operationMetadata(data []byte) (id string, code int, project string, err er
 	}
 	return wrapper.Metadata.ID, wrapper.Metadata.StatusCode, wrapper.Metadata.Project, nil
 }
+
+// nativeResourceMatches requires the exact resource type, instance/snapshot path
+// and project query from Incus's operation metadata. Description text alone is
+// never sufficient to reattach an operation after a lost HTTP acknowledgement.
+func nativeResourceMatches(paths []string, targetPath, project string) bool {
+	// A multi-resource operation could target other guests as well. Incus
+	// snapshot/restore is per-instance; refuse non-unique native resources.
+	if len(paths) != 1 {
+		return false
+	}
+	for _, raw := range paths {
+		ref, err := url.Parse(raw)
+		if err != nil || ref.IsAbs() || ref.Host != "" || ref.Fragment != "" || ref.Path != targetPath {
+			continue
+		}
+		query, err := url.ParseQuery(ref.RawQuery)
+		if err != nil {
+			continue
+		}
+		projects, hasProject := query["project"]
+		delete(query, "project")
+		if len(query) != 0 {
+			continue
+		}
+		if hasProject && len(projects) == 1 && projects[0] == project {
+			return true
+		}
+		if !hasProject && project == "default" {
+			return true // Native default-project resource URLs may omit ?project.
+		}
+	}
+	return false
+}
+
+func nativeOperationCorrelates(op struct {
+	ID          string              `json:"id"`
+	Description string              `json:"description"`
+	Project     string              `json:"project"`
+	CreatedAt   time.Time           `json:"created_at"`
+	StatusCode  int                 `json:"status_code"`
+	Resources   map[string][]string `json:"resources"`
+}, v NativeOperation) bool {
+	if !uuidPattern.MatchString(op.ID) || (op.Project != "" && op.Project != v.Project) ||
+		op.CreatedAt.IsZero() || op.CreatedAt.Before(v.SubmittedAt) ||
+		op.CreatedAt.After(time.Now().UTC().Add(10*time.Second)) {
+		return false
+	}
+	switch v.Action {
+	case "snapshot":
+		if op.Description != "Snapshotting instance" {
+			return false
+		}
+	case "restore":
+		if op.Description != "Restoring snapshot" {
+			return false
+		}
+	default:
+		return false
+	}
+	instancePath := "/1.0/instances/" + url.PathEscape(v.Instance)
+	snapshotPath := instancePath + "/snapshots/" + url.PathEscape(v.Snapshot)
+	// Real Incus 6.0.4 lists operations under metadata.running and includes
+	// both resource kinds with an explicit ?project=... for nondefault projects.
+	// A restore whose native metadata does not identify the precise snapshot
+	// cannot be proven and MUST remain outcome_uncertain.
+	return nativeResourceMatches(op.Resources["instances"], instancePath, v.Project) &&
+		nativeResourceMatches(op.Resources["instances_snapshots"], snapshotPath, v.Project)
+}
+
 func (b Backend) reconcileLostAck(ctx context.Context, v *NativeOperation) {
-	// Only a single unequivocally matching *running* native operation may
-	// reattach to an unacknowledged local submission. Absence is never failure.
-	route := "/1.0/operations?recursion=1&project=" + url.QueryEscape(v.Project)
-	response, err := b.nativeRequest(ctx, http.MethodGet, route, nil, "")
-	if err != nil {
+	// The Incus 6.0.4 operation-list envelope groups records by state
+	// (metadata.running, metadata.pending, ...), NOT a flat metadata array.
+	// Never adopt merely by description/snapshot name; preserve uncertainty if
+	// no uniquely and independently correlated native operation is visible.
+	response, err := b.nativeRequest(ctx, http.MethodGet, "/1.0/operations?recursion=1&project="+url.QueryEscape(v.Project), nil, "")
+	if err != nil || response.Status != http.StatusOK {
 		return
 	}
 	var envelope struct {
-		Metadata []json.RawMessage `json:"metadata"`
+		Type     string                       `json:"type"`
+		Metadata map[string][]json.RawMessage `json:"metadata"`
 	}
-	if json.Unmarshal(response.Body, &envelope) != nil || envelope.Metadata == nil {
+	if json.Unmarshal(response.Body, &envelope) != nil || envelope.Type != "sync" || envelope.Metadata == nil {
 		return
 	}
-	matches := []string{}
-	for _, item := range envelope.Metadata {
-		var op struct {
-			ID          string              `json:"id"`
-			Description string              `json:"description"`
-			Project     string              `json:"project"`
-			StatusCode  int                 `json:"status_code"`
-			Resources   map[string][]string `json:"resources"`
-		}
-		if json.Unmarshal(item, &op) != nil || !uuidPattern.MatchString(op.ID) || op.Project != v.Project || op.StatusCode >= 200 {
-			continue
-		}
-		desc := strings.ToLower(op.Description)
-		if (v.Action == "restore" && !strings.Contains(desc, "restor")) || (v.Action == "snapshot" && !strings.Contains(desc, "snapshot")) {
-			continue
-		}
-		// An operation on the same guest is not sufficient identity proof:
-		// a separate Incus actor could be snapshotting a different name. The
-		// native operation must explicitly identify the requested snapshot.
-		target := "/1.0/instances/" + v.Instance + "/snapshots/" + v.Snapshot
-		match := strings.Contains(op.Description, v.Snapshot)
-		for _, paths := range op.Resources {
-			for _, resource := range paths {
-				if resource == target || strings.HasPrefix(resource, target+"?") {
-					match = true
-				}
+	type candidate struct {
+		ID          string              `json:"id"`
+		Description string              `json:"description"`
+		Project     string              `json:"project"`
+		CreatedAt   time.Time           `json:"created_at"`
+		StatusCode  int                 `json:"status_code"`
+		Resources   map[string][]string `json:"resources"`
+	}
+	var matched candidate
+	count := 0
+	for _, group := range envelope.Metadata {
+		for _, item := range group {
+			var op candidate
+			if json.Unmarshal(item, &op) != nil || !nativeOperationCorrelates(op, *v) {
+				continue
 			}
-		}
-		if match {
-			matches = append(matches, op.ID)
+			if (op.StatusCode < 100 || op.StatusCode >= 200) &&
+				op.StatusCode != 200 && op.StatusCode != 400 && op.StatusCode != 401 {
+				continue
+			}
+			matched = op
+			count++
 		}
 	}
-	if len(matches) == 1 {
-		v.NativeID = matches[0]
+	if count != 1 {
+		return
+	}
+	v.NativeID = matched.ID
+	v.Diagnostic = ""
+	switch matched.StatusCode {
+	case 200:
+		// Strictly matched list metadata is a native terminal observation.
+		// nativeStatusLocked still rechecks guest identity and snapshot state.
+		v.NativeTerminal = "success"
+		v.State = "native_succeeded"
+	case 400, 401:
+		v.NativeTerminal = "failure"
+		v.State = "native_failed"
+	default:
 		v.State = "running"
-		v.Diagnostic = ""
 	}
 }
+
 func (b Backend) nativeStatusLocked(ctx context.Context, req Request) (Result, error) {
 	base := Result{Status: "operation_not_found", Available: true, HostID: b.HostID}
 	if !validName(req.OperationID) || !validName(req.Project) || !validName(req.Instance) || !uuidPattern.MatchString(req.UUID) {
@@ -510,6 +586,9 @@ func (b Backend) nativeStatusLocked(ctx context.Context, req Request) (Result, e
 		// The native operation may already have expired. Preserve its verified
 		// terminal code even when a later guest-identity check was unavailable.
 		v.State = "native_succeeded"
+	} else if v.NativeTerminal == "failure" {
+		// A strictly matched native terminal failure survives operation expiry.
+		v.State = "native_failed"
 	} else if v.NativeID != "" {
 		response, callErr := b.nativeRequest(ctx, http.MethodGet, "/1.0/operations/"+v.NativeID+"?project="+url.QueryEscape(v.Project), nil, "")
 		if callErr == nil {
@@ -670,19 +749,21 @@ func (b Backend) RecoverableNativeOperations() ([]NativeOperation, error) {
 	return result.Operations, err
 }
 
-func (b Backend) WatchNativeOperation(ctx context.Context, req Request) {
-	// Probe immediately: a small native snapshot may finish before the next
-	// scheduled poll and Incus can expire terminal operations shortly thereafter.
+// WatchNativeOperation observes a bounded slice of a durable operation. It
+// returns true only when a native terminal record is persisted. A lost HTTP
+// acknowledgement, temporary native API failure, or absent proof is NOT
+// completion: the Executor must give this operation another observation turn.
+func (b Backend) WatchNativeOperation(ctx context.Context, req Request) bool {
 	ticker := time.NewTicker(time.Second)
 	defer ticker.Stop()
 	for {
 		result, err := b.Lock(func() (Result, error) { return b.nativeStatusLocked(ctx, req) })
-		if err != nil || result.Operation == nil || nativeTerminal(result.Status) || result.Status == "outcome_uncertain" {
-			return
+		if err == nil && result.Operation != nil && nativeTerminal(result.Status) {
+			return true
 		}
 		select {
 		case <-ctx.Done():
-			return
+			return false
 		case <-ticker.C:
 		}
 	}

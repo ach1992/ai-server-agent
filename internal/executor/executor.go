@@ -45,7 +45,10 @@ type Server struct {
 	browserRunTerminateTestHook       func(int) (bool, error) // private one-shot Browser uncertain-stop test hook
 	browserKillTestHook               func() error            // private root-fixture pause/fault, never public API
 	managedWatchMu                    sync.Mutex
-	managedWatching                   map[string]bool // active native-operation observers in this Executor process
+	managedWatching                   map[string]bool // active or queued native-operation observers
+	managedWatchQueue                 []nativeWatchTicket
+	managedWatchActive                int
+	managedWatchObserveTestHook       func(context.Context, string) bool // test-only bounded observer scheduler fixture
 	jobsMu                            sync.Mutex
 	jobUnknownBeforeWriteTestHook     func() // test-only deterministic status reconciliation interleaving
 	lifecycleLockPath                 string

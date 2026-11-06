@@ -214,8 +214,8 @@ func (s *Server) managedEnvironmentAction(ctx context.Context, req Request) Resp
 	}
 	backend := s.managedBackend()
 	result, err := backend.Run(ctx, in, req.Approval, secret)
-	if err == nil && result.Operation != nil && result.Operation.NativeID != "" &&
-		(result.Status == "running" || result.Status == "submitted") {
+	if result.Operation != nil &&
+		(result.Operation.State == "running" || result.Operation.State == "submitted" || result.Operation.State == "outcome_uncertain") {
 		s.watchNativeOperation(backend, *result.Operation)
 	}
 	var resp Response
@@ -234,34 +234,80 @@ func (s *Server) managedEnvironmentAction(ctx context.Context, req Request) Resp
 	return s.finishActionAudit(req, "managed_environment", "root", "incus "+in.Operation, "managed", started, resp)
 }
 
-// watchNativeOperation preserves the last native result even when the MCP
-// caller disconnects. The existing Executor owns these bounded goroutines;
-// no new daemon or external scheduling service is introduced.
+// nativeWatchTicket is at most one pending observation per durable operation.
+// The journal holds at most 256 records; keep only 32 active observer goroutines.
+type nativeWatchTicket struct {
+	operation managedincus.NativeOperation
+	deadline  time.Time
+}
+
+const nativeWatchConcurrency = 32
+const nativeWatchSlice = 2 * time.Second
+const nativeWatchBudget = 2 * time.Hour
+
+// watchNativeOperation admits *all* journal-backed pending operations. When 32
+// observations are active, further operations queue instead of being silently
+// dropped; short observation turns ensure a long-running operation cannot
+// indefinitely starve a later accepted one.
 func (s *Server) watchNativeOperation(b managedincus.Backend, op managedincus.NativeOperation) {
 	s.managedWatchMu.Lock()
+	defer s.managedWatchMu.Unlock()
 	if s.managedWatching == nil {
 		s.managedWatching = map[string]bool{}
 	}
 	if s.managedWatching[op.ID] {
-		s.managedWatchMu.Unlock()
-		return
-	}
-	if len(s.managedWatching) >= 32 {
-		s.managedWatchMu.Unlock()
 		return
 	}
 	s.managedWatching[op.ID] = true
-	s.managedWatchMu.Unlock()
-	go func() {
-		defer func() {
-			s.managedWatchMu.Lock()
-			delete(s.managedWatching, op.ID)
-			s.managedWatchMu.Unlock()
-		}()
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
-		defer cancel()
-		b.WatchNativeOperation(ctx, managedincus.Request{Operation: "operation_status", OperationID: op.ID, ActorID: op.ActorID, Project: op.Project, Instance: op.Instance, UUID: op.UUID})
-	}()
+	s.managedWatchQueue = append(s.managedWatchQueue, nativeWatchTicket{
+		operation: op,
+		deadline:  time.Now().Add(nativeWatchBudget),
+	})
+	s.startManagedWatchersLocked(b)
+}
+
+// startManagedWatchersLocked must hold managedWatchMu; it starts only the
+// bounded active set and makes every queued operation eligible when a turn
+// finishes. The queue remains in Executor memory; the durable journal is
+// recovered separately after restart.
+func (s *Server) startManagedWatchersLocked(b managedincus.Backend) {
+	for s.managedWatchActive < nativeWatchConcurrency && len(s.managedWatchQueue) > 0 {
+		ticket := s.managedWatchQueue[0]
+		s.managedWatchQueue[0] = nativeWatchTicket{}
+		s.managedWatchQueue = s.managedWatchQueue[1:]
+		s.managedWatchActive++
+		go s.observeManagedWatchTurn(b, ticket)
+	}
+}
+
+func (s *Server) observeManagedWatchTurn(b managedincus.Backend, ticket nativeWatchTicket) {
+	op := ticket.operation
+	ctx, cancel := context.WithTimeout(context.Background(), nativeWatchSlice)
+	completed := false
+	if s.managedWatchObserveTestHook != nil {
+		completed = s.managedWatchObserveTestHook(ctx, op.ID)
+	} else {
+		completed = b.WatchNativeOperation(ctx, managedincus.Request{
+			Operation: "operation_status", OperationID: op.ID, ActorID: op.ActorID,
+			Project: op.Project, Instance: op.Instance, UUID: op.UUID,
+		})
+	}
+	cancel()
+
+	s.managedWatchMu.Lock()
+	defer s.managedWatchMu.Unlock()
+	s.managedWatchActive--
+	if !completed && time.Now().Before(ticket.deadline) {
+		s.managedWatchQueue = append(s.managedWatchQueue, ticket)
+	} else {
+		delete(s.managedWatching, op.ID)
+		if !completed {
+			// Unverified work remains in the root-only journal for manual
+			// operation_status/Owner-approved resolution, never marked success.
+			log.Printf("managed_incus_observer_budget_exhausted: operation_id=%s; native outcome remains unverified", op.ID)
+		}
+	}
+	s.startManagedWatchersLocked(b)
 }
 
 // resumeNativeOperations reattaches polling immediately after an Executor
