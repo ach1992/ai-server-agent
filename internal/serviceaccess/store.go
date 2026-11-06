@@ -321,7 +321,7 @@ func (s *Store) Register(r Registration) (Metadata, error) {
 	rec := Record{ID: newID, HostID: r.HostID, Project: r.Project, Guest: r.Guest, GuestUUID: r.GuestUUID, Service: r.Service, Purpose: r.Purpose, Endpoint: r.Endpoint, Username: r.Username, CreatedAt: now, UpdatedAt: now}
 	err = s.withLock(func(d *diskStore) (bool, error) {
 		for _, existing := range d.Records {
-			if existing.HostID == r.HostID && existing.Project == r.Project && existing.Guest == r.Guest && existing.GuestUUID == r.GuestUUID && existing.Service == r.Service && existing.Endpoint == r.Endpoint && existing.RevokedAt == nil {
+			if existing.HostID == r.HostID && existing.Project == r.Project && existing.Guest == r.Guest && existing.GuestUUID == r.GuestUUID && existing.Service == r.Service && existing.Endpoint == r.Endpoint && existing.Username == r.Username && existing.Purpose == r.Purpose && existing.RevokedAt == nil {
 				return false, errors.New("service_already_registered: inspect existing references before creating duplicates")
 			}
 		}
@@ -562,7 +562,7 @@ func (s *Store) Modify(ref string, change Registration, allowOriginChange bool) 
 				return false, err
 			}
 			for j, r := range d.Records {
-				if i != j && r.RevokedAt == nil && r.HostID == next.HostID && r.Project == next.Project && r.Guest == next.Guest && r.GuestUUID == next.GuestUUID && r.Service == next.Service && r.Endpoint == next.Endpoint {
+				if i != j && r.RevokedAt == nil && r.HostID == next.HostID && r.Project == next.Project && r.Guest == next.Guest && r.GuestUUID == next.GuestUUID && r.Service == next.Service && r.Endpoint == next.Endpoint && r.Username == next.Username && r.Purpose == next.Purpose {
 					return false, errors.New("service_already_registered: duplicate service destination")
 				}
 			}

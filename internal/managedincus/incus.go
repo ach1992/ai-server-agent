@@ -346,6 +346,20 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 			if req.CPU < 1 || req.MemoryMiB < 128 || req.DiskGiB < 1 {
 				return base, errors.New("explicit positive cpu/memory_mib/disk_gib required")
 			}
+			// An operation ID is an Agent-host-wide create idempotency key,
+			// not merely a name-scoped hint. A reconnect/new chat proposing
+			// a different instance name must not duplicate an earlier guest.
+			all, err := b.List(ctx, "")
+			if err != nil {
+				return base, err
+			}
+			for _, prior := range all {
+				if prior.Managed && prior.OperationID == req.OperationID {
+					if prior.Project != req.Project || prior.Name != req.Instance || prior.WorkID != req.WorkID || prior.Type != req.Type {
+						return base, errors.New("operation_id_collision: existing managed guest already owns this creation id; list and inspect native state before retry")
+					}
+				}
+			}
 			x, found, err := b.inspect(ctx, req.Project, req.Instance)
 			if err != nil {
 				return base, err

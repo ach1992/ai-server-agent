@@ -210,7 +210,7 @@ func instructions(cfg config.Config) string {
 		label = fmt.Sprintf("Server label: %s. ", cfg.ServerLabel)
 	}
 	return fmt.Sprintf(`Configured workspace root is persistent.
-Environment purpose: %s. %s%s Profile hints do not change permissions.
+Environment purpose: %s. %s%s Role guidance; it is not an authorization boundary.
 
 Repositories: repository_discover/repository_inspect. Branches: worktree_create/worktree_remove. Use run_command for worker shell; start_job with job_status/job_output. workspace_* for bounded worker files; code_* for optional LSP; debug_* for optional DAP; terminal_* for PTY. Browser: browser_e2e (one call); browser_session_* (cross-call); browser_run (custom Playwright). Check optional runtime availability. runtime_list is passive; browser_status reports Browser readiness. Incus: managed_environment. Service refs: service_access. Protected Browser login: browser_session_credential_login. Workspace labels are not project ACLs.
 

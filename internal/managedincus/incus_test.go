@@ -99,6 +99,11 @@ func TestNativeLifecycleIdentityCollisionAndRecovery(t *testing.T) {
 	if _, err := b.Run(ctx, conflict, false, ""); err == nil || !strings.Contains(err.Error(), "collision") {
 		t.Fatalf("different create operation reused existing guest: %v", err)
 	}
+	sameOperationNewName := req
+	sameOperationNewName.Instance = "guest-b"
+	if _, err := b.Run(ctx, sameOperationNewName, false, ""); err == nil || !strings.Contains(err.Error(), "operation_id_collision") {
+		t.Fatalf("same create operation duplicated under new name: %v", err)
+	}
 	other := req
 	other.Instance = "guest-b"
 	other.OperationID = "second"

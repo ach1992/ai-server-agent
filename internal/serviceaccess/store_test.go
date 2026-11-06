@@ -132,7 +132,7 @@ func TestGeneratedCredentialOriginAndValidation(t *testing.T) {
 	if dirinfo.Mode().Perm() != 0700 {
 		t.Fatal("private store directory permissions are not 0700")
 	}
-	if _, err := s.Register(Registration{HostID: "asa_testing_host", Project: "default", Guest: "guest-one", GuestUUID: "uuid-123", Service: "wordpress", Endpoint: r.Endpoint}); err == nil {
+	if _, err := s.Register(Registration{HostID: "asa_testing_host", Project: "default", Guest: "guest-one", GuestUUID: "uuid-123", Service: "wordpress", Endpoint: r.Endpoint, Username: "testadmin"}); err == nil {
 		t.Fatal("duplicate registered")
 	}
 }
@@ -221,5 +221,36 @@ func TestUpdateServiceEndpointPreservesCredentialAndGuestBinding(t *testing.T) {
 	}
 	if _, err := s.Modify(r.ID, Registration{HostID: "different-host", Endpoint: "http://localhost/login"}, true); err == nil {
 		t.Fatal("host credential binding mutated silently")
+	}
+}
+
+// The same WordPress/aaPanel endpoint may legitimately have administrator,
+// editor, API and other separate credentials. Only exact duplicate account
+// identity is rejected, not the host/service/URL itself.
+func TestMultipleServiceAccountsSameEndpoint(t *testing.T) {
+	s, first := newFixture(t)
+	editor, err := s.Register(Registration{HostID: first.HostID, Project: first.Project, Guest: first.Guest, GuestUUID: first.GuestUUID, Service: first.Service, Endpoint: first.Endpoint, Username: "editor", Purpose: "role-testing"})
+	if err != nil {
+		t.Fatalf("second service account blocked: %v", err)
+	}
+	if editor.ID == first.ID {
+		t.Fatal("separate accounts reused identical secret reference")
+	}
+	if _, err := s.Enroll(editor.ID, "password", "editor", "editor-only-password", 30, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.Enroll(first.ID, "password", "testadmin", "admin-only-password", 30, false); err != nil {
+		t.Fatal(err)
+	}
+	admin, err := s.Resolve(first.ID, first.HostID)
+	if err != nil || admin.Secret != "admin-only-password" {
+		t.Fatal("admin credential changed by editor registration")
+	}
+	other, err := s.Resolve(editor.ID, first.HostID)
+	if err != nil || other.Secret != "editor-only-password" {
+		t.Fatal("editor credential changed by admin registration")
+	}
+	if _, err := s.Register(Registration{HostID: first.HostID, Project: first.Project, Guest: first.Guest, GuestUUID: first.GuestUUID, Service: first.Service, Endpoint: first.Endpoint, Username: "editor", Purpose: "role-testing"}); err == nil {
+		t.Fatal("identical duplicate account allowed")
 	}
 }
