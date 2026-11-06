@@ -98,10 +98,12 @@ elif args[0]=='snapshot' and args[1]=='list':
 elif args[0]=='snapshot' and args[1]=='create':
     k=value('--project','default')+':'+args[2]
     state['snapshots'].setdefault(k,[]).append(args[3]);save()
+    if mode=='snapshot_lost_ack':sys.exit(45)
 elif args[0]=='snapshot' and args[1]=='restore':
     k=value('--project','default')+':'+args[2]
     if args[3] not in state['snapshots'].get(k,[]):sys.exit(41)
     save()
+    if mode=='restore_lost_ack':sys.exit(45)
 elif args[0] in ('start','stop','delete'):
     name=args[1];project=value('--project','default')
     found=[x for x in state['instances'] if x['name']==name and x['project']==project]
@@ -255,6 +257,43 @@ func TestSnapshotRestoreAndCredentialStdinTransport(t *testing.T) {
 		t.Fatalf("secret-bearing guest exec stdout leak: %+v %v", private, err)
 	}
 }
+func TestSnapshotRestoreLostAcknowledgementNeverClaimsCompletion(t *testing.T) {
+	b := fixture(t)
+	ctx := context.Background()
+	created, err := b.Run(ctx, createRequest(), false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ref := Request{Project: "default", Instance: "guest-a", UUID: created.Instance.UUID, Snapshot: "before-test"}
+	writeMode := func(mode string) {
+		t.Helper()
+		if err := os.WriteFile(filepath.Join(b.StateDir, "native.json.mode"), []byte(mode), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	writeMode("snapshot_lost_ack")
+	snapshot := ref
+	snapshot.Operation = "snapshot"
+	if result, err := b.Run(ctx, snapshot, false, ""); err == nil || !strings.Contains(err.Error(), "snapshot_outcome_uncertain") || result.Status == "snapshot_created" {
+		t.Fatalf("lost snapshot acknowledgement treated as completion: %+v %v", result, err)
+	}
+	// A native snapshot may already be visible while its daemon operation
+	// is still running. The Agent must not silently submit it again.
+	observed, err := b.Snapshots(ctx, ref.Project, ref.Instance)
+	if err != nil || !hasSnapshot(observed, ref.Snapshot) {
+		t.Fatalf("native snapshot state not discoverable: %v %v", observed, err)
+	}
+	if _, err := b.Run(ctx, snapshot, false, ""); err == nil || !strings.Contains(err.Error(), "snapshot_collision") {
+		t.Fatalf("uncertain native snapshot was submitted twice: %v", err)
+	}
+	writeMode("restore_lost_ack")
+	restore := ref
+	restore.Operation = "restore"
+	if result, err := b.Run(ctx, restore, true, ""); err == nil || !strings.Contains(err.Error(), "restore_outcome_uncertain") || result.Status == "completed_native" {
+		t.Fatalf("lost restore acknowledgement treated as completion: %+v %v", result, err)
+	}
+}
+
 func TestConcurrentCreateSameOperationSingleInstance(t *testing.T) {
 	b := fixture(t)
 	var wg sync.WaitGroup
