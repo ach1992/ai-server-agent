@@ -61,7 +61,7 @@ printf 'EXACT_BROWSER_ACCEPTANCE_HEAD=%s\n' "$(git rev-parse HEAD)"
 printf 'PINNED_RUNTIME node=%s playwright=%s chromium_revision=%s\n' "$node_version" "$playwright_version" "$chromium_revision"
 log="$root/browser-e2e-acceptance.log"
 export AI_SERVER_AGENT_BROWSER_FLOW_RUNTIME="$root"
-go test ./internal/browser -run '^(TestBrowserFlow(PinnedRuntimeAcceptance|ReviewAcceptance|RefLifecyclePinnedRuntime|SnapshotIssuanceRacePinnedRuntime|AccessibilityPrivacyPinnedRuntime)|TestManagedBrowserSession(RunnerPinnedRuntime|CrashCleanupPinnedRuntime|CapturePinnedRuntime)|TestManagedBrowserLargeImageContinuationPinnedChromium|TestIsolatedManagedBrowserRealProfileSeparation|TestIsolatedBrowserProfileReclaimedAfterSIGKILLPinnedRuntime)$' -v -count=1 | tee "$log"
+go test ./internal/browser -run '^(TestBrowserFlow(PinnedRuntimeAcceptance|ReviewAcceptance|RefLifecyclePinnedRuntime|SnapshotIssuanceRacePinnedRuntime|AccessibilityPrivacyPinnedRuntime)|TestManagedBrowserSession(RunnerPinnedRuntime|CrashCleanupPinnedRuntime|CapturePinnedRuntime)|TestManagedBrowserLargeImageContinuationPinnedChromium|TestIsolatedManagedBrowserRealProfileSeparation|TestIsolatedBrowserProfileReclaimedAfterSIGKILLPinnedRuntime|TestManagedCredentialLoginPinnedChromium)$' -v -count=1 | tee "$log"
 # Broker/audit fault injection needs no Chromium profile; run once here to
 # correlate the source-level recovery checks with the exact pinned runtime.
 # Ubuntu 22.04 disposable hosted runner: real pinned Chromium sandbox
@@ -83,6 +83,7 @@ for name in \
   TestManagedBrowserLargeImageContinuationPinnedChromium \
   TestIsolatedManagedBrowserRealProfileSeparation \
   TestIsolatedBrowserProfileReclaimedAfterSIGKILLPinnedRuntime \
+  TestManagedCredentialLoginPinnedChromium \
   TestBrowserSessionCapturePrincipalAndBoundedIntegrity \
   TestBrowserSessionCaptureFrameFailuresAreFailClosed \
   TestBrowserSessionCaptureKnownTooLargeDoesNotPoisonSession \
