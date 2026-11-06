@@ -278,6 +278,9 @@ func (b Backend) selectInstance(ctx context.Context, req Request) (Summary, erro
 	if !native.Managed || !uuidPattern.MatchString(native.UUID) || native.UUID != req.UUID {
 		return Summary{}, errors.New("instance_identity_mismatch: host/provider/UUID does not match this Agent-managed guest")
 	}
+	if err := b.checkConfirmedIdentity(native); err != nil {
+		return Summary{}, err
+	}
 	return native, nil
 }
 func (b Backend) Lock(fn func() (Result, error)) (Result, error) {
@@ -358,6 +361,70 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 		}
 		base.Instance = &x
 		return base, nil
+	case "abandon_create":
+		return b.Lock(func() (Result, error) {
+			if !approval {
+				return base, errors.New("approval_required: abandoning a durably reserved native create requires explicit current Owner authorization")
+			}
+			if !validName(req.Project) || !validName(req.Instance) || !validName(req.OperationID) || !validName(req.WorkID) {
+				return base, errors.New("abandon_create requires exact project, instance, operation_id and work_id")
+			}
+			journal, err := b.loadIntents()
+			if err != nil {
+				return base, err
+			}
+			found := false
+			for _, intent := range journal.Intents {
+				if intent.OperationID != req.OperationID {
+					continue
+				}
+				found = true
+				if intent.HostID != b.HostID || intent.Project != req.Project || intent.Instance != req.Instance || intent.WorkID != req.WorkID {
+					return base, errors.New("create_intent_identity_mismatch: cannot abandon another identity")
+				}
+				if intent.State != "submitted" || intent.NativeUUID != "" {
+					return base, errors.New("create_intent_not_pending: confirmed or abandoned intent cannot be retired")
+				}
+			}
+			if !found {
+				return base, errors.New("create_intent_missing: no matching pending native create")
+			}
+			// Both native APIs must be readable and authoritative. The Incus
+			// operation list covers all projects; ANY outstanding background
+			// operation is conservatively treated as potentially relevant when a
+			// native operation ID could not be captured after interrupted launch.
+			// Never infer absence merely from timeout or one empty instance list.
+			for check := 0; check < 2; check++ {
+				operations, err := b.command(ctx, 20*time.Second, "operation", "list", "--all-projects", "--format", "json")
+				if err != nil {
+					return base, errors.New("create_abandon_outcome_uncertain: Incus outstanding operations could not be enumerated; intent retained")
+				}
+				var nativeOperations []json.RawMessage
+				if json.Unmarshal([]byte(operations), &nativeOperations) != nil || nativeOperations == nil {
+					return base, errors.New("create_abandon_outcome_uncertain: native operation list invalid or incomplete; intent retained")
+				}
+				if len(nativeOperations) != 0 {
+					return base, errors.New("create_abandon_outcome_uncertain: native background operations still exist; verify their completion before abandonment")
+				}
+				all, err := b.List(ctx, "")
+				if err != nil {
+					return base, errors.New("create_abandon_outcome_uncertain: all-project native guest discovery failed; intent retained")
+				}
+				for _, guest := range all {
+					if (guest.Project == req.Project && guest.Name == req.Instance) || (guest.Managed && guest.OperationID == req.OperationID) {
+						return base, errors.New("create_abandon_identity_conflict: a native instance still occupies this creation identity; reconcile it instead")
+					}
+				}
+			}
+			abandoned, err := b.abandonIntent(req)
+			if err != nil {
+				return base, err
+			}
+			base.Status = "create_intent_abandoned"
+			base.Pending = []CreateIntent{abandoned}
+			base.Diagnostic = "Abandoned only after explicit approval and two successful Incus all-project instance/operation absence checks. Old operation_id stays retired; use a new stable ID for a subsequent launch. Does not cancel any native operation."
+			return base, nil
+		})
 	case "create":
 		return b.Lock(func() (Result, error) {
 			if !validName(req.Project) || !validName(req.Instance) || !validName(req.WorkID) || !validName(req.OperationID) || !imagePattern.MatchString(req.Image) {
@@ -401,7 +468,7 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 					if _, err := b.reserveCreate(req); err != nil {
 						return base, err
 					}
-					if err := b.confirmCreate(req.OperationID); err != nil {
+					if err := b.confirmCreate(req.OperationID, x.UUID); err != nil {
 						return base, err
 					}
 					base.Instance = &x
@@ -459,7 +526,7 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 				if !uuidPattern.MatchString(x.UUID) {
 					return base, errors.New("native_uuid_unverified: created guest UUID missing or malformed")
 				}
-				if err := b.confirmCreate(req.OperationID); err != nil {
+				if err := b.confirmCreate(req.OperationID, x.UUID); err != nil {
 					return base, errors.New("create_outcome_uncertain: native guest exists but local intent confirmation failed; do not retry")
 				}
 				base.Instance = &x
@@ -610,7 +677,7 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 				if exists {
 					return base, errors.New("delete_unverified: instance still exists")
 				}
-				if err := b.retireDeleted(req.Project, req.Instance); err != nil {
+				if err := b.retireDeleted(req.Project, req.Instance, x.OperationID, x.UUID); err != nil {
 					return base, errors.New("delete_outcome_uncertain: native absence verified but local operation intent cleanup failed")
 				}
 				base.Instance = nil

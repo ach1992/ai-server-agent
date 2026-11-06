@@ -31,7 +31,27 @@ elif args[0]=='query' and '/1.0/storage-pools/' in args[1]:
     total=16*(1<<30)
     used=total if mode=='pool_full' else 2*(1<<30)
     print(json.dumps({'space':{'total':total,'used':used}}))
+elif args[0]=='operation' and args[1]=='list':
+    if mode=='operation_unavailable':sys.exit(49)
+    if mode=='operation_malformed':print('broken-json');sys.exit(0)
+    if mode=='pending_second_scan':
+        state['operation_list_calls']=state.get('operation_list_calls',0)+1;save()
+        if state['operation_list_calls']>=2:
+            print(json.dumps([{'id':'ddccbb11-1234-1234-1234-123456789abc','status':'Running',
+              'description':'Creating instance','resources':{'instances':['/1.0/instances/guest-a']}}]))
+            sys.exit(0)
+    if mode=='pending_operation':
+        print(json.dumps([{'id':'ddccbb11-1234-1234-1234-123456789abc','status':'Running',
+            'description':'Creating instance','resources':{'instances':['/1.0/instances/guest-a']}}]))
+        sys.exit(0)
+    if mode=='late_native_visible':
+        state['instances'].append({'name':'guest-a','project':'default','type':'container',
+          'status':'Running','config':{'user.asa.host':'asa_one_host','user.asa.work':'issue65',
+          'user.asa.operation':'stable-creation-id','volatile.uuid':'12345678-1234-1234-1234-123456789abc'},
+          'devices':{'root':{'pool':'default','size':'1GiB'}}});save()
+    print('[]')
 elif args[0]=='list':
+    if mode=='list_unavailable':sys.exit(48)
     project=value('--project')
     result=state['instances']
     if project: result=[x for x in result if x['project']==project]
@@ -410,5 +430,186 @@ func TestInterruptedNativeCreateKeepsIntentAfterCancellation(t *testing.T) {
 	}
 	if _, err := other.Run(context.Background(), req, false, ""); err == nil || !strings.Contains(err.Error(), "create_outcome_uncertain") {
 		t.Fatalf("reconnected Agent silently relaunched interrupted operation: %v", err)
+	}
+}
+
+func TestConfirmedCreateUUIDSurvivesReconnectAndRejectsTagClonedReplacement(t *testing.T) {
+	b := fixture(t)
+	ctx := context.Background()
+	req := createRequest()
+	first, err := b.Run(ctx, req, false, "")
+	if err != nil || first.Instance == nil {
+		t.Fatalf("initial create failed: %+v %v", first, err)
+	}
+	nativeUUID := first.Instance.UUID
+	d, err := b.loadIntents()
+	if err != nil || len(d.Intents) != 1 || d.Intents[0].NativeUUID != nativeUUID || d.Intents[0].State != "confirmed" {
+		t.Fatalf("confirmed UUID not persisted: %+v %v", d, err)
+	}
+	restarted := Backend{HostID: b.HostID, Binary: b.Binary, StateDir: b.StateDir, capacityProbe: b.capacityProbe}
+	if out, err := restarted.Run(ctx, req, false, ""); err != nil || out.Status != "reconciled_existing" {
+		t.Fatalf("original UUID not reconciled: %+v %v", out, err)
+	}
+	path := filepath.Join(b.StateDir, "native.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var native map[string]any
+	if err := json.Unmarshal(raw, &native); err != nil {
+		t.Fatal(err)
+	}
+	entry := native["instances"].([]any)[0].(map[string]any)
+	// Every identifying project/name/host/work/operation tag remains copied.
+	entry["config"].(map[string]any)["volatile.uuid"] = "99887766-1234-1234-1234-123456789abc"
+	raw, err = json.Marshal(native)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, raw, 0600); err != nil {
+		t.Fatal(err)
+	}
+	if out, err := restarted.Run(ctx, req, false, ""); err == nil || !strings.Contains(err.Error(), "create_intent_native_uuid_conflict") {
+		t.Fatalf("copied tags authorized replacement as original: %+v %v", out, err)
+	}
+	if _, err := restarted.Run(ctx, Request{Operation: "stop", Project: req.Project, Instance: req.Instance, UUID: "99887766-1234-1234-1234-123456789abc"}, false, ""); err == nil || !strings.Contains(err.Error(), "create_intent_native_uuid_conflict") {
+		t.Fatalf("replacement accepted for guest mutation: %v", err)
+	}
+	d, err = restarted.loadIntents()
+	if err != nil || d.Intents[0].NativeUUID != nativeUUID {
+		t.Fatalf("confirmed UUID was overwritten by a replacement: %+v %v", d, err)
+	}
+}
+
+func TestApprovedAbandonRequiresProvenNativeAbsenceAndRetainsTombstone(t *testing.T) {
+	b := fixture(t)
+	req := createRequest()
+	ctx := context.Background()
+	modePath := filepath.Join(b.StateDir, "native.json.mode")
+	if err := os.WriteFile(modePath, []byte("uncertain_launch"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Run(ctx, req, false, ""); err == nil || !strings.Contains(err.Error(), "create_outcome_uncertain") {
+		t.Fatalf("setup missing uncertain create: %v", err)
+	}
+	abandon := Request{Operation: "abandon_create", Project: req.Project, Instance: req.Instance, OperationID: req.OperationID, WorkID: req.WorkID}
+	if _, err := b.Run(ctx, abandon, false, ""); err == nil || !strings.Contains(err.Error(), "approval_required") {
+		t.Fatalf("abandon without approval accepted: %v", err)
+	}
+	wrong := abandon
+	wrong.WorkID = "another-work"
+	if _, err := b.Run(ctx, wrong, true, ""); err == nil || !strings.Contains(err.Error(), "identity_mismatch") {
+		t.Fatalf("wrong-scoped abandonment accepted: %v", err)
+	}
+	b2 := Backend{HostID: b.HostID, Binary: b.Binary, StateDir: b.StateDir, capacityProbe: b.capacityProbe}
+	for _, mode := range []string{"pending_operation", "pending_second_scan", "operation_unavailable", "operation_malformed", "list_unavailable", "late_native_visible"} {
+		if err := os.WriteFile(modePath, []byte(mode), 0600); err != nil {
+			t.Fatal(err)
+		}
+		if mode == "pending_second_scan" {
+			// Native fixture starts with an empty first operation scan.
+			// In a second scan it makes the pending background job visible.
+			if err := os.Remove(filepath.Join(b.StateDir, "native.json")); err != nil && !os.IsNotExist(err) {
+				t.Fatal(err)
+			}
+		}
+		if _, err := b2.Run(ctx, abandon, true, ""); err == nil || !(strings.Contains(err.Error(), "uncertain") || strings.Contains(err.Error(), "identity_conflict")) {
+			t.Fatalf("ambiguous native state (%s) allowed abandonment: %v", mode, err)
+		}
+		data, err := b2.loadIntents()
+		if err != nil || len(data.Intents) != 1 || data.Intents[0].State != "submitted" {
+			t.Fatalf("ambiguous mode (%s) erased pending intent: %+v %v", mode, data, err)
+		}
+		if mode == "late_native_visible" {
+			// Preserve injected native guest for checking: after operations become
+			// empty, an existing name must still prevent the retirement.
+			if err := os.Remove(modePath); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := b2.Run(ctx, abandon, true, ""); err == nil || !strings.Contains(err.Error(), "identity_conflict") {
+				t.Fatalf("native instance after pending launch not detected: %v", err)
+			}
+			// Test-only native fixture disappearance: independent owner-verified
+			// negative state after external removal (not a production cleanup).
+			if err := os.Remove(filepath.Join(b.StateDir, "native.json")); err != nil {
+				t.Fatal(err)
+			}
+		}
+	}
+	if err := os.Remove(modePath); err != nil && !os.IsNotExist(err) {
+		t.Fatal(err)
+	}
+	out, err := b2.Run(ctx, abandon, true, "")
+	if err != nil || out.Status != "create_intent_abandoned" || len(out.Pending) != 1 || out.Pending[0].State != "abandoned" {
+		t.Fatalf("approved verified abandonment blocked: %+v %v", out, err)
+	}
+	record, err := b2.loadIntents()
+	if err != nil || len(record.Intents) != 1 || record.Intents[0].State != "abandoned" || record.Intents[0].AbandonedAt == nil {
+		t.Fatalf("durable tombstone missing: %+v %v", record, err)
+	}
+	if _, err := b2.Run(ctx, req, false, ""); err == nil || !strings.Contains(err.Error(), "abandoned_operation_id") {
+		t.Fatalf("retired operation ID allowed relaunch: %v", err)
+	}
+	newer := req
+	newer.OperationID = "fresh-attempt-after-abandon"
+	newer.Image = "images:ubuntu/24.04"
+	created, err := b2.Run(ctx, newer, false, "")
+	if err != nil || created.Status != "created" {
+		t.Fatalf("new attempt after verified abandoned identity failed: %+v %v", created, err)
+	}
+	current, err := b2.List(ctx, "default")
+	if err != nil || len(current) != 1 {
+		t.Fatalf("abandon/recovery duplicate native resources: %+v %v", current, err)
+	}
+	uuid := created.Instance.UUID
+	if _, err := b2.Run(ctx, Request{Operation: "stop", Project: newer.Project, Instance: newer.Instance, UUID: uuid}, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b2.Run(ctx, Request{Operation: "delete", Project: newer.Project, Instance: newer.Instance, UUID: uuid}, true, ""); err != nil {
+		t.Fatal(err)
+	}
+	journal, err := b2.loadIntents()
+	if err != nil || len(journal.Intents) != 1 || journal.Intents[0].OperationID != req.OperationID || journal.Intents[0].State != "abandoned" {
+		t.Fatalf("deleting fresh guest also removed retired old operation ID: %+v %v", journal, err)
+	}
+	if _, err := b2.Run(ctx, req, false, ""); err == nil || !strings.Contains(err.Error(), "abandoned_operation_id") {
+		t.Fatalf("old operation ID replayed after deleting fresh guest: %v", err)
+	}
+}
+
+func TestCannotAbandonConfirmedCreate(t *testing.T) {
+	b := fixture(t)
+	req := createRequest()
+	ctx := context.Background()
+	if _, err := b.Run(ctx, req, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	abandon := Request{Operation: "abandon_create", Project: req.Project, Instance: req.Instance, WorkID: req.WorkID, OperationID: req.OperationID}
+	if _, err := b.Run(ctx, abandon, true, ""); err == nil || !strings.Contains(err.Error(), "not_pending") {
+		t.Fatalf("confirmed resource was abandoned: %v", err)
+	}
+}
+
+func TestMissingConfirmedUUIDNeverSilentlyRebinds(t *testing.T) {
+	b := fixture(t)
+	req := createRequest()
+	out, err := b.Run(context.Background(), req, false, "")
+	if err != nil || out.Instance == nil {
+		t.Fatalf("create: %+v %v", out, err)
+	}
+	d, err := b.loadIntents()
+	if err != nil {
+		t.Fatal(err)
+	}
+	d.Intents[0].NativeUUID = "" // simulate a historical/partially-written confirmation
+	if err := b.saveIntents(d); err != nil {
+		t.Fatal(err)
+	}
+	restarted := Backend{HostID: b.HostID, Binary: b.Binary, StateDir: b.StateDir, capacityProbe: b.capacityProbe}
+	if out, err := restarted.Run(context.Background(), req, false, ""); err == nil || !strings.Contains(err.Error(), "create_intent_uuid_unavailable") {
+		t.Fatalf("missing original UUID silently rebound: %+v %v", out, err)
+	}
+	if _, err := restarted.Run(context.Background(), Request{Operation: "stop", Project: req.Project, Instance: req.Instance, UUID: out.Instance.UUID}, false, ""); err == nil || !strings.Contains(err.Error(), "create_intent_uuid_unavailable") {
+		t.Fatalf("missing immutable UUID allowed guest mutation: %v", err)
 	}
 }

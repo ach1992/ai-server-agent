@@ -19,16 +19,18 @@ import (
 )
 
 type CreateIntent struct {
-	HostID      string    `json:"host_id"`
-	Project     string    `json:"project"`
-	Instance    string    `json:"instance"`
-	WorkID      string    `json:"work_id"`
-	OperationID string    `json:"operation_id"`
-	Type        string    `json:"type"`
-	Image       string    `json:"image"`
-	StoragePool string    `json:"storage_pool,omitempty"`
-	SubmittedAt time.Time `json:"submitted_at"`
-	State       string    `json:"state"` // submitted or confirmed; unverified submission is NEVER a negative result
+	HostID      string     `json:"host_id"`
+	Project     string     `json:"project"`
+	Instance    string     `json:"instance"`
+	WorkID      string     `json:"work_id"`
+	OperationID string     `json:"operation_id"`
+	Type        string     `json:"type"`
+	Image       string     `json:"image"`
+	StoragePool string     `json:"storage_pool,omitempty"`
+	SubmittedAt time.Time  `json:"submitted_at"`
+	State       string     `json:"state"`                 // submitted, confirmed, or explicitly abandoned
+	NativeUUID  string     `json:"native_uuid,omitempty"` // verified native UUID, immutable after confirmation
+	AbandonedAt *time.Time `json:"abandoned_at,omitempty"`
 }
 type intentJournal struct {
 	Version int            `json:"version"`
@@ -73,7 +75,7 @@ func (b Backend) loadIntents() (intentJournal, error) {
 	}
 	seen := map[string]bool{}
 	for _, x := range d.Intents {
-		if x.HostID == "" || !validName(x.Project) || !validName(x.Instance) || !validName(x.OperationID) || !validName(x.WorkID) || !imagePattern.MatchString(x.Image) || seen[x.OperationID] || (x.State != "submitted" && x.State != "confirmed") {
+		if x.HostID == "" || !validName(x.Project) || !validName(x.Instance) || !validName(x.OperationID) || !validName(x.WorkID) || !imagePattern.MatchString(x.Image) || !validName(x.StoragePool) || seen[x.OperationID] || (x.State != "submitted" && x.State != "confirmed" && x.State != "abandoned") || (x.NativeUUID != "" && !uuidPattern.MatchString(x.NativeUUID)) || (x.State == "submitted" && (x.NativeUUID != "" || x.AbandonedAt != nil)) || (x.State == "abandoned" && (x.AbandonedAt == nil || x.NativeUUID != "")) || (x.State == "confirmed" && x.AbandonedAt != nil) {
 			return d, errors.New("invalid/duplicate Incus create intent")
 		}
 		seen[x.OperationID] = true
@@ -134,51 +136,149 @@ func (b Backend) reserveCreate(req Request) (bool, error) {
 			return false, errors.New("create_intent_host_mismatch")
 		}
 		if x.OperationID == req.OperationID {
+			if x.State == "abandoned" {
+				return false, errors.New("create_intent_abandoned_operation_id: use a fresh id for a new authorized launch")
+			}
 			if x.Project != req.Project || x.Instance != req.Instance || x.WorkID != req.WorkID || x.Type != req.Type || x.Image != req.Image || x.StoragePool != req.StoragePool {
 				return false, errors.New("create_intent_collision: stable operation ID already submitted with different parameters")
 			}
 			return true, nil
 		}
-		if x.Project == req.Project && x.Instance == req.Instance {
+		if x.State != "abandoned" && x.Project == req.Project && x.Instance == req.Instance {
 			return false, errors.New("create_intent_collision: a different creation operation already reserves this project/name")
 		}
 	}
 	d.Intents = append(d.Intents, intentFor(req, b.HostID))
 	return false, b.saveIntents(d)
 }
-func (b Backend) confirmCreate(operationID string) error {
+
+// confirmCreate binds the first verified native UUID durably. A later
+// same-name/tag replacement cannot silently inherit the original operation.
+func (b Backend) confirmCreate(operationID, nativeUUID string) error {
+	if !uuidPattern.MatchString(nativeUUID) {
+		return errors.New("native_uuid_unverified: malformed native guest UUID")
+	}
 	d, err := b.loadIntents()
 	if err != nil {
 		return err
 	}
 	for i := range d.Intents {
-		if d.Intents[i].OperationID == operationID {
-			if d.Intents[i].State == "confirmed" {
-				return nil
+		x := &d.Intents[i]
+		if x.OperationID != operationID {
+			continue
+		}
+		if x.HostID != b.HostID {
+			return errors.New("create_intent_host_mismatch")
+		}
+		switch x.State {
+		case "confirmed":
+			if x.NativeUUID == "" {
+				return errors.New("create_intent_uuid_unavailable: confirmed record lacks original UUID; manual reconciliation required")
 			}
-			d.Intents[i].State = "confirmed"
+			if x.NativeUUID != nativeUUID {
+				return errors.New("create_intent_native_uuid_conflict: native guest UUID differs from the originally confirmed instance")
+			}
+			return nil
+		case "submitted":
+			x.State = "confirmed"
+			x.NativeUUID = nativeUUID
 			return b.saveIntents(d)
+		default:
+			return errors.New("create_intent_abandoned: cannot silently reinstate retired operation")
 		}
 	}
 	return errors.New("create_intent_missing: cannot confirm unrecorded launch")
 }
-func (b Backend) retireDeleted(project, instance string) error {
-	// Caller must have locked, checked the exact native identity pre-delete and
-	// verified absence post-delete. Removing its own operation intent enables
-	// later legitimate explicit fresh creates with a different operation ID.
+
+// Abandonment retains a non-secret tombstone to prohibit reuse of the old
+// operation ID while releasing the project/name for a new explicit create.
+// Caller must hold b.Lock and have proved native absence and approval.
+func (b Backend) abandonIntent(req Request) (CreateIntent, error) {
+	d, err := b.loadIntents()
+	if err != nil {
+		return CreateIntent{}, err
+	}
+	for i := range d.Intents {
+		x := &d.Intents[i]
+		if x.OperationID != req.OperationID {
+			continue
+		}
+		if x.HostID != b.HostID || x.Project != req.Project || x.Instance != req.Instance || x.WorkID != req.WorkID {
+			return CreateIntent{}, errors.New("create_intent_identity_mismatch: full host/project/name/work/operation identity required")
+		}
+		if x.State != "submitted" || x.NativeUUID != "" {
+			return CreateIntent{}, errors.New("create_intent_not_pending: confirmed or previously abandoned operations cannot be retired as uncertain")
+		}
+		now := time.Now().UTC()
+		x.State = "abandoned"
+		x.AbandonedAt = &now
+		if err := b.saveIntents(d); err != nil {
+			return CreateIntent{}, err
+		}
+		return *x, nil
+	}
+	return CreateIntent{}, errors.New("create_intent_missing: no matching submitted create operation")
+}
+
+// A current provider UUID alone is not sufficient to authorize mutations:
+// a same-name guest with copied Agent tags must not inherit an earlier
+// confirmed operation identity.
+func (b Backend) checkConfirmedIdentity(x Summary) error {
 	d, err := b.loadIntents()
 	if err != nil {
 		return err
 	}
-	var kept []CreateIntent
-	for _, x := range d.Intents {
-		if x.Project != project || x.Instance != instance {
-			kept = append(kept, x)
+	for _, intent := range d.Intents {
+		if intent.OperationID != x.OperationID {
+			continue
 		}
-	}
-	if len(kept) == len(d.Intents) {
+		if intent.HostID != b.HostID || intent.Project != x.Project || intent.Instance != x.Name || intent.WorkID != x.WorkID {
+			return errors.New("create_intent_identity_mismatch: native resource reused protected creation tags")
+		}
+		if intent.State == "abandoned" {
+			return errors.New("create_intent_abandoned_identity_conflict: retired native operation reappeared")
+		}
+		if intent.State == "confirmed" {
+			if intent.NativeUUID == "" {
+				return errors.New("create_intent_uuid_unavailable: confirmed record lacks original UUID")
+			}
+			if intent.NativeUUID != x.UUID {
+				return errors.New("create_intent_native_uuid_conflict: guest was replaced after original confirmation")
+			}
+		}
+		// A submitted intent can be reconciled through create, not silently
+		// taken over by a mutation while its native identity is still uncertain.
+		if intent.State == "submitted" {
+			return errors.New("create_intent_unconfirmed: finish create reconciliation before mutation")
+		}
 		return nil
 	}
+	return nil
+}
+
+func (b Backend) retireDeleted(project, instance, operationID, nativeUUID string) error {
+	// Caller is holding the lifecycle lock and verified that the exact guest
+	// was deleted. Retire only the matching confirmed journal entry, preserving
+	// old abandoned operation IDs as permanent anti-replay tombstones.
+	d, err := b.loadIntents()
+	if err != nil {
+		return err
+	}
+	kept := make([]CreateIntent, 0, len(d.Intents))
+	removed := false
+	for _, x := range d.Intents {
+		if x.Project != project || x.Instance != instance || x.OperationID != operationID {
+			kept = append(kept, x)
+			continue
+		}
+		if x.State != "confirmed" || x.NativeUUID != nativeUUID {
+			return errors.New("create_intent_delete_identity_conflict: confirmed journal identity disagrees with native deleted guest")
+		}
+		removed = true
+	}
+	if !removed {
+		return nil
+	} // native guest predates the optional intent journal
 	d.Intents = kept
 	return b.saveIntents(d)
 }

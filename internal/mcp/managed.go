@@ -11,14 +11,14 @@ import (
 )
 
 type ManagedEnvironmentInput struct {
-	Operation     string   `json:"operation" jsonschema:"status, pending_creates, list, inspect, create, start, stop, exec, snapshots, snapshot, restore or delete"`
+	Operation     string   `json:"operation" jsonschema:"status, pending_creates, list, inspect, create, abandon_create, start, stop, exec, snapshots, snapshot, restore or delete"`
 	Project       string   `json:"project,omitempty" jsonschema:"Actual Incus project. Required for per-instance operations; list without project searches all projects"`
 	Instance      string   `json:"instance,omitempty" jsonschema:"Exact native Incus instance name"`
 	UUID          string   `json:"uuid,omitempty" jsonschema:"Native volatile.uuid obtained from inspect; required before mutating an existing guest"`
 	Image         string   `json:"image,omitempty" jsonschema:"Native Incus image alias or fingerprint for create (e.g. images:debian/13)"`
 	Type          string   `json:"type,omitempty" jsonschema:"container or virtual-machine for create"`
 	WorkID        string   `json:"work_id,omitempty" jsonschema:"Stable Issue/project-owned work identifier for create, not a chat/session name"`
-	OperationID   string   `json:"operation_id,omitempty" jsonschema:"Stable create idempotency key; reuse unchanged when the outcome is uncertain"`
+	OperationID   string   `json:"operation_id,omitempty" jsonschema:"Stable create idempotency key; reuse unchanged while outcome is uncertain; an approved abandoned operation requires a new ID"`
 	CPU           int      `json:"cpu,omitempty" jsonschema:"Explicit CPU count at create; operator capacity also applies"`
 	MemoryMiB     int      `json:"memory_mib,omitempty" jsonschema:"Explicit guest memory size in MiB at create; checked against host capacity"`
 	DiskGiB       int      `json:"disk_gib,omitempty" jsonschema:"Explicit guest root disk size in GiB at create; checked against host capacity"`
@@ -26,7 +26,7 @@ type ManagedEnvironmentInput struct {
 	Command       []string `json:"command,omitempty" jsonschema:"Native guest exec argv, no shell interpretation and never include secret values"`
 	CredentialRef string   `json:"credential_ref,omitempty" jsonschema:"Optional service reference for confidential guest-exec stdin, bound to this exact host/project/guest/UUID; suppresses all guest stdout/stderr"`
 	Snapshot      string   `json:"snapshot,omitempty" jsonschema:"Exact snapshot name for snapshot/restore"`
-	Approval      bool     `json:"approval,omitempty" jsonschema:"Set only after explicit Owner approval for destructive delete/restore; no automatic privilege escalation"`
+	Approval      bool     `json:"approval,omitempty" jsonschema:"Set only after explicit Owner approval for destructive delete/restore or abandonment of an uncertain native creation intent; no automatic privilege escalation"`
 }
 
 type ServiceAccessInput struct {
@@ -47,7 +47,7 @@ type ServiceAccessInput struct {
 
 func (s *Server) registerManagedTools() {
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "managed_environment",
-		Description: "Optional host-local native Incus system containers and KVM VMs. status reports readiness without changing the host; list/inspect reconcile actual provider state and Agent instance identity before create or resume. Create uses stable operation_id and real capacity checks, refuses collisions, never installs/initializes Incus. Guest exec uses native Incus agent and argv (no shell unless explicitly requested). Snapshot/restore/delete are identity-bound; restore/delete require explicit approval. Missing Incus degrades only this tool; ordinary root/worker operations remain available.",
+		Description: "Optional host-local native Incus system containers and KVM VMs. status reports readiness without changing the host; list/inspect reconcile actual provider state and Agent instance identity before create or resume. Create uses stable operation_id and real capacity checks, refuses collisions, never installs/initializes Incus. Explicitly approved abandon_create requires exact intent identity plus two successful all-project native instance/operation absence checks; retired operation IDs are not reused. Guest exec uses native Incus agent and argv (no shell unless explicitly requested). Snapshot/restore/delete are identity-bound; restore/delete require explicit approval. Missing Incus degrades only this tool; ordinary root/worker operations remain available.",
 		Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in ManagedEnvironmentInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		native := managedincus.Request{Operation: in.Operation, Project: in.Project, Instance: in.Instance, UUID: in.UUID, Image: in.Image, Type: in.Type, WorkID: in.WorkID, OperationID: in.OperationID, CPU: in.CPU, MemoryMiB: in.MemoryMiB, DiskGiB: in.DiskGiB, StoragePool: in.StoragePool, Command: in.Command, Snapshot: in.Snapshot}
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "managed_environment", ManagedEnv: native, CredentialRef: in.CredentialRef, Approval: in.Approval})

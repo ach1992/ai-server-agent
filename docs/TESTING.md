@@ -610,3 +610,11 @@ The pinned Chromium GitHub CI acceptance job must run and require an actual PASS
 - **F6:** `TestNativeInvalidUUIDRefusesCreate` rejects absent or malformed `volatile.uuid` rather than reporting created/reconciled success.
 
 Source, fixture, mocked CLI and CI checks cannot replace real native Incus/KVM/aaPanel/WordPress acceptance on an approved disposable host. Preserve an independent reviewer gate after exact candidate CI and Security pass.
+
+
+### Second high-assurance review remediation (2026-11-06; R1/R2)
+
+- **R1 / safe uncertain-create retirement:** `TestApprovedAbandonRequiresProvenNativeAbsenceAndRetainsTombstone` injects a native launch failure before creation, restart/reconnect, missing approval, wrong work ID, active native background operation, unavailable/malformed operation list, and a late-visible native instance. All uncertain cases must retain the submitted intent. When two complete all-project operation/instance scans show no active operation or guest, an explicitly approved `abandon_create` produces a durable `abandoned` tombstone; the original operation ID can never launch again, while a fresh ID may create one replacement guest under the freed name. `TestCannotAbandonConfirmedCreate` protects confirmed resources.
+- **R2 / durable confirmed UUID:** `TestConfirmedCreateUUIDSurvivesReconnectAndRejectsTagClonedReplacement` verifies that the first successful native guest UUID is atomically persisted with the confirmation, survives a reconstructed Agent and rejects a same-name/project/tag replacement with a changed UUID for both create reconciliation and subsequent guest mutations. A confirmed record without a saved UUID refuses silent backfill.
+
+Incus's documented `incus operation list --all-projects --format json` is used solely for a fail-closed native absence check; no operational resource is canceled or destroyed by this reconciliation. Mocked/native-CLI assertions do not prove real background-operation enumeration or durable behavior across host failure; these require an authorized disposable Incus-ready host.
