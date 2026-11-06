@@ -489,6 +489,81 @@ try {
       }
       continue;
     }
+    // Secret-bearing login is deliberately NOT a normal flow: values arrive
+    // from the root-private service store over the existing pinned Browser
+    // worker's stdin. The broker never includes them in argv, JSON results,
+    // snapshot refs, traces, debug output or ordinary tool arguments.
+    if (input?.type === 'credential_login') {
+      const nonce = input?.nonce;
+      const valid = typeof nonce === 'string' && /^[0-9a-f]{32}$/.test(nonce) &&
+        typeof input.expected_origin === 'string' &&
+        typeof input.secret === 'string' && input.secret.length > 0 && input.secret.length <= 4096 &&
+        typeof input.username === 'string' &&
+        typeof input.secret_selector === 'string' && typeof input.submit_selector === 'string' &&
+        typeof input.success_selector === 'string' && typeof input.success_url === 'string' &&
+        typeof input.username_selector === 'string' && typeof input.challenge_selector === 'string';
+      if (!valid) { reply({event:'error', nonce, reason:'credential_login_failed'}); continue; }
+      // Strict, origin-only comparison; no login to a page reached via a
+      // redirect, with a misleading hostname, or with embedded URL userinfo.
+      const rightOrigin = () => {
+        try { return new URL(page.url()).origin === input.expected_origin; }
+        catch { return false; }
+      };
+      let reason = 'credential_login_not_confirmed';
+      try {
+        if (!rightOrigin()) {
+          reason = 'credential_origin_mismatch';
+          throw new Error('refused');
+        }
+        // Require a meaningful success transition rather than accepting a
+        // pre-existing body element or the same URL as evidence of login.
+        const wasSuccess = input.success_selector ?
+          await page.locator(input.success_selector).first().isVisible().catch(() => false) :
+          page.url().startsWith(input.success_url);
+        if (wasSuccess) throw new Error('already_matches_success');
+        if (input.username_selector) {
+          await page.locator(input.username_selector).first().fill(input.username, {timeout:10000});
+        }
+        if (!rightOrigin()) { reason='credential_origin_mismatch'; throw new Error('refused'); }
+        await page.locator(input.secret_selector).first().fill(input.secret, {timeout:10000});
+        if (!rightOrigin()) { reason='credential_origin_mismatch'; throw new Error('refused'); }
+        // Block native form actions leaving the registered origin. Client
+        // JavaScript can have its own side effects, which remain a property
+        // of the authorized target page, not an Agent protection promise.
+        const formAction = await page.locator(input.submit_selector).first().evaluate(el => {
+          const form = el.form || el.closest('form');
+          return form ? form.action : '';
+        });
+        if (formAction && new URL(formAction, page.url()).origin !== input.expected_origin) {
+          reason='credential_form_origin_mismatch';
+          throw new Error('refused');
+        }
+        await page.locator(input.submit_selector).first().click({timeout:10000});
+        // Always discard frame-supplied raw credentials before returning a
+        // result, even on failure. No screenshot or trace during this path.
+        input.secret = '';
+        input.username = '';
+        state.refs.clear();
+        if (input.success_selector) {
+          await page.locator(input.success_selector).first().waitFor({state:'visible',timeout:15000});
+        } else {
+          await page.waitForURL(url => url.href.startsWith(input.success_url),{timeout:15000});
+        }
+        if (!rightOrigin()) { reason='credential_origin_mismatch'; throw new Error('refused'); }
+        reply({event:'result',nonce,result:{ok:true,status:'authenticated'}});
+      } catch {
+        input.secret = '';
+        input.username = '';
+        state.refs.clear();
+        if (reason === 'credential_login_not_confirmed' && input.challenge_selector) {
+          try {
+            if (await page.locator(input.challenge_selector).first().isVisible()) reason='credential_manual_intervention';
+          } catch {}
+        }
+        reply({event:'error',nonce,reason});
+      }
+      continue;
+    }
     if (input?.type !== 'flow' || !Array.isArray(input.steps) || input.steps.length < 1 || input.steps.length > 12 ||
         typeof input.nonce !== 'string' || !/^[0-9a-f]{32}$/.test(input.nonce)) {
       reply({event:'error',reason:'invalid_request'}); break;

@@ -45,6 +45,14 @@ An AI/client must be able to identify server and capability state, determine the
 
 Git/GitHub remain the sources of truth for code, project specifications, unresolved work, commits, PRs, reviews, CI, and releases. Agent-owned state is limited to protected operational state needed for reliable execution and recovery; it is not a second project-management database.
 
+### 4.5 Recoverable disposable test environments and service access (Issue #65 Rev 3)
+
+For authorized hosts with separately installed/initialized Incus, the Agent offers optional first-class discovery and lifecycle of **system containers and Linux VMs**. It records only the minimum native identity required for safe targeting: Agent instance ID, Incus project/name/UUID, purpose/work identifier and stable creation operation ID. Cold-chat recovery reads live Incus state and durable service metadata, not chat/session IDs or a second project database. Actual guest execution uses Incus native execution when available, retaining ordinary root/worker shell and PTY escape hatches. Independent guests can coexist; shared images/caches are reused by Incus. No fixed provider allowlist, mandatory Incus install or QEMU compatibility layer is required.
+
+The dedicated root-protected `state_dir/service-access` store is distinct from inbound Agent bearer credentials and ordinary managed state. It supports expiring, renewable and revoked service login secrets, with a **30-day default** and explicit no-expiry. Registered WordPress, aaPanel or arbitrary other authorized test-service endpoints may be bound to a particular native guest UUID. Metadata can be updated without re-enrolling secrets; a different credential destination origin requires explicit approval, and native guest identity is immutable for an existing reference. Secret values do not appear in MCP responses, normal audit/log entries, root/worker command argv or repository files. Operator enrollment uses a no-echo local TTY; generated values can be sent into native guest execution without appearing in chat.
+
+Managed Browser login uses **new isolated Playwright sessions** with a stored credential reference, checks original endpoint/form origin and requires actual success evidence. No previous chat's Browser session handle, cookies or inferred target IP is required for recovery. MFA/CAPTCHA and invalid credentials require honest manual/operator intervention; a source-only test does not establish the real VM+aaPanel+WordPress acceptance scenario.
+
 ## 5. Client and Connection Independence
 
 **Direct MCP client access is a first-class product requirement.** No dedicated upstream-connector implementation or acceptance is in the current Agent scope. An intermediary integration would require a separate explicit Owner decision and must not become a prerequisite for standalone operation.

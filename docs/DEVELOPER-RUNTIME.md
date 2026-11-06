@@ -386,7 +386,7 @@ The previous initial knobs are `http_read_header_timeout_seconds` (default 10), 
 
 Not Core-v1 requirements:
 
-- managed Incus integration — direct root/CLI use is sufficient until repeated evidence justifies integration;
+- generic environment-provider registries or non-native VM compatibility layers — Issue #65 Rev 3 explicitly promotes narrowly scoped optional Incus, not additional provider abstractions;
 - code-server — optional human visual UI only;
 - Ctags — deferred fallback;
 - multiple terminal backends;
