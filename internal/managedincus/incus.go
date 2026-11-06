@@ -30,6 +30,7 @@ type Request struct {
 	Type        string   `json:"type,omitempty"` // container or virtual-machine
 	WorkID      string   `json:"work_id,omitempty"`
 	OperationID string   `json:"operation_id,omitempty"`
+	ActorID     string   `json:"-"` // injected only by authenticated root Executor
 	CPU         int      `json:"cpu,omitempty"`
 	MemoryMiB   int      `json:"memory_mib,omitempty"`
 	DiskGiB     int      `json:"disk_gib,omitempty"`
@@ -65,6 +66,7 @@ type Summary struct {
 	Status      string   `json:"status"`
 	WorkID      string   `json:"work_id,omitempty"`
 	OperationID string   `json:"operation_id,omitempty"`
+	ActorID     string   `json:"-"` // injected only by authenticated root Executor
 	CPU         string   `json:"cpu,omitempty"`
 	Memory      string   `json:"memory,omitempty"`
 	DiskLimit   string   `json:"disk_limit,omitempty"`
@@ -73,17 +75,19 @@ type Summary struct {
 	Managed     bool     `json:"managed"`
 }
 type Result struct {
-	Status          string         `json:"status"`
-	HostID          string         `json:"host_id"`
-	Available       bool           `json:"available"`
-	Diagnostic      string         `json:"diagnostic,omitempty"`
-	Instances       []Summary      `json:"instances,omitempty"`
-	Instance        *Summary       `json:"instance,omitempty"`
-	Output          string         `json:"output,omitempty"`
-	ExitCode        int            `json:"exit_code,omitempty"`
-	Snapshots       []string       `json:"snapshots,omitempty"`
-	Pending         []CreateIntent `json:"pending_creates,omitempty"`
-	OutputTruncated bool           `json:"output_truncated,omitempty"`
+	Status          string            `json:"status"`
+	HostID          string            `json:"host_id"`
+	Available       bool              `json:"available"`
+	Diagnostic      string            `json:"diagnostic,omitempty"`
+	Instances       []Summary         `json:"instances,omitempty"`
+	Instance        *Summary          `json:"instance,omitempty"`
+	Output          string            `json:"output,omitempty"`
+	ExitCode        int               `json:"exit_code,omitempty"`
+	Snapshots       []string          `json:"snapshots,omitempty"`
+	Pending         []CreateIntent    `json:"pending_creates,omitempty"`
+	Operations      []NativeOperation `json:"native_operations,omitempty"`
+	Operation       *NativeOperation  `json:"native_operation,omitempty"`
+	OutputTruncated bool              `json:"output_truncated,omitempty"`
 }
 type Backend struct {
 	HostID         string
@@ -91,6 +95,7 @@ type Backend struct {
 	StateDir       string               // lock directory already owned by root Executor
 	capacityProbe  func(int, int) error // test-only; production always checks actual host capacity
 	beforeMutation func(Request)        // test-only adversarial interleaving before final identity check
+	apiOverride    nativeAPIFunc        // test-only native REST fixture
 }
 
 const maxOutput = 64 << 10
@@ -347,6 +352,43 @@ func (b Backend) Ready(ctx context.Context) Result {
 	return r
 }
 func (b Backend) Run(ctx context.Context, req Request, approval bool, secret string) (Result, error) {
+	if req.Operation == "operation_list" {
+		return b.Lock(func() (Result, error) {
+			journal, err := b.loadNativeOperations()
+			if err != nil {
+				return Result{}, err
+			}
+			result := Result{Status: "native_operations_observed", HostID: b.HostID, Available: true, Operations: []NativeOperation{}}
+			if req.Project != "" && !validName(req.Project) {
+				return result, errors.New("invalid native operation project filter")
+			}
+			if req.Instance != "" && !validName(req.Instance) {
+				return result, errors.New("invalid native operation instance filter")
+			}
+			for _, v := range journal.Operations {
+				if v.ActorID != "" && v.ActorID != req.ActorID {
+					continue
+				}
+				if req.Project != "" && v.Project != req.Project {
+					continue
+				}
+				if req.Instance != "" && v.Instance != req.Instance {
+					continue
+				}
+				result.Operations = append(result.Operations, v)
+				if len(result.Operations) > 64 {
+					return Result{}, errors.New("native_operation_list_bounded: more than 64 records; narrow project/instance filter")
+				}
+			}
+			return result, nil
+		})
+	}
+	if req.Operation == "operation_status" {
+		return b.Lock(func() (Result, error) { return b.nativeStatusLocked(ctx, req) })
+	}
+	if req.Operation == "resolve_uncertain" {
+		return b.Lock(func() (Result, error) { return b.resolveUncertainLocked(ctx, req, approval) })
+	}
 	if req.Operation == "pending_creates" {
 		return b.Lock(func() (Result, error) {
 			journal, err := b.loadIntents()
@@ -573,6 +615,20 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 				return base, err
 			}
 			base.Instance = &x
+			if req.Operation == "snapshot" || req.Operation == "restore" {
+				if !validName(req.Snapshot) {
+					return base, errors.New("snapshot name required")
+				}
+				if req.Operation == "restore" && !approval {
+					return base, errors.New("approval_required: destructive guest restore requires explicit current Owner approval")
+				}
+				return b.submitNativeLocked(ctx, req, x)
+			}
+			if req.Operation != "snapshots" {
+				if err := b.nativeConflict(req); err != nil {
+					return base, err
+				}
+			}
 			if req.Operation == "snapshots" {
 				list, err := b.Snapshots(ctx, req.Project, req.Instance)
 				base.Snapshots = list
@@ -581,22 +637,8 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 				}
 				return base, err
 			}
-			if req.Operation == "snapshot" || req.Operation == "restore" {
-				if !validName(req.Snapshot) {
-					return base, errors.New("snapshot name required")
-				}
-				list, err := b.Snapshots(ctx, req.Project, req.Instance)
-				if err != nil {
-					return base, err
-				}
-				if req.Operation == "snapshot" && hasSnapshot(list, req.Snapshot) {
-					return base, errors.New("snapshot_collision: snapshot name already exists")
-				}
-				if req.Operation == "restore" && !hasSnapshot(list, req.Snapshot) {
-					return base, errors.New("snapshot_missing: restore target does not exist")
-				}
-			}
-			if (req.Operation == "delete" || req.Operation == "restore") && !approval {
+
+			if req.Operation == "delete" && !approval {
 				return base, errors.New("approval_required: destructive guest operation requires explicit current Owner approval")
 			}
 			args := []string{}
@@ -610,16 +652,6 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 					return base, errors.New("stop and inspect guest before deletion (no implicit force)")
 				}
 				args = []string{"delete", req.Instance, "--project", req.Project}
-			case "snapshot":
-				if !validName(req.Snapshot) {
-					return base, errors.New("snapshot name required")
-				}
-				args = []string{"snapshot", "create", req.Instance, req.Snapshot, "--project", req.Project}
-			case "restore":
-				if !validName(req.Snapshot) {
-					return base, errors.New("snapshot name required")
-				}
-				args = []string{"snapshot", "restore", req.Instance, req.Snapshot, "--project", req.Project}
 			case "exec":
 				if len(req.Command) == 0 || len(req.Command) > 64 {
 					return base, errors.New("guest command argv required (1..64)")
@@ -633,10 +665,9 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 				args = append(args, req.Command...)
 			}
 			timeout := time.Minute
-			// Directory-backed VM snapshots and restores can copy a full disk.
-			// Allow the same bounded budget as guest exec, not the fast
-			// start/stop budget. The daemon may outlive any client timeout.
-			if req.Operation == "exec" || req.Operation == "snapshot" || req.Operation == "restore" {
+			// Snapshot/restore are handled by the separate nonblocking
+			// native API path. Guest exec retains its bounded four-minute budget.
+			if req.Operation == "exec" {
 				timeout = 4 * time.Minute
 			}
 			runCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -666,12 +697,6 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 			base.ExitCode = code
 			base.OutputTruncated = trunc
 			if runErr != nil {
-				if req.Operation == "snapshot" || req.Operation == "restore" {
-					// The Incus daemon may continue after its CLI is killed or
-					// disconnected. Never report a failed snapshot/restore as an
-					// authoritative absence, or advise a blind retry.
-					return base, fmt.Errorf("%s_outcome_uncertain: native Incus operation may still be running; inspect native operations and snapshots before retrying (exit_code=%d): %w", req.Operation, code, runErr)
-				}
 				if req.Operation == "exec" && x.Type == "virtual-machine" && strings.Contains(strings.ToLower(out), "agent") {
 					return base, errors.New("guest_agent_unavailable: Incus VM guest agent is required for native exec")
 				}
@@ -684,19 +709,6 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 					return base, errors.New("guest_exec_outcome_uncertain: native guest identity changed during execution; no output delivered")
 				}
 				base.Status = "guest_command_completed"
-				return base, nil
-			}
-			if req.Operation == "snapshot" {
-				verified, err := b.selectInstance(ctx, req)
-				if err != nil || verified.UUID != x.UUID {
-					return base, errors.New("snapshot_outcome_uncertain: native guest identity changed")
-				}
-				list, err := b.Snapshots(ctx, req.Project, req.Instance)
-				if err != nil || !hasSnapshot(list, req.Snapshot) {
-					return base, errors.New("snapshot_outcome_uncertain: snapshot not verified in Incus")
-				}
-				base.Snapshots = list
-				base.Status = "snapshot_created"
 				return base, nil
 			}
 			if req.Operation == "delete" {

@@ -132,7 +132,58 @@ func fixture(t *testing.T) Backend {
 	if err := os.WriteFile(cli, []byte(data), 0700); err != nil {
 		t.Fatal(err)
 	}
-	return Backend{HostID: "asa_one_host", Binary: cli, StateDir: d, capacityProbe: func(int, int) error { return nil }}
+	b := Backend{HostID: "asa_one_host", Binary: cli, StateDir: d, capacityProbe: func(int, int) error { return nil }}
+	b.apiOverride = func(ctx context.Context, method, route string, payload []byte, etag string) (nativeAPIResponse, error) {
+		const opID = "a40f5541-5e98-454f-b3b6-8a51ef5dbd3c"
+		var requested struct {
+			Restore string `json:"restore"`
+			Name    string `json:"name"`
+		}
+		_ = json.Unmarshal(payload, &requested)
+		mode, _ := os.ReadFile(filepath.Join(d, "native.json.mode"))
+		if method == "GET" && strings.Contains(route, "/operations?") {
+			return nativeAPIResponse{Status: 200, Body: []byte(`{"type":"sync","metadata":[]}`)}, nil
+		}
+		if method == "GET" && strings.Contains(route, "/operations/") {
+			if string(mode) == "api_op_expired" || string(mode) == "pending_operation" {
+				return nativeAPIResponse{Status: 404}, fmt.Errorf("incus_api_http_404")
+			}
+			code := 200
+			if string(mode) == "api_running" {
+				code = 103
+			}
+			if string(mode) == "api_failed" {
+				code = 400
+			}
+			body, _ := json.Marshal(map[string]any{"type": "sync", "metadata": map[string]any{"id": opID, "status_code": code, "project": "default"}})
+			return nativeAPIResponse{Status: 200, Body: body}, nil
+		}
+		if method == "GET" && strings.Contains(route, "/instances/guest-a") {
+			xs, err := b.List(ctx, "default")
+			if err != nil || len(xs) == 0 {
+				return nativeAPIResponse{}, fmt.Errorf("fixture instance unavailable")
+			}
+			body, _ := json.Marshal(map[string]any{"type": "sync", "metadata": map[string]any{"architecture": "x86_64", "devices": map[string]any{}, "config": map[string]string{"volatile.uuid": xs[0].UUID, "user.asa.host": b.HostID}, "profiles": []string{"default"}, "ephemeral": false, "stateful": false, "description": "fixture"}})
+			return nativeAPIResponse{Status: 200, ETag: "fixture-etag", Body: body}, nil
+		}
+		if method == "POST" && strings.Contains(route, "/snapshots?") {
+			if _, err := b.command(ctx, time.Second, "snapshot", "create", "guest-a", requested.Name, "--project", "default"); err != nil {
+				return nativeAPIResponse{}, err
+			}
+		} else if method == "PUT" && strings.Contains(route, "/instances/guest-a") {
+			if etag != "fixture-etag" {
+				return nativeAPIResponse{}, fmt.Errorf("fixture etag mismatch")
+			}
+			if _, err := b.command(ctx, time.Second, "snapshot", "restore", "guest-a", requested.Restore, "--project", "default"); err != nil {
+				return nativeAPIResponse{}, err
+			}
+		} else {
+			return nativeAPIResponse{}, fmt.Errorf("unsupported fixture API request %s %s", method, route)
+		}
+		body, _ := json.Marshal(map[string]any{"type": "async", "operation": "/1.0/operations/" + opID, "metadata": map[string]any{"id": opID, "status_code": 103, "project": "default"}})
+		return nativeAPIResponse{Status: 202, Body: body}, nil
+	}
+	return b
 }
 func TestNativeReadinessQueriesSupportedAPI(t *testing.T) {
 	b := fixture(t)
@@ -225,9 +276,14 @@ func TestSnapshotRestoreAndCredentialStdinTransport(t *testing.T) {
 	sn := ref
 	sn.Operation = "snapshot"
 	sn.Snapshot = "before-test"
+	sn.OperationID = "unit-snapshot-one"
 	result, err := b.Run(ctx, sn, false, "")
-	if err != nil || result.Status != "snapshot_created" {
+	if err != nil || result.Status != "running" || result.Operation == nil || result.Operation.NativeID == "" {
 		t.Fatalf("snapshot: %+v %v", result, err)
+	}
+	check, err := b.Run(ctx, Request{Operation: "operation_status", Project: "default", Instance: "guest-a", UUID: id, OperationID: sn.OperationID}, false, "")
+	if err != nil || check.Status != "native_succeeded" {
+		t.Fatalf("snapshot status: %+v %v", check, err)
 	}
 	snaps := ref
 	snaps.Operation = "snapshots"
@@ -238,11 +294,18 @@ func TestSnapshotRestoreAndCredentialStdinTransport(t *testing.T) {
 	restore := ref
 	restore.Operation = "restore"
 	restore.Snapshot = "before-test"
+	restore.OperationID = "unit-restore-one"
 	if _, err := b.Run(ctx, restore, false, ""); err == nil || !strings.Contains(err.Error(), "approval_required") {
 		t.Fatal("restore requires approval")
 	}
-	if _, err := b.Run(ctx, restore, true, ""); err != nil {
-		t.Fatalf("mock native restore: %v", err)
+	if _, err := b.Run(ctx, Request{Operation: "stop", Project: "default", Instance: "guest-a", UUID: id}, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := b.Run(ctx, restore, true, ""); err != nil || r.Status != "running" {
+		t.Fatalf("restore submission: %+v %v", r, err)
+	}
+	if r, err := b.Run(ctx, Request{Operation: "operation_status", Project: "default", Instance: "guest-a", UUID: id, OperationID: restore.OperationID}, false, ""); err != nil || r.Status != "native_succeeded" {
+		t.Fatalf("restore status: %+v %v", r, err)
 	}
 	ex := ref
 	ex.Operation = "exec"
@@ -274,7 +337,8 @@ func TestSnapshotRestoreLostAcknowledgementNeverClaimsCompletion(t *testing.T) {
 	writeMode("snapshot_lost_ack")
 	snapshot := ref
 	snapshot.Operation = "snapshot"
-	if result, err := b.Run(ctx, snapshot, false, ""); err == nil || !strings.Contains(err.Error(), "snapshot_outcome_uncertain") || result.Status == "snapshot_created" {
+	snapshot.OperationID = "unit-snapshot-lost"
+	if result, err := b.Run(ctx, snapshot, false, ""); err != nil || result.Status != "outcome_uncertain" || result.Operation == nil {
 		t.Fatalf("lost snapshot acknowledgement treated as completion: %+v %v", result, err)
 	}
 	// A native snapshot may already be visible while its daemon operation
@@ -283,14 +347,36 @@ func TestSnapshotRestoreLostAcknowledgementNeverClaimsCompletion(t *testing.T) {
 	if err != nil || !hasSnapshot(observed, ref.Snapshot) {
 		t.Fatalf("native snapshot state not discoverable: %v %v", observed, err)
 	}
-	if _, err := b.Run(ctx, snapshot, false, ""); err == nil || !strings.Contains(err.Error(), "snapshot_collision") {
-		t.Fatalf("uncertain native snapshot was submitted twice: %v", err)
+	if r, err := b.Run(ctx, snapshot, false, ""); err != nil || r.Status != "outcome_uncertain" {
+		t.Fatalf("uncertain operation was improperly repeated: %+v %v", r, err)
 	}
-	writeMode("restore_lost_ack")
-	restore := ref
-	restore.Operation = "restore"
-	if result, err := b.Run(ctx, restore, true, ""); err == nil || !strings.Contains(err.Error(), "restore_outcome_uncertain") || result.Status == "completed_native" {
-		t.Fatalf("lost restore acknowledgement treated as completion: %+v %v", result, err)
+	// A separate clean guest proves lost restore acknowledgement. The uncertain
+	// snapshot above must continue to block additional guest mutations.
+	b2 := fixture(t)
+	created2, err := b2.Run(ctx, createRequest(), false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	id2 := created2.Instance.UUID
+	prior := Request{Operation: "snapshot", Project: "default", Instance: "guest-a", UUID: id2, Snapshot: "before-test", OperationID: "unit-pre-restore"}
+	if _, err = b2.Run(ctx, prior, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if r, err := b2.Run(ctx, Request{Operation: "operation_status", Project: "default", Instance: "guest-a", UUID: id2, OperationID: prior.OperationID}, false, ""); err != nil || r.Status != "native_succeeded" {
+		t.Fatalf("snapshot not terminal: %+v %v", r, err)
+	}
+	if _, err = b2.Run(ctx, Request{Operation: "stop", Project: "default", Instance: "guest-a", UUID: id2}, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if err = os.WriteFile(filepath.Join(b2.StateDir, "native.json.mode"), []byte("restore_lost_ack"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	restore := Request{Operation: "restore", Project: "default", Instance: "guest-a", UUID: id2, Snapshot: "before-test", OperationID: "unit-restore-lost"}
+	if r, err := b2.Run(ctx, restore, true, ""); err != nil || r.Status != "outcome_uncertain" || r.Operation == nil {
+		t.Fatalf("lost restore acknowledgement reported completion: %+v %v", r, err)
+	}
+	if r, err := b2.Run(ctx, restore, true, ""); err != nil || r.Status != "outcome_uncertain" {
+		t.Fatalf("uncertain restore was blindly repeated: %+v %v", r, err)
 	}
 }
 
@@ -444,15 +530,24 @@ func TestMutationsRejectIdentityReplacementAtFinalCheck(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			req := Request{Operation: op, Project: "default", Instance: "guest-a", UUID: created.Instance.UUID, Command: []string{"true"}, Snapshot: "snap"}
+			req := Request{Operation: op, Project: "default", Instance: "guest-a", UUID: created.Instance.UUID, Command: []string{"true"}, Snapshot: "snap", OperationID: "mutation-" + op}
 			if op == "delete" {
 				if _, err := b.Run(ctx, Request{Operation: "stop", Project: "default", Instance: "guest-a", UUID: created.Instance.UUID}, false, ""); err != nil {
 					t.Fatal(err)
 				}
 			}
 			if op == "snapshot" || op == "restore" {
-				if _, err := b.Run(ctx, Request{Operation: "snapshot", Project: "default", Instance: "guest-a", UUID: created.Instance.UUID, Snapshot: "snap"}, false, ""); err != nil {
+				if _, err := b.Run(ctx, Request{Operation: "snapshot", Project: "default", Instance: "guest-a", UUID: created.Instance.UUID, Snapshot: "snap", OperationID: "before-mutation-" + op}, false, ""); err != nil {
 					t.Fatal(err)
+				}
+				result, err := b.Run(ctx, Request{Operation: "operation_status", Project: "default", Instance: "guest-a", UUID: created.Instance.UUID, OperationID: "before-mutation-" + op}, false, "")
+				if err != nil || result.Status != "native_succeeded" {
+					t.Fatalf("fixture snapshot: %+v %v", result, err)
+				}
+				if op == "restore" {
+					if _, err := b.Run(ctx, Request{Operation: "stop", Project: "default", Instance: "guest-a", UUID: created.Instance.UUID}, false, ""); err != nil {
+						t.Fatal(err)
+					}
 				}
 				if op == "snapshot" {
 					req.Snapshot = "second"

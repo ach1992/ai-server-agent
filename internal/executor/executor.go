@@ -44,6 +44,8 @@ type Server struct {
 	browserNodeBinary                 string                  // test-only private fixture override; production always uses root-owned pinned Node
 	browserRunTerminateTestHook       func(int) (bool, error) // private one-shot Browser uncertain-stop test hook
 	browserKillTestHook               func() error            // private root-fixture pause/fault, never public API
+	managedWatchMu                    sync.Mutex
+	managedWatching                   map[string]bool // active native-operation observers in this Executor process
 	jobsMu                            sync.Mutex
 	jobUnknownBeforeWriteTestHook     func() // test-only deterministic status reconciliation interleaving
 	lifecycleLockPath                 string
@@ -176,6 +178,7 @@ func (s *Server) Serve() error {
 	sweepContext, stopSweep := context.WithCancel(context.Background())
 	defer stopSweep()
 	go s.runTransferSweepLoop(sweepContext)
+	s.resumeNativeOperations()
 	for {
 		c, err := ln.Accept()
 		if err != nil {

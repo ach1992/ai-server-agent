@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"log"
 	"strings"
 	"time"
 
@@ -186,6 +187,7 @@ func (s *Server) managedEnvironmentAction(ctx context.Context, req Request) Resp
 		return fileError("host_identity_unavailable", "state", errors.New("Agent instance_id must be configured"))
 	}
 	in := req.ManagedEnv
+	in.ActorID = req.PrincipalID // server-authenticated only; never a client-provided operation field.
 	started := time.Now()
 	if blocked := s.beginActionAudit(req, "managed_environment", "root", "incus "+in.Operation, "managed"); blocked != nil {
 		return *blocked
@@ -210,7 +212,12 @@ func (s *Server) managedEnvironmentAction(ctx context.Context, req Request) Resp
 	if preflightErr != nil {
 		return s.finishActionAudit(req, "managed_environment", "root", "incus "+in.Operation, "managed", started, managedErr(preflightErr))
 	}
-	result, err := s.managedBackend().Run(ctx, in, req.Approval, secret)
+	backend := s.managedBackend()
+	result, err := backend.Run(ctx, in, req.Approval, secret)
+	if err == nil && result.Operation != nil && result.Operation.NativeID != "" &&
+		(result.Status == "running" || result.Status == "submitted") {
+		s.watchNativeOperation(backend, *result.Operation)
+	}
 	var resp Response
 	if err != nil {
 		resp = managedErr(err)
@@ -225,4 +232,49 @@ func (s *Server) managedEnvironmentAction(ctx context.Context, req Request) Resp
 		_ = serviceaccess.New(s.cfg.StateDir).MarkUsed(req.CredentialRef)
 	}
 	return s.finishActionAudit(req, "managed_environment", "root", "incus "+in.Operation, "managed", started, resp)
+}
+
+// watchNativeOperation preserves the last native result even when the MCP
+// caller disconnects. The existing Executor owns these bounded goroutines;
+// no new daemon or external scheduling service is introduced.
+func (s *Server) watchNativeOperation(b managedincus.Backend, op managedincus.NativeOperation) {
+	s.managedWatchMu.Lock()
+	if s.managedWatching == nil {
+		s.managedWatching = map[string]bool{}
+	}
+	if s.managedWatching[op.ID] {
+		s.managedWatchMu.Unlock()
+		return
+	}
+	if len(s.managedWatching) >= 32 {
+		s.managedWatchMu.Unlock()
+		return
+	}
+	s.managedWatching[op.ID] = true
+	s.managedWatchMu.Unlock()
+	go func() {
+		defer func() {
+			s.managedWatchMu.Lock()
+			delete(s.managedWatching, op.ID)
+			s.managedWatchMu.Unlock()
+		}()
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Hour)
+		defer cancel()
+		b.WatchNativeOperation(ctx, managedincus.Request{Operation: "operation_status", OperationID: op.ID, ActorID: op.ActorID, Project: op.Project, Instance: op.Instance, UUID: op.UUID})
+	}()
+}
+
+// resumeNativeOperations reattaches polling immediately after an Executor
+// restart, before Incus's short-lived native terminal operation may expire.
+// Future ChatGPT conversations can also rediscover the same records.
+func (s *Server) resumeNativeOperations() {
+	backend := s.managedBackend()
+	candidates, err := backend.RecoverableNativeOperations()
+	if err != nil {
+		log.Printf("managed_incus_recovery_error: unable to inspect root-private operation journal: %v", err)
+		return
+	}
+	for _, op := range candidates {
+		s.watchNativeOperation(backend, op)
+	}
 }
