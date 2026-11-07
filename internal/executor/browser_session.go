@@ -439,6 +439,11 @@ func (s *Server) browserSessionEntry(req Request) (*stdioSession, error) {
 // Browser profile. The trusted Agent-provided script is supplied as bounded
 // Node argv parts; Node imports an in-memory data: module. argv contains
 // source code and managed paths only, never bearer credentials or page data.
+// The unstarted broker's exact scratch could not be reclaimed after a
+// failed process launch. Keep its host UID reserved until operator recovery
+// rather than permitting a later Browser to inherit its old files.
+var errBrowserFailedLaunchCleanupUnverified = errors.New("browser_failed_launch_cleanup_unverified")
+
 func (s *Server) browserSessionOpen(ctx context.Context, req Request) Response {
 	if req.SessionID != "" || len(req.Content) == 0 || len(req.Content) > browserSessionMaxScript || req.TimeoutMS != 0 {
 		return browserSessionError("invalid_browser_session_open", "validation", errors.New("expected bounded runner script and no existing session"))
@@ -529,8 +534,13 @@ func (s *Server) browserSessionOpen(ctx context.Context, req Request) Response {
 	if group != nil {
 		id, err = s.workerContainedBrowserSession(req, req.Workspace, node, group, hostUID, args...)
 		if id == "" {
-			// A failed/premature spawn cannot release Browser admission
-			// until the kernel confirms no detached descendants remain.
+			// The failed-start broker has already tried to verify private
+			// cgroup stop and exact scratch cleanup. If either is unknown,
+			// retain the admission/host-UID reservation, never reuse it.
+			if errors.Is(err, errBrowserFailedLaunchCleanupUnverified) {
+				reserved = false
+				return browserSessionError("browser_failed_launch_cleanup_unverified", "state", err)
+			}
 			if cleanupErr := group.abortBeforeLaunch(); cleanupErr != nil {
 				reserved = false // stay fail-closed until root recovery
 				return browserSessionError("browser_containment_cleanup_unknown", "state", errors.Join(err, cleanupErr))

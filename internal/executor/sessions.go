@@ -493,6 +493,23 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 			s.sessions.remove(entry)
 		}
 	}()
+	// An isolated Browser's scratch is created before cmd.Start. If an
+	// unstarted/failed broker attempt loses its process identity, reclaim
+	// ONLY these exact names after the private cgroup is proved empty.
+	// Failure to prove stop/reclamation must not recycle its host UID.
+	scratchPrepared := false
+	defer func() {
+		if !removeOnFailure || !scratchPrepared || entry.browserScratchCleanup == nil {
+			return
+		}
+		if stopErr := containment.abortBeforeLaunch(); stopErr != nil {
+			err = errors.Join(err, fmt.Errorf("%w: private cgroup: %v", errBrowserFailedLaunchCleanupUnverified, stopErr))
+			return
+		}
+		if cleanupErr := entry.browserScratchCleanup(); cleanupErr != nil {
+			err = errors.Join(err, fmt.Errorf("%w: profile/trace: %v", errBrowserFailedLaunchCleanupUnverified, cleanupErr))
+		}
+	}()
 	// An externally owned scope must have an fsynced pending reservation
 	// BEFORE systemd-run. Every later startup failure must reconcile that
 	// record; no in-memory-only uncertain backend is permitted.
@@ -567,6 +584,7 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 		if err := s.prepareBrowserSessionScratch(entry.browserHostUID, entry.browserScratchName, entry.browserTraceScratchName); err != nil {
 			return "", fmt.Errorf("prepare isolated Browser scratch: %w", err)
 		}
+		scratchPrepared = true
 		// The kernel enforces peer profile/trace integrity through distinct
 		// host UIDs; execute pinned Node directly, without the superseded
 		// Landlock helper that interfered with Chromium's optional sandbox.
