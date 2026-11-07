@@ -57,10 +57,23 @@ func TestMappedBrowserSessionHostUIDAcrossPeers(t *testing.T) {
 	if err := os.Chmod(root, 0711); err != nil {
 		t.Fatal(err)
 	}
-	profiles := []string{filepath.Join(root, "asa-profile-"+strings.Repeat("a", 32)),
-		filepath.Join(root, "asa-profile-"+strings.Repeat("b", 32))}
-	traces := []string{filepath.Join(root, "asa-trace-"+strings.Repeat("a", 32)),
-		filepath.Join(root, "asa-trace-"+strings.Repeat("b", 32))}
+	scratch := filepath.Join(root, "isolated-sessions")
+	if err := os.Mkdir(scratch, 0711); err != nil {
+		t.Fatal(err)
+	}
+	// The installed Executor service runs with a private primary group;
+	// the installer explicitly provisions this root-controlled parent
+	// as root:root, independent of the service's group.
+	if err := os.Chown(scratch, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chmod(scratch, 0711); err != nil {
+		t.Fatal(err)
+	}
+	profiles := []string{filepath.Join(scratch, "asa-profile-"+strings.Repeat("a", 32)),
+		filepath.Join(scratch, "asa-profile-"+strings.Repeat("b", 32))}
+	traces := []string{filepath.Join(scratch, "asa-trace-"+strings.Repeat("a", 32)),
+		filepath.Join(scratch, "asa-trace-"+strings.Repeat("b", 32))}
 	for i, hostUID := range []uint32{browserSessionHostUIDBase, browserSessionHostUIDBase + 1} {
 		for _, dir := range []string{profiles[i], traces[i]} {
 			if err := os.Mkdir(dir, 0700); err != nil {
@@ -107,6 +120,10 @@ sys.stdin.readline()
 assert (p/"cookie").read_bytes()==b"B-ORIGINAL"
 assert t.read_bytes()==b"PK"+b"B-TRACE"
 (p/"next-browser-action").write_text("B-CONTINUES")
+# Authorized code is free to change its own scratch metadata; verified
+# root cleanup must remain possible even after that ordinary operation.
+os.chmod(p,0o755)
+os.chmod(Path(os.environ["OWN_TRACE"]),0o755)
 print("B_CONTINUES",flush=True)
 `
 	b := run(1, bScript)
@@ -216,6 +233,23 @@ if not all(blocked):raise SystemExit(4)
 	if action, err := os.ReadFile(filepath.Join(profiles[1], "next-browser-action")); err != nil ||
 		string(action) != "B-CONTINUES" {
 		t.Fatalf("peer Browser post-corruption action missing: %v %q", err, action)
+	}
+	// The original Executor broker calls this only after verified full
+	// process/cgroup stop. A mode changed by the session itself must not
+	// strand its slot, provided inode type and exact host ownership match.
+	var executor Server
+	for _, own := range []string{profiles[1], traces[1]} {
+		info, err := os.Stat(own)
+		if err != nil || info.Mode().Perm() != 0755 {
+			t.Fatalf("session did not change its own scratch mode: %v %v", info, err)
+		}
+		if err := executor.browserReclaimScratchAt(scratch, browserSessionHostUIDBase+1, hostGID,
+			filepath.Base(own), true); err != nil {
+			t.Fatalf("verified root cleanup refused a session-owned mode change: %v", err)
+		}
+		if _, err := os.Lstat(own); !errors.Is(err, os.ErrNotExist) {
+			t.Fatalf("exact retired Browser scratch still present: %v", err)
+		}
 	}
 	fmt.Println("MAPPED_HOST_UID_PEER_INTEGRITY_OK")
 }

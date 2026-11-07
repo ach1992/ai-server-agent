@@ -328,8 +328,12 @@ func (s *Server) browserReclaimScratchAt(dir string, expectedUID, expectedGID ui
 		stat, ok := child.Sys().(*syscall.Stat_t)
 		validOwner := ok && stat.Uid == expectedUID
 		if private {
+			// Arbitrary same-session Playwright/Node code may legitimately
+			// chmod its OWN profile. After proven whole-cgroup stop, exact
+			// root cleanup must not strand its admission solely because
+			// the owner changed directory mode during the session.
 			validOwner = ok && validBrowserSessionHostUID(stat.Uid) &&
-				stat.Gid == expectedGID && child.Mode().Perm() == 0700 &&
+				stat.Gid == expectedGID &&
 				(expectedUID == 0 || stat.Uid == expectedUID)
 		}
 		if !child.IsDir() || child.Mode()&os.ModeSymlink != 0 || !validOwner {
