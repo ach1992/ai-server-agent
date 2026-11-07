@@ -44,6 +44,11 @@ func RunBrowserSessionHelper(args []string) int {
 		fmt.Fprintln(os.Stderr, "browser_session_write_boundary_scratch_unavailable:", err)
 		return 1
 	}
+	// Landlock is per-thread. Keep the exact thread confined until execve
+	// replaces the Go helper with Node; unlocking before exec would permit
+	// the Go scheduler to select an unconstrained thread.
+	runtime.LockOSThread()
+	defer runtime.UnlockOSThread()
 	if err := browserSessionAllowWrites(profile, trace); err != nil {
 		fmt.Fprintln(os.Stderr, "browser_session_write_boundary_unavailable:", err)
 		return 1
@@ -55,9 +60,8 @@ func RunBrowserSessionHelper(args []string) int {
 	return 0
 }
 
+// Caller must retain its OS thread through unix.Exec after this returns.
 func browserSessionAllowWrites(profile, trace string) error {
-	runtime.LockOSThread()
-	defer runtime.UnlockOSThread()
 	abi, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, 0, 0, uintptr(unix.LANDLOCK_CREATE_RULESET_VERSION))
 	if errno != 0 || abi < 2 {
 		return errors.New("isolated Browser write boundary requires Landlock ABI 2 or later")
