@@ -783,7 +783,7 @@ func TestExportApprovedRootManagedBrowserTraceRunner(t *testing.T) {
 	sandbox := os.Getenv("ASA_203_BROWSER_SANDBOX_GENERATOR") == "1"
 	script, err := managedSessionRunnerWithSandbox(engine,
 		filepath.Join(root, "state", "runtime", "browser", "profile"),
-		filepath.Join(root, "state", "runtime", "browser", "isolated"), false, "isolated", sandbox)
+		filepath.Join(root, "state", "runtime", "browser", "isolated-sessions"), false, "isolated", sandbox)
 	if err != nil {
 		t.Fatal(err)
 	}

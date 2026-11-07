@@ -70,6 +70,12 @@ go test ./internal/browser -run '^(TestBrowserFlow(PinnedRuntimeAcceptance|Revie
 ASA_BROWSER_SANDBOX_PINNED_WORKER_TEST=1 go test ./internal/browser -run '^TestIsolatedChromiumSandboxPinnedWorkerCompatibility$' -v -count=1 | tee -a "$log"
 go test ./internal/executor -run '^(TestBrowserSession|TestBrowserAdmissionStatus|TestBrowserSandbox|TestChromiumSandboxProcessTitleAndPinnedBinary|TestCredentialDerivedBrowserEvidenceAndScriptAvailable)' -v -count=1 | tee -a "$log"
 go test ./internal/mcp -run '^(TestOfficialSDKCanDiscoverTools|TestBrowserSessionKnownFlowFailureMCP|TestBrowserSessionCaptureMCP)' -v -count=1 | tee -a "$log"
+# Actual peer metadata integrity needs two different host UIDs, which an
+# ordinary non-root Go test cannot create. Compile the current source as the
+# unprivileged runner, then run only this disposable fixture under sudo.
+# No Agent service, OS account or host configuration is created/changed.
+go test -c -o "$root/mapped-browser-peer-integrity.test" ./internal/executor
+sudo env ASA_REQUIRE_BROWSER_MAPPED_HOST_UID=1 "$root/mapped-browser-peer-integrity.test" -test.run '^TestMappedBrowserSessionHostUIDAcrossPeers$' -test.v | tee -a "$log"
 # A stale regex or environment cannot make a critical new Browser test
 # silently SKIP while the pinned acceptance job still reports SUCCESS.
 for name in \
@@ -82,7 +88,7 @@ for name in \
   TestManagedBrowserSessionCapturePinnedRuntime \
   TestManagedBrowserLargeImageContinuationPinnedChromium \
   TestManagedBrowserNormalCloseDefersExecutorTraceCleanup \
-  TestBrowserSessionWriteBoundaryAcrossPeers \
+  TestMappedBrowserSessionHostUIDAcrossPeers \
   TestIsolatedManagedBrowserRealProfileSeparation \
   TestIsolatedBrowserProfileReclaimedAfterSIGKILLPinnedRuntime \
   TestManagedCredentialLoginPinnedChromium \

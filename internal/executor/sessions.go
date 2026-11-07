@@ -84,6 +84,7 @@ type stdioSession struct {
 	browserLease            *browserSessionAdmission // release only after verified process cleanup, before broker deletion
 	browserMode             string                   // opening mode, immutable per session
 	browserPrivate          bool                     // isolated-only OS identity, not available to ordinary worker commands
+	browserHostUID          uint32                   // distinct host filesystem UID, held until verified whole-cgroup cleanup
 	browserGroup            *dapCgroup               // original Node + detached Chromium; cgroup.kill/empty proof required before lease release
 	browserScratchName      string                   // exact Executor-issued isolated-profile basename
 	browserTraceScratchName string                   // exact Executor-issued private trace directory for every managed Browser
@@ -317,11 +318,11 @@ func (s *Server) workerStdioSession(req Request, kind, workspace, binary string,
 // The original stdio broker owns this Browser, not a second Browser broker.
 // Atomic CLONE_INTO_CGROUP guarantees that Playwright's independently grouped
 // Chromium subprocesses inherit the same private root-controlled boundary.
-func (s *Server) workerContainedBrowserSession(req Request, workspace, binary string, group *dapCgroup, args ...string) (string, error) {
+func (s *Server) workerContainedBrowserSession(req Request, workspace, binary string, group *dapCgroup, hostUID uint32, args ...string) (string, error) {
 	if req.Root || req.Approval || group == nil || os.Geteuid() != 0 {
 		return "", errors.New("managed Browser requires a root-owned private process cgroup")
 	}
-	return s.startProcessSessionWithOptions(req, "browser", workspace, binary, nil, "", group, false, args...)
+	return s.startProcessSessionWithOptions(req, "browser", workspace, binary, nil, "", group, false, hostUID, args...)
 }
 
 // Python DAP must start inside the exact executor-owned private cgroup
@@ -331,7 +332,7 @@ func (s *Server) workerContainedDAPSession(req Request, workspace, binary string
 	if req.Root || req.Approval || group == nil || os.Geteuid() != 0 {
 		return "", errors.New("contained DAP requires an unprivileged request on root executor")
 	}
-	return s.startProcessSessionWithOptions(req, "dap", workspace, binary, nil, "", group, true, args...)
+	return s.startProcessSessionWithOptions(req, "dap", workspace, binary, nil, "", group, true, 0, args...)
 }
 
 // JS adapters listen on a private Unix socket instead of stdio. The same
@@ -341,7 +342,7 @@ func (s *Server) workerContainedSocketDAPSession(req Request, workspace, binary 
 	if req.Root || req.Approval || group == nil || os.Geteuid() != 0 {
 		return "", errors.New("socket DAP requires root executor-owned worker containment")
 	}
-	return s.startProcessSessionWithOptions(req, "dap", workspace, binary, nil, "", group, false, args...)
+	return s.startProcessSessionWithOptions(req, "dap", workspace, binary, nil, "", group, false, 0, args...)
 }
 
 func (s *Server) workerProcessSession(req Request, kind, workspace, binary string, terminal *tmuxTerminalState, args ...string) (string, error) {
@@ -396,10 +397,10 @@ func (s *Server) startProcessSession(req Request, kind, workspace, binary string
 }
 
 func (s *Server) startProcessSessionWithID(req Request, kind, workspace, binary string, terminal *tmuxTerminalState, priorID string, args ...string) (id string, err error) {
-	return s.startProcessSessionWithOptions(req, kind, workspace, binary, terminal, priorID, nil, false, args...)
+	return s.startProcessSessionWithOptions(req, kind, workspace, binary, terminal, priorID, nil, false, 0, args...)
 }
 
-func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, binary string, terminal *tmuxTerminalState, priorID string, containment *dapCgroup, directDAP bool, args ...string) (id string, err error) {
+func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, binary string, terminal *tmuxTerminalState, priorID string, containment *dapCgroup, directDAP bool, browserHostUID uint32, args ...string) (id string, err error) {
 	if directDAP && (kind != "dap" || terminal != nil || priorID != "" || req.Root || req.Approval) {
 		return "", errors.New("private DAP stdio is available only to fresh worker-owned DAP sessions")
 	}
@@ -457,6 +458,12 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 		entry.browser = &browserStdioState{}
 		entry.browserMode = req.BrowserProfileMode
 		entry.browserPrivate = req.BrowserProfileMode == "isolated" && s.browserUID != 0 && s.browserUID != s.workerUID
+		if entry.browserPrivate {
+			if !validBrowserSessionHostUID(browserHostUID) {
+				return "", errors.New("isolated Browser host UID reservation missing")
+			}
+			entry.browserHostUID = browserHostUID
+		}
 		entry.browserLease = &s.browserAdmission
 		entry.browserGroup = containment
 		if containment != nil {
@@ -467,13 +474,13 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 			if req.BrowserProfileMode == "isolated" {
 				entry.browserScratchName = "asa-profile-" + hex.EncodeToString(nonce[:])
 			}
-			traceName, profileName, private := entry.browserTraceScratchName, entry.browserScratchName, entry.browserPrivate
+			traceName, profileName, private, hostUID := entry.browserTraceScratchName, entry.browserScratchName, entry.browserPrivate, entry.browserHostUID
 			entry.browserScratchCleanup = func() error {
 				var cleanupErr error
 				if profileName != "" {
-					cleanupErr = errors.Join(cleanupErr, s.browserReclaimNamedScratch(profileName, private))
+					cleanupErr = errors.Join(cleanupErr, s.browserReclaimNamedScratch(profileName, private, hostUID))
 				}
-				return errors.Join(cleanupErr, s.browserReclaimNamedScratch(traceName, private))
+				return errors.Join(cleanupErr, s.browserReclaimNamedScratch(traceName, private, hostUID))
 			}
 		}
 	}
@@ -557,18 +564,12 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 		args = []string{"-f", "/dev/null", "-S", terminal.socket, "-C", "attach-session", "-t", terminal.name}
 	}
 	if entry.browserPrivate && s.browserNodeBinary == "" {
-		// Production-only, same-PID self-exec stage: prevent arbitrary
-		// Node/Playwright scripts from modifying a concurrent session's
-		// private Browser files. Reuse the original broker and cgroup.
-		agentBinary, execErr := os.Executable()
-		if execErr != nil {
-			return "", fmt.Errorf("resolve Browser session helper: %w", execErr)
+		if err := s.prepareBrowserSessionScratch(entry.browserHostUID, entry.browserScratchName, entry.browserTraceScratchName); err != nil {
+			return "", fmt.Errorf("prepare isolated Browser scratch: %w", err)
 		}
-		if s.browserHelperBinary != "" { // source-built, root-only test fixture
-			agentBinary = s.browserHelperBinary
-		}
-		args = append([]string{"browser-session-helper", binary}, args...)
-		binary = agentBinary
+		// The kernel enforces peer profile/trace integrity through distinct
+		// host UIDs; execute pinned Node directly, without the superseded
+		// Landlock helper that interfered with Chromium's optional sandbox.
 	}
 	cmd := exec.Command(binary, args...)
 	cmd.Dir = cwd
@@ -649,7 +650,19 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 			cmd.SysProcAttr.Credential = &syscall.Credential{Uid: 0, Gid: 0, Groups: []uint32{0}}
 		} else {
 			if entry.browserPrivate {
-				cmd.SysProcAttr.Credential = &syscall.Credential{Uid: s.browserUID, Gid: s.browserGID, Groups: []uint32{s.browserGID}}
+				// Each process sees the stable aibrowser identity in its own
+				// user namespace, but the host kernel owns its files under
+				// a distinct session UID. This also protects chmod/utimes,
+				// which Landlock's write-only rules cannot confine.
+				cmd.SysProcAttr.Cloneflags |= syscall.CLONE_NEWUSER
+				cmd.SysProcAttr.UidMappings = []syscall.SysProcIDMap{
+					{ContainerID: int(s.browserUID), HostID: int(entry.browserHostUID), Size: 1},
+				}
+				cmd.SysProcAttr.GidMappings = []syscall.SysProcIDMap{
+					{ContainerID: int(s.browserGID), HostID: int(s.browserGID), Size: 1},
+				}
+				cmd.SysProcAttr.GidMappingsEnableSetgroups = false
+				cmd.SysProcAttr.Credential = &syscall.Credential{Uid: s.browserUID, Gid: s.browserGID, NoSetGroups: true}
 			} else {
 				cmd.SysProcAttr.Credential = &syscall.Credential{Uid: s.workerUID, Gid: s.workerGID, Groups: []uint32{s.workerGID}}
 			}

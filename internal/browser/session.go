@@ -67,7 +67,10 @@ func (m *Manager) SessionOpen(ctx context.Context, opts SessionOptions) (executo
 	if mode == "isolated" {
 		// Browser trace bytes are never created under the aiworker-owned
 		// temporary root, even before the retained ZIP is pinned.
-		scratch = filepath.Join(m.dataDir(), "isolated")
+		// New mapped-host-UID Browser sessions use a separately provisioned,
+		// root-owned 0711 directory. The legacy aibrowser-owned scratch
+		// remains untouched for independently authorized rollback.
+		scratch = filepath.Join(m.dataDir(), "isolated-sessions")
 	}
 	script, err := managedSessionRunnerWithSandbox(m.engineDir(), filepath.Join(m.dataDir(), "profile"), scratch, opts.IgnoreHTTPSErrors, mode, opts.ChromiumSandbox)
 	m.mu.RUnlock()

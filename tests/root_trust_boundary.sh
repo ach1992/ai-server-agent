@@ -40,6 +40,7 @@ assert_owner_mode "$STATE_DIR/jobs" root root 711
 assert_owner_mode "$STATE_DIR/browser-home" aibrowser aibrowser 700
 assert_owner_mode "$STATE_DIR/runtime/browser" root root 755
 assert_owner_mode "$STATE_DIR/runtime/browser/isolated" aibrowser aibrowser 700
+assert_owner_mode "$STATE_DIR/runtime/browser/isolated-sessions" root root 711
 [ "$(id -u aibrowser)" != "$(id -u aiworker)" ] &&
 [ "$(id -g aibrowser)" != "$(id -g aiworker)" ] &&
 [ "$(id -u aibrowser)" != "$(id -u aiagent)" ] &&

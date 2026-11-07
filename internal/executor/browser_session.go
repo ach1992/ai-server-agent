@@ -26,6 +26,7 @@ import (
 type browserSessionAdmission struct {
 	mu                sync.Mutex
 	holders           map[string]string // opaque reservation/session ID -> shared/isolated/maintenance
+	isolatedHostUIDs  map[string]uint32 // unique host filesystem owner held until verified Browser cleanup
 	sharedHolder      string
 	maintenanceHolder string
 }
@@ -85,6 +86,29 @@ func (a *browserSessionAdmission) tryMode(holder, mode string, limit int, before
 	if a.holders == nil {
 		a.holders = make(map[string]string)
 	}
+	if mode == "isolated" {
+		if a.isolatedHostUIDs == nil {
+			a.isolatedHostUIDs = make(map[string]uint32)
+		}
+		var uid uint32
+		for candidate := browserSessionHostUIDBase; candidate < browserSessionHostUIDBase+browserSessionHostUIDSlots; candidate++ {
+			occupied := false
+			for _, current := range a.isolatedHostUIDs {
+				if current == candidate {
+					occupied = true
+					break
+				}
+			}
+			if !occupied {
+				uid = candidate
+				break
+			}
+		}
+		if uid == 0 {
+			return false, errors.New("no isolated Browser filesystem identity available")
+		}
+		a.isolatedHostUIDs[holder] = uid
+	}
 	a.holders[holder] = mode
 	if mode == "shared" {
 		a.sharedHolder = holder
@@ -118,6 +142,10 @@ func (a *browserSessionAdmission) transfer(from, to string) bool {
 	}
 	delete(a.holders, from)
 	a.holders[to] = mode
+	if uid := a.isolatedHostUIDs[from]; uid != 0 {
+		delete(a.isolatedHostUIDs, from)
+		a.isolatedHostUIDs[to] = uid
+	}
 	if a.sharedHolder == from {
 		a.sharedHolder = to
 	}
@@ -136,6 +164,7 @@ func (a *browserSessionAdmission) release(holder string) bool {
 		return false
 	}
 	delete(a.holders, holder)
+	delete(a.isolatedHostUIDs, holder)
 	if a.sharedHolder == holder {
 		a.sharedHolder = ""
 	}
@@ -153,6 +182,12 @@ func (a *browserSessionAdmission) reserved() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return len(a.holders) != 0
+}
+
+func (a *browserSessionAdmission) isolatedHostUID(holder string) uint32 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.isolatedHostUIDs[holder]
 }
 
 // A global-exclusive first admission reclaims only Agent-recognized
@@ -198,14 +233,14 @@ func (s *Server) browserReclaimScratch() error {
 	// independent ownership domains. Both are swept only when there are
 	// no admitted Browsers, never across active sessions.
 	if s.browserUID != 0 && s.browserUID != s.workerUID {
-		return s.browserReclaimScratchAt(s.isolatedBrowserScratchDir(), s.browserUID, s.browserGID, "", true)
+		return s.browserReclaimScratchAt(s.isolatedBrowserScratchDir(), 0, s.browserGID, "", true)
 	}
 	return nil
 }
 
 // Exact session/run scratch reclamation follows verified whole-cgroup stop.
 // The private flag comes from the immutable session record, never the caller.
-func (s *Server) browserReclaimNamedScratch(name string, private bool) error {
+func (s *Server) browserReclaimNamedScratch(name string, private bool, hostUID uint32) error {
 	if !browserScratchName(name) || !(strings.HasPrefix(name, "asa-profile-") && len(name) == len("asa-profile-")+32 ||
 		strings.HasPrefix(name, "asa-trace-") && len(name) == len("asa-trace-")+32 ||
 		strings.HasPrefix(name, "run.") && len(name) == len("run.")+32) {
@@ -215,7 +250,10 @@ func (s *Server) browserReclaimNamedScratch(name string, private bool) error {
 		return errors.New("Executor Browser scratch root unavailable")
 	}
 	if private {
-		return s.browserReclaimScratchAt(s.isolatedBrowserScratchDir(), s.browserUID, s.browserGID, name, true)
+		if !validBrowserSessionHostUID(hostUID) {
+			return errors.New("unrecognized isolated Browser scratch owner")
+		}
+		return s.browserReclaimScratchAt(s.isolatedBrowserScratchDir(), hostUID, s.browserGID, name, true)
 	}
 	return s.browserReclaimScratchMatching(name)
 }
@@ -245,8 +283,7 @@ func (s *Server) browserReclaimScratchAt(dir string, expectedUID, expectedGID ui
 			return fmt.Errorf("isolated Browser parent untrusted: %w", err)
 		}
 		stat, ok := info.Sys().(*syscall.Stat_t)
-		if expectedUID == 0 || expectedUID == s.workerUID || !ok ||
-			info.Mode().Perm() != 0700 || stat.Uid != expectedUID || stat.Gid != expectedGID {
+		if !ok || info.Mode().Perm() != 0711 || stat.Uid != 0 || stat.Gid != 0 {
 			return errors.New("isolated Browser scratch root ownership changed")
 		}
 	}
@@ -289,7 +326,13 @@ func (s *Server) browserReclaimScratchAt(dir string, expectedUID, expectedGID ui
 			return fmt.Errorf("verify Browser scratch candidate: %w", err)
 		}
 		stat, ok := child.Sys().(*syscall.Stat_t)
-		if !child.IsDir() || child.Mode()&os.ModeSymlink != 0 || !ok || stat.Uid != expectedUID {
+		validOwner := ok && stat.Uid == expectedUID
+		if private {
+			validOwner = ok && validBrowserSessionHostUID(stat.Uid) &&
+				stat.Gid == expectedGID && child.Mode().Perm() == 0700 &&
+				(expectedUID == 0 || stat.Uid == expectedUID)
+		}
+		if !child.IsDir() || child.Mode()&os.ModeSymlink != 0 || !validOwner {
 			if exact != "" {
 				return errors.New("exact Browser scratch ownership is unverified")
 			}
@@ -428,6 +471,13 @@ func (s *Server) browserSessionOpen(ctx context.Context, req Request) Response {
 			s.browserAdmission.release(reservation)
 		}
 	}()
+	hostUID := uint32(0)
+	if mode == "isolated" && s.cfg.AgentUser != "" {
+		hostUID = s.browserAdmission.isolatedHostUID(reservation)
+		if err := s.verifyBrowserSessionHostUID(hostUID); err != nil {
+			return browserSessionError("browser_isolation_unavailable", "security", err)
+		}
+	}
 	node := "/opt/ai-server-agent/browser/node/bin/node"
 	if s.browserNodeBinary != "" { // private hermetic test fixture, never public input
 		node = s.browserNodeBinary
@@ -473,7 +523,7 @@ func (s *Server) browserSessionOpen(ctx context.Context, req Request) Response {
 	}
 	var id string
 	if group != nil {
-		id, err = s.workerContainedBrowserSession(req, req.Workspace, node, group, args...)
+		id, err = s.workerContainedBrowserSession(req, req.Workspace, node, group, hostUID, args...)
 		if id == "" {
 			// A failed/premature spawn cannot release Browser admission
 			// until the kernel confirms no detached descendants remain.
@@ -497,6 +547,16 @@ func (s *Server) browserSessionOpen(ctx context.Context, req Request) Response {
 		reserved = false
 	}
 	if err != nil {
+		// A verified pre-launch kernel refusal is not an uncertain Browser
+		// side effect. Surface unavailable user namespaces/cgroup support
+		// directly; keep launched/ambiguous sessions on the existing
+		// authenticated inspection and close path below.
+		if id == "" && mode == "isolated" &&
+			(errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EINVAL) ||
+				errors.Is(err, syscall.ENOSYS)) {
+			return browserSessionError("browser_isolation_unavailable", "dependency",
+				fmt.Errorf("isolated Browser user namespace or atomic cgroup launch unavailable: %w", err))
+		}
 		if id != "" {
 			if entry, lookupErr := s.sessions.get(req, id); lookupErr == nil && entry.browser != nil {
 				entry.browser.mu.Lock()
