@@ -26,6 +26,7 @@ import (
 type browserSessionAdmission struct {
 	mu                sync.Mutex
 	holders           map[string]string // opaque reservation/session ID -> shared/isolated/maintenance
+	isolatedHostUIDs  map[string]uint32 // unique host filesystem owner held until verified Browser cleanup
 	sharedHolder      string
 	maintenanceHolder string
 }
@@ -85,6 +86,29 @@ func (a *browserSessionAdmission) tryMode(holder, mode string, limit int, before
 	if a.holders == nil {
 		a.holders = make(map[string]string)
 	}
+	if mode == "isolated" {
+		if a.isolatedHostUIDs == nil {
+			a.isolatedHostUIDs = make(map[string]uint32)
+		}
+		var uid uint32
+		for candidate := browserSessionHostUIDBase; candidate < browserSessionHostUIDBase+browserSessionHostUIDSlots; candidate++ {
+			occupied := false
+			for _, current := range a.isolatedHostUIDs {
+				if current == candidate {
+					occupied = true
+					break
+				}
+			}
+			if !occupied {
+				uid = candidate
+				break
+			}
+		}
+		if uid == 0 {
+			return false, errors.New("no isolated Browser filesystem identity available")
+		}
+		a.isolatedHostUIDs[holder] = uid
+	}
 	a.holders[holder] = mode
 	if mode == "shared" {
 		a.sharedHolder = holder
@@ -118,6 +142,10 @@ func (a *browserSessionAdmission) transfer(from, to string) bool {
 	}
 	delete(a.holders, from)
 	a.holders[to] = mode
+	if uid := a.isolatedHostUIDs[from]; uid != 0 {
+		delete(a.isolatedHostUIDs, from)
+		a.isolatedHostUIDs[to] = uid
+	}
 	if a.sharedHolder == from {
 		a.sharedHolder = to
 	}
@@ -136,6 +164,7 @@ func (a *browserSessionAdmission) release(holder string) bool {
 		return false
 	}
 	delete(a.holders, holder)
+	delete(a.isolatedHostUIDs, holder)
 	if a.sharedHolder == holder {
 		a.sharedHolder = ""
 	}
@@ -153,6 +182,12 @@ func (a *browserSessionAdmission) reserved() bool {
 	a.mu.Lock()
 	defer a.mu.Unlock()
 	return len(a.holders) != 0
+}
+
+func (a *browserSessionAdmission) isolatedHostUID(holder string) uint32 {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.isolatedHostUIDs[holder]
 }
 
 // A global-exclusive first admission reclaims only Agent-recognized
@@ -198,14 +233,14 @@ func (s *Server) browserReclaimScratch() error {
 	// independent ownership domains. Both are swept only when there are
 	// no admitted Browsers, never across active sessions.
 	if s.browserUID != 0 && s.browserUID != s.workerUID {
-		return s.browserReclaimScratchAt(s.isolatedBrowserScratchDir(), s.browserUID, s.browserGID, "", true)
+		return s.browserReclaimScratchAt(s.isolatedBrowserScratchDir(), 0, s.browserGID, "", true)
 	}
 	return nil
 }
 
 // Exact session/run scratch reclamation follows verified whole-cgroup stop.
 // The private flag comes from the immutable session record, never the caller.
-func (s *Server) browserReclaimNamedScratch(name string, private bool) error {
+func (s *Server) browserReclaimNamedScratch(name string, private bool, hostUID uint32) error {
 	if !browserScratchName(name) || !(strings.HasPrefix(name, "asa-profile-") && len(name) == len("asa-profile-")+32 ||
 		strings.HasPrefix(name, "asa-trace-") && len(name) == len("asa-trace-")+32 ||
 		strings.HasPrefix(name, "run.") && len(name) == len("run.")+32) {
@@ -215,7 +250,10 @@ func (s *Server) browserReclaimNamedScratch(name string, private bool) error {
 		return errors.New("Executor Browser scratch root unavailable")
 	}
 	if private {
-		return s.browserReclaimScratchAt(s.isolatedBrowserScratchDir(), s.browserUID, s.browserGID, name, true)
+		if !validBrowserSessionHostUID(hostUID) {
+			return errors.New("unrecognized isolated Browser scratch owner")
+		}
+		return s.browserReclaimScratchAt(s.isolatedBrowserScratchDir(), hostUID, s.browserGID, name, true)
 	}
 	return s.browserReclaimScratchMatching(name)
 }
@@ -245,8 +283,7 @@ func (s *Server) browserReclaimScratchAt(dir string, expectedUID, expectedGID ui
 			return fmt.Errorf("isolated Browser parent untrusted: %w", err)
 		}
 		stat, ok := info.Sys().(*syscall.Stat_t)
-		if expectedUID == 0 || expectedUID == s.workerUID || !ok ||
-			info.Mode().Perm() != 0700 || stat.Uid != expectedUID || stat.Gid != expectedGID {
+		if !ok || info.Mode().Perm() != 0711 || stat.Uid != 0 || stat.Gid != 0 {
 			return errors.New("isolated Browser scratch root ownership changed")
 		}
 	}
@@ -289,7 +326,17 @@ func (s *Server) browserReclaimScratchAt(dir string, expectedUID, expectedGID ui
 			return fmt.Errorf("verify Browser scratch candidate: %w", err)
 		}
 		stat, ok := child.Sys().(*syscall.Stat_t)
-		if !child.IsDir() || child.Mode()&os.ModeSymlink != 0 || !ok || stat.Uid != expectedUID {
+		validOwner := ok && stat.Uid == expectedUID
+		if private {
+			// Arbitrary same-session Playwright/Node code may legitimately
+			// chmod its OWN profile. After proven whole-cgroup stop, exact
+			// root cleanup must not strand its admission solely because
+			// the owner changed directory mode during the session.
+			validOwner = ok && validBrowserSessionHostUID(stat.Uid) &&
+				stat.Gid == expectedGID &&
+				(expectedUID == 0 || stat.Uid == expectedUID)
+		}
+		if !child.IsDir() || child.Mode()&os.ModeSymlink != 0 || !validOwner {
 			if exact != "" {
 				return errors.New("exact Browser scratch ownership is unverified")
 			}
@@ -362,7 +409,9 @@ func (s *Server) browserSessionAction(ctx context.Context, req Request) Response
 	case "browser_session_open":
 		return s.browserSessionOpen(ctx, req)
 	case "browser_session_flow":
-		return s.credentialFlowEvidenceGate(req, s.browserSessionFlow(ctx, req))
+		return s.browserSessionFlow(ctx, req)
+	case "browser_session_script":
+		return s.browserSessionScript(ctx, req)
 	case "browser_session_capture":
 		return s.browserSessionCapture(ctx, req)
 	case "browser_session_trace":
@@ -426,6 +475,13 @@ func (s *Server) browserSessionOpen(ctx context.Context, req Request) Response {
 			s.browserAdmission.release(reservation)
 		}
 	}()
+	hostUID := uint32(0)
+	if mode == "isolated" && s.cfg.AgentUser != "" {
+		hostUID = s.browserAdmission.isolatedHostUID(reservation)
+		if err := s.verifyBrowserSessionHostUID(hostUID); err != nil {
+			return browserSessionError("browser_isolation_unavailable", "security", err)
+		}
+	}
 	node := "/opt/ai-server-agent/browser/node/bin/node"
 	if s.browserNodeBinary != "" { // private hermetic test fixture, never public input
 		node = s.browserNodeBinary
@@ -471,7 +527,7 @@ func (s *Server) browserSessionOpen(ctx context.Context, req Request) Response {
 	}
 	var id string
 	if group != nil {
-		id, err = s.workerContainedBrowserSession(req, req.Workspace, node, group, args...)
+		id, err = s.workerContainedBrowserSession(req, req.Workspace, node, group, hostUID, args...)
 		if id == "" {
 			// A failed/premature spawn cannot release Browser admission
 			// until the kernel confirms no detached descendants remain.
@@ -495,6 +551,16 @@ func (s *Server) browserSessionOpen(ctx context.Context, req Request) Response {
 		reserved = false
 	}
 	if err != nil {
+		// A verified pre-launch kernel refusal is not an uncertain Browser
+		// side effect. Surface unavailable user namespaces/cgroup support
+		// directly; keep launched/ambiguous sessions on the existing
+		// authenticated inspection and close path below.
+		if id == "" && mode == "isolated" &&
+			(errors.Is(err, syscall.EPERM) || errors.Is(err, syscall.EINVAL) ||
+				errors.Is(err, syscall.ENOSYS)) {
+			return browserSessionError("browser_isolation_unavailable", "dependency",
+				fmt.Errorf("isolated Browser user namespace or atomic cgroup launch unavailable: %w", err))
+		}
 		if id != "" {
 			if entry, lookupErr := s.sessions.get(req, id); lookupErr == nil && entry.browser != nil {
 				entry.browser.mu.Lock()
@@ -640,6 +706,75 @@ func (s *Server) browserSessionReadFrame(ctx context.Context, req Request, state
 		case <-time.After(15 * time.Millisecond):
 		}
 	}
+}
+
+// browserSessionScript runs user-supplied Playwright JavaScript on the existing
+// principal/workspace-bound page. The executable is the SAME managed Browser,
+// not browser_run's independently created process/profile. Stdio framing,
+// audit, session ownership, uncertainty and credential revocation are shared.
+func (s *Server) browserSessionScript(ctx context.Context, req Request) Response {
+	entry, err := s.browserSessionEntry(req)
+	if err != nil {
+		return browserSessionError("browser_session_not_found", "authorization", errSessionNotFound)
+	}
+	if strings.TrimSpace(req.Content) == "" || len(req.Content) > maxStdioInputBytes-1024 {
+		return browserSessionError("invalid_browser_script", "validation", errors.New("nonempty Playwright script required within session frame budget"))
+	}
+	timeout := time.Duration(req.TimeoutMS) * time.Millisecond
+	if req.TimeoutMS == 0 {
+		timeout = 90 * time.Second
+	}
+	if req.TimeoutMS < 0 || timeout > 5*time.Minute {
+		return browserSessionError("invalid_timeout", "validation", errors.New("Browser script timeout maximum is 5 minutes"))
+	}
+	state := entry.browser
+	if !state.mu.TryLock() {
+		return browserSessionBusy()
+	}
+	defer state.mu.Unlock()
+	if state.uncertain {
+		return browserSessionError("browser_session_uncertain", "state", errors.New("prior Browser action completion unverified; close this session"))
+	}
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return browserSessionError("browser_nonce_unavailable", "security", err)
+	}
+	nonce := hex.EncodeToString(random[:])
+	payload, err := json.Marshal(struct {
+		Type   string `json:"type"`
+		Nonce  string `json:"nonce"`
+		Script string `json:"script"`
+	}{Type: "script", Nonce: nonce, Script: req.Content})
+	if err != nil || len(payload)+1 > maxStdioInputBytes {
+		return browserSessionError("input_too_large", "validation", errors.New("encoded Playwright script exceeds existing session frame budget"))
+	}
+	if err := s.workerStdioWrite(req, entry.id, append(payload, '\n')); err != nil {
+		state.uncertain = true
+		return browserSessionError("browser_session_action_uncertain", "state", errors.New("Playwright script delivery unverified; close before retry"))
+	}
+	frameCtx, cancel := context.WithTimeout(ctx, timeout+time.Second)
+	defer cancel()
+	frame, err := s.browserSessionReadFrame(frameCtx, req, state, entry.id, nonce)
+	if err != nil || frame.Event != "result" || len(frame.Result) == 0 {
+		state.uncertain = true
+		return browserSessionError("browser_session_action_uncertain", "state", errors.New("Playwright script completion unknown; inspect and close rather than replaying side effects"))
+	}
+	var outcome struct {
+		OK *bool `json:"ok"`
+	}
+	if json.Unmarshal(frame.Result, &outcome) != nil || outcome.OK == nil {
+		state.uncertain = true
+		return browserSessionError("browser_session_action_uncertain", "state", errors.New("invalid Playwright script result"))
+	}
+	resp := Response{OK: *outcome.OK, Status: "result", SessionID: entry.id, Output: string(frame.Result), OutputEncoding: "json", BytesSeen: int64(len(frame.Result)), BytesReturned: int64(len(frame.Result))}
+	if !*outcome.OK {
+		resp.Status = "failed"
+		resp.ReasonCode = "browser_script_failed"
+		resp.ErrorCode = "browser_script_failed"
+		resp.ErrorClass = "action"
+		resp.Error = "Playwright script failed after a known completion; inspect returned diagnostics; do not automatically replay mutations"
+	}
+	return resp
 }
 
 func (s *Server) browserSessionFlow(ctx context.Context, req Request) Response {

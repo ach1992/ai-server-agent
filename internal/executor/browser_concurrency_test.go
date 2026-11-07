@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"github.com/ach1992/ai-server-agent/internal/policy"
 	"os"
 	"path/filepath"
@@ -11,6 +12,48 @@ import (
 	"testing"
 	"time"
 )
+
+// Each concurrently admitted isolated Browser has a different Linux host
+// filesystem owner. Reservation transfer and uncertain cleanup must never
+// recycle the UID while its original Browser process is still admitted.
+func TestBrowserConcurrentHostUIDAllocationAndCleanup(t *testing.T) {
+	var admission browserSessionAdmission
+	seen := make(map[uint32]bool)
+	for i := 0; i < int(browserSessionHostUIDSlots); i++ {
+		from := fmt.Sprintf("reservation-%d", i)
+		to := fmt.Sprintf("session-%d", i)
+		allowed, err := admission.tryMode(from, "isolated", int(browserSessionHostUIDSlots), nil)
+		if err != nil || !allowed {
+			t.Fatalf("isolated slot %d was unavailable: %t %v", i, allowed, err)
+		}
+		uid := admission.isolatedHostUID(from)
+		if !validBrowserSessionHostUID(uid) || seen[uid] {
+			t.Fatalf("duplicate/invalid isolated session host UID: %d", uid)
+		}
+		seen[uid] = true
+		if !admission.transfer(from, to) || admission.isolatedHostUID(from) != 0 ||
+			admission.isolatedHostUID(to) != uid {
+			t.Fatal("session UID reservation was not preserved during broker transfer")
+		}
+	}
+	if ok, err := admission.tryMode("overflow", "isolated", int(browserSessionHostUIDSlots), nil); ok || err != nil {
+		t.Fatalf("isolated UID pool accepted an over-capacity reservation: %t %v", ok, err)
+	}
+	recycledUID := admission.isolatedHostUID("session-0")
+	if !admission.release("session-0") {
+		t.Fatal("could not retire verified first Browser")
+	}
+	ok, err := admission.tryMode("replacement", "isolated", int(browserSessionHostUIDSlots), nil)
+	if err != nil || !ok || admission.isolatedHostUID("replacement") != recycledUID {
+		t.Fatalf("verified close did not release exactly one host UID: %t %v", ok, err)
+	}
+	for i := 1; i < int(browserSessionHostUIDSlots); i++ {
+		uid := admission.isolatedHostUID(fmt.Sprintf("session-%d", i))
+		if uid == recycledUID || uid == 0 {
+			t.Fatalf("another live Browser lost its reserved host UID: %d", uid)
+		}
+	}
+}
 
 func TestBrowserConcurrentSharedIsolatedAndMaintenance(t *testing.T) {
 	var a browserSessionAdmission
@@ -166,7 +209,7 @@ func TestBrowserExactScratchDoesNotReclaimConcurrentPeer(t *testing.T) {
 		}
 	}
 	for _, name := range []string{owned, ownedTrace} {
-		if err := s.browserReclaimNamedScratch(name, false); err != nil {
+		if err := s.browserReclaimNamedScratch(name, false, 0); err != nil {
 			t.Fatal(err)
 		}
 		if _, err := os.Lstat(filepath.Join(tmp, name)); !os.IsNotExist(err) {
@@ -179,7 +222,7 @@ func TestBrowserExactScratchDoesNotReclaimConcurrentPeer(t *testing.T) {
 		}
 	}
 	for _, name := range []string{"../untrusted", "asa-trace-Aa1234", "asa-trace-" + strings.Repeat("g", 32)} {
-		if err := s.browserReclaimNamedScratch(name, false); err == nil {
+		if err := s.browserReclaimNamedScratch(name, false, 0); err == nil {
 			t.Fatalf("untrusted scratch identity %s accepted", name)
 		}
 	}

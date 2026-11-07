@@ -17,8 +17,8 @@ import (
 // Chromium's own --no-sandbox flag is insufficient evidence: a requested
 // sandbox is reported ready only when a renderer in the original root-owned
 // Browser cgroup has seccomp-BPF, no_new_privs and distinct user/PID namespaces.
-// This is process-start assurance, NOT per-principal Linux identity isolation
-// (all isolated managed sessions still share aibrowser).
+// This is process-start assurance, separate from the per-session host UID
+// mapping that prevents peer Browser filesystem metadata corruption.
 type browserSandboxProcess struct {
 	effectiveUID uint32
 	effectiveGID uint32
@@ -122,7 +122,7 @@ func chromiumSandboxCommandFlags(cmdline []byte) (renderer, noSandbox bool) {
 // the existing broker-pinned process, not a user-provided PID.
 func (s *Server) verifyManagedBrowserSandbox(entry *stdioSession) error {
 	entry.mu.Lock()
-	group, nodePID, private := entry.browserGroup, entry.pid, entry.browserPrivate
+	group, nodePID, private, hostUID := entry.browserGroup, entry.pid, entry.browserPrivate, entry.browserHostUID
 	entry.mu.Unlock()
 	if !private || group == nil || !group.verified || !group.containsPID(nodePID) {
 		return errors.New("isolated Browser cgroup/identity proof unavailable")
@@ -131,8 +131,8 @@ func (s *Server) verifyManagedBrowserSandbox(entry *stdioSession) error {
 	if err != nil {
 		return fmt.Errorf("isolated Browser Node identity or namespace unreadable: %w", err)
 	}
-	if node.effectiveUID != s.browserUID || node.effectiveGID != s.browserGID {
-		return errors.New("isolated Browser Node did not retain its dedicated UID/GID")
+	if !validBrowserSessionHostUID(hostUID) || node.effectiveUID != hostUID || node.effectiveGID != s.browserGID {
+		return errors.New("isolated Browser Node did not retain its session host UID/GID")
 	}
 	// The generated Node runner has already created and evaluated one
 	// about:blank page before emitting ready, allowing bounded startup proof.
@@ -171,7 +171,7 @@ func (s *Server) verifyManagedBrowserSandbox(entry *stdioSession) error {
 				continue
 			}
 			proc, readErr := readBrowserSandboxProcess(pid)
-			if readErr != nil || !proc.confinedFrom(node, s.browserUID, s.browserGID) {
+			if readErr != nil || !proc.confinedFrom(node, hostUID, s.browserGID) {
 				allEnforced = false
 			}
 		}

@@ -17,7 +17,7 @@ import (
 func isolatedStdioDAPTest(t *testing.T, binary string, args ...string) (*Server, Request, *stdioSession, *stdioDAPConn) {
 	t.Helper()
 	s, owner, workspace := testStdioBroker(t)
-	id, err := s.startProcessSessionWithOptions(owner, "dap", workspace, binary, nil, "", nil, true, args...)
+	id, err := s.startProcessSessionWithOptions(owner, "dap", workspace, binary, nil, "", nil, true, 0, args...)
 	if err != nil {
 		t.Fatal(err)
 	}
