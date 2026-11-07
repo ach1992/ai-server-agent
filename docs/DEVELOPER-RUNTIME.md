@@ -343,7 +343,15 @@ Developer subprocesses receive only the environment appropriate to their executi
 
 **Service-access credentials are a general Agent/Executor capability, not a
 Browser add-on.** The shared root-only `serviceaccess` store owns opaque refs,
-enrollment, rotation/expiry/revocation and target identity. A target can be
+atomic root-local registration/import, enrollment, rotation/expiry/revocation
+and target identity. Credential `kind` is descriptive metadata (password,
+token, api_key, private_key, access_code, etc.), not a provider allowlist.
+AI-generated random passwords/tokens are created within the Executor and never
+returned; provider-issued API keys, one-time codes and actual keypairs must not
+be fabricated with that generator. The operator can add a previously issued
+credential with one private interactive `service-access add` command, or import
+a bounded multi-line textual key from a root-owned file; no generic secret-read
+MCP operation is introduced. A target can be
 HTTP(S), SSH, a database, or another network-style application URI; recording
 a target does not confer the ability to authenticate or make a network request.
 The secret remains private to the root Executor and is never an ordinary

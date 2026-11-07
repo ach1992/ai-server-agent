@@ -30,7 +30,7 @@ func main() {
 	flag.Parse()
 	args := flag.Args()
 	if len(args) == 0 {
-		fatal("usage: ai-server-agent [serve|executor|print-config|validate-config|validate-credential-store|runtime-settings|service-access enroll]")
+		fatal("usage: ai-server-agent [serve|executor|print-config|validate-config|validate-credential-store|runtime-settings|service-access add|enroll]")
 	}
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {

@@ -318,3 +318,65 @@ func TestGenericTargetURIRejectsSecretBearingAndLocalScheme(t *testing.T) {
 		}
 	}
 }
+
+// A manual credential import must commit both the reference and material
+// together, so a failed or interrupted one-command action leaves no visible
+// empty reference for a future AI conversation to mistake for a ready login.
+func TestRegisterWithSecretAtomicAndGenericKinds(t *testing.T) {
+	st := New(t.TempDir())
+	reg := Registration{HostID: "asa_fixture", Service: "service-access-test",
+		Endpoint: "ssh://git.example.org:22", Purpose: "operator-import"}
+	key := "-----BEGIN PRIVATE KEY-----\nSYNTHETIC-TEST-KEY-NOT-REAL\n-----END PRIVATE KEY-----\n"
+	if _, err := st.RegisterWithSecret(reg, "private_key", "", 30, false); err == nil {
+		t.Fatal("empty imported secret accepted")
+	}
+	if _, err := st.RegisterWithSecret(reg, "invalid kind/with space", "fake", 30, false); err == nil {
+		t.Fatal("unsupported metadata kind accepted")
+	}
+	if _, err := st.RegisterWithSecret(reg, "private_key", key, -1, false); err == nil {
+		t.Fatal("invalid TTL accepted")
+	}
+	empty, err := st.List()
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("failed registrations retained partial state: %+v %v", empty, err)
+	}
+	meta, err := st.RegisterWithSecret(reg, "private_key", key, 2, false)
+	if err != nil || meta.Status != "ready" || meta.Kind != "private_key" || meta.ExpiresAt == nil {
+		t.Fatalf("atomic private-key registration failed: %+v %v", meta, err)
+	}
+	encoded, _ := json.Marshal(meta)
+	if strings.Contains(string(encoded), "SYNTHETIC-TEST-KEY") || strings.Contains(string(encoded), "\"secret\"") {
+		t.Fatal("secret leaked through metadata")
+	}
+	got, err := st.Resolve(meta.ID, reg.HostID)
+	if err != nil || got.Secret != key {
+		t.Fatal("multiline credential bytes not preserved in private store")
+	}
+	if _, err := st.RegisterWithSecret(reg, "private_key", "SECOND-SECRET", 2, false); err == nil {
+		t.Fatal("duplicate registration overwrote protected credential")
+	}
+	again, err := st.Resolve(meta.ID, reg.HostID)
+	if err != nil || again.Secret != key {
+		t.Fatal("duplicate import altered previously enrolled key")
+	}
+	for _, kind := range []string{"api_key", "access_code", "client_secret", "certificate", "custom.text"} {
+		otherReg := Registration{HostID: reg.HostID, Service: kind, Endpoint: "grpcs://api.example.net:443"}
+		m, err := st.RegisterWithSecret(otherReg, kind, "SYNTHETIC-"+kind, 7, false)
+		if err != nil || m.Kind != kind || m.Status != "ready" {
+			t.Fatalf("generic kind %q not stored: %+v %v", kind, m, err)
+		}
+		if _, err := st.Resolve(m.ID, reg.HostID); err != nil {
+			t.Fatalf("generic kind %q not usable by root-only resolver: %v", kind, err)
+		}
+	}
+	if _, err := st.Generate(meta.ID, "private_key", "", 30, false); err == nil {
+		t.Fatal("random token generator claimed it can issue a valid private key")
+	}
+	if _, err := st.Generate(meta.ID, "api_key", "", 30, false); err == nil {
+		t.Fatal("random token generator claimed it can issue a provider API key")
+	}
+	final, err := st.Resolve(meta.ID, reg.HostID)
+	if err != nil || final.Secret != key {
+		t.Fatal("unsupported generation changed existing protected material")
+	}
+}
