@@ -415,7 +415,7 @@ func (s *Server) debugLaunch(ctx context.Context, req Request) (response Respons
 	d := &dapState{conn: stream, workspace: workspace, adapter: "go/delve", adapterPID: pid, workerUID: s.workerUID, program: relative, sourceVersion: req.FileVersion, stage: "starting", socketDir: dir}
 	var containment *dapCgroup
 	if os.Geteuid() == 0 {
-		containment, err = createDAPCgroup()
+		containment, err = createDAPCgroup(s.cfg.EffectiveExecutorServiceUnit())
 		if err != nil {
 			_ = stream.Close()
 			return fileError("dap_containment_unavailable", "dependency", err)

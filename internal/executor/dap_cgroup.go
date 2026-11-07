@@ -24,19 +24,39 @@ type dapCgroup struct {
 	beforeKillTestHook func() error // test-only pause/fail before actual cgroup.kill
 }
 
-func createDAPCgroup() (*dapCgroup, error) {
-	return createPrivateExecutorCgroup("asa-dap-")
+func createDAPCgroup(expectedUnit string) (*dapCgroup, error) {
+	return createPrivateExecutorCgroup("asa-dap-", expectedUnit)
 }
 
 // Browser and DAP share the existing root Executor's kernel ownership proof:
 // the child starts atomically inside its own cgroup, and cgroup.kill plus
 // populated=0 accounts for detached descendants in different process groups.
 // Names are trusted internal constants, never supplied by MCP clients.
-func createBrowserCgroup() (*dapCgroup, error) {
-	return createPrivateExecutorCgroup("asa-browser-")
+func createBrowserCgroup(expectedUnit string) (*dapCgroup, error) {
+	return createPrivateExecutorCgroup("asa-browser-", expectedUnit)
 }
 
-func createPrivateExecutorCgroup(prefix string) (*dapCgroup, error) {
+func executorCgroupRelative(data []byte, expectedUnit string) (string, error) {
+	var relative string
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		if strings.HasPrefix(line, "0::/") {
+			relative = strings.TrimPrefix(line, "0::")
+			break
+		}
+	}
+	if expectedUnit == "" || relative == "" || filepath.Base(relative) != expectedUnit || filepath.Clean(relative) != relative {
+		return "", errors.New("executor cgroup identity does not match the configured dedicated service unit")
+	}
+	// The canonical installed unit retains its prior behavior; optional
+	// alternate validation units must be direct system services, never
+	// descendants of another job, scope or untrusted delegation tree.
+	if expectedUnit != "ai-server-agent-executor.service" && relative != "/system.slice/"+expectedUnit {
+		return "", errors.New("configured Executor unit must run directly under system.slice")
+	}
+	return relative, nil
+}
+
+func createPrivateExecutorCgroup(prefix, expectedUnit string) (*dapCgroup, error) {
 	if prefix != "asa-dap-" && prefix != "asa-browser-" {
 		return nil, errors.New("unrecognized Executor cgroup purpose")
 	}
@@ -47,15 +67,9 @@ func createPrivateExecutorCgroup(prefix string) (*dapCgroup, error) {
 	if err != nil {
 		return nil, err
 	}
-	var relative string
-	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
-		if strings.HasPrefix(line, "0::/") {
-			relative = strings.TrimPrefix(line, "0::")
-			break
-		}
-	}
-	if relative == "" || filepath.Base(relative) != "ai-server-agent-executor.service" || filepath.Clean(relative) != relative {
-		return nil, errors.New("executor cgroup identity is not the dedicated Agent executor service")
+	relative, err := executorCgroupRelative(data, expectedUnit)
+	if err != nil {
+		return nil, err
 	}
 	parent := filepath.Join("/sys/fs/cgroup", strings.TrimPrefix(relative, "/"))
 	if _, err := os.Stat(filepath.Join(parent, "cgroup.procs")); err != nil {
