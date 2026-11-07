@@ -36,3 +36,41 @@ func TestConnectionGuard(t *testing.T) {
 		}
 	}
 }
+
+// Print-only commands must not demand destructive-operation approval merely
+// because the *text* mentions a destructive command or protected resource.
+func TestRootLiteralOutputAvoidsSpuriousApproval(t *testing.T) {
+	g := New([]string{"/etc/ai-server-agent"})
+	harmless := []string{
+		"printf '%s' 'rm -rf /tmp/disposable'",
+		"printf '%s\\n' 'DROP TABLE accounts'",
+		"echo \"systemctl restart ai-server-agent.service\"",
+		"echo '/etc/ai-server-agent/mcp-credentials.json'",
+		"printf '%s' 'nft flush ruleset'",
+		"printf '%s\\n' 'rm -rf /tmp/disposable'",
+		"printf '%s' 'arr[$(rm -rf /tmp/disposable)]'", // inert data, not a printf assignment
+	}
+	for _, cmd := range harmless {
+		if got := g.Evaluate(cmd, true); !got.Allowed || got.RequiresApproval {
+			t.Errorf("literal text wrongly denied: cmd=%q decision=%+v", cmd, got)
+		}
+	}
+	unsafe := []string{
+		"printf '%s' 'rm -rf /' | bash",
+		"echo 'rm -rf /' ; rm -rf /",
+		"printf '%s' \"$(rm -rf /)\"",
+		"printf '%s' 'rm -rf /' > /etc/ai-server-agent/config.json",
+		"bash -c 'rm -rf /tmp/disposable'",
+		"echo 'systemctl stop ai-server-agent' && systemctl stop ai-server-agent",
+		"printf -v 'arr[$(rm -rf /tmp/disposable)]' '%s' value",
+		"printf -v 'arr[$(systemctl stop ai-server-agent.service)]' '%s' value",
+		"printf '%n' 'arr[$(rm -rf /tmp/disposable)]'",
+		"printf '%s%n' value 'arr[$(nft flush ruleset)]'",
+		"printf '%d' 'arr[$(rm -rf /tmp/disposable)]'",
+	}
+	for _, cmd := range unsafe {
+		if got := g.Evaluate(cmd, true); !got.Allowed || !got.RequiresApproval {
+			t.Errorf("shell execution bypassed approval: cmd=%q decision=%+v", cmd, got)
+		}
+	}
+}
