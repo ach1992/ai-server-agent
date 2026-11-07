@@ -13,9 +13,11 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
+	"unicode/utf8"
 
 	"golang.org/x/sys/unix"
 )
@@ -36,7 +38,7 @@ type Record struct {
 	Purpose    string     `json:"purpose,omitempty"`
 	Endpoint   string     `json:"endpoint"`
 	Username   string     `json:"username,omitempty"`
-	Kind       string     `json:"kind,omitempty"` // password or token; no site/provider allowlist.
+	Kind       string     `json:"kind,omitempty"` // Nonsecret kind label; no provider or consumer allowlist.
 	Secret     string     `json:"secret,omitempty"`
 	CreatedAt  time.Time  `json:"created_at"`
 	UpdatedAt  time.Time  `json:"updated_at"`
@@ -86,22 +88,65 @@ func New(stateDir string) *Store {
 }
 func (s *Store) Path() string { return s.dir }
 
-func ValidEndpoint(raw string) error {
+// ValidServiceTarget validates a target's non-secret identity only, not an
+// executable network operation. Records support application-specific network
+// schemes (SSH, database, API, etc.) or omit an endpoint entirely for a
+// host-local application key/code. This does not create a Browser session or
+// grant arbitrary code access to the credential. Each authorized consumer
+// must independently validate its supported protocol and destination.
+func ValidServiceTarget(raw string) error {
+	if len(raw) == 0 || len(raw) > 2048 || strings.ContainsAny(raw, "\r\n\x00") {
+		return errors.New("service target must be a bounded network URI without control characters")
+	}
 	u, err := url.Parse(raw)
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
+	if err != nil || u.Scheme == "" || u.Host == "" || u.Hostname() == "" ||
+		u.User != nil || u.Opaque != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return errors.New("service target must be an absolute network URI without userinfo, query or fragment")
+	}
+	// A local file or code-like URL is not a service destination, even when
+	// it syntactically includes an authority/host. Target URI never serves
+	// as a command, filesystem path, or a caller-selected secret sink.
+	switch strings.ToLower(u.Scheme) {
+	case "file", "data", "javascript", "about", "blob":
+		return errors.New("service target must use a network-service URI scheme")
+	}
+	return nil
+}
+
+// ValidEndpoint is the narrower HTTP(S) Browser/API endpoint contract.
+// Accepting a generic target record must never automatically authorize
+// credential delivery through an HTTP-based consumer.
+func ValidEndpoint(raw string) error {
+	if err := ValidServiceTarget(raw); err != nil {
 		return errors.New("endpoint must be an HTTP(S) URL without userinfo, query or fragment")
 	}
-	if strings.ContainsAny(raw, "\r\n\x00") || len(raw) > 2048 {
-		return errors.New("invalid endpoint length or characters")
+	u, _ := url.Parse(raw)
+	if u.Scheme != "https" && u.Scheme != "http" {
+		return errors.New("endpoint must be an HTTP(S) URL without userinfo, query or fragment")
 	}
 	return nil
 }
 func Origin(raw string) string {
-	u, _ := url.Parse(raw)
-	if u == nil {
+	u, err := url.Parse(raw)
+	if err != nil || u == nil {
 		return ""
 	}
-	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host)
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.ToLower(u.Host)
+	// Chromium URL.origin omits explicit HTTP(S) default ports and renders
+	// other numeric ports without leading zeroes. Match those semantics so a
+	// legitimate same-origin credential is not falsely rejected; retain the
+	// scheme and every genuinely different destination port.
+	if (scheme == "http" || scheme == "https") && u.Port() != "" {
+		port := u.Port()
+		if number, err := strconv.Atoi(port); err == nil && number >= 0 && number <= 65535 {
+			host = strings.TrimSuffix(host, ":"+port)
+			if (scheme == "http" && number != 80) || (scheme == "https" && number != 443) {
+				host += ":" + strconv.Itoa(number)
+			}
+		}
+	}
+	return scheme + "://" + host
 }
 func validateRegistration(r Registration) error {
 	if strings.TrimSpace(r.HostID) == "" || strings.TrimSpace(r.Service) == "" || len(r.HostID) > 160 || len(r.Service) > 120 || len(r.Purpose) > 500 || len(r.Username) > 256 {
@@ -110,8 +155,13 @@ func validateRegistration(r Registration) error {
 	if (r.Guest == "") != (r.GuestUUID == "") || (r.Guest != "" && r.Project == "") || (r.Guest == "" && r.Project != "") || len(r.Guest) > 120 || len(r.Project) > 120 || len(r.GuestUUID) > 120 {
 		return errors.New("guest requires project and verified native UUID")
 	}
-	if err := ValidEndpoint(r.Endpoint); err != nil {
-		return err
+	// Host-local application keys and activation codes do not inherently
+	// have a network endpoint. Browser/network consumers must independently
+	// require and validate their own concrete destination before using a ref.
+	if r.Endpoint != "" {
+		if err := ValidServiceTarget(r.Endpoint); err != nil {
+			return err
+		}
 	}
 	for _, x := range []string{r.HostID, r.Service, r.Purpose, r.Username, r.Guest, r.GuestUUID, r.Project} {
 		if strings.IndexFunc(x, func(c rune) bool { return c < 32 || c == 127 }) >= 0 {
@@ -310,15 +360,37 @@ func (s *Store) List() ([]Metadata, error) {
 	return out, nil
 }
 func (s *Store) Register(r Registration) (Metadata, error) {
+	return s.register(r, "", "", 0, false)
+}
+
+// RegisterWithSecret provides the operator-local one-command path. The
+// registration and protected secret are committed in the SAME fsynced store
+// transaction; a failed import cannot leave a newly registered empty ref.
+func (s *Store) RegisterWithSecret(r Registration, kind, secret string, ttlDays int, never bool) (Metadata, error) {
+	if err := validateSecret(kind, secret); err != nil {
+		return Metadata{}, err
+	}
+	return s.register(r, kind, secret, ttlDays, never)
+}
+
+func (s *Store) register(r Registration, kind, secret string, ttlDays int, never bool) (Metadata, error) {
 	if err := validateRegistration(r); err != nil {
 		return Metadata{}, err
+	}
+	var expires *time.Time
+	if secret != "" {
+		var err error
+		expires, err = expiration(s.now(), ttlDays, never)
+		if err != nil {
+			return Metadata{}, err
+		}
 	}
 	newID, err := id()
 	if err != nil {
 		return Metadata{}, err
 	}
 	now := s.now()
-	rec := Record{ID: newID, HostID: r.HostID, Project: r.Project, Guest: r.Guest, GuestUUID: r.GuestUUID, Service: r.Service, Purpose: r.Purpose, Endpoint: r.Endpoint, Username: r.Username, CreatedAt: now, UpdatedAt: now}
+	rec := Record{ID: newID, HostID: r.HostID, Project: r.Project, Guest: r.Guest, GuestUUID: r.GuestUUID, Service: r.Service, Purpose: r.Purpose, Endpoint: r.Endpoint, Username: r.Username, Kind: kind, Secret: secret, ExpiresAt: expires, CreatedAt: now, UpdatedAt: now}
 	err = s.withLock(func(d *diskStore) (bool, error) {
 		for _, existing := range d.Records {
 			if existing.HostID == r.HostID && existing.Project == r.Project && existing.Guest == r.Guest && existing.GuestUUID == r.GuestUUID && existing.Service == r.Service && existing.Endpoint == r.Endpoint && existing.Username == r.Username && existing.Purpose == r.Purpose && existing.RevokedAt == nil {
@@ -367,15 +439,41 @@ func expiration(now time.Time, ttlDays int, never bool) (*time.Time, error) {
 	at := now.Add(time.Duration(ttlDays) * 24 * time.Hour)
 	return &at, nil
 }
+
+// Kind is an operator/application label, not a credential encoding or a
+// permission grant. A consumer must interpret only the format it supports.
+func ValidKind(kind string) bool {
+	if kind == "" || len(kind) > 64 {
+		return false
+	}
+	for i, r := range kind {
+		if (r >= 'a' && r <= 'z') || (i > 0 && ((r >= '0' && r <= '9') || r == '_' || r == '-' || r == '.')) {
+			continue
+		}
+		return false
+	}
+	return true
+}
+
+func validateSecret(kind, secret string) error {
+	if !ValidKind(kind) {
+		return errors.New("credential kind must be a short lowercase label")
+	}
+	// Textual multi-line keys (e.g. PEM) are supported for private file
+	// enrollment. NUL and invalid UTF-8 cannot be safely delivered by all
+	// current consumers; binary keys need a dedicated adapter/encoding.
+	if secret == "" || len(secret) > 4096 || strings.IndexByte(secret, 0) >= 0 || !utf8.ValidString(secret) {
+		return errors.New("credential must be nonempty UTF-8 text of at most 4096 bytes")
+	}
+	return nil
+}
+
 func (s *Store) Enroll(id, kind, username, secret string, ttlDays int, never bool) (Metadata, error) {
-	if secret == "" || len(secret) > 4096 || strings.IndexByte(secret, 0) >= 0 || strings.ContainsAny(secret, "\r\n") {
-		return Metadata{}, errors.New("invalid secret length")
+	if err := validateSecret(kind, secret); err != nil {
+		return Metadata{}, err
 	}
 	if len(username) > 256 || strings.IndexFunc(username, func(r rune) bool { return r < 32 || r == 127 }) >= 0 {
 		return Metadata{}, errors.New("invalid username metadata")
-	}
-	if kind != "password" && kind != "token" {
-		return Metadata{}, errors.New("credential kind must be password or token")
 	}
 	exp, err := expiration(s.now(), ttlDays, never)
 	if err != nil {
@@ -396,6 +494,11 @@ func (s *Store) Enroll(id, kind, username, secret string, ttlDays int, never boo
 	})
 }
 func (s *Store) Generate(id, kind, username string, ttlDays int, never bool) (Metadata, error) {
+	// A random 256-bit hex string is appropriate as an Agent-generated
+	// password/token, not a provider-issued API key, SSH keypair, or OTP.
+	if kind != "password" && kind != "token" {
+		return Metadata{}, errors.New("generate supports password or token only; import externally issued credential material")
+	}
 	var b [32]byte
 	if _, err := rand.Read(b[:]); err != nil {
 		return Metadata{}, err
@@ -541,7 +644,7 @@ func (s *Store) Modify(ref string, change Registration, allowOriginChange bool) 
 			}
 			next := current
 			if change.Endpoint != "" {
-				if err := ValidEndpoint(change.Endpoint); err != nil {
+				if err := ValidServiceTarget(change.Endpoint); err != nil {
 					return false, err
 				}
 				if Origin(change.Endpoint) != Origin(current.Endpoint) && !allowOriginChange {

@@ -85,7 +85,7 @@ func (s *Server) debugLaunchShell(ctx context.Context, req Request) (response Re
 	defer func() {
 		response = s.finishActionAudit(req, "debug_launch", "worker", auditObject, "developer_debugger", start, response)
 	}()
-	group, err := createDAPCgroup()
+	group, err := createDAPCgroup(s.cfg.EffectiveExecutorServiceUnit())
 	if err != nil {
 		return fileError("dap_containment_unavailable", "dependency", err)
 	}

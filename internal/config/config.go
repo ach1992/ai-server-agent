@@ -22,6 +22,7 @@ type Config struct {
 	TLSCertFile         string           `json:"tls_cert_file,omitempty"`
 	TLSKeyFile          string           `json:"tls_key_file,omitempty"`
 	ExecutorSocket      string           `json:"executor_socket"`
+	ExecutorServiceUnit string           `json:"executor_service_unit,omitempty"`
 	ExecutorToken       string           `json:"executor_token_file"`
 	StateDir            string           `json:"state_dir"`
 	LogDir              string           `json:"log_dir"`
@@ -64,6 +65,31 @@ func (c Config) EffectiveRuntime() RuntimeSettings {
 	return *c.Runtime
 }
 
+// The installed unit retains the canonical identity by default. A second
+// operator-managed Agent on the same Test host may supply its own systemd
+// Executor unit through a privileged local config; MCP callers cannot override
+// this name or select a cgroup parent per request.
+func (c Config) EffectiveExecutorServiceUnit() string {
+	if c.ExecutorServiceUnit != "" {
+		return c.ExecutorServiceUnit
+	}
+	return "ai-server-agent-executor.service"
+}
+
+func validExecutorServiceUnit(unit string) bool {
+	if len(unit) > 128 || !strings.HasSuffix(unit, "-executor.service") {
+		return false
+	}
+	for i, r := range unit {
+		alphaNum := (r >= 'a' && r <= 'z') || (r >= 'A' && r <= 'Z') || (r >= '0' && r <= '9')
+		if alphaNum || (i > 0 && (r == '-' || r == '_' || r == '.' || r == '@')) {
+			continue
+		}
+		return false
+	}
+	return !strings.Contains(unit, "..")
+}
+
 func (c Config) TLSConfigured() bool {
 	return c.TLSCertFile != "" && c.TLSKeyFile != ""
 }
@@ -100,6 +126,9 @@ func (c Config) Validate() error {
 		if !unicode.IsPrint(r) {
 			return errors.New("server_label contains an invalid or non-printable character")
 		}
+	}
+	if !validExecutorServiceUnit(c.EffectiveExecutorServiceUnit()) {
+		return errors.New("executor_service_unit must be a single systemd service basename ending in -executor.service")
 	}
 	if c.AuthMode != "bearer" {
 		return fmt.Errorf("unsupported auth_mode %q: bearer authentication is required", c.AuthMode)

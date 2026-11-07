@@ -47,7 +47,7 @@ import { createHash } from 'node:crypto';
 import { statfsSync, mkdtempSync, mkdirSync, rmSync, openSync, fstatSync, readSync, closeSync, constants, readdirSync, opendirSync, lstatSync } from 'node:fs';
 import { join } from 'node:path';
 process.env.PLAYWRIGHT_BROWSERS_PATH = %s;
-const { chromium } = await import(%s);
+const { chromium, request } = await import(%s);
 const profile = %s;
 const downloads = %s;
 const flowTemplate = %s;
@@ -161,12 +161,13 @@ const privateProfileSafe = () => {
     return true;
   } catch { return false; }
 };
+const browserOptions = {
+  headless: true, ignoreHTTPSErrors: %t, chromiumSandbox, acceptDownloads: false, downloadsPath: downloads,
+  args: ['--disk-cache-size=67108864', '--media-cache-size=33554432']
+};
 let context;
 try {
-  context = await chromium.launchPersistentContext(isolatedProfile || profile, {
-    headless: true, ignoreHTTPSErrors: %t, chromiumSandbox, acceptDownloads: false, downloadsPath: downloads,
-    args: ['--disk-cache-size=67108864', '--media-cache-size=33554432']
-  });
+  context = await chromium.launchPersistentContext(isolatedProfile || profile, browserOptions);
 } catch (error) {
   // A requested OS sandbox is never silently retried with --no-sandbox.
   // Emit only a bounded stable reason; raw Chromium stderr remains private.
@@ -523,8 +524,15 @@ try {
           reason='credential_origin_mismatch'; throw new Error('refused');
         }
         try {
-          const ready = await page.request.get(input.service_endpoint,{timeout:5000,failOnStatusCode:false});
-          if (ready.status() >= 500) {reason='credential_service_not_ready';throw new Error('service not ready');}
+          // Login-page GETs may rotate session/CSRF tokens. Keep this probe's
+          // cookies separate from the rendered form, including Set-Cookie.
+          const readiness = await request.newContext({ignoreHTTPSErrors:browserOptions.ignoreHTTPSErrors});
+          try {
+            const ready = await readiness.get(input.service_endpoint,{timeout:5000,failOnStatusCode:false});
+            if (ready.status() >= 500) {reason='credential_service_not_ready';throw new Error('service not ready');}
+          } finally {
+            await readiness.dispose();
+          }
         } catch {
           if (reason !== 'credential_service_not_ready') reason='credential_service_unreachable';
           throw new Error('service unreachable');
@@ -577,9 +585,13 @@ try {
         // authentication did not navigate. This is defense in depth: raw
         // screenshots/traces/snapshots remain blocked by Executor.
         try {
-          await page.locator(input.secret_selector).first().evaluate(el => {
-            if ('value' in el) el.value='';
-            el.removeAttribute('value');
+          // A navigation may have removed the form; do not wait for it to
+          // reappear. Clear every remaining match when the form is retained.
+          await page.locator(input.secret_selector).evaluateAll(elements => {
+            for (const el of elements) {
+              if ('value' in el) el.value='';
+              el.removeAttribute('value');
+            }
           });
         } catch {}
         if (!rightOrigin()) { reason='credential_origin_mismatch'; throw new Error('refused'); }

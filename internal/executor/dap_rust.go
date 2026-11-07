@@ -89,7 +89,7 @@ func (s *Server) debugLaunchRust(ctx context.Context, req Request) (response Res
 	defer func() {
 		response = s.finishActionAudit(req, "debug_launch", "worker", auditObject, "developer_debugger", started, response)
 	}()
-	group, err := createDAPCgroup()
+	group, err := createDAPCgroup(s.cfg.EffectiveExecutorServiceUnit())
 	if err != nil {
 		return fileError("dap_containment_unavailable", "dependency", err)
 	}

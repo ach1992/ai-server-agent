@@ -129,3 +129,52 @@ func TestInstanceIDFormatAndCopyRoundTrip(t *testing.T) {
 		t.Fatalf("state-preserving clone changed identity: %q", cloned.InstanceID)
 	}
 }
+
+// Alternate Executor unit names are an explicit root-local opt-in for
+// separately installed validation Agents, never caller-provided cgroup paths.
+func TestExecutorUnitConfigDefaultAndIsolatedInstall(t *testing.T) {
+	cfg := Default()
+	if cfg.EffectiveExecutorServiceUnit() != "ai-server-agent-executor.service" || cfg.Validate() != nil {
+		t.Fatal("default installed Executor service contract changed")
+	}
+	cfg.ExecutorServiceUnit = "asa65-issue65-executor.service"
+	if err := cfg.Validate(); err != nil {
+		t.Fatal("valid separately installed Executor unit rejected:", err)
+	}
+	path := filepath.Join(t.TempDir(), "config.json")
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	got, err := Load(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.EffectiveExecutorServiceUnit() != cfg.ExecutorServiceUnit {
+		t.Fatal("custom Executor service unit not preserved")
+	}
+	// Previously installed config files omit the field and keep the canonical unit.
+	cfg.ExecutorServiceUnit = ""
+	if err := Save(path, cfg); err != nil {
+		t.Fatal(err)
+	}
+	got, err = Load(path)
+	if err != nil || got.EffectiveExecutorServiceUnit() != "ai-server-agent-executor.service" {
+		t.Fatal("old installed config did not retain the canonical unit", err)
+	}
+}
+func TestExecutorUnitConfigRejectsPathsOrUnrelatedUnits(t *testing.T) {
+	bad := []string{
+		"system.slice/asa65-issue65-executor.service", "../asa65-issue65-executor.service",
+		"/system.slice/ai-server-agent-executor.service", "ssh.service", "ai-server-agent.service",
+		"asa65-issue65-executor.service/..", "asa65\n-executor.service",
+		".hidden-executor.service", "A..B-executor.service",
+		strings.Repeat("a", 140) + "-executor.service",
+	}
+	for _, unit := range bad {
+		cfg := Default()
+		cfg.ExecutorServiceUnit = unit
+		if err := cfg.Validate(); err == nil {
+			t.Errorf("accepted untrusted Executor unit %q", unit)
+		}
+	}
+}

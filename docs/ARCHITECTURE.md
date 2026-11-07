@@ -15,7 +15,7 @@ The control plane intentionally coexists with normal server software. It does no
 AI Server Agent is split into two long-running services:
 
 - `ai-server-agent.service`: MCP/API process running as the unprivileged `aiagent` account.
-- `ai-server-agent-executor.service`: root executor reachable through the Agent-owned Unix socket.
+- `ai-server-agent-executor.service`: root executor reachable through the Agent-owned Unix socket. The child-process containment parent is the Executor's verified systemd cgroup. An independent root-managed validation instance can explicitly bind a different `executor_service_unit` in its own protected config; ordinary installs default to `ai-server-agent-executor.service`, and MCP callers never select cgroup parents.
 
 Ordinary shell work runs as `aiworker` in `/srv/ai-workspace`. Root shell work is explicit and uses the same policy/approval evaluation before execution.
 

@@ -88,7 +88,7 @@ func (s *Server) debugLaunchPHPHTTP(ctx context.Context, req Request) (response 
 		}
 	}()
 	// Important: private adapter group is NOT the Service Job cgroup.
-	group, err := createDAPCgroup()
+	group, err := createDAPCgroup(s.cfg.EffectiveExecutorServiceUnit())
 	if err != nil {
 		return fileError("dap_containment_unavailable", "dependency", err)
 	}

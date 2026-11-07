@@ -254,3 +254,230 @@ func TestMultipleServiceAccountsSameEndpoint(t *testing.T) {
 		t.Fatal("identical duplicate account allowed")
 	}
 }
+
+// Credential records identify application targets independently of how the
+// authorized consumer eventually uses them. No protocol/provider is promoted
+// to a privileged secret retrieval API by registering its URI.
+func TestGenericTargetSchemesShareProtectedCredentialLifecycle(t *testing.T) {
+	for _, endpoint := range []string{
+		"https://api.example.org/v1", "ssh://git.example.org:22",
+		"postgres://db.example.org:5432/reports", "mysql://db.internal:3306/app",
+		"app://local/authorized-service", "grpcs://api.example.org:443",
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			st := New(t.TempDir())
+			meta, err := st.Register(Registration{
+				HostID: "asa_generic_host", Service: "service", Endpoint: endpoint,
+				Purpose: "authorized application integration",
+			})
+			if err != nil || meta.Endpoint != endpoint || meta.Status != "unenrolled" {
+				t.Fatalf("register: %+v %v", meta, err)
+			}
+			const secret = "PRIVATE-SYNTHETIC-CREDENTIAL-DO-NOT-EXPOSE"
+			enrolled, err := st.Enroll(meta.ID, "token", "", secret, 3, false)
+			if err != nil || enrolled.Status != "ready" {
+				t.Fatalf("enroll: %+v %v", enrolled, err)
+			}
+			encoded, _ := json.Marshal(enrolled)
+			if strings.Contains(string(encoded), secret) || strings.Contains(string(encoded), "\"secret\"") {
+				t.Fatal("credential disclosed through generic metadata")
+			}
+			rec, err := st.Resolve(meta.ID, "asa_generic_host")
+			if err != nil || rec.Secret != secret || rec.Endpoint != endpoint {
+				t.Fatalf("private resolve: %v", err)
+			}
+			if _, err := st.Resolve(meta.ID, "another-host"); err == nil {
+				t.Fatal("host-bound ref authorized elsewhere")
+			}
+			if _, err := st.Revoke(meta.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.Resolve(meta.ID, "asa_generic_host"); err == nil {
+				t.Fatal("revoked ref still usable")
+			}
+		})
+	}
+}
+func TestGenericTargetURIRejectsSecretBearingAndLocalScheme(t *testing.T) {
+	for _, v := range []string{
+		"", "javascript:alert(1)", "file:///tmp/secret", "file://host/tmp/secret",
+		"ssh://admin:password@host:22", "ssh://user@host", "ssh://host?token=abc",
+		"postgres://db.example/app#token", "../relative-path", "mailto:admin@example.org",
+		"ssh:///missing-host", "ssh://host\nother", "data://host/object",
+	} {
+		if err := ValidServiceTarget(v); err == nil {
+			t.Errorf("accepted secret-bearing or unsafe target %q", v)
+		}
+	}
+	for _, v := range []string{"ssh://host:22", "postgres://db.example:5432/app", "app://local/service"} {
+		if err := ValidServiceTarget(v); err != nil {
+			t.Errorf("generic target refused: %q: %v", v, err)
+		}
+		if err := ValidEndpoint(v); err == nil {
+			t.Errorf("browser HTTP validator accepted nonweb target %q", v)
+		}
+	}
+}
+
+// A manual credential import must commit both the reference and material
+// together, so a failed or interrupted one-command action leaves no visible
+// empty reference for a future AI conversation to mistake for a ready login.
+func TestRegisterWithSecretAtomicAndGenericKinds(t *testing.T) {
+	st := New(t.TempDir())
+	reg := Registration{HostID: "asa_fixture", Service: "service-access-test",
+		Endpoint: "ssh://git.example.org:22", Purpose: "operator-import"}
+	key := "-----BEGIN PRIVATE KEY-----\nSYNTHETIC-TEST-KEY-NOT-REAL\n-----END PRIVATE KEY-----\n"
+	if _, err := st.RegisterWithSecret(reg, "private_key", "", 30, false); err == nil {
+		t.Fatal("empty imported secret accepted")
+	}
+	if _, err := st.RegisterWithSecret(reg, "invalid kind/with space", "fake", 30, false); err == nil {
+		t.Fatal("unsupported metadata kind accepted")
+	}
+	if _, err := st.RegisterWithSecret(reg, "private_key", key, -1, false); err == nil {
+		t.Fatal("invalid TTL accepted")
+	}
+	empty, err := st.List()
+	if err != nil || len(empty) != 0 {
+		t.Fatalf("failed registrations retained partial state: %+v %v", empty, err)
+	}
+	meta, err := st.RegisterWithSecret(reg, "private_key", key, 2, false)
+	if err != nil || meta.Status != "ready" || meta.Kind != "private_key" || meta.ExpiresAt == nil {
+		t.Fatalf("atomic private-key registration failed: %+v %v", meta, err)
+	}
+	encoded, _ := json.Marshal(meta)
+	if strings.Contains(string(encoded), "SYNTHETIC-TEST-KEY") || strings.Contains(string(encoded), "\"secret\"") {
+		t.Fatal("secret leaked through metadata")
+	}
+	got, err := st.Resolve(meta.ID, reg.HostID)
+	if err != nil || got.Secret != key {
+		t.Fatal("multiline credential bytes not preserved in private store")
+	}
+	if _, err := st.RegisterWithSecret(reg, "private_key", "SECOND-SECRET", 2, false); err == nil {
+		t.Fatal("duplicate registration overwrote protected credential")
+	}
+	again, err := st.Resolve(meta.ID, reg.HostID)
+	if err != nil || again.Secret != key {
+		t.Fatal("duplicate import altered previously enrolled key")
+	}
+	for _, kind := range []string{"api_key", "access_code", "client_secret", "certificate", "custom.text"} {
+		otherReg := Registration{HostID: reg.HostID, Service: kind, Endpoint: "grpcs://api.example.net:443"}
+		m, err := st.RegisterWithSecret(otherReg, kind, "SYNTHETIC-"+kind, 7, false)
+		if err != nil || m.Kind != kind || m.Status != "ready" {
+			t.Fatalf("generic kind %q not stored: %+v %v", kind, m, err)
+		}
+		if _, err := st.Resolve(m.ID, reg.HostID); err != nil {
+			t.Fatalf("generic kind %q not usable by root-only resolver: %v", kind, err)
+		}
+	}
+	if _, err := st.Generate(meta.ID, "private_key", "", 30, false); err == nil {
+		t.Fatal("random token generator claimed it can issue a valid private key")
+	}
+	if _, err := st.Generate(meta.ID, "api_key", "", 30, false); err == nil {
+		t.Fatal("random token generator claimed it can issue a provider API key")
+	}
+	final, err := st.Resolve(meta.ID, reg.HostID)
+	if err != nil || final.Secret != key {
+		t.Fatal("unsupported generation changed existing protected material")
+	}
+}
+
+// Offline app secrets and activation codes must not require invented HTTP
+// endpoints. Their refs remain Agent-host-bound and cannot authorize Browser.
+func TestHostLocalCredentialWithoutNetworkEndpoint(t *testing.T) {
+	st := New(t.TempDir())
+	reg := Registration{HostID: "asa_local_app", Service: "offline-license", Purpose: "authorized local plugin"}
+	meta, err := st.RegisterWithSecret(reg, "access_code", "SYNTHETIC-LOCAL-CODE", 7, false)
+	if err != nil || meta.Endpoint != "" || meta.Status != "ready" {
+		t.Fatalf("local credential failed: %+v %v", meta, err)
+	}
+	got, err := st.Resolve(meta.ID, reg.HostID)
+	if err != nil || got.Secret != "SYNTHETIC-LOCAL-CODE" {
+		t.Fatal("local credential inaccessible to protected root store")
+	}
+	if err := ValidEndpoint(got.Endpoint); err == nil {
+		t.Fatal("missing endpoint falsely considered a Browser destination")
+	}
+	if _, err := st.Resolve(meta.ID, "other-agent"); err == nil {
+		t.Fatal("local reference escaped its Agent identity")
+	}
+	generated, err := st.Register(Registration{HostID: reg.HostID, Service: "local-api-token"})
+	if err != nil || generated.Endpoint != "" {
+		t.Fatalf("AI cannot register local-only credential metadata: %+v %v", generated, err)
+	}
+	ready, err := st.Generate(generated.ID, "token", "", 1, false)
+	if err != nil || ready.Status != "ready" || ready.Kind != "token" {
+		t.Fatalf("AI-generated local-only token missing: %+v %v", ready, err)
+	}
+	secret, err := st.Resolve(generated.ID, reg.HostID)
+	if err != nil || len(secret.Secret) != 64 {
+		t.Fatal("generated token not retained by generic protected store")
+	}
+}
+
+// Browser URL.origin strips explicit HTTP(S) default ports. A private
+// credential must neither be rejected on the equivalent default-port URL nor
+// accepted on a truly different scheme or nondefault destination port.
+func TestOriginNormalizesBrowserDefaultPorts(t *testing.T) {
+	cases := []struct{ raw, want string }{
+		{"https://Example.ORG:443/login", "https://example.org"},
+		{"http://Example.ORG:80/login", "http://example.org"},
+		{"https://Example.ORG:0443/login", "https://example.org"},
+		{"http://Example.ORG:0080/login", "http://example.org"},
+		{"https://Example.ORG:8443/login", "https://example.org:8443"},
+		{"http://Example.ORG:8080/login", "http://example.org:8080"},
+		{"http://Example.ORG:08080/login", "http://example.org:8080"},
+		{"http://Example.ORG:443/login", "http://example.org:443"},
+		{"https://Example.ORG:80/login", "https://example.org:80"},
+		{"https://[2001:DB8::1]:443/login", "https://[2001:db8::1]"},
+		{"http://[::1]:80/login", "http://[::1]"},
+		{"https://[::1]:8443/login", "https://[::1]:8443"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			if got := Origin(tc.raw); got != tc.want {
+				t.Fatalf("Browser origin parity: Origin(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+	if Origin("https://example.org:443/login") != Origin("https://example.org/login") ||
+		Origin("http://example.org:80/login") != Origin("http://example.org/login") {
+		t.Fatal("same-origin default-port URL incorrectly rejected")
+	}
+	for _, nondefault := range []string{
+		"https://example.org:444/login", "https://example.org:80/login",
+		"http://example.org:443/login", "http://other.example.org:80/login",
+	} {
+		if Origin(nondefault) == Origin("https://example.org:443/login") {
+			t.Fatalf("different Browser origin incorrectly matched: %s", nondefault)
+		}
+	}
+}
+
+func TestCredentialEndpointMoveDefaultPortNeedsNoNewOriginApproval(t *testing.T) {
+	st := New(t.TempDir())
+	meta, err := st.Register(Registration{
+		HostID: "asa_default_port", Service: "app", Endpoint: "https://Example.org:443/login",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Enroll(meta.ID, "password", "operator", "SYNTHETIC-TEST-ONLY", 1, false); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := st.Modify(meta.ID, Registration{
+		HostID: meta.HostID, Endpoint: "https://example.org/new-login",
+	}, false)
+	if err != nil || changed.Endpoint != "https://example.org/new-login" {
+		t.Fatalf("equivalent default port rejected: %+v %v", changed, err)
+	}
+	if _, err := st.Modify(meta.ID, Registration{
+		HostID: meta.HostID, Endpoint: "https://example.org:444/login",
+	}, false); err == nil || !strings.Contains(err.Error(), "approval_required") {
+		t.Fatalf("nondefault port changed without required origin approval: %v", err)
+	}
+	if _, err := st.Modify(meta.ID, Registration{
+		HostID: meta.HostID, Endpoint: "http://example.org/login",
+	}, false); err == nil || !strings.Contains(err.Error(), "approval_required") {
+		t.Fatalf("scheme downgrade changed without required origin approval: %v", err)
+	}
+}

@@ -463,7 +463,7 @@ func (s *Server) browserSessionOpen(ctx context.Context, req Request) Response {
 	// Private fixture binary overrides do not run Chromium in ordinary CI.
 	var group *dapCgroup
 	if s.browserNodeBinary == "" {
-		group, err = createBrowserCgroup()
+		group, err = createBrowserCgroup(s.cfg.EffectiveExecutorServiceUnit())
 		if err != nil {
 			return browserSessionError("browser_containment_unavailable", "dependency", err)
 		}

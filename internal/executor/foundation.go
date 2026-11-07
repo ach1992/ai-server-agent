@@ -370,7 +370,7 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 	// terminator cannot safely authorize the next profile admission.
 	if req.AuditAction == "browser_run" && s.browserNodeBinary == "" {
 		var containmentErr error
-		browserGroup, containmentErr = createBrowserCgroup()
+		browserGroup, containmentErr = createBrowserCgroup(s.cfg.EffectiveExecutorServiceUnit())
 		if containmentErr != nil {
 			return fileError("browser_containment_unavailable", "dependency", containmentErr)
 		}

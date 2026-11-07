@@ -240,3 +240,39 @@ func TestNativeIdentityConflictHasTypedManagedError(t *testing.T) {
 		}
 	}
 }
+
+// Registration and private credential use are shared; Browser has the narrower
+// HTTP(S) transport binding and cannot consume SSH/database/app target refs.
+func TestGenericCredentialRefCannotBeSubmittedToBrowser(t *testing.T) {
+	s := &Server{cfg: config.Config{StateDir: t.TempDir(), InstanceID: "asa_generic_host"}}
+	st := serviceaccess.New(s.cfg.StateDir)
+	meta, err := st.Register(serviceaccess.Registration{
+		HostID: s.cfg.InstanceID, Service: "SSH", Endpoint: "ssh://git.example.org:22",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	sentinel := "PRIVATE-SYNTHETIC-DO-NOT-EXPOSE"
+	if _, err = st.Enroll(meta.ID, "password", "git", sentinel, 7, false); err != nil {
+		t.Fatal(err)
+	}
+	const sid = "stdio_0123456789abcdef0123456789abcdef"
+	s.sessions = newStdioSessionBrokerForSlots(2)
+	s.sessions.sessions = map[string]*stdioSession{sid: {
+		id: sid, kind: "browser", ownerID: "owner", ownerClass: "direct",
+		workspace: "/authorized/worktree", browserMode: "isolated", browser: &browserStdioState{},
+	}}
+	s.browserAdmission.holders = map[string]string{sid: "isolated"}
+	req := Request{Action: "browser_session_credential_login", SessionID: sid,
+		CredentialRef: meta.ID, Workspace: "/authorized/worktree",
+		PrincipalID: "owner", PrincipalClass: "direct",
+		Content: `{"secret_selector":"#password","submit_selector":"button","success_selector":"#app"}`,
+	}
+	resp := s.browserSessionCredentialLogin(context.Background(), req)
+	if resp.OK || resp.ErrorCode != "credential_web_endpoint_required" || strings.Contains(resp.Error, sentinel) {
+		t.Fatalf("non-HTTP target incorrectly used in Browser: %+v", resp)
+	}
+	if s.sessions.sessions[sid].browser.credentialRef != "" {
+		t.Fatal("Browser received secret-derived state")
+	}
+}

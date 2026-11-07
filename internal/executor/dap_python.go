@@ -80,7 +80,7 @@ func (s *Server) debugLaunchPython(ctx context.Context, req Request) (response R
 	defer func() {
 		response = s.finishActionAudit(req, "debug_launch", "worker", auditObject, "developer_debugger", started, response)
 	}()
-	containment, err := createDAPCgroup()
+	containment, err := createDAPCgroup(s.cfg.EffectiveExecutorServiceUnit())
 	if err != nil {
 		return fileError("dap_containment_unavailable", "dependency", err)
 	}

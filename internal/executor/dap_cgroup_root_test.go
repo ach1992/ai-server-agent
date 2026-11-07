@@ -74,7 +74,7 @@ func TestApprovedRootDAPCgroupEarlyAdapterCrash(t *testing.T) {
 	pin := os.NewFile(uintptr(fd), "root-approved-adapter-pin")
 	defer pin.Close()
 	e := &stdioSession{pid: pid, pidPin: pin}
-	cg, err := createDAPCgroup()
+	cg, err := createDAPCgroup("ai-server-agent-executor.service")
 	if err != nil {
 		t.Fatal(err)
 	}
