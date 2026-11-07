@@ -55,13 +55,14 @@ func TestApprovedRootBrowserPrivateTraceNormalCloseAndWorkerDenial(t *testing.T)
 	s.agentUID, s.agentGID = uint32(agentUID), uint32(agentGID)
 	private := s.isolatedBrowserScratchDir()
 	home := filepath.Join(s.cfg.StateDir, "browser-home")
-	for _, dir := range []string{home, private} {
-		if err := os.Mkdir(dir, 0700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chown(dir, uid, gid); err != nil {
-			t.Fatal(err)
-		}
+	if err := os.Mkdir(home, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(home, uid, gid); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(private, 0711); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := s.isolatedBrowserHome(); err != nil {
 		t.Fatalf("isolated Browser directory provenance: %v", err)
@@ -121,7 +122,7 @@ func TestApprovedRootBrowserPrivateTraceNormalCloseAndWorkerDenial(t *testing.T)
 		t.Fatal(err)
 	}
 	entry.mu.Lock()
-	childPID, group := entry.pid, entry.browserGroup
+	childPID, group, hostUID := entry.pid, entry.browserGroup, entry.browserHostUID
 	traceName, profileName := entry.browserTraceScratchName, entry.browserScratchName
 	privateMode := entry.browserPrivate
 	entry.mu.Unlock()
@@ -133,11 +134,11 @@ func TestApprovedRootBrowserPrivateTraceNormalCloseAndWorkerDenial(t *testing.T)
 		t.Fatal(err)
 	}
 	st, ok := proc.Sys().(*syscall.Stat_t)
-	if !ok || st.Uid != s.browserUID {
+	if !ok || st.Uid != hostUID {
 		t.Fatal("managed Node did not drop privileges to isolated Browser UID")
 	}
 	originalGroupPath := group.path
-	marker := filepath.Join(private, "detached.pid")
+	marker := filepath.Join(private, traceName, "detached.pid")
 	descendant := browserFixtureWorkerPID(t, marker)
 	if !group.containsPID(descendant) {
 		t.Fatal("detached test descendant escaped original kernel cgroup")
@@ -155,7 +156,7 @@ func TestApprovedRootBrowserPrivateTraceNormalCloseAndWorkerDenial(t *testing.T)
 	if err != nil || info.Size() < 4 {
 		t.Fatalf("actual retained trace ZIP absent: %v %v", info, err)
 	}
-	if ownerInfo, ok := info.Sys().(*syscall.Stat_t); !ok || ownerInfo.Uid != s.browserUID {
+	if ownerInfo, ok := info.Sys().(*syscall.Stat_t); !ok || ownerInfo.Uid != hostUID {
 		t.Fatal("retained trace bytes are not owned by isolated Browser UID")
 	}
 	read := browserOwnerControl(owner, id, "browser_session_trace")
@@ -173,7 +174,7 @@ func TestApprovedRootBrowserPrivateTraceNormalCloseAndWorkerDenial(t *testing.T)
 	}
 	// Both the named ZIP and the original Node's open FDs must be unavailable
 	// to B's otherwise authorized worker shell, despite knowledge of paths/PID.
-	command := fmt.Sprintf("test ! -r %q && test ! -x %q && test ! -r /proc/%d/environ",
+	command := fmt.Sprintf("test ! -r %q && test ! -r %q && test ! -r /proc/%d/environ",
 		tracePath, private, childPID)
 	workerB := Request{Action: "run", PrincipalID: intruder.PrincipalID,
 		PrincipalClass: owner.PrincipalClass, Workspace: owner.Workspace, Command: command}

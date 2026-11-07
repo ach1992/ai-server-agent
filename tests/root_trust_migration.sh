@@ -47,6 +47,7 @@ test -d "$STATE_DIR/runtime" && test -d "$STATE_DIR/jobs"
 test ! -L "$STATE_DIR/runtime/browser"
 test "$(stat -c '%U:%G:%a' "$STATE_DIR/runtime/browser")" = root:root:755
 test "$(stat -c '%U:%G:%a' "$STATE_DIR/runtime/browser/isolated")" = aibrowser:aibrowser:700
+test "$(stat -c '%U:%G:%a' "$STATE_DIR/runtime/browser/isolated-sessions")" = root:root:711
 test "$(stat -c '%U:%G:%a' "$STATE_DIR/browser-home")" = aibrowser:aibrowser:700
 test "$(getent passwd aibrowser | cut -d: -f6-7)" = "$STATE_DIR/browser-home:/usr/sbin/nologin"
 test "$(id -G aibrowser)" = "$(id -g aibrowser)"

@@ -706,6 +706,17 @@ if [ -d "$browser_private" ]; then
     die "Existing isolated Browser state identity/mode is unsafe."
 fi
 install -d -m 0700 -o "$BROWSER_USER" -g "$BROWSER_USER" "$browser_private"
+# Per-session mapped host UIDs require a root-owned searchable parent.
+# Do not change the legacy isolated directory: its original 0700 identity
+# remains intact for a separately authorized installed-build rollback.
+browser_sessions="$STATE_DIR/runtime/browser/isolated-sessions"
+[ ! -L "$browser_sessions" ] || die "Isolated Browser session root must not be a symlink."
+[ ! -e "$browser_sessions" ] || [ -d "$browser_sessions" ] || die "Isolated Browser session root must be a directory."
+if [ -d "$browser_sessions" ]; then
+  [ "$(stat -c '%u:%g:%a' "$browser_sessions")" = "0:0:711" ] ||
+    die "Existing isolated Browser session root identity/mode is unsafe."
+fi
+install -d -m 0711 -o root -g root "$browser_sessions"
 # Existing job outputs from the older worker-owned container are never trusted
 # as symlinks after migration.
 find "$STATE_DIR/jobs" -mindepth 1 -maxdepth 1 -type l -delete

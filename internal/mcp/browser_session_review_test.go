@@ -32,10 +32,10 @@ func TestBrowserSessionKnownFlowFailureMCP(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer listener.Close()
-	observed := make(chan executor.Request, 3)
+	observed := make(chan executor.Request, 4)
 	serverErrors := make(chan error, 1)
 	go func() {
-		for i := 0; i < 3; i++ {
+		for i := 0; i < 4; i++ {
 			c, err := listener.Accept()
 			if err != nil {
 				serverErrors <- err
@@ -56,6 +56,8 @@ func TestBrowserSessionKnownFlowFailureMCP(t *testing.T) {
 				result = executor.Response{OK: true, Status: "result", SessionID: "stdio_browser_mcp", OutputEncoding: "json", Output: `{"ok":true,"failed_step":null,"results":[{"index":0,"action":"assert_text","ok":true}]}`}
 			case 2:
 				result = executor.Response{OK: false, Status: "uncertain", ReasonCode: "browser_session_action_uncertain", ErrorCode: "browser_session_action_uncertain", ErrorClass: "state", SessionID: "stdio_browser_mcp", Error: "unknown completion; do not retry"}
+			case 3:
+				result = executor.Response{OK: true, Status: "result", SessionID: "stdio_browser_mcp", OutputEncoding: "json", Output: "{\"ok\":true,\"value\":\"same-session\",\"logs\":[\"mcp-verified\"]}"}
 			}
 			if err := json.NewEncoder(c).Encode(result); err != nil {
 				serverErrors <- err
@@ -125,4 +127,28 @@ func TestBrowserSessionKnownFlowFailureMCP(t *testing.T) {
 			t.Fatalf("call %d executor timeout: %v", i, ctx.Err())
 		}
 	}
+	scriptResult, err := session.CallTool(ctx, &mcpsdk.CallToolParams{Name: "browser_session_script", Arguments: map[string]any{
+		"workspace": "/srv/ai-workspace/verified-worktree", "session_id": "stdio_browser_mcp",
+		"script": "return await page.title()", "timeout_ms": 10000,
+	}})
+	if err != nil || scriptResult.IsError {
+		t.Fatalf("custom Playwright MCP script failed: result=%+v err=%v", scriptResult, err)
+	}
+	raw, _ := json.Marshal(scriptResult)
+	if !strings.Contains(string(raw), "same-session") || !strings.Contains(string(raw), "mcp-verified") {
+		t.Fatalf("script result missing from real SDK client: %s", raw)
+	}
+	select {
+	case req := <-observed:
+		if req.Action != "browser_session_script" || req.PrincipalID != "direct-default" ||
+			req.PrincipalClass != "direct" || req.Root || req.Approval || req.Content != "return await page.title()" ||
+			req.TimeoutMS != 10000 || req.SessionID != "stdio_browser_mcp" {
+			t.Fatalf("script MCP lost trusted principal/session binding: %+v", req)
+		}
+	case e := <-serverErrors:
+		t.Fatal(e)
+	case <-ctx.Done():
+		t.Fatalf("script MCP fixture stalled: %v", ctx.Err())
+	}
+
 }

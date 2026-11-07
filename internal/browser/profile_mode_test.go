@@ -70,7 +70,7 @@ func TestManagedBrowserIsolatedSessionRunnerCleanupContract(t *testing.T) {
 		`ASA_BROWSER_SESSION_TRACE`,
 		`browser_trace_identity_unavailable`,
 		`cleanupProfile();`,
-		`mkdirSync(isolatedProfile, {mode:0o700})`,
+		`mkdirSync(isolatedProfile, {recursive:true,mode:0o700})`,
 		`/^asa-profile-[A-Za-z0-9]{6}$/`,
 		`bytes > 256 * 1024 * 1024`,
 		`seen > 8192`,

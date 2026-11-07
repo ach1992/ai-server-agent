@@ -64,6 +64,13 @@ type BrowserSessionFlowInput struct {
 	TimeoutMS int64              `json:"timeout_ms,omitempty" jsonschema:"Total action timeout 90000ms default, 300000ms maximum"`
 }
 
+type BrowserSessionScriptInput struct {
+	Workspace string `json:"workspace" jsonschema:"Exact workspace of the authenticated Browser session"`
+	SessionID string `json:"session_id" jsonschema:"Principal-bound Browser session identity"`
+	Script    string `json:"script" jsonschema:"Playwright JavaScript body executed with page, context, browser and console in the SAME live session; return serializable values, use console.log for bounded output"`
+	TimeoutMS int64  `json:"timeout_ms,omitempty" jsonschema:"Execution timeout in milliseconds (default 90000; maximum 300000)"`
+}
+
 func (s *Server) registerBrowserSessionTools() {
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_open", Description: "Open a principal/workspace-bound Chromium session. Default shared uses the exclusive worker profile; isolated uses a dedicated Browser OS identity and private scratch without worker workspace file access. Trace ZIPs require isolated mode. chromium_sandbox=true explicitly requests verified Chromium OS sandboxing only for isolated sessions; incompatible hosts fail closed (user namespaces, seccomp, AppArmor). Default off; shared Browser unchanged. session_id alone is not authorization; sessions survive client disconnects, not Executor restart.", Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionOpenInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := s.browser.SessionOpen(ctx, browser.SessionOptions{Workspace: in.Workspace, IgnoreHTTPSErrors: in.IgnoreHTTPSErrors, ProfileMode: in.ProfileMode, ChromiumSandbox: in.ChromiumSandbox})
@@ -74,6 +81,13 @@ func (s *Server) registerBrowserSessionTools() {
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_flow", Description: "Execute 1-12 Browser actions in an existing session; stable element refs can persist across calls but expire on navigation/snapshot/detachment. Never auto-retry uncertain side effects.", Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionFlowInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := s.browser.SessionFlow(ctx, browser.SessionOptions{Workspace: in.Workspace, SessionID: in.SessionID, Steps: in.Steps, TimeoutMS: in.TimeoutMS})
+		if err != nil {
+			return executorTransportErrorResult(err)
+		}
+		return s.responseResult(resp)
+	})
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_session_script", Description: "Run custom async Playwright JavaScript against the SAME principal/workspace-bound managed page/context/browser, including after protected credential login. Returns serializable result and bounded console.log output; JavaScript may mutate the application and is not auto-retried. The credential value is never passed to script arguments. Uses the existing Browser OS identity/session and 16 KiB input frame; close on unknown completion.", Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in BrowserSessionScriptInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+		resp, err := s.browser.SessionScript(ctx, browser.SessionOptions{Workspace: in.Workspace, SessionID: in.SessionID, Script: in.Script, TimeoutMS: in.TimeoutMS})
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}

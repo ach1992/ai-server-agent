@@ -113,6 +113,9 @@ func TestPendingScopeCrashRecoveryFreshServer(t *testing.T) {
 			}
 			req.SessionID = entry.id
 			req.SessionEpoch = entry.terminal.epoch
+			// Initial root admission was approved. Recovery/cleanup of the
+			// already-bound PENDING scope must not depend on repeating it.
+			req.Approval = false
 			// The recovered pending owner cannot acquire any terminal I/O.
 			for _, action := range []string{"terminal_read", "terminal_write", "terminal_interrupt", "terminal_resize", "terminal_reconnect"} {
 				req.Action = action
