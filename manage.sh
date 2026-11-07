@@ -963,7 +963,10 @@ credential_issue(){ (
   backup="$(mktemp "$CONTROL_DIR/.mcp-credentials.backup.XXXXXX")"
   cp -a "$CREDENTIAL_STORE" "$backup"
   jq --arg id "$principal" --arg class "$class" --arg name "$name" --arg verifier "$verifier" --arg created "$created" --arg now "$now" --argjson existed "$existed" '
-    .credentials = ([.credentials[] | select(.principal.id != $id and .principal.id != "mcp-gateway")] + [{
+    # Preserve the historical Gateway bearer while rotating direct/default
+    # on an OLD installed binary: both clients must keep access until the
+    # new Agent is installed and safely retires the gateway identity.
+    .credentials = ([.credentials[] | select(.principal.id != $id and ($id == "direct-default" or .principal.id != "mcp-gateway"))] + [{
       principal:{id:$id,class:$class,name:$name},
       verifier_algorithm:"sha256-v1",
       verifier:$verifier,
