@@ -42,6 +42,7 @@ type Server struct {
 	terminalAdmissionMu               sync.Mutex              // serializes disk-backed terminal capacity and scope creation
 	browserAdmission                  browserSessionAdmission // shared, isolated and maintenance admission
 	browserNodeBinary                 string                  // test-only private fixture override; production always uses root-owned pinned Node
+	browserHelperBinary               string                  // test-only root Browser acceptance: freshly compiled Agent self-exec helper
 	browserRunTerminateTestHook       func(int) (bool, error) // private one-shot Browser uncertain-stop test hook
 	browserKillTestHook               func() error            // private root-fixture pause/fault, never public API
 	managedWatchMu                    sync.Mutex

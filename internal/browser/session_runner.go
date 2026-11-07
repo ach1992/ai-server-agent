@@ -89,7 +89,12 @@ const discardTrace = () => {
     closeSync(fd);
   }
   if (traceDir) {
-    rmSync(traceDir, {recursive:true,force:true});
+    // The isolated session's parent scratch is intentionally not writable by
+    // its Node process. Keep the pre-created directory inode stable across
+    // record/discard/record; the Executor removes it after verified stop.
+    if (process.env.ASA_BROWSER_RECLAIM_BY_EXECUTOR === '1')
+      rmSync(join(traceDir,'trace.zip'), {force:true});
+    else rmSync(traceDir, {recursive:true,force:true});
     traceDir = '';
   }
   traceSize = 0;
@@ -129,7 +134,7 @@ if (executorOwnsScratch && !/^asa-trace-[0-9a-f]{32}$/.test(traceName))
   throw new Error('browser_trace_identity_unavailable');
 const isolatedProfile = profileMode !== 'isolated' ? '' : executorOwnsScratch ?
   join(downloads, profileName) : mkdtempSync(join(downloads, 'asa-profile-'));
-if (executorOwnsScratch && isolatedProfile) mkdirSync(isolatedProfile, {mode:0o700});
+if (executorOwnsScratch && isolatedProfile) mkdirSync(isolatedProfile, {recursive:true,mode:0o700});
 const cleanupProfile = () => { if (!executorOwnsScratch && isolatedProfile) rmSync(isolatedProfile, {recursive:true,force:true}); };
 // Bounded private profile retention: no extra monitor process, host scheduler,
 // or arbitrary project cleanup. Never follow symlinks; fail closed if the
@@ -382,7 +387,7 @@ try {
       try {
         if (!diskSafe()) throw Error('trace_disk_reserve_unavailable');
         dir = executorOwnsScratch ? join(downloads, traceName) : mkdtempSync(join(downloads, 'asa-trace-'));
-        if (executorOwnsScratch) mkdirSync(dir, {mode:0o700});
+        if (executorOwnsScratch) mkdirSync(dir, {recursive:true,mode:0o700});
         const zipPath = join(dir, 'trace.zip');
         await context.tracing.start({ screenshots: true, snapshots: true, sources: false });
         started = true;
@@ -444,8 +449,15 @@ try {
         response = {event:'error',nonce:input.nonce,reason:'trace_record_unknown'};
       } finally {
         clearTimeout(watchdog);
-        try { if (dir) rmSync(dir,{recursive:true,force:true}); }
-        catch { try { discardTrace(); } catch {} response = {event:'error',nonce:input.nonce,reason:'trace_cleanup_unknown'}; }
+        try {
+          if (dir) {
+            if (executorOwnsScratch) rmSync(join(dir,'trace.zip'),{force:true});
+            else rmSync(dir,{recursive:true,force:true});
+          }
+        } catch {
+          try { discardTrace(); } catch {}
+          response = {event:'error',nonce:input.nonce,reason:'trace_cleanup_unknown'};
+        }
       }
       reply(response);
       continue;
@@ -583,7 +595,8 @@ try {
         if (observed==='challenge') {reason='credential_manual_intervention';throw new Error('manual challenge');}
         // Clear the live form's retained password value even when successful
         // authentication did not navigate. This is defense in depth: raw
-        // screenshots/traces/snapshots remain blocked by Executor.
+        // screenshots, traces and snapshots remain available to the
+        // authenticated principal; never reintroduce a blanket evidence ban.
         try {
           // A navigation may have removed the form; do not wait for it to
           // reappear. Clear every remaining match when the form is retained.

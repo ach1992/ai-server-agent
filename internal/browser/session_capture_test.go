@@ -707,12 +707,47 @@ func TestManagedBrowserNormalCloseDefersExecutorTraceCleanup(t *testing.T) {
 	if _, err := stdin.Write(append(flow, '\n')); err != nil {
 		t.Fatal(err)
 	}
-	if frame := read(); frame["event"] != "trace_meta" {
-		t.Fatalf("normal-close test trace not recorded: %v stderr=%s", frame, stderr.String())
+	first := read()
+	if first["event"] != "trace_meta" {
+		t.Fatalf("normal-close test trace not recorded: %v stderr=%s", first, stderr.String())
 	}
 	tracePath := filepath.Join(tmp, traceName, "trace.zip")
 	if info, er := os.Stat(tracePath); er != nil || info.Size() < 4 {
 		t.Fatalf("retained trace not present before close: %v %v", info, er)
+	}
+	// The confined session can discard and re-record its own trace without
+	// deleting the Executor-owned directory inode (whose parent is not
+	// writable from the session). The root broker removes it after stop.
+	originalDir, er := os.Stat(filepath.Join(tmp, traceName))
+	if er != nil {
+		t.Fatal(er)
+	}
+	discard, _ := json.Marshal(map[string]any{
+		"type": "trace_discard", "nonce": strings.Repeat("2", 32),
+		"file_version": "sha256:" + first["sha256"].(string),
+	})
+	if _, er := stdin.Write(append(discard, '\n')); er != nil {
+		t.Fatal(er)
+	}
+	if frame := read(); frame["event"] != "trace_discarded" {
+		t.Fatalf("managed trace discard failed: %v", frame)
+	}
+	stableDir, er := os.Stat(filepath.Join(tmp, traceName))
+	if er != nil || !os.SameFile(originalDir, stableDir) {
+		t.Fatalf("Executor-owned trace directory inode replaced: %v", er)
+	}
+	if _, er := os.Stat(tracePath); !os.IsNotExist(er) {
+		t.Fatalf("discard retained trace ZIP: %v", er)
+	}
+	flow, _ = json.Marshal(map[string]any{
+		"type": "trace_record", "nonce": strings.Repeat("3", 32),
+		"steps": []FlowStep{{Action: "snapshot"}},
+	})
+	if _, er := stdin.Write(append(flow, '\n')); er != nil {
+		t.Fatal(er)
+	}
+	if second := read(); second["event"] != "trace_meta" {
+		t.Fatalf("re-recording trace failed: %v", second)
 	}
 	if _, err := stdin.Write([]byte("{\"type\":\"close\"}\n")); err != nil {
 		t.Fatal(err)
@@ -754,9 +789,8 @@ func TestExportApprovedRootManagedBrowserTraceRunner(t *testing.T) {
 	}
 	// Source-only test instrumentation creates a detached child to keep
 	// the kernel cgroup populated after normal Node shutdown.
-	anchor := "const state = { refs: new Map(), sequence: 0 };"
-	addon := fmt.Sprintf("\nconst {spawn: __fixtureSpawn} = await import('node:child_process');\nconst {writeFileSync: __fixtureWrite} = await import('node:fs');\nconst __fixtureChild = __fixtureSpawn('/bin/sleep', ['90'], {detached:true,stdio:'ignore'});\n__fixtureWrite(%q, String(__fixtureChild.pid));\n__fixtureChild.unref();\n",
-		filepath.Join(root, "state", "runtime", "browser", "isolated", "detached.pid"))
+	anchor := "const traceName = process.env.ASA_BROWSER_SESSION_TRACE || '';"
+	addon := "\nconst {spawn: __fixtureSpawn} = await import('node:child_process');\nconst {writeFileSync: __fixtureWrite} = await import('node:fs');\nconst __fixtureChild = __fixtureSpawn('/bin/sleep', ['90'], {detached:true,stdio:'ignore'});\n__fixtureWrite(join(downloads,traceName,'detached.pid'), String(__fixtureChild.pid));\n__fixtureChild.unref();\n"
 	if strings.Count(script, anchor) != 1 {
 		t.Fatal("generated managed runner anchor drifted")
 	}

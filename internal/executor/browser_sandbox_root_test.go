@@ -75,6 +75,7 @@ func TestApprovedRootBrowserSandboxEnforcedUnderAibrowser(t *testing.T) {
 	if _, err := s.isolatedBrowserHome(); err != nil {
 		t.Fatalf("root Browser identity/home proof: %v", err)
 	}
+	s.browserHelperBinary = approvedBrowserRootHelperBinary(t, fixtureRoot)
 	limits := s.cfg.EffectiveRuntime()
 	limits.BrowserConcurrentSlots = 1
 	s.cfg.Runtime = &limits

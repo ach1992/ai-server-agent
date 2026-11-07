@@ -556,6 +556,20 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 		launchedScope = true
 		args = []string{"-f", "/dev/null", "-S", terminal.socket, "-C", "attach-session", "-t", terminal.name}
 	}
+	if entry.browserPrivate && s.browserNodeBinary == "" {
+		// Production-only, same-PID self-exec stage: prevent arbitrary
+		// Node/Playwright scripts from modifying a concurrent session's
+		// private Browser files. Reuse the original broker and cgroup.
+		agentBinary, execErr := os.Executable()
+		if execErr != nil {
+			return "", fmt.Errorf("resolve Browser session helper: %w", execErr)
+		}
+		if s.browserHelperBinary != "" { // source-built, root-only test fixture
+			agentBinary = s.browserHelperBinary
+		}
+		args = append([]string{"browser-session-helper", binary}, args...)
+		binary = agentBinary
+	}
 	cmd := exec.Command(binary, args...)
 	cmd.Dir = cwd
 	if entry.browserPrivate {
@@ -573,6 +587,11 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 		if err != nil {
 			return "", err
 		}
+		if entry.browserPrivate && entry.browserScratchName != "" {
+			// Node and Chromium use the session's own writable profile as
+			// HOME/TMPDIR. A sibling's profile is never the temp directory.
+			home = filepath.Join(s.isolatedBrowserScratchDir(), entry.browserScratchName)
+		}
 	}
 	cmd.Env = sanitizedSessionEnv(home)
 	if kind == "browser" {
@@ -582,7 +601,7 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 		// delete a different *live* isolated Browser's profile or trace.
 		cmd.Env = append(cmd.Env, "ASA_BROWSER_RECLAIM_BY_EXECUTOR=1")
 		if entry.browserPrivate {
-			cmd.Env = append(cmd.Env, "TMPDIR="+s.isolatedBrowserScratchDir())
+			cmd.Env = append(cmd.Env, "TMPDIR="+home)
 		}
 		if entry.browserScratchName != "" {
 			cmd.Env = append(cmd.Env, "ASA_BROWSER_SESSION_PROFILE="+entry.browserScratchName)

@@ -71,6 +71,7 @@ func TestApprovedRootBrowserPrivateTraceNormalCloseAndWorkerDenial(t *testing.T)
 	s.cfg.Runtime = &capacity
 	owner.PrincipalID = "trace-owner-A"
 	owner.BrowserProfileMode = "isolated"
+	s.browserHelperBinary = approvedBrowserRootHelperBinary(t, fixtureRoot)
 
 	repo, err := os.Getwd()
 	if err != nil {
@@ -137,7 +138,7 @@ func TestApprovedRootBrowserPrivateTraceNormalCloseAndWorkerDenial(t *testing.T)
 		t.Fatal("managed Node did not drop privileges to isolated Browser UID")
 	}
 	originalGroupPath := group.path
-	marker := filepath.Join(private, "detached.pid")
+	marker := filepath.Join(private, traceName, "detached.pid")
 	descendant := browserFixtureWorkerPID(t, marker)
 	if !group.containsPID(descendant) {
 		t.Fatal("detached test descendant escaped original kernel cgroup")

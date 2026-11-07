@@ -99,6 +99,28 @@ func approvedBrowserCgroupRootFixture(t *testing.T) (*Server, Request, string, s
 	return s, req, tmp, root
 }
 
+// The hDE01-only root acceptance executes source tests under a Go test
+// binary, not the installed Agent CLI. Build the exact candidate helper into
+// its existing disposable fixture so tests exercise the production entrypoint.
+func approvedBrowserRootHelperBinary(t *testing.T, root string) string {
+	t.Helper()
+	wd, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	repo := filepath.Clean(filepath.Join(wd, "..", ".."))
+	binary := filepath.Join(root, "agent-browser-helper")
+	ctx, cancel := context.WithTimeout(context.Background(), 55*time.Second)
+	defer cancel()
+	build := exec.CommandContext(ctx, "go", "build", "-trimpath", "-o", binary, "./cmd/ai-server-agent")
+	build.Dir = repo
+	build.Env = append(os.Environ(), "TMPDIR=/var/tmp")
+	if output, err := build.CombinedOutput(); err != nil {
+		t.Fatalf("build exact source Browser helper: %v %s", err, output)
+	}
+	return binary
+}
+
 func rootBrowserPersistentScript(profile, marker string) string {
 	return fmt.Sprintf(`import { chromium } from 'file:///opt/ai-server-agent/browser/node_modules/playwright/index.mjs';
 import { spawn } from 'node:child_process';
