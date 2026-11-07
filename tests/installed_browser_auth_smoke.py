@@ -167,7 +167,13 @@ class LocalMCP:
         structured = result.get("structuredContent")
         if not isinstance(structured, dict):
             raise SmokeError("tool_structured_result_missing")
-        if not structured.get("ok"):
+        # browser_status is a passive RuntimeStatus object, unlike the
+        # Executor-backed tools, which return {ok, error_code, ...}.
+        if tool == "browser_status":
+            if structured.get("inspection_complete") is not True:
+                raise SmokeError("browser_status_incomplete")
+            return structured
+        if structured.get("ok") is not True:
             code = structured.get("error_code") or structured.get("reason_code") or "unknown"
             if not isinstance(code, str) or not re.fullmatch(r"[a-zA-Z0-9_]{1,80}", code):
                 code = "unknown"

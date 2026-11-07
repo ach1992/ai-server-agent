@@ -36,7 +36,7 @@ class FakeMCP:
         if name == self.error_tool:
             raise auth.SmokeError("fixture_failure")
         if name == "browser_status":
-            return {"ok": True, "ready": True}
+            return {"inspection_complete": True, "ready": True}
         if name == "service_access":
             return {"ok": True, "output_encoding": "json",
                     "output": json.dumps({"id": REF, "host_id": self.host,
@@ -60,6 +60,13 @@ class LocalLoginAcceptance(unittest.TestCase):
             client, profile=profile, ref=REF, instance=INSTANCE,
             workspace=self.temp.name, ignore_https_errors=ignore_https_errors,
         )
+
+    def test_browser_status_is_not_an_executor_ok_response(self):
+        class PassiveResult(auth.LocalMCP):
+            def rpc(self, method, params, timeout=30):
+                return {"structuredContent": {"inspection_complete": True, "ready": True}}
+        result = PassiveResult(port=12345, bearer="fixture").call("browser_status", {})
+        self.assertTrue(result["ready"])
 
     def test_success_uses_normal_tools_and_always_closes(self):
         client = FakeMCP()
