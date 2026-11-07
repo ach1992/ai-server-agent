@@ -290,8 +290,15 @@ func (s *Server) syncSpoolHasCommittedStatus(path string) (bool, error) {
 	if len(raw) > 64 {
 		return false, nil
 	}
-	_, parseErr := strconv.Atoi(strings.TrimSpace(string(raw)))
-	return parseErr == nil, nil
+	// writeJobStatus emits exactly fmt.Fprintf("%d\n", exitCode).
+	// A parseable numeric prefix (for example "13" from "137\n") is
+	// not a completed record. Do not change persistent-Job status parsing;
+	// only abandoned synchronous spools require this recovery proof.
+	if len(raw) < 2 || raw[len(raw)-1] != '\n' {
+		return false, nil
+	}
+	exitCode, parseErr := strconv.Atoi(string(raw[:len(raw)-1]))
+	return parseErr == nil && string(raw) == strconv.Itoa(exitCode)+"\n", nil
 }
 
 // cleanupInterruptedSyncSpools is safe both on Executor startup and during

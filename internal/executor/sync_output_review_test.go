@@ -92,8 +92,21 @@ func TestSyncOutputInterruptedExecutorProcessReclaimedAfterRestart(t *testing.T)
 }
 
 func TestSyncOutputCrashDuringStatusWriteCleansTornStatus(t *testing.T) {
-	for _, badStatus := range []string{"non-numeric", strings.Repeat("x", 65), "unknown"} {
-		t.Run(fmt.Sprintf("bytes_%d", len(badStatus)), func(t *testing.T) {
+	// writeJobStatus emits exactly a canonical "<exit-code>\n" record.
+	// A crash after a numeric prefix but before the newline must not be
+	// mistaken for a committed exit code (e.g. "13" instead of "137\n").
+	for _, tc := range []struct{ name, status string }{
+		{"empty", ""},
+		{"numeric_prefix", "13"},
+		{"numeric_no_terminator", "137"},
+		{"leading_whitespace", " 137\n"},
+		{"duplicate_terminator", "137\n\n"},
+		{"noncanonical_zero_padding", "0137\n"},
+		{"non_numeric", "non-numeric"},
+		{"oversized", strings.Repeat("x", 65)},
+		{"unknown", "unknown"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
 			s := reviewSyncServer(t)
 			c := newSyncOutputCapture(s)
 			if _, err := c.Write(bytes.Repeat([]byte("t"), maxSyncOutputBytes+129)); err != nil {
@@ -108,11 +121,16 @@ func TestSyncOutputCrashDuringStatusWriteCleansTornStatus(t *testing.T) {
 			if err := c.marker.Close(); err != nil {
 				t.Fatal(err)
 			}
-			if err := os.WriteFile(paths.status, []byte(badStatus), 0600); err != nil {
+			if err := os.WriteFile(paths.status, []byte(tc.status), 0600); err != nil {
 				t.Fatal(err)
 			}
-			if err := s.cleanupInterruptedSyncSpools(filepath.Dir(paths.status)); err != nil {
-				t.Fatalf("torn status blocked startup reconciliation: %v", err)
+			for restart := 0; restart < 2; restart++ {
+				if err := s.cleanupInterruptedSyncSpools(filepath.Dir(paths.status)); err != nil {
+					t.Fatalf("torn status blocked restart %d reconciliation: %v", restart, err)
+				}
+			}
+			if out := s.jobOutputBounded(Request{JobID: c.jobID}); out.OK || out.ErrorCode != "job_not_found" {
+				t.Fatalf("uncommitted status advertised partial output as complete: %+v", out)
 			}
 			for _, path := range []string{paths.status, paths.log, paths.status[:len(paths.status)-len(".status")] + syncSpoolMarkerSuffix} {
 				if _, err := os.Stat(path); !os.IsNotExist(err) {
@@ -186,18 +204,23 @@ func TestSyncOutputCommitBeforeMarkerCleanupRetainsCompleteJob(t *testing.T) {
 	if err := c.file.Close(); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeJobStatus(c.statusPath, 0); err != nil {
+	if err := writeJobStatus(c.statusPath, 137); err != nil {
 		t.Fatal(err)
 	}
 	if err := c.marker.Close(); err != nil {
 		t.Fatal(err)
 	}
 	jobsDir := filepath.Join(s.cfg.StateDir, "jobs")
-	if err := s.cleanupInterruptedSyncSpools(jobsDir); err != nil {
-		t.Fatal(err)
+	for restart := 0; restart < 2; restart++ {
+		if err := s.cleanupInterruptedSyncSpools(jobsDir); err != nil {
+			t.Fatalf("committed cleanup failed on restart %d: %v", restart, err)
+		}
 	}
 	if got := syncSpoolMarkerIDs(t, jobsDir); len(got) != 0 {
 		t.Fatalf("committed stale marker not removed: %v", got)
+	}
+	if status, err := os.ReadFile(c.statusPath); err != nil || string(status) != "137\n" {
+		t.Fatalf("valid canonical exit status not preserved: %q, %v", status, err)
 	}
 	part := s.jobOutputBounded(Request{JobID: c.jobID, Limit: 4096})
 	if !part.OK || part.Output != string(payload[:4096]) {
