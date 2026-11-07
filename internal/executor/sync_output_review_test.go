@@ -91,6 +91,38 @@ func TestSyncOutputInterruptedExecutorProcessReclaimedAfterRestart(t *testing.T)
 	}
 }
 
+func TestSyncOutputCrashDuringStatusWriteCleansTornStatus(t *testing.T) {
+	for _, badStatus := range []string{"non-numeric", strings.Repeat("x", 65), "unknown"} {
+		t.Run(fmt.Sprintf("bytes_%d", len(badStatus)), func(t *testing.T) {
+			s := reviewSyncServer(t)
+			c := newSyncOutputCapture(s)
+			if _, err := c.Write(bytes.Repeat([]byte("t"), maxSyncOutputBytes+129)); err != nil {
+				t.Fatal(err)
+			}
+			paths := jobPathsFor(filepath.Join(s.cfg.StateDir, "jobs"), c.jobID)
+			// The process disappears before Finish's numeric status fsync;
+			// release only test-owned FDs and leave root-private artifacts.
+			if err := c.file.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := c.marker.Close(); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.WriteFile(paths.status, []byte(badStatus), 0600); err != nil {
+				t.Fatal(err)
+			}
+			if err := s.cleanupInterruptedSyncSpools(filepath.Dir(paths.status)); err != nil {
+				t.Fatalf("torn status blocked startup reconciliation: %v", err)
+			}
+			for _, path := range []string{paths.status, paths.log, paths.status[:len(paths.status)-len(".status")] + syncSpoolMarkerSuffix} {
+				if _, err := os.Stat(path); !os.IsNotExist(err) {
+					t.Fatalf("stale partial artifact remains: %s (%v)", path, err)
+				}
+			}
+		})
+	}
+}
+
 func TestSyncOutputLiveWriterAndUnrelatedJobProtectedFromCleanup(t *testing.T) {
 	s := reviewSyncServer(t)
 	jobsDir := filepath.Join(s.cfg.StateDir, "jobs")

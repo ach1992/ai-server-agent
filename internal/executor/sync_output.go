@@ -267,6 +267,33 @@ func (w *syncOutputCapture) Finish(resp *Response, maxTextFallbackBytes int) err
 	return nil
 }
 
+// An abandoned synchronous spool may have a partially-written .status file.
+// Read it using the same safe inode and shared status lock as persistent Jobs,
+// but treat nonnumeric/torn content as incomplete instead of a startup error.
+func (s *Server) syncSpoolHasCommittedStatus(path string) (bool, error) {
+	f, err := s.openJobFile(path)
+	if os.IsNotExist(err) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	if err := lockJobStatusFile(f, syscall.LOCK_SH); err != nil {
+		return false, err
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	raw, err := io.ReadAll(io.LimitReader(f, 65))
+	if err != nil {
+		return false, err
+	}
+	if len(raw) > 64 {
+		return false, nil
+	}
+	_, parseErr := strconv.Atoi(strings.TrimSpace(string(raw)))
+	return parseErr == nil, nil
+}
+
 // cleanupInterruptedSyncSpools is safe both on Executor startup and during
 // normal Job retention. It never retires an active capture: flock remains held
 // for the entire lifetime of the owning process. Crash-left partial output is
@@ -302,18 +329,24 @@ func (s *Server) cleanupInterruptedSyncSpools(jobsDir string) error {
 			return err
 		}
 		paths := jobPathsFor(jobsDir, id)
-		status, _, err := s.readJobStatusValue(paths.status)
-		if err != nil && !os.IsNotExist(err) {
+		// A crash during the status writer can leave a torn or oversized
+		// status file. It is not complete proof; discard only under the
+		// now-unlocked, root-private spool marker rather than preventing
+		// Executor startup indefinitely.
+		complete, err := s.syncSpoolHasCommittedStatus(paths.status)
+		if err != nil {
 			_ = marker.Close()
 			return err
 		}
-		complete := false
-		if status != "" && status != jobStatusUnknown && status != jobStatusStopped {
-			if _, parseErr := strconv.Atoi(status); parseErr == nil {
-				if f, openErr := s.openJobFile(paths.log); openErr == nil {
-					complete = true
-					_ = f.Close()
-				}
+		if complete {
+			f, openErr := s.openJobFile(paths.log)
+			if openErr == nil {
+				_ = f.Close()
+			} else if os.IsNotExist(openErr) {
+				complete = false
+			} else {
+				_ = marker.Close()
+				return openErr
 			}
 		}
 		if !complete {
