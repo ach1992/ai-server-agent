@@ -47,6 +47,8 @@ func TestRootLiteralOutputAvoidsSpuriousApproval(t *testing.T) {
 		"echo \"systemctl restart ai-server-agent.service\"",
 		"echo '/etc/ai-server-agent/mcp-credentials.json'",
 		"printf '%s' 'nft flush ruleset'",
+		"printf '%s\\n' 'rm -rf /tmp/disposable'",
+		"printf '%s' 'arr[$(rm -rf /tmp/disposable)]'", // inert data, not a printf assignment
 	}
 	for _, cmd := range harmless {
 		if got := g.Evaluate(cmd, true); !got.Allowed || got.RequiresApproval {
@@ -60,6 +62,11 @@ func TestRootLiteralOutputAvoidsSpuriousApproval(t *testing.T) {
 		"printf '%s' 'rm -rf /' > /etc/ai-server-agent/config.json",
 		"bash -c 'rm -rf /tmp/disposable'",
 		"echo 'systemctl stop ai-server-agent' && systemctl stop ai-server-agent",
+		"printf -v 'arr[$(rm -rf /tmp/disposable)]' '%s' value",
+		"printf -v 'arr[$(systemctl stop ai-server-agent.service)]' '%s' value",
+		"printf '%n' 'arr[$(rm -rf /tmp/disposable)]'",
+		"printf '%s%n' value 'arr[$(nft flush ruleset)]'",
+		"printf '%d' 'arr[$(rm -rf /tmp/disposable)]'",
 	}
 	for _, cmd := range unsafe {
 		if got := g.Evaluate(cmd, true); !got.Allowed || !got.RequiresApproval {

@@ -60,14 +60,34 @@ func New(protected []string) *Guard {
 // subject to the ordinary approval checks (including bash -c and eval).
 func literalOutputCommand(command string) bool {
 	var args string
+	var isPrintf bool
 	for _, cmd := range []string{"printf", "echo"} {
 		if strings.HasPrefix(command, cmd+" ") || strings.HasPrefix(command, cmd+"\t") {
 			args = command[len(cmd):]
+			isPrintf = cmd == "printf"
 			break
 		}
 	}
 	if args == "" || strings.ContainsAny(args, "\r\n") {
 		return false
+	}
+	if isPrintf {
+		// Unlike echo, printf can evaluate variable names (-v and %n) and
+		// arithmetic arguments (%d), even inside single-quoted shell words.
+		// Only recognize literal, output-only string formats. All other
+		// printf forms retain the existing approval-policy evaluation.
+		formatArg := strings.TrimLeft(args, " \t")
+		formatOK := false
+		for _, format := range []string{"'%s'", "'%s\\n'", "\"%s\"", "%s"} {
+			if strings.HasPrefix(formatArg, format) &&
+				(len(formatArg) == len(format) || formatArg[len(format)] == ' ' || formatArg[len(format)] == '\t') {
+				formatOK = true
+				break
+			}
+		}
+		if !formatOK {
+			return false
+		}
 	}
 	var quote byte
 	for i := 0; i < len(args); i++ {
