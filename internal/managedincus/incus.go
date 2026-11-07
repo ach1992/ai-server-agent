@@ -290,8 +290,13 @@ func (b Backend) selectInstance(ctx context.Context, req Request) (Summary, erro
 	if !found {
 		return Summary{}, errors.New("instance_missing: rediscover native Incus state before retry")
 	}
-	if !native.Managed || !uuidPattern.MatchString(native.UUID) || native.UUID != req.UUID {
-		return Summary{}, errors.New("instance_identity_mismatch: host/provider/UUID does not match this Agent-managed guest")
+	// The authenticated root operator may manage native Incus guests already
+	// present on this host; an Agent creation tag is not an authorization
+	// boundary. Always require the *observed* provider UUID, not a name alone.
+	// checkConfirmedIdentity still rejects any guest that collides with a
+	// journaled Agent create, including an externally replaced native UUID.
+	if !uuidPattern.MatchString(native.UUID) || native.UUID != req.UUID {
+		return Summary{}, errors.New("instance_identity_mismatch: supplied native UUID does not match the currently observed host/project/instance")
 	}
 	if err := b.checkConfirmedIdentity(native); err != nil {
 		return Summary{}, err
@@ -730,7 +735,7 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 			if err != nil || !exists {
 				return base, errors.New("operation_outcome_uncertain: inspect current native state")
 			}
-			if after.UUID != x.UUID || !after.Managed {
+			if after.UUID != x.UUID {
 				return base, errors.New("instance_identity_changed: rediscover before further operations")
 			}
 			if err := b.checkConfirmedIdentity(after); err != nil {
