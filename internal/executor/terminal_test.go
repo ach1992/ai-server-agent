@@ -18,6 +18,40 @@ import (
 	"time"
 )
 
+// Root shell admission needs the original explicit authorization, but
+// reconnect/read/write/status/close on an existing principal-bound session
+// must not demand a new approval boolean for every terminal packet.
+func TestRootTerminalApprovalIsOnlyForInitialOpen(t *testing.T) {
+	s := &Server{sessions: newStdioSessionBroker()}
+	req := Request{Action: "terminal_open", PrincipalID: "operator", PrincipalClass: "direct",
+		Workspace: "/tmp/existing", Root: true, Columns: 80, Rows: 24}
+	if got := s.terminalAction(req); got.OK || got.ErrorCode != "approval_required" {
+		t.Fatalf("unapproved root creation allowed: %+v", got)
+	}
+	req.Action = "terminal_read"
+	req.SessionID = "stdio_0123456789abcdef0123456789abcdef"
+	got := s.terminalAction(req)
+	if got.ErrorCode == "approval_required" {
+		t.Fatalf("root terminal read required repeated approval: %+v", got)
+	}
+	req.Action = "terminal_close"
+	got = s.terminalAction(req)
+	if got.ErrorCode == "approval_required" {
+		t.Fatalf("root terminal close required repeated approval: %+v", got)
+	}
+	req.Action = "terminal_reconnect"
+	got = s.terminalAction(req)
+	if got.ErrorCode == "approval_required" {
+		t.Fatalf("root terminal reconnect required repeated approval: %+v", got)
+	}
+	req.Action = "terminal_read"
+	req.Root = false
+	req.Approval = true
+	got = s.terminalAction(req)
+	if got.OK || got.ErrorCode != "invalid_authority" {
+		t.Fatalf("worker tried to spoof root approval: %+v", got)
+	}
+}
 func TestTerminalPasteCommandsBoundedAndLossless(t *testing.T) {
 	for _, length := range []int{1, terminalInputChunk - 1, terminalInputChunk, terminalInputChunk + 1, 8192, terminalMaxInput} {
 		t.Run(fmt.Sprintf("length_%d", length), func(t *testing.T) {
