@@ -53,6 +53,68 @@ func New(protected []string) *Guard {
 	}
 }
 
+// literalOutputCommand recognizes a deliberately small set of side-effect-free
+// shell commands. Destructive words inside a plain echo/printf argument are
+// DATA, not an operation. Reject any expansions, substitutions, redirections,
+// pipelines, control operators or additional statements; ambiguous Bash stays
+// subject to the ordinary approval checks (including bash -c and eval).
+func literalOutputCommand(command string) bool {
+	var args string
+	var isPrintf bool
+	for _, cmd := range []string{"printf", "echo"} {
+		if strings.HasPrefix(command, cmd+" ") || strings.HasPrefix(command, cmd+"\t") {
+			args = command[len(cmd):]
+			isPrintf = cmd == "printf"
+			break
+		}
+	}
+	if args == "" || strings.ContainsAny(args, "\r\n") {
+		return false
+	}
+	if isPrintf {
+		// Unlike echo, printf can evaluate variable names (-v and %n) and
+		// arithmetic arguments (%d), even inside single-quoted shell words.
+		// Only recognize literal, output-only string formats. All other
+		// printf forms retain the existing approval-policy evaluation.
+		formatArg := strings.TrimLeft(args, " \t")
+		formatOK := false
+		for _, format := range []string{"'%s'", "'%s\\n'", "\"%s\"", "%s"} {
+			if strings.HasPrefix(formatArg, format) &&
+				(len(formatArg) == len(format) || formatArg[len(format)] == ' ' || formatArg[len(format)] == '\t') {
+				formatOK = true
+				break
+			}
+		}
+		if !formatOK {
+			return false
+		}
+	}
+	var quote byte
+	for i := 0; i < len(args); i++ {
+		c := args[i]
+		switch quote {
+		case '\x27':
+			if c == '\x27' {
+				quote = 0
+			}
+		case '"':
+			if c == '"' {
+				quote = 0
+			} else if c == '$' || c == '\x60' || c == '\\' {
+				return false
+			}
+		default:
+			switch c {
+			case '\x27', '"':
+				quote = c
+			case ';', '&', '|', '>', '<', '$', '\x60', '\\', '(', ')':
+				return false
+			}
+		}
+	}
+	return quote == 0
+}
+
 func (g *Guard) Evaluate(command string, root bool) Decision {
 	s := strings.TrimSpace(command)
 	if s == "" {
@@ -60,6 +122,9 @@ func (g *Guard) Evaluate(command string, root bool) Decision {
 	}
 	if !root {
 		return Decision{Allowed: true, Category: "worker", Reason: "runs as the unprivileged worker user"}
+	}
+	if literalOutputCommand(s) {
+		return Decision{Allowed: true, Category: "root", Reason: "literal text output does not execute the quoted operation"}
 	}
 	for _, p := range g.protected {
 		if p != "" && strings.Contains(s, p) {

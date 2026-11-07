@@ -160,6 +160,47 @@ func TestManagedBrowserSessionRunnerPinnedRuntime(t *testing.T) {
 	if newAction["ok"] != true {
 		t.Fatalf("fresh ref stopped working: %v", newAction)
 	}
+	scriptCall := func(nonce, script string) map[string]any {
+		t.Helper()
+		wire, _ := json.Marshal(map[string]any{"type": "script", "nonce": nonce, "script": script})
+		if len(wire) > 16384 {
+			t.Fatal("test script frame oversized")
+		}
+		if _, err := stdin.Write(append(wire, '\n')); err != nil {
+			t.Fatal(err)
+		}
+		frame := read()
+		if frame["event"] != "result" || frame["nonce"] != nonce {
+			t.Fatalf("script frame: %+v", frame)
+		}
+		return frame["result"].(map[string]any)
+	}
+	scripted := scriptCall(strings.Repeat("d", 32), `await page.locator('#state').evaluate(el => el.textContent='scripted');
+console.log('same live page'); return await page.locator('#state').textContent();`)
+	if scripted["ok"] != true || scripted["value"] != "scripted" ||
+		scripted["logs"].([]any)[0] != "same live page" {
+		t.Fatalf("advanced Playwright did not retain live page: %+v", scripted)
+	}
+	confirmed := call(strings.Repeat("e", 32), []FlowStep{{Action: "assert_text", Selector: "#state", Expected: "scripted"}})
+	if confirmed["ok"] != true {
+		t.Fatalf("flow lost script state: %+v", confirmed)
+	}
+	stale := call(strings.Repeat("f", 32), []FlowStep{{Action: "click", Ref: newRef}})
+	if stale["ok"] != false || get(stale)[0].(map[string]any)["error"] != "invalid_ref" {
+		t.Fatalf("custom script retained stale accessibility refs: %+v", stale)
+	}
+	failed := scriptCall(strings.Repeat("a", 32), `throw new Error('action specific failure')`)
+	if failed["ok"] != false || !strings.Contains(failed["error"].(string), "action specific failure") {
+		t.Fatalf("script failure diagnostics missing: %+v", failed)
+	}
+	tooLarge := scriptCall(strings.Repeat("b", 32), `return 'x'.repeat(30000)`)
+	if tooLarge["ok"] != false || tooLarge["error"] != "script_result_too_large_or_unserializable" {
+		t.Fatalf("oversized result silently lost: %+v", tooLarge)
+	}
+	confirmed = call(strings.Repeat("e", 32), []FlowStep{{Action: "assert_text", Selector: "#state", Expected: "scripted"}})
+	if confirmed["ok"] != true {
+		t.Fatalf("known script errors poisoned live session: %+v", confirmed)
+	}
 	three := call(strings.Repeat("3", 32), []FlowStep{{Action: "goto", URL: web.URL}})
 	if three["ok"] != true {
 		t.Fatalf("reload=%v", three)

@@ -3,6 +3,8 @@ package executor
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
@@ -280,5 +282,106 @@ exit 0
 	second := s.browserSessionAction(ctx, request)
 	if second.ErrorCode != "browser_flow_failed" {
 		t.Fatalf("known failure poisoned session: %+v", second)
+	}
+}
+
+// The Executor's real connection-bound dispatcher must preserve the caller
+// cancellation signal for authorized Playwright scripts. The same Browser
+// remains inspectable and closeable after an uncertain cancellation; no
+// action is replayed against its potentially changed page.
+func TestBrowserScriptDispatchContextConnectionCancellation(t *testing.T) {
+	s, owner, _ := browserAuditFixture(t)
+	s.token = "synthetic-dispatch-token"
+	owner.Token = s.token
+	started := filepath.Join(t.TempDir(), "script-started")
+	binary := filepath.Join(t.TempDir(), "delayed-browser")
+	script := fmt.Sprintf(`#!/bin/sh
+printf 'ASA_BROWSER_SESSION {"event":"ready"}\n'
+while IFS= read -r request; do
+  case "$request" in
+    *'"type":"script"'*)
+      printf started > %q
+      sleep 15
+      ;;
+    *'"type":"close"'*) exit 0 ;;
+  esac
+done
+`, started)
+	if err := os.WriteFile(binary, []byte(script), 0755); err != nil {
+		t.Fatal(err)
+	}
+	s.browserNodeBinary = binary
+	open := s.dispatchContext(context.Background(), owner)
+	if !open.OK {
+		t.Fatalf("open through real dispatcher: %+v", open)
+	}
+	id := open.SessionID
+	defer func() {
+		if s.browserAdmission.matches(id) {
+			_ = s.browserSessionClose(browserOwnerControl(owner, id, "browser_session_close"))
+		}
+	}()
+
+	req := browserOwnerControl(owner, id, "browser_session_script")
+	req.Content = "return await page.title()"
+	if denied := s.dispatchContext(context.Background(), func() Request {
+		other := req
+		other.PrincipalID = "other"
+		return other
+	}()); denied.OK || denied.ErrorCode != "browser_session_not_found" {
+		t.Fatalf("dispatch script escaped principal binding: %+v", denied)
+	}
+	if denied := s.dispatchContext(context.Background(), func() Request {
+		other := req
+		other.Token = "wrong-token"
+		return other
+	}()); denied.OK || denied.Error != "unauthorized" {
+		t.Fatalf("dispatch script escaped executor authentication: %+v", denied)
+	}
+
+	server, caller := net.Pipe()
+	defer server.Close()
+	defer caller.Close()
+	ctx, release := connectionContext(server)
+	defer release()
+	result := make(chan Response, 1)
+	go func() { result <- s.dispatchContext(ctx, req) }()
+	deadline := time.Now().Add(4 * time.Second)
+	for {
+		if _, err := os.Stat(started); err == nil {
+			break
+		} else if !os.IsNotExist(err) {
+			t.Fatal(err)
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("pending Playwright script never reached real Browser subprocess")
+		}
+		time.Sleep(15 * time.Millisecond)
+	}
+	disconnectAt := time.Now()
+	if err := caller.Close(); err != nil {
+		t.Fatal(err)
+	}
+	select {
+	case completed := <-result:
+		if completed.OK || completed.ErrorCode != "browser_session_action_uncertain" {
+			t.Fatalf("canceled pending script claimed known completion: %+v", completed)
+		}
+		if elapsed := time.Since(disconnectAt); elapsed > 1500*time.Millisecond {
+			t.Fatalf("script did not inherit connection cancellation: %s", elapsed)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Executor script ignored canceled caller and held Browser action mutex")
+	}
+	status := s.dispatchContext(context.Background(), browserOwnerControl(owner, id, "browser_session_status"))
+	if !status.OK || status.Status != "uncertain" {
+		t.Fatalf("canceled action lost inspection or uncertainty: %+v", status)
+	}
+	closed := s.dispatchContext(context.Background(), browserOwnerControl(owner, id, "browser_session_close"))
+	if !closed.OK || closed.Status != "closed" {
+		t.Fatalf("cannot close Browser promptly after client disconnect: %+v", closed)
+	}
+	if s.browserAdmission.reserved() {
+		t.Fatal("canceled script stranded original Browser admission")
 	}
 }
