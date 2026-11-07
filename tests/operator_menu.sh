@@ -332,6 +332,14 @@ export AI_SERVER_AGENT_MANAGE_LIBRARY_ONLY=1
 source "$ASA_MANAGE_SOURCE"
 if ui_has_interactive_tty; then echo 'PHANTOM_CONTROLLING_TTY' >&2; exit 1; fi
 [ "$(credential_principal_fields direct-secondary)" = 'direct|direct/secondary' ] || exit 1
+[ "$(credential_principal_fields direct-chatgpt)" = 'direct|direct/chatgpt' ] || exit 1
+[ "$(credential_principal_fields direct-ci_runner)" = 'direct|direct/ci_runner' ] || exit 1
+for invalid in direct- direct-CAPS direct-some/other direct-.. mcp-gateway; do
+  if credential_principal_fields "$invalid" >/dev/null; then
+    echo "INVALID_MCP_PRINCIPAL_ACCEPTED=$invalid" >&2
+    exit 1
+  fi
+done
 if credential_principal_fields mcp-gateway >/dev/null; then
   echo 'RETIRED_GATEWAY_PRINCIPAL_REISSUABLE' >&2
   exit 1

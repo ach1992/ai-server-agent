@@ -862,9 +862,12 @@ status(){
 random_mcp_token(){ od -An -N32 -tx1 /dev/urandom | tr -d ' \n'; printf '\n'; }
 
 credential_principal_fields(){
-  case "$1" in
-    direct-default) printf 'direct|direct/default\n' ;;
-    direct-secondary) printf 'direct|direct/secondary\n' ;;
+  local suffix
+  case "${1:-}" in
+    direct-*)
+      suffix="${1#direct-}"
+      [[ "$suffix" =~ ^[a-z0-9][a-z0-9_-]*$ ]] || return 1
+      printf 'direct|direct/%s\n' "$suffix" ;;
     *) return 1 ;;
   esac
 }
@@ -874,7 +877,7 @@ validate_credential_store_file(){
   [ -f "$CREDENTIAL_STORE" ] && [ ! -L "$CREDENTIAL_STORE" ] || die "Named MCP credential store is missing or unsafe: $CREDENTIAL_STORE"
   meta="$(stat -c '%u:%G:%a' "$CREDENTIAL_STORE" 2>/dev/null || true)"
   [ "$meta" = "0:$AGENT_USER:640" ] || die "Named MCP credential store must be root:$AGENT_USER with mode 0640; found ${meta:-unknown}."
-  jq -e 'type=="object" and .version==1 and (.credentials|type)=="array" and (.credentials|length)>0 and (.credentials|length)<=2' "$CREDENTIAL_STORE" >/dev/null 2>&1 || die "Named MCP credential store is malformed."
+  jq -e 'type=="object" and .version==1 and (.credentials|type)=="array" and (.credentials|length)>0' "$CREDENTIAL_STORE" >/dev/null 2>&1 || die "Named MCP credential store is malformed."
 }
 
 verify_mcp_token_local(){
@@ -960,7 +963,7 @@ credential_issue(){ (
   backup="$(mktemp "$CONTROL_DIR/.mcp-credentials.backup.XXXXXX")"
   cp -a "$CREDENTIAL_STORE" "$backup"
   jq --arg id "$principal" --arg class "$class" --arg name "$name" --arg verifier "$verifier" --arg created "$created" --arg now "$now" --argjson existed "$existed" '
-    .credentials = ([.credentials[] | select(.principal.id != $id and ($id != "direct-secondary" or .principal.id != "mcp-gateway"))] + [{
+    .credentials = ([.credentials[] | select(.principal.id != $id and .principal.id != "mcp-gateway")] + [{
       principal:{id:$id,class:$class,name:$name},
       verifier_algorithm:"sha256-v1",
       verifier:$verifier,
@@ -1045,7 +1048,7 @@ credential_prepare_rollback(){ (
     log "Only direct/default is stored. No optional credential removal is needed."
     return 0
   fi
-  warn "Rollback preparation removes ALL non-default credential records. Secondary clients immediately lose access; a retired Gateway record cannot be reactivated by the older binary. This operation preserves direct/default, but cannot prove that you still possess its bearer. Test your direct/default connection before continuing."
+  warn "Rollback preparation removes ALL non-default credential records. Other named clients immediately lose access; a retired Gateway record cannot be reactivated by the older binary. This operation preserves direct/default, but cannot prove that you still possess its bearer. Test your direct/default connection before continuing."
   if ! confirm "Permanently remove optional MCP credentials and restart the Agent?" no; then
     ui_notice info "Cancelled; credentials unchanged."
     return 20
@@ -1091,6 +1094,8 @@ credential_menu(){
     ui_option 2 'Issue/rotate secondary client credential' caution
     ui_option 3 'Revoke direct credential' destructive
     ui_option 4 'Revoke secondary client credential' destructive
+    ui_option 5 'Issue/rotate additional named client credential' caution
+    ui_option 6 'Revoke additional named client credential' destructive
     ui_option 0 'Back' navigation
     local choice principal action
     if ! ui_read_choice choice 'Choose: '; then
@@ -1098,12 +1103,19 @@ credential_menu(){
       return 0
     fi
     case "$choice" in
-      1|2|3|4)
+      1|2|3|4|5|6)
         case "$choice" in
           1) principal=direct-default; action=credential_issue ;;
           2) principal=direct-secondary; action=credential_issue ;;
           3) principal=direct-default; action=credential_revoke ;;
           4) principal=direct-secondary; action=credential_revoke ;;
+          5|6)
+            if ! ui_read_choice principal 'Client ID (direct-<name>): '; then continue; fi
+            if ! credential_principal_fields "$principal" >/dev/null; then
+              ui_notice warning 'Use a valid ID such as direct-chatgpt (lowercase letters, digits, underscores and hyphens).'
+              pause; continue
+            fi
+            if [ "$choice" = 5 ]; then action=credential_issue; else action=credential_revoke; fi ;;
         esac
         local effect
         if [ "$action" = credential_revoke ]; then
@@ -2830,7 +2842,7 @@ manage_usage(){
   ui_section 'Update settings'
   ui_wrap '  ' 'profile-set development|validation|production, profile-label <label>, profile-label-clear'
   ui_wrap '  ' 'runtime-set <key> <integer>, runtime-reset <key>'
-  ui_wrap '  ' 'credential-rotate direct-default|direct-secondary, credential-revoke direct-default|direct-secondary'
+  ui_wrap '  ' 'credential-rotate direct-<client>, credential-revoke direct-<client> (default and secondary remain valid names)'
   ui_wrap '  ' 'credential-prepare-rollback (explicitly remove optional credentials before a compatible older release)'
   ui_section 'Connection and lifecycle'
   ui_wrap '  ' 'configure-cloudflare, configure-local, configure-manual-tls, cloudflare-cleanup'
@@ -2859,8 +2871,8 @@ case "${1:-menu}" in
   chatgpt|chatgpt-setup) chatgpt_setup ;;
   reveal-auth) reveal_auth ;;
   credentials|credential-status) credential_status ;;
-  credential-rotate) [ "$#" -eq 2 ] || die "Usage: ai-server-agent-manage credential-rotate direct-default|direct-secondary"; credential_issue "$2" ;;
-  credential-revoke) [ "$#" -eq 2 ] || die "Usage: ai-server-agent-manage credential-revoke direct-default|direct-secondary"; credential_revoke "$2" ;;
+  credential-rotate) [ "$#" -eq 2 ] || die "Usage: ai-server-agent-manage credential-rotate direct-<client>"; credential_issue "$2" ;;
+  credential-revoke) [ "$#" -eq 2 ] || die "Usage: ai-server-agent-manage credential-revoke direct-<client>"; credential_revoke "$2" ;;
   credential-prepare-rollback) [ "$#" -eq 1 ] || die "Usage: ai-server-agent-manage credential-prepare-rollback"; credential_prepare_rollback ;;
   setup|configure) connection_menu ;;
   configure-cloudflare) configure_cloudflare ;;

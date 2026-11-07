@@ -779,6 +779,86 @@ func TestNamedCredentialAuthAttachesServerDerivedPrincipal(t *testing.T) {
 	}
 }
 
+// Independently enrolled clients must not be artificially limited to two.
+func TestMCPMultipleNamedClientsAndRevocation(t *testing.T) {
+	cfg := testConfig(t, "bearer")
+	names := []string{"default", "secondary", "chatgpt", "ci_runner", "automation"}
+	records := make([]credential.Record, 0, len(names))
+	tokens := make([]string, len(names))
+	for i, name := range names {
+		tokens[i] = strings.Repeat(string(rune('1'+i)), credential.TokenHexLength)
+		digest, err := credential.VerifyToken(tokens[i])
+		if err != nil {
+			t.Fatal(err)
+		}
+		records = append(records, credential.Record{
+			Principal:         credential.Principal{ID: "direct-" + name, Class: "direct", Name: "direct/" + name},
+			VerifierAlgorithm: credential.VerifierAlgorithm, Verifier: digest,
+			CreatedAt: "2026-10-08T00:00:00Z", Enabled: true,
+		})
+	}
+	path := filepath.Join(cfg.StateDir, "named-clients.json")
+	cfg.BearerTokenFile = ""
+	cfg.CredentialStoreFile = path
+	makeServer := func() *Server {
+		t.Helper()
+		data, err := json.Marshal(credential.Store{Version: credential.StoreVersion, Credentials: records})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, data, 0600); err != nil {
+			t.Fatal(err)
+		}
+		server, err := New(cfg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return server
+	}
+	check := func(server *Server, token, name string, allowed bool) {
+		t.Helper()
+		got := credential.Principal{}
+		protected := server.auth(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			var ok bool
+			got, ok = credential.PrincipalFromContext(r.Context())
+			if !ok {
+				t.Fatal("missing authenticated principal")
+			}
+			w.WriteHeader(http.StatusNoContent)
+		}))
+		request := httptest.NewRequest(http.MethodGet, "/", nil)
+		request.Header.Set("Authorization", "Bearer "+token)
+		recorder := httptest.NewRecorder()
+		protected.ServeHTTP(recorder, request)
+		if allowed && (recorder.Code != http.StatusNoContent || got.ID != "direct-"+name || got.Name != "direct/"+name || got.Class != "direct") {
+			t.Fatalf("client %s failed auth isolation: %d %+v", name, recorder.Code, got)
+		}
+		if !allowed && recorder.Code != http.StatusUnauthorized {
+			t.Fatalf("revoked old client %s still accepted: %d", name, recorder.Code)
+		}
+	}
+	server := makeServer()
+	for i, name := range names {
+		check(server, tokens[i], name, true)
+	}
+	// Revoking one client must not unexpectedly revoke unrelated clients.
+	records[2].Enabled = false
+	records[2].RevokedAt = "2026-10-09T00:00:00Z"
+	server = makeServer()
+	check(server, tokens[2], "chatgpt", false)
+	check(server, tokens[3], "ci_runner", true)
+	// Rotating one client invalidates its previous verifier on next startup.
+	oldToken := tokens[4]
+	newToken := strings.Repeat("a", credential.TokenHexLength)
+	digest, _ := credential.VerifyToken(newToken)
+	records[4].Verifier = digest
+	records[4].RotatedAt = "2026-10-10T00:00:00Z"
+	server = makeServer()
+	check(server, oldToken, "automation", false)
+	check(server, newToken, "automation", true)
+	check(server, tokens[0], "default", true)
+}
+
 func TestRetiredGatewayBearerCannotAccessMCP(t *testing.T) {
 	cfg := testConfig(t, "bearer")
 	direct := strings.Repeat("3", credential.TokenHexLength)

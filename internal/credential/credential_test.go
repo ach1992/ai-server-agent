@@ -165,17 +165,73 @@ func TestRevokedPrincipalFailsClosedWhileAnotherPrincipalRemainsActive(t *testin
 	}
 }
 
-func TestStoreRequiresDirectDefaultPrincipalRecord(t *testing.T) {
+func TestStoreAllowsNamedPrincipalWithoutHistoricalDefault(t *testing.T) {
 	token := strings.Repeat("5", TokenHexLength)
 	store := Store{Version: StoreVersion, Credentials: []Record{{
-		Principal:         Principal{ID: "direct-secondary", Class: "direct", Name: "direct/secondary"},
-		VerifierAlgorithm: VerifierAlgorithm,
-		Verifier:          verifier(token),
-		CreatedAt:         "2026-10-08T00:00:00Z",
-		Enabled:           true,
+		Principal:         Principal{ID: "direct-ci-runner", Class: "direct", Name: "direct/ci-runner"},
+		VerifierAlgorithm: VerifierAlgorithm, Verifier: verifier(token),
+		CreatedAt: "2026-10-08T00:00:00Z", Enabled: true,
 	}}}
-	if err := store.Validate(); err == nil || !strings.Contains(err.Error(), "missing the direct-default principal") {
-		t.Fatalf("Validate() error = %v, want missing direct-default rejection", err)
+	if err := store.Validate(); err != nil {
+		t.Fatalf("active custom principal must be valid: %v", err)
+	}
+	got, ok := store.Authenticate(token)
+	if !ok || got.ID != "direct-ci-runner" {
+		t.Fatalf("custom principal rejected: %+v ok=%v", got, ok)
+	}
+}
+
+func TestManyNamedPrincipalsAreIndependentlyAuthenticated(t *testing.T) {
+	store := Store{Version: StoreVersion}
+	tokens := []string{}
+	for i, name := range []string{"default", "secondary", "chatgpt", "codex", "development", "qa", "automations"} {
+		token := strings.Repeat(string(rune('1'+i)), TokenHexLength)
+		tokens = append(tokens, token)
+		store.Credentials = append(store.Credentials, Record{
+			Principal:         Principal{ID: "direct-" + name, Class: "direct", Name: "direct/" + name},
+			VerifierAlgorithm: VerifierAlgorithm, Verifier: verifier(token), CreatedAt: "2026-10-08T00:00:00Z", Enabled: true,
+		})
+	}
+	if err := store.Validate(); err != nil {
+		t.Fatalf("more than two valid principals refused: %v", err)
+	}
+	for i, name := range []string{"default", "secondary", "chatgpt", "codex", "development", "qa", "automations"} {
+		p, ok := store.Authenticate(tokens[i])
+		if !ok || p.ID != "direct-"+name || p.Name != "direct/"+name {
+			t.Fatalf("principal %s failed authentication: %+v, ok=%v", name, p, ok)
+		}
+	}
+	store.Credentials[3].Enabled = false
+	store.Credentials[3].RevokedAt = "2026-10-09T00:00:00Z"
+	if err := store.Validate(); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := store.Authenticate(tokens[3]); ok {
+		t.Fatal("revoked named client still authenticates")
+	}
+	if p, ok := store.Authenticate(tokens[4]); !ok || p.ID != "direct-development" {
+		t.Fatalf("unrelated named client lost access: %+v ok=%v", p, ok)
+	}
+}
+
+func TestRejectInvalidNamedPrincipalIdentity(t *testing.T) {
+	token := strings.Repeat("9", TokenHexLength)
+	cases := []Principal{
+		{ID: "direct-", Class: "direct", Name: "direct/"},
+		{ID: "direct-CAPS", Class: "direct", Name: "direct/CAPS"},
+		{ID: "direct-user/one", Class: "direct", Name: "direct/user/one"},
+		{ID: "direct-admin", Class: "gateway", Name: "direct/admin"},
+		{ID: "direct-admin", Class: "direct", Name: "direct/wrong"},
+		{ID: "mcp-gateway", Class: "direct", Name: "direct/gateway"},
+	}
+	for _, principal := range cases {
+		store := Store{Version: StoreVersion, Credentials: []Record{{
+			Principal: principal, VerifierAlgorithm: VerifierAlgorithm,
+			Verifier: verifier(token), CreatedAt: "2026-10-08T00:00:00Z", Enabled: true,
+		}}}
+		if err := store.Validate(); err == nil {
+			t.Errorf("accepted inconsistent principal identity %+v", principal)
+		}
 	}
 }
 
