@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -35,7 +36,7 @@ func TestManagedCredentialLoginPinnedChromium(t *testing.T) {
 	rotatingTokens := make(map[string]string)
 	var rotatingGets, rotatingCookieProbes int
 	var rotatingInitialID, rotatingPostID string
-	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	app := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if r.URL.Path == "/origin-parity" {
 			// Use the real Chromium URL parser, not a mock, to compare
@@ -165,12 +166,42 @@ func TestManagedCredentialLoginPinnedChromium(t *testing.T) {
     <span id="mfa" style="display:none">MFA required</span>
   </form>`+errorNotice)
 	}))
+	// Ordinary CI runs on a random loopback port. An explicitly opt-in,
+	// root-only disposable Test-host run additionally proves a real HTTP :80
+	// or HTTPS :443 login with the registered endpoint's explicit default
+	// port; no external listener or privileged port is used in normal CI.
+	defaultPortMode := os.Getenv("ASA_BROWSER_DEFAULT_PORT_SMOKE")
+	switch defaultPortMode {
+	case "":
+		app.Start()
+	case "http", "https":
+		if os.Geteuid() != 0 {
+			t.Skip("default-port Browser acceptance requires explicit root-only Test-host opt-in")
+		}
+		port := 80
+		if defaultPortMode == "https" {
+			port = 443
+		}
+		listener, err := net.Listen("tcp", fmt.Sprintf("127.0.0.1:%d", port))
+		if err != nil {
+			t.Fatalf("dedicated Test-host loopback port unavailable: %v", err)
+		}
+		_ = app.Listener.Close()
+		app.Listener = listener
+		if defaultPortMode == "https" {
+			app.StartTLS()
+		} else {
+			app.Start()
+		}
+	default:
+		t.Fatal("unsupported default-port Browser smoke mode")
+	}
 	defer app.Close()
 	d := t.TempDir()
 	if err := os.Mkdir(filepath.Join(d, "downloads"), 0700); err != nil {
 		t.Fatal(err)
 	}
-	script, err := managedSessionRunner(engine, filepath.Join(d, "profile"), filepath.Join(d, "downloads"), false, "isolated")
+	script, err := managedSessionRunner(engine, filepath.Join(d, "profile"), filepath.Join(d, "downloads"), defaultPortMode == "https", "isolated")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -238,12 +269,12 @@ func TestManagedCredentialLoginPinnedChromium(t *testing.T) {
 			t.Fatalf("navigation failed: %+v", got)
 		}
 	}
-	origin := app.URL
+	origin := serviceaccess.Origin(app.URL)
 	request := func(nonce, pass string) map[string]any {
 		return map[string]any{"type": "credential_login", "nonce": nonce, "expected_origin": origin,
 			"username": "testadmin", "secret": pass, "username_selector": "#user", "secret_selector": "#secret",
 			"submit_selector": "#submit", "success_selector": "#dashboard", "success_url": "", "challenge_selector": "#mfa",
-			"login_error_selector": "#login-error", "service_endpoint": origin + "/login"}
+			"login_error_selector": "#login-error", "service_endpoint": app.URL + "/login"}
 	}
 	// Guard against the original F1 false-positive: Chromium canonicalizes
 	// explicit default ports, while Go supplies expected_origin to the
