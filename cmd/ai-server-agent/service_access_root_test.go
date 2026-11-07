@@ -77,4 +77,13 @@ func TestOperatorLocalProtectedCredentialFileAcceptance(t *testing.T) {
 	if _, err := store.Resolve(entries[0].ID, cfg.InstanceID); err == nil {
 		t.Fatal("revoked imported credential was still usable")
 	}
+	// Offline application code is registered without an invented endpoint.
+	if err := enrollServiceCredential(cfg, []string{"add", "--service", "local-license",
+		"--kind", "access_code", "--secret-file", input, "--ttl-days", "1"}); err != nil {
+		t.Fatal(err)
+	}
+	all, err := store.List()
+	if err != nil || len(all) != 2 || all[1].Endpoint != "" || all[1].Kind != "access_code" {
+		t.Fatalf("root-local application credential not enrolled: %+v %v", all, err)
+	}
 }

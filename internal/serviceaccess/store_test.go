@@ -380,3 +380,36 @@ func TestRegisterWithSecretAtomicAndGenericKinds(t *testing.T) {
 		t.Fatal("unsupported generation changed existing protected material")
 	}
 }
+
+// Offline app secrets and activation codes must not require invented HTTP
+// endpoints. Their refs remain Agent-host-bound and cannot authorize Browser.
+func TestHostLocalCredentialWithoutNetworkEndpoint(t *testing.T) {
+	st := New(t.TempDir())
+	reg := Registration{HostID: "asa_local_app", Service: "offline-license", Purpose: "authorized local plugin"}
+	meta, err := st.RegisterWithSecret(reg, "access_code", "SYNTHETIC-LOCAL-CODE", 7, false)
+	if err != nil || meta.Endpoint != "" || meta.Status != "ready" {
+		t.Fatalf("local credential failed: %+v %v", meta, err)
+	}
+	got, err := st.Resolve(meta.ID, reg.HostID)
+	if err != nil || got.Secret != "SYNTHETIC-LOCAL-CODE" {
+		t.Fatal("local credential inaccessible to protected root store")
+	}
+	if err := ValidEndpoint(got.Endpoint); err == nil {
+		t.Fatal("missing endpoint falsely considered a Browser destination")
+	}
+	if _, err := st.Resolve(meta.ID, "other-agent"); err == nil {
+		t.Fatal("local reference escaped its Agent identity")
+	}
+	generated, err := st.Register(Registration{HostID: reg.HostID, Service: "local-api-token"})
+	if err != nil || generated.Endpoint != "" {
+		t.Fatalf("AI cannot register local-only credential metadata: %+v %v", generated, err)
+	}
+	ready, err := st.Generate(generated.ID, "token", "", 1, false)
+	if err != nil || ready.Status != "ready" || ready.Kind != "token" {
+		t.Fatalf("AI-generated local-only token missing: %+v %v", ready, err)
+	}
+	secret, err := st.Resolve(generated.ID, reg.HostID)
+	if err != nil || len(secret.Secret) != 64 {
+		t.Fatal("generated token not retained by generic protected store")
+	}
+}

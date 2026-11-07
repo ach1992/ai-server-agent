@@ -37,7 +37,7 @@ type ServiceAccessInput struct {
 	GuestUUID    string `json:"guest_uuid,omitempty" jsonschema:"Native volatile.uuid from current managed_environment inspect"`
 	Service      string `json:"service,omitempty" jsonschema:"Descriptive service name, not a fixed allowlist; e.g. WordPress or aaPanel"`
 	Purpose      string `json:"purpose,omitempty" jsonschema:"Non-secret work/purpose label"`
-	Endpoint     string `json:"endpoint,omitempty" jsonschema:"Non-secret absolute service target URI (e.g. https://app.example/login, ssh://git.example:22, postgres://db.example:5432/app); no userinfo, query tokens or fragments. Storage does not itself grant an authentication adapter"`
+	Endpoint     string `json:"endpoint,omitempty" jsonschema:"Optional non-secret absolute network-service URI (https, ssh, postgres, etc.). Omit for host-local app keys/codes without any network endpoint; no userinfo/query tokens/fragments. Storage alone does not grant an authentication adapter"`
 	Username     string `json:"username,omitempty" jsonschema:"Optional non-secret username for registration or generated credentials"`
 	Kind         string `json:"kind,omitempty" jsonschema:"Random generation supports only password or token; other kinds (api_key, private_key, access_code) are imported with operator-local service-access add/enroll; values never leave protected Executor"`
 	TTLDays      int    `json:"ttl_days,omitempty" jsonschema:"Expiration from generation/renewal in days; 0 defaults to 30; set never_expires instead for explicit no expiry"`

@@ -89,9 +89,10 @@ func (s *Store) Path() string { return s.dir }
 
 // ValidServiceTarget validates a target's non-secret identity only, not an
 // executable network operation. Records support application-specific network
-// schemes (SSH, database, API, etc.) without allocating a Browser session or
-// granting arbitrary code a way to retrieve the credential. Each authorized
-// consumer must independently validate its supported protocol and destination.
+// schemes (SSH, database, API, etc.) or omit an endpoint entirely for a
+// host-local application key/code. This does not create a Browser session or
+// grant arbitrary code access to the credential. Each authorized consumer
+// must independently validate its supported protocol and destination.
 func ValidServiceTarget(raw string) error {
 	if len(raw) == 0 || len(raw) > 2048 || strings.ContainsAny(raw, "\r\n\x00") {
 		return errors.New("service target must be a bounded network URI without control characters")
@@ -138,8 +139,13 @@ func validateRegistration(r Registration) error {
 	if (r.Guest == "") != (r.GuestUUID == "") || (r.Guest != "" && r.Project == "") || (r.Guest == "" && r.Project != "") || len(r.Guest) > 120 || len(r.Project) > 120 || len(r.GuestUUID) > 120 {
 		return errors.New("guest requires project and verified native UUID")
 	}
-	if err := ValidServiceTarget(r.Endpoint); err != nil {
-		return err
+	// Host-local application keys and activation codes do not inherently
+	// have a network endpoint. Browser/network consumers must independently
+	// require and validate their own concrete destination before using a ref.
+	if r.Endpoint != "" {
+		if err := ValidServiceTarget(r.Endpoint); err != nil {
+			return err
+		}
 	}
 	for _, x := range []string{r.HostID, r.Service, r.Purpose, r.Username, r.Guest, r.GuestUUID, r.Project} {
 		if strings.IndexFunc(x, func(c rune) bool { return c < 32 || c == 127 }) >= 0 {

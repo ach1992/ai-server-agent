@@ -32,13 +32,13 @@ type serviceCredentialFlags struct {
 
 func parseServiceCredentialFlags(argv []string) (serviceCredentialFlags, error) {
 	if len(argv) < 1 || (argv[0] != "enroll" && argv[0] != "add") {
-		return serviceCredentialFlags{}, errors.New("usage: service-access add --service NAME --endpoint URI [--kind KIND] [--secret-file ROOT_ONLY_FILE] | service-access enroll --ref svc_ID [--kind KIND] [--secret-file ROOT_ONLY_FILE]")
+		return serviceCredentialFlags{}, errors.New("usage: service-access add --service NAME [--endpoint URI] [--kind KIND] [--secret-file ROOT_ONLY_FILE] | service-access enroll --ref svc_ID [--kind KIND] [--secret-file ROOT_ONLY_FILE]")
 	}
 	mode := argv[0]
 	flags := flag.NewFlagSet("service-access "+mode, flag.ContinueOnError)
 	ref := flags.String("ref", "", "existing opaque service reference")
 	service := flags.String("service", "", "nonsecret service name (add only)")
-	endpoint := flags.String("endpoint", "", "nonsecret service target URI (add only)")
+	endpoint := flags.String("endpoint", "", "optional nonsecret network-service URI; omit for host-local app keys or codes (add only)")
 	purpose := flags.String("purpose", "", "nonsecret purpose label (add only)")
 	kind := flags.String("kind", "password", "nonsecret credential kind, e.g. password, api_key, private_key, access_code")
 	username := flags.String("username", "", "nonsecret username (optional)")
@@ -57,11 +57,13 @@ func parseServiceCredentialFlags(argv []string) (serviceCredentialFlags, error) 
 			return serviceCredentialFlags{}, errors.New("enroll requires --ref; service identity changes require an explicit separate update")
 		}
 	} else {
-		if *ref != "" || *service == "" || *endpoint == "" {
-			return serviceCredentialFlags{}, errors.New("add requires --service and --endpoint; --ref is only for enroll")
+		if *ref != "" || *service == "" {
+			return serviceCredentialFlags{}, errors.New("add requires --service; --ref is only for enroll")
 		}
-		if err := serviceaccess.ValidServiceTarget(*endpoint); err != nil {
-			return serviceCredentialFlags{}, errors.New("invalid service target URI: no secrets, userinfo, query, or fragment")
+		if *endpoint != "" {
+			if err := serviceaccess.ValidServiceTarget(*endpoint); err != nil {
+				return serviceCredentialFlags{}, errors.New("invalid service target URI: no secrets, userinfo, query, or fragment")
+			}
 		}
 	}
 	return serviceCredentialFlags{

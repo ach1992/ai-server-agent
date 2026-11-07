@@ -352,8 +352,10 @@ be fabricated with that generator. The operator can add a previously issued
 credential with one private interactive `service-access add` command, or import
 a bounded multi-line textual key from a root-owned file; no generic secret-read
 MCP operation is introduced. A target can be
-HTTP(S), SSH, a database, or another network-style application URI; recording
-a target does not confer the ability to authenticate or make a network request.
+HTTP(S), SSH, a database, or another network-style application URI, or a
+host-local application identity with **no** endpoint for keys/codes unrelated
+to a network service; recording a target does not confer the ability to
+authenticate or make a network request.
 The secret remains private to the root Executor and is never an ordinary
 MCP/worker-shell/environment value. Today, existing authorized consumers are
 an isolated Browser form login (**HTTP(S)-only, same-origin**) and an explicitly

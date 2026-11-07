@@ -26,13 +26,21 @@ func TestServiceAccessOperatorAddOneCommandAndExistingEnroll(t *testing.T) {
 	}
 }
 
+func TestServiceAccessOperatorLocalApplicationDoesNotRequireFakeURL(t *testing.T) {
+	local, err := parseServiceCredentialFlags([]string{"add", "--service", "local-license",
+		"--kind", "access_code", "--purpose", "offline entitlement"})
+	if err != nil || local.endpoint != "" || local.kind != "access_code" || local.service != "local-license" {
+		t.Fatalf("host-local credential unnecessarily requires network endpoint: %+v %v", local, err)
+	}
+}
+
 func TestServiceAccessOperatorRejectsPlaintextFlagsAndAmbiguousOptions(t *testing.T) {
 	for _, args := range [][]string{
 		{"add", "--service", "app", "--endpoint", "http://host", "--password", "SECRET"},
 		{"add", "--service", "app", "--endpoint", "http://host", "SECRET"},
 		{"add", "--service", "app", "--endpoint", "https://user:password@host"},
 		{"add", "--service", "app", "--endpoint", "ssh://host?token=SECRET"},
-		{"add", "--service", "app"},
+		{"add", "--endpoint", "https://host"},
 		{"add", "--service", "app", "--endpoint", "ssh://host", "--ref", "svc_123"},
 		{"enroll", "--ref", "svc_123", "--endpoint", "https://host"},
 		{"enroll", "--kind", "token"},
