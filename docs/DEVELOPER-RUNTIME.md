@@ -341,6 +341,24 @@ Developer subprocesses receive only the environment appropriate to their executi
 - worker HOME/config/cache remains separate from project worktrees;
 - secret values are not returned merely to make environment status discoverable.
 
+**Service-access credentials are a general Agent/Executor capability, not a
+Browser add-on.** The shared root-only `serviceaccess` store owns opaque refs,
+enrollment, rotation/expiry/revocation and target identity. A target can be
+HTTP(S), SSH, a database, or another network-style application URI; recording
+a target does not confer the ability to authenticate or make a network request.
+The secret remains private to the root Executor and is never an ordinary
+MCP/worker-shell/environment value. Today, existing authorized consumers are
+an isolated Browser form login (**HTTP(S)-only, same-origin**) and an explicitly
+guest/UUID-bound native Incus exec with confidential stdin. Both use the same
+ref/lifecycle and check identity and expiry when invoked. Other applications
+must add a **real, bounded typed consumer** only when needed: independently
+validate their exact destination/protocol and operation permissions, deliver
+credentials through a private channel (not argv, logs or tool output), handle
+retry/revoke/uncertain outcomes, and return only safe diagnostics. Never add a
+generic "resolve secret" public endpoint, auto-export tokens to a shell, or
+couple the store to Playwright/aaPanel/WordPress. Existing MCP principal
+authentication is independent from these target-service credentials.
+
 ### Generated evidence and artifacts
 
 Browser traces/screenshots, debug logs/output, profiles, test artifacts and similar generated evidence are runtime artifacts unless intentionally promoted into project truth.

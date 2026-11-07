@@ -86,13 +86,40 @@ func New(stateDir string) *Store {
 }
 func (s *Store) Path() string { return s.dir }
 
-func ValidEndpoint(raw string) error {
+// ValidServiceTarget validates a target's non-secret identity only, not an
+// executable network operation. Records support application-specific network
+// schemes (SSH, database, API, etc.) without allocating a Browser session or
+// granting arbitrary code a way to retrieve the credential. Each authorized
+// consumer must independently validate its supported protocol and destination.
+func ValidServiceTarget(raw string) error {
+	if len(raw) == 0 || len(raw) > 2048 || strings.ContainsAny(raw, "\r\n\x00") {
+		return errors.New("service target must be a bounded network URI without control characters")
+	}
 	u, err := url.Parse(raw)
-	if err != nil || (u.Scheme != "https" && u.Scheme != "http") || u.Hostname() == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
+	if err != nil || u.Scheme == "" || u.Host == "" || u.Hostname() == "" ||
+		u.User != nil || u.Opaque != "" || u.RawQuery != "" || u.ForceQuery || u.Fragment != "" {
+		return errors.New("service target must be an absolute network URI without userinfo, query or fragment")
+	}
+	// A local file or code-like URL is not a service destination, even when
+	// it syntactically includes an authority/host. Target URI never serves
+	// as a command, filesystem path, or a caller-selected secret sink.
+	switch strings.ToLower(u.Scheme) {
+	case "file", "data", "javascript", "about", "blob":
+		return errors.New("service target must use a network-service URI scheme")
+	}
+	return nil
+}
+
+// ValidEndpoint is the narrower HTTP(S) Browser/API endpoint contract.
+// Accepting a generic target record must never automatically authorize
+// credential delivery through an HTTP-based consumer.
+func ValidEndpoint(raw string) error {
+	if err := ValidServiceTarget(raw); err != nil {
 		return errors.New("endpoint must be an HTTP(S) URL without userinfo, query or fragment")
 	}
-	if strings.ContainsAny(raw, "\r\n\x00") || len(raw) > 2048 {
-		return errors.New("invalid endpoint length or characters")
+	u, _ := url.Parse(raw)
+	if u.Scheme != "https" && u.Scheme != "http" {
+		return errors.New("endpoint must be an HTTP(S) URL without userinfo, query or fragment")
 	}
 	return nil
 }
@@ -110,7 +137,7 @@ func validateRegistration(r Registration) error {
 	if (r.Guest == "") != (r.GuestUUID == "") || (r.Guest != "" && r.Project == "") || (r.Guest == "" && r.Project != "") || len(r.Guest) > 120 || len(r.Project) > 120 || len(r.GuestUUID) > 120 {
 		return errors.New("guest requires project and verified native UUID")
 	}
-	if err := ValidEndpoint(r.Endpoint); err != nil {
+	if err := ValidServiceTarget(r.Endpoint); err != nil {
 		return err
 	}
 	for _, x := range []string{r.HostID, r.Service, r.Purpose, r.Username, r.Guest, r.GuestUUID, r.Project} {
@@ -541,7 +568,7 @@ func (s *Store) Modify(ref string, change Registration, allowOriginChange bool) 
 			}
 			next := current
 			if change.Endpoint != "" {
-				if err := ValidEndpoint(change.Endpoint); err != nil {
+				if err := ValidServiceTarget(change.Endpoint); err != nil {
 					return false, err
 				}
 				if Origin(change.Endpoint) != Origin(current.Endpoint) && !allowOriginChange {

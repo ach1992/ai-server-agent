@@ -77,6 +77,13 @@ func (s *Server) browserSessionCredentialLogin(ctx context.Context, req Request)
 	if err != nil {
 		return managedErr(err)
 	}
+	// Service references are shared infrastructure, not Browser-specific.
+	// An SSH/database/app credential may be valid in the store but cannot
+	// be submitted through this HTTP(S) Browser consumer.
+	if serviceaccess.ValidEndpoint(rec.Endpoint) != nil {
+		return browserSessionError("credential_web_endpoint_required", "validation",
+			errors.New("registered service target is not an HTTP(S) Browser endpoint"))
+	}
 	if rec.Guest != "" {
 		ready := s.managedBackend().Ready(ctx)
 		if !ready.Available {

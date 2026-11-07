@@ -37,7 +37,7 @@ type ServiceAccessInput struct {
 	GuestUUID    string `json:"guest_uuid,omitempty" jsonschema:"Native volatile.uuid from current managed_environment inspect"`
 	Service      string `json:"service,omitempty" jsonschema:"Descriptive service name, not a fixed allowlist; e.g. WordPress or aaPanel"`
 	Purpose      string `json:"purpose,omitempty" jsonschema:"Non-secret work/purpose label"`
-	Endpoint     string `json:"endpoint,omitempty" jsonschema:"Current URL including scheme/host/port/path; must not contain passwords, query tokens or fragments"`
+	Endpoint     string `json:"endpoint,omitempty" jsonschema:"Non-secret absolute service target URI (e.g. https://app.example/login, ssh://git.example:22, postgres://db.example:5432/app); no userinfo, query tokens or fragments. Storage does not itself grant an authentication adapter"`
 	Username     string `json:"username,omitempty" jsonschema:"Optional non-secret username for registration or generated credentials"`
 	Kind         string `json:"kind,omitempty" jsonschema:"Credential kind for generate: password or token; generated value never leaves root Executor"`
 	TTLDays      int    `json:"ttl_days,omitempty" jsonschema:"Expiration from generation/renewal in days; 0 defaults to 30; set never_expires instead for explicit no expiry"`
@@ -57,7 +57,7 @@ func (s *Server) registerManagedTools() {
 		return s.responseResult(resp)
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "service_access",
-		Description: "Agent-local root-protected target-service records. Never returns secret values. Register verified guest-bound or independently authorized external endpoint; generate a strong local password/token without exposing it; list/inspect metadata; renew (default 30 days/no-expiry), revoke, delete or clean expired values. Third-party credentials can be enrolled/rotated with the operator-local no-echo CLI, never through MCP parameters, chat or logs. Credential refs are scoped to the authenticated Agent instance. No mandatory Vault/DB/new daemon.",
+		Description: "Shared root-protected target-service credential records for Browser, native guest and future application/API consumers; NOT a Browser-only credential store. Never returns secret values. Register a verified guest-bound or independently authorized service URI, generate or operator-enroll secrets; list/inspect metadata; renew, revoke, delete, or cleanup. An opaque ref is NOT permission to extract its secret: each consuming operation must enforce its own protocol, target binding and authorization. Browser protected login requires an HTTP(S) endpoint; existing native guest exec uses confidential stdin. No mandatory Vault/DB/new daemon.",
 		Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in ServiceAccessInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		reg := serviceaccess.Registration{Project: in.Project, Guest: in.Guest, GuestUUID: in.GuestUUID, Service: in.Service, Purpose: in.Purpose, Endpoint: in.Endpoint, Username: in.Username}
 		op := serviceaccess.Input{Operation: in.Operation, Ref: in.Ref, Registration: reg, Kind: in.Kind, Username: in.Username, TTLDays: in.TTLDays, NeverExpires: in.NeverExpires}

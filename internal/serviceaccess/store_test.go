@@ -254,3 +254,67 @@ func TestMultipleServiceAccountsSameEndpoint(t *testing.T) {
 		t.Fatal("identical duplicate account allowed")
 	}
 }
+
+// Credential records identify application targets independently of how the
+// authorized consumer eventually uses them. No protocol/provider is promoted
+// to a privileged secret retrieval API by registering its URI.
+func TestGenericTargetSchemesShareProtectedCredentialLifecycle(t *testing.T) {
+	for _, endpoint := range []string{
+		"https://api.example.org/v1", "ssh://git.example.org:22",
+		"postgres://db.example.org:5432/reports", "mysql://db.internal:3306/app",
+		"app://local/authorized-service", "grpcs://api.example.org:443",
+	} {
+		t.Run(endpoint, func(t *testing.T) {
+			st := New(t.TempDir())
+			meta, err := st.Register(Registration{
+				HostID: "asa_generic_host", Service: "service", Endpoint: endpoint,
+				Purpose: "authorized application integration",
+			})
+			if err != nil || meta.Endpoint != endpoint || meta.Status != "unenrolled" {
+				t.Fatalf("register: %+v %v", meta, err)
+			}
+			const secret = "PRIVATE-SYNTHETIC-CREDENTIAL-DO-NOT-EXPOSE"
+			enrolled, err := st.Enroll(meta.ID, "token", "", secret, 3, false)
+			if err != nil || enrolled.Status != "ready" {
+				t.Fatalf("enroll: %+v %v", enrolled, err)
+			}
+			encoded, _ := json.Marshal(enrolled)
+			if strings.Contains(string(encoded), secret) || strings.Contains(string(encoded), "\"secret\"") {
+				t.Fatal("credential disclosed through generic metadata")
+			}
+			rec, err := st.Resolve(meta.ID, "asa_generic_host")
+			if err != nil || rec.Secret != secret || rec.Endpoint != endpoint {
+				t.Fatalf("private resolve: %v", err)
+			}
+			if _, err := st.Resolve(meta.ID, "another-host"); err == nil {
+				t.Fatal("host-bound ref authorized elsewhere")
+			}
+			if _, err := st.Revoke(meta.ID); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.Resolve(meta.ID, "asa_generic_host"); err == nil {
+				t.Fatal("revoked ref still usable")
+			}
+		})
+	}
+}
+func TestGenericTargetURIRejectsSecretBearingAndLocalScheme(t *testing.T) {
+	for _, v := range []string{
+		"", "javascript:alert(1)", "file:///tmp/secret", "file://host/tmp/secret",
+		"ssh://admin:password@host:22", "ssh://user@host", "ssh://host?token=abc",
+		"postgres://db.example/app#token", "../relative-path", "mailto:admin@example.org",
+		"ssh:///missing-host", "ssh://host\nother", "data://host/object",
+	} {
+		if err := ValidServiceTarget(v); err == nil {
+			t.Errorf("accepted secret-bearing or unsafe target %q", v)
+		}
+	}
+	for _, v := range []string{"ssh://host:22", "postgres://db.example:5432/app", "app://local/service"} {
+		if err := ValidServiceTarget(v); err != nil {
+			t.Errorf("generic target refused: %q: %v", v, err)
+		}
+		if err := ValidEndpoint(v); err == nil {
+			t.Errorf("browser HTTP validator accepted nonweb target %q", v)
+		}
+	}
+}
