@@ -213,9 +213,9 @@ The public endpoint remains bearer-authenticated. Treat the bearer credential as
 
 ### MCP credential lifecycle
 
-The Agent keeps a bounded named-principal credential set. `direct/default` is the normal direct-MCP client principal. An optional `direct/secondary` identity lets a second client use an independently rotatable/revocable bearer while sharing the same supported tools and approval policy. No separate connector is installed. Any older stored `mcp-gateway` identity is retained only as an inert compatibility record: its bearer cannot authenticate and a new secondary issue replaces the record. Callers cannot select or override their authenticated principal.
+The Agent supports **any practical number of independently named direct-MCP clients**, without a hard-coded two-client principal cap. Fresh installations still issue conventional `direct/default`; existing `direct/secondary` records remain fully supported. Additional client names such as `direct/chatgpt`, `direct/ci_runner` or `direct/development` use canonical IDs `direct-chatgpt`, `direct-ci_runner`, `direct-development`. Each receives its own independently rotatable/revocable 64-hex-character bearer, with the same supported tools and approval rules; a client cannot select or override another principal. An older stored `mcp-gateway` identity stays inert and its bearer never authenticates; new credential issuance removes that retired record. No second connector/permission engine is introduced.
 
-Use `sudo ai-server-agent-manage credential-status` for non-secret state, `credential-rotate direct-default|direct-secondary` to issue or rotate one credential, and `credential-revoke direct-default|direct-secondary` to revoke one. Secondary credentials are optional, not created at installation. Rotation is immediate after verified service cutover: there is no grace overlap. Revoking the last **usable** credential is refused, even if an inert retired record remains in the store. Safe uninstall preserves the credential store; update/repair preserve it; purge removes Agent-owned credential state so a later fresh install gets fresh credentials.
+Use `sudo ai-server-agent-manage credential-status` for non-secret inventory, `sudo ai-server-agent-manage credential-rotate direct-chatgpt` to issue or rotate a named client, and `sudo ai-server-agent-manage credential-revoke direct-chatgpt` to revoke it. `direct-default` and `direct-secondary` continue working as principal IDs. The interactive Credentials menu also accepts additional client IDs. Only lowercase ASCII letters, digits, underscores and hyphens are allowed after the `direct-` prefix to keep principal identity canonical and safe in shell/API/audit contexts. Rotation is immediate after verified service cutover, with no grace overlap. Revoking the last **usable** bearer is refused, even if a retired record remains. Safe uninstall/update/repair preserve the credential store; explicit purge removes it. This is capability availability, not automatic permission to issue a credential without operator authorization.
 
 Existing installations migrate the current bearer into `direct/default` without forced rotation. Migration activates and verifies the verifier-backed store before the legacy plaintext token/header file is removed; on failed activation the previous known-good legacy configuration is restored for recovery.
 
@@ -278,7 +278,7 @@ This is an interactive, confirmed **destructive credential operation**.
 It deletes optional principal records, including revoked `direct/secondary`
 and retired Gateway entries, while keeping the active `direct/default`
 verifier; it restarts and health-checks the current Agent with recovery on
-failure. Secondary clients immediately lose access and need new credentials
+failure. Other named clients immediately lose access and need new credentials
 if later reintroduced. **Do not run it to try to make `v0.1.14` or another
 unsupported legacy release eligible**: removing credentials cannot restore
 missing privileged lifecycle trust.
@@ -398,7 +398,7 @@ Purge does **not** silently delete Cloudflare resources. If recorded Cloudflare 
 Key boundaries:
 
 - public MCP access requires bearer authentication;
-- MCP bearer credentials are named direct-client principals (`direct/default` and optional `direct/secondary`) with independently revocable/rotatable verifier records; bearer plaintext is not retained after issuance/migration;
+- MCP bearer credentials are independent named direct-client principals (`direct/default`, `direct/secondary` and operator-issued additional clients) with independently revocable/rotatable verifier records; bearer plaintext is not retained after issuance/migration;
 - direct public mode requires native TLS;
 - ordinary commands run as `aiworker`; isolated managed Browser runs with `aibrowser` and private 0700 HOME/scratch, while default shared Browser and `browser_run` preserve worker ownership; explicit `chromium_sandbox=true` for isolated managed Browser additionally requests start-verified Chromium renderer seccomp-BPF/user+PID namespaces, without changing the common `aibrowser` UID or globally enabling this on all hosts;
 - root commands are intentional capabilities evaluated by executor policy/approval guardrails;
