@@ -68,7 +68,7 @@ go test ./internal/browser -run '^(TestBrowserFlow(PinnedRuntimeAcceptance|Revie
 # compatibility as the runner UID. This is NOT the separate root/aibrowser
 # cgroup proof, and must never be reported as one.
 ASA_BROWSER_SANDBOX_PINNED_WORKER_TEST=1 go test ./internal/browser -run '^TestIsolatedChromiumSandboxPinnedWorkerCompatibility$' -v -count=1 | tee -a "$log"
-go test ./internal/executor -run '^(TestBrowserSession|TestBrowserAdmissionStatus|TestBrowserSandbox|TestChromiumSandboxProcessTitleAndPinnedBinary|TestCredentialDerivedBrowserEvidenceGate)' -v -count=1 | tee -a "$log"
+go test ./internal/executor -run '^(TestBrowserSession|TestBrowserAdmissionStatus|TestBrowserSandbox|TestChromiumSandboxProcessTitleAndPinnedBinary|TestCredentialDerivedBrowserEvidenceAndScriptAvailable)' -v -count=1 | tee -a "$log"
 go test ./internal/mcp -run '^(TestOfficialSDKCanDiscoverTools|TestBrowserSessionKnownFlowFailureMCP|TestBrowserSessionCaptureMCP)' -v -count=1 | tee -a "$log"
 # A stale regex or environment cannot make a critical new Browser test
 # silently SKIP while the pinned acceptance job still reports SUCCESS.
@@ -93,7 +93,7 @@ for name in \
   TestBrowserSessionExitedRetentionGCAndExpiry \
   TestBrowserSessionKnownFlowFailurePreservesSession \
   TestBrowserSessionKnownFlowFailureMCP \
-  TestCredentialDerivedBrowserEvidenceGate; do
+  TestCredentialDerivedBrowserEvidenceAndScriptAvailable; do
   grep -Fq -- "--- PASS: $name (" "$log" || {
     echo "Missing pinned Browser gate result: $name" >&2
     exit 1
