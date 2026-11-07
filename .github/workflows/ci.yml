@@ -385,7 +385,15 @@ jobs:
           fi
           grep -qF 'exec.CommandContext(ctx, "/bin/bash", "--noprofile", "--norc", "-s")' internal/executor/foundation.go
           grep -qF 'cmd.Stdin = strings.NewReader(command)' internal/executor/foundation.go
-          grep -qF 'newBoundedOutputCollector(maxSyncOutputBytes)' internal/executor/foundation.go
+          # OUT-01: the bounded in-response collector is now wrapped in a
+          # recoverable synchronous capture. Do not regress either layer:
+          # preview stays bounded; full result must be committed to the
+          # existing private job_output continuation before advertising ID.
+          grep -qF 'out := newSyncOutputCapture(s)' internal/executor/foundation.go
+          grep -qF 'preview: newBoundedOutputCollector(maxSyncOutputBytes)' internal/executor/sync_output.go
+          grep -qF 'captureErr := out.Finish(&resp' internal/executor/foundation.go
+          grep -qF 'resp.JobID = w.jobID' internal/executor/sync_output.go
+          TMPDIR=/var/tmp go test ./internal/executor -run '^TestSyncOutput' -count=1
           if grep -qF 'bytes.Buffer' internal/executor/foundation.go; then
             echo 'synchronous command output must not use an unbounded bytes.Buffer' >&2
             exit 1
