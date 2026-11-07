@@ -207,6 +207,178 @@ func TestNativeReadinessQueriesSupportedAPI(t *testing.T) {
 func createRequest() Request {
 	return Request{Operation: "create", Project: "default", Instance: "guest-a", Image: "images:debian/13", Type: "container", WorkID: "issue65", OperationID: "stable-creation-id", CPU: 1, MemoryMiB: 128, DiskGiB: 1, StoragePool: "default"}
 }
+
+// Pre-existing Incus guests are already in the authorized root operator's
+// native inventory; Agent-created tags are descriptive, not the authority.
+func TestExistingNativeGuestOperationsRequireObservedUUID(t *testing.T) {
+	b := fixture(t)
+	const uuid = "12345678-1234-1234-1234-123456789abc"
+	fixtureJSON := `{"instances":[{"name":"guest-a","project":"default","type":"container","status":"Running","config":{"volatile.uuid":"` + uuid + `"}}],"snapshots":{"default:guest-a":["operator-snap"]}}`
+	if err := os.WriteFile(filepath.Join(b.StateDir, "native.json"), []byte(fixtureJSON), 0600); err != nil {
+		t.Fatal(err)
+	}
+	ctx := context.Background()
+	observed, err := b.Run(ctx, Request{Operation: "inspect", Project: "default", Instance: "guest-a"}, false, "")
+	if err != nil || observed.Instance == nil || observed.Instance.Managed || observed.Instance.UUID != uuid {
+		t.Fatalf("unmanaged guest not discoverable: %+v err=%v", observed, err)
+	}
+	baseline := Request{Project: "default", Instance: "guest-a", UUID: uuid}
+	snapshots := baseline
+	snapshots.Operation = "snapshots"
+	got, err := b.Run(ctx, snapshots, false, "")
+	if err != nil || got.Status != "snapshots_observed" || len(got.Snapshots) != 1 || got.Snapshots[0] != "operator-snap" {
+		t.Fatalf("existing guest snapshot list unavailable: %+v %v", got, err)
+	}
+	exec := baseline
+	exec.Operation = "exec"
+	exec.Command = []string{"id"}
+	got, err = b.Run(ctx, exec, false, "")
+	if err != nil || got.Status != "guest_command_completed" || !strings.Contains(got.Output, "native-exec-ok") {
+		t.Fatalf("existing guest exec blocked: %+v %v", got, err)
+	}
+	wrong := baseline
+	wrong.Operation = "stop"
+	wrong.UUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	if _, err = b.Run(ctx, wrong, false, ""); err == nil || !strings.Contains(err.Error(), "instance_identity_mismatch") {
+		t.Fatalf("wrong provider UUID authorized: %v", err)
+	}
+	mutate := baseline
+	mutate.Operation = "stop"
+	got, err = b.Run(ctx, mutate, false, "")
+	if err != nil || got.Instance == nil || got.Instance.Status != "Stopped" {
+		t.Fatalf("existing guest stop blocked: %+v %v", got, err)
+	}
+	del := baseline
+	del.Operation = "delete"
+	if _, err = b.Run(ctx, del, false, ""); err == nil || !strings.Contains(err.Error(), "approval_required") {
+		t.Fatalf("delete without owner confirmation authorized: %v", err)
+	}
+	start := baseline
+	start.Operation = "start"
+	got, err = b.Run(ctx, start, false, "")
+	if err != nil || got.Instance == nil || got.Instance.Status != "Running" {
+		t.Fatalf("existing guest start blocked: %+v %v", got, err)
+	}
+	if _, err = b.Run(ctx, del, true, ""); err == nil || !strings.Contains(err.Error(), "stop and inspect") {
+		t.Fatalf("running existing guest deleted without stop: %v", err)
+	}
+	if _, err = b.Run(ctx, mutate, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	got, err = b.Run(ctx, del, true, "")
+	if err != nil || got.Status != "deleted" {
+		t.Fatalf("authorized existing guest delete failed: %+v %v", got, err)
+	}
+	if _, exists, err := b.inspect(ctx, "default", "guest-a"); err != nil || exists {
+		t.Fatalf("deleted native guest still present: exists=%v err=%v", exists, err)
+	}
+}
+
+func TestExistingNativeGuestIdentityCannotDriftBeforeMutation(t *testing.T) {
+	b := fixture(t)
+	const uuid = "12345678-1234-1234-1234-123456789abc"
+	path := filepath.Join(b.StateDir, "native.json")
+	first := `{"instances":[{"name":"guest-a","project":"default","type":"container","status":"Running","config":{"volatile.uuid":"` + uuid + `"}}],"snapshots":{}}`
+	if err := os.WriteFile(path, []byte(first), 0600); err != nil {
+		t.Fatal(err)
+	}
+	b.beforeMutation = func(req Request) {
+		updated := strings.Replace(first, uuid, "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", 1)
+		if err := os.WriteFile(path, []byte(updated), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	_, err := b.Run(context.Background(), Request{Operation: "stop", Project: "default", Instance: "guest-a", UUID: uuid}, false, "")
+	if err == nil || !strings.Contains(err.Error(), "identity_changed_before_mutation") {
+		t.Fatalf("external UUID replacement bypassed preflight: %v", err)
+	}
+	rows, err := b.List(context.Background(), "default")
+	if err != nil || len(rows) != 1 || rows[0].Status != "Running" {
+		t.Fatalf("external replacement mutated despite refusal: %+v %v", rows, err)
+	}
+}
+
+func TestExistingNativeGuestAsynchronousSnapshotKeepsValidJournal(t *testing.T) {
+	b := fixture(t)
+	const uuid = "12345678-1234-1234-1234-123456789abc"
+	path := filepath.Join(b.StateDir, "native.json")
+	payload := `{"instances":[{"name":"guest-a","project":"default","type":"container","status":"Running","config":{"volatile.uuid":"` + uuid + `"}}],"snapshots":{}}`
+	if err := os.WriteFile(path, []byte(payload), 0600); err != nil {
+		t.Fatal(err)
+	}
+	req := Request{Operation: "snapshot", Project: "default", Instance: "guest-a", UUID: uuid, Snapshot: "operator-snap", OperationID: "external-snapshot-1", ActorID: "principal"}
+	got, err := b.Run(context.Background(), req, false, "")
+	if err != nil || got.Operation == nil || got.Operation.WorkID != "existing-native" ||
+		got.Operation.State != "running" {
+		t.Fatalf("existing guest snapshot not submitted: %+v err=%v", got, err)
+	}
+	journal, err := b.loadNativeOperations()
+	if err != nil || len(journal.Operations) != 1 || journal.Operations[0].UUID != uuid {
+		t.Fatalf("native journal broken by missing Agent create tags: %+v %v", journal, err)
+	}
+	// Exactly replayed ID must never create a second snapshot.
+	same, err := b.Run(context.Background(), req, false, "")
+	if err != nil || same.Operation == nil || same.Operation.ID != req.OperationID {
+		t.Fatalf("durable snapshot idempotency failed: %+v %v", same, err)
+	}
+	names, err := b.Snapshots(context.Background(), "default", "guest-a")
+	if err != nil || len(names) != 1 {
+		t.Fatalf("duplicate native snapshots: %+v %v", names, err)
+	}
+}
+
+// Removing creation tags or replacing the native UUID cannot turn an
+// Agent-journaled guest into a free-standing target by changing its metadata.
+func TestExistingNativeGuestPolicyPreservesAgentCreateJournalCollision(t *testing.T) {
+	b := fixture(t)
+	ctx := context.Background()
+	created, err := b.Run(ctx, createRequest(), false, "")
+	if err != nil || created.Instance == nil {
+		t.Fatalf("fixture create: %+v %v", created, err)
+	}
+	path := filepath.Join(b.StateDir, "native.json")
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var native struct {
+		Instances []Instance          `json:"instances"`
+		Snapshots map[string][]string `json:"snapshots"`
+	}
+	if err := json.Unmarshal(raw, &native); err != nil {
+		t.Fatal(err)
+	}
+	if len(native.Instances) != 1 {
+		t.Fatalf("expected one guest, got %+v", native.Instances)
+	}
+	delete(native.Instances[0].Config, "user.asa.host")
+	delete(native.Instances[0].Config, "user.asa.operation")
+	delete(native.Instances[0].Config, "user.asa.work")
+	rewritten, err := json.Marshal(native)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, rewritten, 0600); err != nil {
+		t.Fatal(err)
+	}
+	req := Request{Operation: "stop", Project: "default", Instance: "guest-a", UUID: created.Instance.UUID}
+	if _, err = b.Run(ctx, req, false, ""); err == nil || !strings.Contains(err.Error(), "create_intent_identity_mismatch") {
+		t.Fatalf("journal metadata collision escaped UUID check: %v", err)
+	}
+	native.Instances[0].Config["volatile.uuid"] = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	rewritten, err = json.Marshal(native)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, rewritten, 0600); err != nil {
+		t.Fatal(err)
+	}
+	req.UUID = "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"
+	if _, err = b.Run(ctx, req, false, ""); err == nil || !strings.Contains(err.Error(), "create_intent_native_uuid_conflict") {
+		t.Fatalf("replaced native UUID escaped persisted journal: %v", err)
+	}
+}
+
 func TestNativeLifecycleIdentityCollisionAndRecovery(t *testing.T) {
 	b := fixture(t)
 	ctx := context.Background()

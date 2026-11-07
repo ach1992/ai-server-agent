@@ -90,8 +90,8 @@ func (s *Server) browserSessionCredentialLogin(ctx context.Context, req Request)
 			return browserSessionError("credential_guest_identity_unavailable", "dependency", errors.New("Incus is not ready on this Agent host; restore native access before credential login"))
 		}
 		target, err := s.managedBackend().Run(ctx, managedincus.Request{Operation: "inspect", Project: rec.Project, Instance: rec.Guest}, false, "")
-		if err != nil || target.Instance == nil || !target.Instance.Managed || target.Instance.UUID != rec.GuestUUID {
-			return browserSessionError("credential_guest_identity_mismatch", "authorization", errors.New("native managed guest identity changed or unavailable; reconcile guest identity before Browser login"))
+		if err != nil || !nativeGuestIdentityMatches(target.Instance, rec.GuestUUID, rec.Project, rec.Guest, s.cfg.InstanceID) {
+			return browserSessionError("credential_guest_identity_mismatch", "authorization", errors.New("native Incus guest identity changed or unavailable; reconcile project/name/UUID before Browser login"))
 		}
 	}
 	var opts credentialLoginOptions
