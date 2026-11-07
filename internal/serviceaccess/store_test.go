@@ -413,3 +413,71 @@ func TestHostLocalCredentialWithoutNetworkEndpoint(t *testing.T) {
 		t.Fatal("generated token not retained by generic protected store")
 	}
 }
+
+// Browser URL.origin strips explicit HTTP(S) default ports. A private
+// credential must neither be rejected on the equivalent default-port URL nor
+// accepted on a truly different scheme or nondefault destination port.
+func TestOriginNormalizesBrowserDefaultPorts(t *testing.T) {
+	cases := []struct{ raw, want string }{
+		{"https://Example.ORG:443/login", "https://example.org"},
+		{"http://Example.ORG:80/login", "http://example.org"},
+		{"https://Example.ORG:0443/login", "https://example.org"},
+		{"http://Example.ORG:0080/login", "http://example.org"},
+		{"https://Example.ORG:8443/login", "https://example.org:8443"},
+		{"http://Example.ORG:8080/login", "http://example.org:8080"},
+		{"http://Example.ORG:08080/login", "http://example.org:8080"},
+		{"http://Example.ORG:443/login", "http://example.org:443"},
+		{"https://Example.ORG:80/login", "https://example.org:80"},
+		{"https://[2001:DB8::1]:443/login", "https://[2001:db8::1]"},
+		{"http://[::1]:80/login", "http://[::1]"},
+		{"https://[::1]:8443/login", "https://[::1]:8443"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.raw, func(t *testing.T) {
+			if got := Origin(tc.raw); got != tc.want {
+				t.Fatalf("Browser origin parity: Origin(%q) = %q, want %q", tc.raw, got, tc.want)
+			}
+		})
+	}
+	if Origin("https://example.org:443/login") != Origin("https://example.org/login") ||
+		Origin("http://example.org:80/login") != Origin("http://example.org/login") {
+		t.Fatal("same-origin default-port URL incorrectly rejected")
+	}
+	for _, nondefault := range []string{
+		"https://example.org:444/login", "https://example.org:80/login",
+		"http://example.org:443/login", "http://other.example.org:80/login",
+	} {
+		if Origin(nondefault) == Origin("https://example.org:443/login") {
+			t.Fatalf("different Browser origin incorrectly matched: %s", nondefault)
+		}
+	}
+}
+
+func TestCredentialEndpointMoveDefaultPortNeedsNoNewOriginApproval(t *testing.T) {
+	st := New(t.TempDir())
+	meta, err := st.Register(Registration{
+		HostID: "asa_default_port", Service: "app", Endpoint: "https://Example.org:443/login",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Enroll(meta.ID, "password", "operator", "SYNTHETIC-TEST-ONLY", 1, false); err != nil {
+		t.Fatal(err)
+	}
+	changed, err := st.Modify(meta.ID, Registration{
+		HostID: meta.HostID, Endpoint: "https://example.org/new-login",
+	}, false)
+	if err != nil || changed.Endpoint != "https://example.org/new-login" {
+		t.Fatalf("equivalent default port rejected: %+v %v", changed, err)
+	}
+	if _, err := st.Modify(meta.ID, Registration{
+		HostID: meta.HostID, Endpoint: "https://example.org:444/login",
+	}, false); err == nil || !strings.Contains(err.Error(), "approval_required") {
+		t.Fatalf("nondefault port changed without required origin approval: %v", err)
+	}
+	if _, err := st.Modify(meta.ID, Registration{
+		HostID: meta.HostID, Endpoint: "http://example.org/login",
+	}, false); err == nil || !strings.Contains(err.Error(), "approval_required") {
+		t.Fatalf("scheme downgrade changed without required origin approval: %v", err)
+	}
+}

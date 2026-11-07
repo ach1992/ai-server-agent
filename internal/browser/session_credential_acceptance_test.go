@@ -14,6 +14,8 @@ import (
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/ach1992/ai-server-agent/internal/serviceaccess"
 )
 
 // This exercises real Chromium, not an Incus guest/aaPanel/WordPress. It is
@@ -35,6 +37,29 @@ func TestManagedCredentialLoginPinnedChromium(t *testing.T) {
 	var rotatingInitialID, rotatingPostID string
 	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if r.URL.Path == "/origin-parity" {
+			// Use the real Chromium URL parser, not a mock, to compare
+			// cross-language default/nondefault-port origin semantics.
+			fmt.Fprint(w, `<!doctype html><div id="origin-parity"></div><script>
+          const endpoints = [
+            "https://Example.ORG:443/login", "http://Example.ORG:80/login",
+            "https://Example.ORG:0443/login", "http://Example.ORG:0080/login",
+            "https://Example.ORG:8443/login", "http://Example.ORG:8080/login",
+            "http://Example.ORG:443/login", "https://Example.ORG:80/login",
+            "https://[2001:DB8::1]:443/login", "http://[::1]:80/login"
+          ];
+          document.querySelector("#origin-parity").textContent =
+            endpoints.map(value => new URL(value).origin).join("|");
+        </script>`)
+			return
+		}
+		if r.URL.Path == "/foreign-form" {
+			fmt.Fprint(w, `<!doctype html><form action="http://unrelated.invalid:80/sink" method="post">
+            <input id="user" name="user"><input id="secret" name="password" type="password">
+            <button id="submit">Sign in</button>
+          </form>`)
+			return
+		}
 		if r.URL.Path == "/ready" {
 			c, err := r.Cookie("session")
 			if err != nil || c.Value != "yes" {
@@ -220,6 +245,27 @@ func TestManagedCredentialLoginPinnedChromium(t *testing.T) {
 			"submit_selector": "#submit", "success_selector": "#dashboard", "success_url": "", "challenge_selector": "#mfa",
 			"login_error_selector": "#login-error", "service_endpoint": origin + "/login"}
 	}
+	// Guard against the original F1 false-positive: Chromium canonicalizes
+	// explicit default ports, while Go supplies expected_origin to the
+	// protected login runner. A disagreement rejects a legitimate login.
+	parityInputs := []string{
+		"https://Example.ORG:443/login", "http://Example.ORG:80/login",
+		"https://Example.ORG:0443/login", "http://Example.ORG:0080/login",
+		"https://Example.ORG:8443/login", "http://Example.ORG:8080/login",
+		"http://Example.ORG:443/login", "https://Example.ORG:80/login",
+		"https://[2001:DB8::1]:443/login", "http://[::1]:80/login",
+	}
+	parityOrigins := make([]string, 0, len(parityInputs))
+	for _, endpoint := range parityInputs {
+		parityOrigins = append(parityOrigins, serviceaccess.Origin(endpoint))
+	}
+	navigate(app.URL+"/origin-parity", strings.Repeat("0", 31)+"a")
+	parity := send(map[string]any{"type": "flow", "nonce": strings.Repeat("0", 31) + "b",
+		"steps": []FlowStep{{Action: "assert_text", Selector: "#origin-parity",
+			Expected: strings.Join(parityOrigins, "|")}}})
+	if parity["event"] != "result" || parity["result"].(map[string]any)["ok"] != true {
+		t.Fatalf("Chromium URL.origin differs from protected Go credential origin: %+v", parity)
+	}
 	navigate(app.URL+"/login", strings.Repeat("1", 32))
 	// Refuse to inject into an unrelated origin, even with a valid store ref.
 	foreign := request(strings.Repeat("2", 32), secret)
@@ -228,6 +274,18 @@ func TestManagedCredentialLoginPinnedChromium(t *testing.T) {
 	if mismatch["event"] != "error" || mismatch["reason"] != "credential_origin_mismatch" {
 		t.Fatalf("cross-origin secret use was not denied: %+v", mismatch)
 	}
+	// The registered-origin page may contain a malicious cross-origin form
+	// action. Refuse it before sending a credential to another destination,
+	// even if its URL explicitly uses a default HTTP port.
+	navigate(app.URL+"/foreign-form", strings.Repeat("0", 31)+"c")
+	crossForm := request(strings.Repeat("0", 31)+"d", secret)
+	crossForm["service_endpoint"] = app.URL + "/foreign-form"
+	crossFormResult := send(crossForm)
+	if crossFormResult["event"] != "error" ||
+		crossFormResult["reason"] != "credential_form_origin_mismatch" {
+		t.Fatalf("cross-origin form action not blocked before submission: %+v", crossFormResult)
+	}
+	navigate(app.URL+"/login", strings.Repeat("0", 31)+"e")
 	// Invalid password cannot produce an authenticated result, even if the
 	// form submits and the page returns normal HTTP 200.
 	invalid := send(request(strings.Repeat("3", 32), "fixture-wrong-password"))

@@ -13,6 +13,7 @@ import (
 	"net/url"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -126,11 +127,26 @@ func ValidEndpoint(raw string) error {
 	return nil
 }
 func Origin(raw string) string {
-	u, _ := url.Parse(raw)
-	if u == nil {
+	u, err := url.Parse(raw)
+	if err != nil || u == nil {
 		return ""
 	}
-	return strings.ToLower(u.Scheme) + "://" + strings.ToLower(u.Host)
+	scheme := strings.ToLower(u.Scheme)
+	host := strings.ToLower(u.Host)
+	// Chromium URL.origin omits explicit HTTP(S) default ports and renders
+	// other numeric ports without leading zeroes. Match those semantics so a
+	// legitimate same-origin credential is not falsely rejected; retain the
+	// scheme and every genuinely different destination port.
+	if (scheme == "http" || scheme == "https") && u.Port() != "" {
+		port := u.Port()
+		if number, err := strconv.Atoi(port); err == nil && number >= 0 && number <= 65535 {
+			host = strings.TrimSuffix(host, ":"+port)
+			if (scheme == "http" && number != 80) || (scheme == "https" && number != 443) {
+				host += ":" + strconv.Itoa(number)
+			}
+		}
+	}
+	return scheme + "://" + host
 }
 func validateRegistration(r Registration) error {
 	if strings.TrimSpace(r.HostID) == "" || strings.TrimSpace(r.Service) == "" || len(r.HostID) > 160 || len(r.Service) > 120 || len(r.Purpose) > 500 || len(r.Username) > 256 {
