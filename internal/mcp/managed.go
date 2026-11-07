@@ -14,7 +14,7 @@ type ManagedEnvironmentInput struct {
 	Operation     string   `json:"operation" jsonschema:"status, pending_creates, list, inspect, create, abandon_create, start, stop, exec, snapshots, snapshot, restore, operation_list, operation_status, resolve_uncertain or delete"`
 	Project       string   `json:"project,omitempty" jsonschema:"Actual Incus project. Required for per-instance operations; list without project searches all projects"`
 	Instance      string   `json:"instance,omitempty" jsonschema:"Exact native Incus instance name"`
-	UUID          string   `json:"uuid,omitempty" jsonschema:"Native volatile.uuid obtained from inspect; required before mutating an existing guest"`
+	UUID          string   `json:"uuid,omitempty" jsonschema:"Currently observed Incus volatile.uuid from inspect, required for operations on both Agent-created and pre-existing native guests"`
 	Image         string   `json:"image,omitempty" jsonschema:"Native Incus image alias or fingerprint for create (e.g. images:debian/13)"`
 	Type          string   `json:"type,omitempty" jsonschema:"container or virtual-machine for create"`
 	WorkID        string   `json:"work_id,omitempty" jsonschema:"Stable Issue/project-owned work identifier for create, not a chat/session name"`
@@ -47,7 +47,7 @@ type ServiceAccessInput struct {
 
 func (s *Server) registerManagedTools() {
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "managed_environment",
-		Description: "Optional native Incus guests through the root Executor; never installs Incus. status/list/inspect discover guests. create is idempotent with stable operation_id, native UUID and storage capacity checks; abandon_create requires approval and native absence proof. start/stop/exec/delete enforce guest identity; restore/delete require approval. snapshot/restore submit nonblocking native operations with durable IDs; operation_list/status recover after restart/new chat. resolve_uncertain requires approval and native absence evidence, never claims success or blindly retries.",
+		Description: "Optional native Incus guests through the root Executor; never installs Incus. status/list/inspect discover guests. create is idempotent with stable operation_id, native UUID and storage capacity checks; abandon_create requires approval and native absence proof. Existing native Incus guests are operable through exact project/name/observed UUID without requiring an Agent creation tag; start/stop/exec/delete enforce guest identity; restore/delete require approval. snapshot/restore submit nonblocking native operations with durable IDs; operation_list/status recover after restart/new chat. resolve_uncertain requires approval and native absence evidence, never claims success or blindly retries.",
 		Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in ManagedEnvironmentInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		native := managedincus.Request{Operation: in.Operation, Project: in.Project, Instance: in.Instance, UUID: in.UUID, Image: in.Image, Type: in.Type, WorkID: in.WorkID, OperationID: in.OperationID, CPU: in.CPU, MemoryMiB: in.MemoryMiB, DiskGiB: in.DiskGiB, StoragePool: in.StoragePool, Command: in.Command, Snapshot: in.Snapshot}
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "managed_environment", ManagedEnv: native, CredentialRef: in.CredentialRef, Approval: in.Approval})
