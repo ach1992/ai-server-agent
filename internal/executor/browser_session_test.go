@@ -35,7 +35,7 @@ reply({event:'ready'});
 for await (const line of createInterface({input:process.stdin})) {
   const cmd = JSON.parse(line);
   if (cmd.type === 'close') break;
-  reply({event:'result',nonce:cmd.nonce,result:{ok:true,executed:cmd.steps.length}});
+  reply({event:'result',nonce:cmd.nonce,result:cmd.type === 'script' ? {ok:true,value:'same-session',logs:['script-ok']} : {ok:true,executed:cmd.steps.length}});
 }
 process.exit(0);`
 	owner.Content = script
@@ -85,6 +85,18 @@ process.exit(0);`
 	if !performed.OK || !strings.Contains(performed.Output, `"executed":1`) {
 		t.Fatalf("cross-call protocol failure: %+v", performed)
 	}
+	action.Action = "browser_session_script"
+	action.Content = "return await page.title()"
+	scripted := s.browserSessionAction(ctx, action)
+	if !scripted.OK || !strings.Contains(scripted.Output, `"value":"same-session"`) {
+		t.Fatalf("same-session script broker/principal contract failed: %+v", scripted)
+	}
+	attacker := action
+	attacker.PrincipalID = "attacker"
+	if got := s.browserSessionAction(ctx, attacker); got.OK || got.ErrorCode != "browser_session_not_found" {
+		t.Fatalf("cross-principal script ran: %+v", got)
+	}
+	action.Action = "browser_session_flow"
 	action.Content = `[{"action":"assert_url"}]`
 	if got := s.browserSessionAction(ctx, action); !got.OK {
 		t.Fatalf("second call failed: %+v", got)

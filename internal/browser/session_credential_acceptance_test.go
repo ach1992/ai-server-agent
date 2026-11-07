@@ -338,6 +338,56 @@ func TestManagedCredentialLoginPinnedChromium(t *testing.T) {
 	if observed["event"] != "result" || observed["result"].(map[string]any)["ok"] != true {
 		t.Fatalf("authenticated navigation failed: %+v", observed)
 	}
+	// Rev 4: authenticated visual/diagnostic capabilities remain usable
+	// on the SAME Chromium context that received private credential input.
+	for i, step := range []FlowStep{{Action: "snapshot"}, {Action: "console"}, {Action: "network"}} {
+		nonce := fmt.Sprintf("%032x", 101+i)
+		result := send(map[string]any{"type": "flow", "nonce": nonce, "steps": []FlowStep{step}})
+		if result["event"] != "result" || result["result"].(map[string]any)["ok"] != true {
+			t.Fatalf("authenticated %s denied: %+v", step.Action, result)
+		}
+	}
+	advanced := send(map[string]any{"type": "script", "nonce": fmt.Sprintf("%032x", 104),
+		"script": "await page.locator('#dashboard').evaluate(el=>el.setAttribute('data-advanced','yes')); console.log('protected-session-advanced-ok'); return await page.locator('#dashboard').getAttribute('data-advanced');"})
+	if advanced["event"] != "result" {
+		t.Fatalf("script frame %+v", advanced)
+	}
+	outcome := advanced["result"].(map[string]any)
+	if outcome["ok"] != true || outcome["value"] != "yes" ||
+		outcome["logs"].([]any)[0] != "protected-session-advanced-ok" {
+		t.Fatalf("advanced same-session Playwright failed: %+v", advanced)
+	}
+	image := send(map[string]any{"type": "image_capture", "nonce": fmt.Sprintf("%032x", 105),
+		"quality": 40, "max_width": 640, "max_height": 360, "crop_x": 0, "crop_y": 0})
+	if image["event"] != "image_meta" || image["size"].(float64) < 4 {
+		t.Fatalf("authenticated screenshot unavailable: %+v", image)
+	}
+	digest := "sha256:" + image["sha256"].(string)
+	window := send(map[string]any{"type": "image_read", "nonce": fmt.Sprintf("%032x", 106),
+		"file_version": digest, "offset": 0, "limit": 1024})
+	if window["event"] != "image_chunk" || window["data"] == "" ||
+		window["sha256"] != image["sha256"] {
+		t.Fatalf("authenticated screenshot continuation failed: %+v", window)
+	}
+	discarded := send(map[string]any{"type": "image_discard", "nonce": fmt.Sprintf("%032x", 107), "file_version": digest})
+	if discarded["event"] != "image_discarded" {
+		t.Fatalf("image discard failed: %+v", discarded)
+	}
+	trace := send(map[string]any{"type": "trace_record", "nonce": fmt.Sprintf("%032x", 108),
+		"steps": []FlowStep{{Action: "assert_text", Selector: "#dashboard", Expected: "Dashboard authenticated"}}})
+	if trace["event"] != "trace_meta" || trace["size"].(float64) < 4 {
+		t.Fatalf("authenticated trace unavailable: %+v", trace)
+	}
+	traceVersion := "sha256:" + trace["sha256"].(string)
+	traceWindow := send(map[string]any{"type": "trace_read", "nonce": fmt.Sprintf("%032x", 109),
+		"file_version": traceVersion, "offset": 0})
+	if traceWindow["event"] != "trace_chunk" || traceWindow["data"] == "" {
+		t.Fatalf("authenticated trace continuation failed: %+v", traceWindow)
+	}
+	discardedTrace := send(map[string]any{"type": "trace_discard", "nonce": fmt.Sprintf("%032x", 110), "file_version": traceVersion})
+	if discardedTrace["event"] != "trace_discarded" {
+		t.Fatalf("trace discard failed: %+v", discardedTrace)
+	}
 	navigate(app.URL+"/retain", strings.Repeat("7", 32))
 	retained := request(strings.Repeat("8", 32), secret)
 	retained["service_endpoint"] = origin + "/retain"

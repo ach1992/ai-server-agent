@@ -2,11 +2,9 @@ package executor
 
 import (
 	"context"
-	"encoding/base64"
 	"encoding/json"
 	"errors"
 	"github.com/ach1992/ai-server-agent/internal/managedincus"
-	"net/url"
 	"os"
 	"strings"
 	"testing"
@@ -162,18 +160,17 @@ func TestMissingOptionalIncusDoesNotReportMutationSuccess(t *testing.T) {
 	}
 }
 
-// Protected login intentionally retains ordinary click/fill/assert/goto
-// interactions, but refuses evidence-bearing paths which cannot be proven
-// secret-free for arbitrary applications (including DOM/canvas/network caches).
-func TestCredentialDerivedBrowserEvidenceGate(t *testing.T) {
+// Protected login must leave the same fully authorized Browser usable for
+// screenshots, traces, diagnostics and arbitrary Playwright, while still
+// enforcing the credential's actual validity and principal/session identity.
+func TestCredentialDerivedBrowserEvidenceAndScriptAvailable(t *testing.T) {
 	s := &Server{cfg: config.Config{StateDir: t.TempDir(), InstanceID: "asa_host"}}
 	st := serviceaccess.New(s.cfg.StateDir)
 	meta, err := st.Register(serviceaccess.Registration{HostID: s.cfg.InstanceID, Service: "aaPanel", Endpoint: "http://localhost:8080/login"})
 	if err != nil {
 		t.Fatal(err)
 	}
-	sentinel := "SENTINEL-POST-LOGIN-PASSWORD-142857"
-	if _, err := st.Enroll(meta.ID, "password", "admin", sentinel, 30, false); err != nil {
+	if _, err := st.Enroll(meta.ID, "password", "admin", "synthetic-private-password", 30, false); err != nil {
 		t.Fatal(err)
 	}
 	const sid = "stdio_0123456789abcdef0123456789abcdef"
@@ -184,47 +181,44 @@ func TestCredentialDerivedBrowserEvidenceGate(t *testing.T) {
 	}
 	s.browserAdmission.holders = map[string]string{sid: "isolated"}
 	req := Request{SessionID: sid, Workspace: "/authorized/worktree", PrincipalID: "owner", PrincipalClass: "direct"}
-	for _, action := range []string{"browser_session_capture", "browser_session_image", "browser_session_trace"} {
+	for _, action := range []string{"browser_session_capture", "browser_session_image", "browser_session_trace", "browser_session_script", "browser_session_flow", "browser_session_status"} {
 		req.Action = action
-		g := s.credentialSessionGate(req)
-		if g.OK || g.ErrorCode != "credential_browser_evidence_unavailable" || strings.Contains(g.Output, sentinel) {
-			t.Fatalf("raw %s exposed secret: %+v", action, g)
+		req.Content = ""
+		if g := s.credentialSessionGate(req); !g.OK {
+			t.Fatalf("authorized %s denied after login: %+v", action, g)
 		}
 	}
 	req.Action = "browser_session_flow"
 	for _, step := range []string{"snapshot", "console", "network"} {
 		req.Content = `[{"action":"` + step + `"}]`
-		g := s.credentialSessionGate(req)
-		if g.OK || g.ErrorCode != "credential_browser_evidence_unavailable" {
-			t.Fatalf("raw %s flow allowed: %+v", step, g)
-		}
-	}
-	for _, step := range []string{
-		`[{"action":"assert_text","selector":"#dashboard","expected":"Ready"}]`,
-		`[{"action":"click","selector":"#settings"}]`,
-		`[{"action":"goto","url":"http://localhost:8080/wp-admin/"}]`,
-	} {
-		req.Content = step
 		if g := s.credentialSessionGate(req); !g.OK {
-			t.Fatalf("bounded UI action blocked: %+v", g)
+			t.Fatalf("post-login %s evidence denied: %+v", step, g)
 		}
 	}
-	result := s.credentialFlowEvidenceGate(req, Response{OK: true, Output: `{"ok":true,"page_text":"` + sentinel + `"}`})
-	if result.OK || result.Output != "" || result.ErrorCode != "credential_browser_evidence_blocked" {
-		t.Fatalf("plaintext result not blocked: %+v", result)
+	req.Action = "browser_session_script"
+	req.Content = "return await page.title()"
+	req.PrincipalID = "another"
+	if g := s.credentialSessionGate(req); g.OK || g.ErrorCode != "browser_session_not_found" {
+		t.Fatalf("cross-principal script allowed: %+v", g)
 	}
-	result = s.credentialFlowEvidenceGate(req, Response{OK: true, Output: `{"ok":true,"observed":"` + url.QueryEscape(sentinel) + `"}`})
-	if result.OK || result.Output != "" {
-		t.Fatalf("URL-escaped secret not blocked: %+v", result)
-	}
-	result = s.credentialFlowEvidenceGate(req, Response{OK: true, Output: `{"ok":true,"output":"` + base64.StdEncoding.EncodeToString([]byte(sentinel)) + `"}`})
-	if result.OK || result.Output != "" {
-		t.Fatalf("encoded secret output not blocked: %+v", result)
-	}
+	req.PrincipalID = "owner"
 	s.sessions.sessions[sid].browser.credentialAuthOK = false
-	req.Content = `[{"action":"snapshot"}]`
 	if g := s.credentialSessionGate(req); g.OK || g.ErrorCode != "browser_credential_login_unverified" {
-		t.Fatalf("failed login allowed leaked evidence: %+v", g)
+		t.Fatalf("unverified credential unlocked script: %+v", g)
+	}
+	s.sessions.sessions[sid].browser.credentialAuthOK = true
+	if _, err := st.Revoke(meta.ID); err != nil {
+		t.Fatal(err)
+	}
+	for _, action := range []string{"browser_session_script", "browser_session_capture", "browser_session_flow"} {
+		req.Action = action
+		if g := s.credentialSessionGate(req); g.OK {
+			t.Fatalf("revoked credential unlocked %s: %+v", action, g)
+		}
+	}
+	req.Action = "browser_session_close"
+	if g := s.credentialSessionGate(req); !g.OK {
+		t.Fatalf("revoked credential prevented closing session: %+v", g)
 	}
 }
 

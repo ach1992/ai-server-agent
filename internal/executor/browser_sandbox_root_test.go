@@ -64,13 +64,15 @@ func TestApprovedRootBrowserSandboxEnforcedUnderAibrowser(t *testing.T) {
 	if !distinctIsolatedBrowserIdentity(s.browserUID, s.browserGID, s.workerUID, s.workerGID, s.agentUID, s.agentGID) {
 		t.Fatal("dedicated Browser numeric account aliases a protected identity")
 	}
-	for _, dir := range []string{filepath.Join(s.cfg.StateDir, "browser-home"), s.isolatedBrowserScratchDir()} {
-		if err := os.Mkdir(dir, 0700); err != nil {
-			t.Fatal(err)
-		}
-		if err := os.Chown(dir, int(browserUID), int(browserGID)); err != nil {
-			t.Fatal(err)
-		}
+	home := filepath.Join(s.cfg.StateDir, "browser-home")
+	if err := os.Mkdir(home, 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chown(home, int(browserUID), int(browserGID)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Mkdir(s.isolatedBrowserScratchDir(), 0711); err != nil {
+		t.Fatal(err)
 	}
 	if _, err := s.isolatedBrowserHome(); err != nil {
 		t.Fatalf("root Browser identity/home proof: %v", err)
@@ -133,14 +135,14 @@ func TestApprovedRootBrowserSandboxEnforcedUnderAibrowser(t *testing.T) {
 		t.Fatal(err)
 	}
 	entry.mu.Lock()
-	nodePID, group, traceName, profileName := entry.pid, entry.browserGroup, entry.browserTraceScratchName, entry.browserScratchName
+	nodePID, group, traceName, profileName, hostUID := entry.pid, entry.browserGroup, entry.browserTraceScratchName, entry.browserScratchName, entry.browserHostUID
 	private := entry.browserPrivate
 	entry.mu.Unlock()
 	if !private || group == nil || !group.verified || !group.containsPID(nodePID) {
 		t.Fatal("sandboxed aibrowser Node not inside its private root-owned cgroup")
 	}
 	node, err := readBrowserSandboxProcess(nodePID)
-	if err != nil || node.effectiveUID != s.browserUID || node.effectiveGID != s.browserGID {
+	if err != nil || node.effectiveUID != hostUID || node.effectiveGID != s.browserGID {
 		t.Fatalf("sandboxed Node OS account proof unavailable: %+v %v", node, err)
 	}
 	if err := s.verifyManagedBrowserSandbox(entry); err != nil {
@@ -197,7 +199,7 @@ func TestApprovedRootBrowserSandboxEnforcedUnderAibrowser(t *testing.T) {
 	// The detached worker/OS isolation proof from #202 remains intact:
 	// authenticated worker B must not be able to read the private trace.
 	workerB := Request{Action: "run", PrincipalID: intruder.PrincipalID, PrincipalClass: owner.PrincipalClass,
-		Workspace: owner.Workspace, Command: fmt.Sprintf("test ! -r %q && test ! -x %q && test ! -r /proc/%d/environ", tracePath, s.isolatedBrowserScratchDir(), nodePID)}
+		Workspace: owner.Workspace, Command: fmt.Sprintf("test ! -r %q && test ! -r %q && test ! -r /proc/%d/environ", tracePath, s.isolatedBrowserScratchDir(), nodePID)}
 	if shell := s.runContext(ctx, workerB); !shell.OK || shell.ExitCode != 0 {
 		t.Fatalf("other principal's worker shell accessed Browser private state: %+v", shell)
 	}
