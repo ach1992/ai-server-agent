@@ -60,11 +60,11 @@ func RunBrowserSessionHelper(args []string) int {
 	return 0
 }
 
-// Caller must retain its OS thread through unix.Exec after this returns.
-func browserSessionAllowWrites(profile, trace string) error {
-	abi, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, 0, 0, uintptr(unix.LANDLOCK_CREATE_RULESET_VERSION))
-	if errno != 0 || abi < 2 {
-		return errors.New("isolated Browser write boundary requires Landlock ABI 2 or later")
+// Landlock ABI 1/2 cannot deny truncation (including O_RDONLY|O_TRUNC).
+// A partial write boundary must not advertise session-integrity protection.
+func browserSessionWriteAccess(abi uintptr) (uint64, error) {
+	if abi < 3 {
+		return 0, errors.New("isolated Browser write boundary requires Landlock ABI 3 or later (file truncation unsupported)")
 	}
 	// Leave READ_FILE / READ_DIR unhandled. This is a cross-session integrity
 	// guard, not an arbitrary filesystem-read ban on authorized scripts.
@@ -78,9 +78,20 @@ func browserSessionAllowWrites(profile, trace string) error {
 		unix.LANDLOCK_ACCESS_FS_MAKE_FIFO |
 		unix.LANDLOCK_ACCESS_FS_MAKE_BLOCK |
 		unix.LANDLOCK_ACCESS_FS_MAKE_CHAR |
-		unix.LANDLOCK_ACCESS_FS_REFER)
-	if abi >= 3 {
-		writes |= unix.LANDLOCK_ACCESS_FS_TRUNCATE
+		unix.LANDLOCK_ACCESS_FS_REFER |
+		unix.LANDLOCK_ACCESS_FS_TRUNCATE)
+	return writes, nil
+}
+
+// Caller must retain its OS thread through unix.Exec after this returns.
+func browserSessionAllowWrites(profile, trace string) error {
+	abi, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, 0, 0, uintptr(unix.LANDLOCK_CREATE_RULESET_VERSION))
+	if errno != 0 {
+		return fmt.Errorf("query isolated Browser Landlock ABI: %w", errno)
+	}
+	writes, err := browserSessionWriteAccess(abi)
+	if err != nil {
+		return err
 	}
 	attr := landlockRulesetAttr{HandledAccessFS: writes}
 	set, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, uintptr(unsafe.Pointer(&attr)), unsafe.Sizeof(attr), 0)

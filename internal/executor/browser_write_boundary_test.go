@@ -15,6 +15,22 @@ import (
 	"golang.org/x/sys/unix"
 )
 
+func TestBrowserSessionWriteBoundaryABI(t *testing.T) {
+	for _, abi := range []uintptr{0, 1, 2} {
+		if rights, err := browserSessionWriteAccess(abi); err == nil || rights != 0 ||
+			!strings.Contains(err.Error(), "ABI 3") {
+			t.Fatalf("ABI %d must explicitly reject incomplete truncation protection: rights=%d err=%v", abi, rights, err)
+		}
+	}
+	for _, abi := range []uintptr{3, 4, 8} {
+		rights, err := browserSessionWriteAccess(abi)
+		if err != nil || rights&unix.LANDLOCK_ACCESS_FS_TRUNCATE == 0 ||
+			rights&unix.LANDLOCK_ACCESS_FS_WRITE_FILE == 0 {
+			t.Fatalf("ABI %d must include both write and truncate: rights=%d err=%v", abi, rights, err)
+		}
+	}
+}
+
 // The subprocess uses the exact production helper and real pinned Node,
 // while all files and identities are disposable synthetic fixtures.
 func TestBrowserSessionWriteBoundaryChild(t *testing.T) {
@@ -40,8 +56,8 @@ func TestBrowserSessionWriteBoundaryAcrossPeers(t *testing.T) {
 	}
 	abi, _, errno := unix.Syscall(unix.SYS_LANDLOCK_CREATE_RULESET, 0, 0,
 		uintptr(unix.LANDLOCK_CREATE_RULESET_VERSION))
-	if errno != 0 || abi < 2 {
-		t.Skip("host does not provide Landlock ABI 2 required for isolated Browser")
+	if errno != 0 || abi < 3 {
+		t.Skip("host does not provide Landlock ABI 3 required for isolated Browser truncation denial")
 	}
 	scratch := filepath.Join(t.TempDir(), "browser")
 	if err := os.Mkdir(scratch, 0700); err != nil {
@@ -95,15 +111,20 @@ process.stdout.write('B_STATE='+readFileSync(%q,'utf8')+'\n');`, peerState, peer
 	if err != nil || strings.TrimSpace(ready) != "B_READY" {
 		t.Fatalf("peer fixture not ready (%v): %q %s", err, ready, bErr.String())
 	}
-	aScript := fmt.Sprintf(`import {writeFileSync,readFileSync,rmSync} from 'node:fs';
+	aScript := fmt.Sprintf(`import {writeFileSync,readFileSync,rmSync,openSync,closeSync,truncateSync,constants} from 'node:fs';
 writeFileSync(%q,'A-OWN-OK');
 let denied=false;
 try { writeFileSync(%q,'A-DAMAGED'); } catch (e) { denied=e.code==='EACCES'||e.code==='EPERM'; }
 let cannotDelete=false;
 try { rmSync(%q,{recursive:true,force:true}); } catch(e) { cannotDelete=e.code==='EACCES'||e.code==='EPERM'; }
+// O_RDONLY|O_TRUNC does not require write permission; ABI 2 cannot deny it.
+let cannotTruncate=false;
+try { const fd=openSync(%q,constants.O_RDONLY|constants.O_TRUNC); closeSync(fd); }
+catch(e) { cannotTruncate=e.code==='EACCES'||e.code==='EPERM'; }
+truncateSync(%q,1); // own-session truncation stays available
 // Reading is deliberately not confined: this is an integrity-only boundary.
 const peerReadable=readFileSync(%q,'utf8')==='B-ORIGINAL';
-if (!denied || !cannotDelete || !peerReadable || readFileSync(%q,'utf8')!=='A-OWN-OK') process.exitCode=10;
+if (!denied || !cannotDelete || !cannotTruncate || !peerReadable || readFileSync(%q,'utf8')!=='A') process.exitCode=10;
 else {
   process.env.PLAYWRIGHT_BROWSERS_PATH=%q;
   const {chromium}=await import(%q);
@@ -121,7 +142,7 @@ else {
     process.stdout.write('A_OWN_OK_AND_PEER_WRITE_DENIED\n');
   } finally {await context.close();}
 }`,
-		filepath.Join(ownA, "synthetic-cookie.txt"), peerState, ownB, peerState, filepath.Join(ownA, "synthetic-cookie.txt"),
+		filepath.Join(ownA, "synthetic-cookie.txt"), peerState, ownB, peerState, filepath.Join(ownA, "synthetic-cookie.txt"), peerState, filepath.Join(ownA, "synthetic-cookie.txt"),
 		filepath.Join(engine, "browsers"),
 		"file://"+filepath.ToSlash(filepath.Join(engine, "node_modules", "playwright", "index.mjs")),
 		ownA, filepath.Join(scratch, traceA, "trace.zip"))
