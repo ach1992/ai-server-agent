@@ -54,7 +54,9 @@ type Server struct {
 	managedWatchActive                int
 	managedWatchObserveTestHook       func(context.Context, string) bool // test-only bounded observer scheduler fixture
 	jobsMu                            sync.Mutex
-	jobUnknownBeforeWriteTestHook     func() // test-only deterministic status reconciliation interleaving
+	syncSpoolMu                       sync.Mutex                               // short, shared persistent-Job/sync-spool disk admission
+	syncSpoolReserveCheckTestHook     func(string, int64) (bool, int64, error) // private deterministic disk-pressure fixture
+	jobUnknownBeforeWriteTestHook     func()                                   // test-only deterministic status reconciliation interleaving
 	lifecycleLockPath                 string
 	fileWriteHooks                    *fileWriteTestHooks
 	workspaceHooks                    *workspaceTestHooks
@@ -174,6 +176,19 @@ func (s *Server) Serve() error {
 		return err
 	}
 	defer ln.Close()
+	// Only files marked as interrupted synchronous transcripts are retired
+	// at startup. Normal persistent Jobs and complete output stay untouched.
+	if _, err := os.Lstat(filepath.Join(s.cfg.StateDir, "jobs")); err == nil {
+		jobsDir, _, stateErr := s.ensureJobState()
+		if stateErr != nil {
+			return fmt.Errorf("inspect Job state on Executor startup: %w", stateErr)
+		}
+		if err := s.cleanupInterruptedSyncSpools(jobsDir); err != nil {
+			return fmt.Errorf("reconcile interrupted synchronous output: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect Job state directory on Executor startup: %w", err)
+	}
 	if err := os.Chmod(s.cfg.ExecutorSocket, 0660); err != nil {
 		return err
 	}

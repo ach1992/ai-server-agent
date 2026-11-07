@@ -79,7 +79,7 @@ type ServiceUseInput struct {
 	AuthMode      string            `json:"auth_mode,omitempty" jsonschema:"HTTP auth mode: bearer, basic, or header; defaults from credential kind but does not constrain it"`
 	Headers       map[string]string `json:"headers,omitempty" jsonschema:"Optional HTTP request headers on registered origin (except reserved Host/Authorization and transport fields); never include enrolled secret"`
 	Command       string            `json:"command,omitempty" jsonschema:"SSH remote command: native enrolled private key, or optional sshpass for password/token; strict known-host verification"`
-	Query         string            `json:"query,omitempty" jsonschema:"SQL over native PostgreSQL or MySQL/MariaDB stdin; registered credential is used as password independent of its descriptive kind"`
+	Query         string            `json:"query,omitempty" jsonschema:"SQL via native PostgreSQL SQL-only --command or MySQL/MariaDB --binary-mode stdin; registered credential used privately independent of kind. PostgreSQL SQL text is exposed in native process argv; avoid unrelated secrets in SQL literals"`
 }
 
 func (s *Server) registerServiceUseTool() {

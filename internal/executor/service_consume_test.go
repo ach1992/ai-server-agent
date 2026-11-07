@@ -213,9 +213,9 @@ func TestServiceSSHNativeKeyConsumer(t *testing.T) {
 func TestServicePostgresNativeQueryAndPrivateEnv(t *testing.T) {
 	const key = "postgres-private"
 	s, ref := serviceFixture(t, "postgresql://db.example:5432/inventory", "password", "dbadmin", key)
-	s.servicePSQLBinary = nativeScript(t, "[ \"$PGUSER\" = 'dbadmin' ]\nread query\nprintf '%s %s\\n' \"$query\" \"$PGPASSWORD\"")
+	s.servicePSQLBinary = nativeScript(t, "[ \"$PGUSER\" = 'dbadmin' ]\nfor arg in \"$@\"; do case \"$arg\" in --command=*) query=\"${arg#*=}\" ;; esac; done\nprintf '%s %s\\n' \"$query\" \"$PGPASSWORD\"")
 	r := useService(s, ref, ServiceUseSpec{Query: "select 4;"})
-	if !r.OK || r.Output != "select 4; [REDACTED]\n" {
+	if !r.OK || r.Output != ";\nselect 4; [REDACTED]\n" {
 		t.Fatalf("Postgres consumer failed: %+v", r)
 	}
 }

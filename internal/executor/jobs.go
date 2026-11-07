@@ -256,7 +256,12 @@ func (s *Server) startJobBounded(req Request) (resp Response) {
 		}
 	}
 
-	if blocked := persistentJobAdmissionResponseWithLimits(jobsDir, s.persistentTaskCapacity(), s.persistentServiceCapacity(), req.Kind); blocked != nil {
+	// Physical spool preallocation and Job admission must observe the same
+	// disk reserve atomically; only the short capacity check is serialized.
+	s.syncSpoolMu.Lock()
+	blocked = persistentJobAdmissionResponseWithLimits(jobsDir, s.persistentTaskCapacity(), s.persistentServiceCapacity(), req.Kind)
+	s.syncSpoolMu.Unlock()
+	if blocked != nil {
 		return *blocked
 	}
 
@@ -1221,6 +1226,9 @@ func jobStateHasReserve(path string, reserve int64) (bool, int64, error) {
 }
 
 func (s *Server) cleanupCompletedJobArtifacts(jobsDir, claimsDir string) error {
+	if err := s.cleanupInterruptedSyncSpools(jobsDir); err != nil {
+		return err
+	}
 	entries, err := os.ReadDir(jobsDir)
 	if err != nil {
 		return err
@@ -1235,6 +1243,14 @@ func (s *Server) cleanupCompletedJobArtifacts(jobsDir, claimsDir string) error {
 			continue
 		}
 		paths := jobPathsFor(jobsDir, id)
+		// An active synchronous writer has no numeric status yet. Its
+		// exclusive marker flock is the active proof; never treat the
+		// missing persistent-job started marker as a stale completed Job.
+		if _, markerErr := os.Lstat(filepath.Join(jobsDir, id+syncSpoolMarkerSuffix)); markerErr == nil {
+			continue
+		} else if !os.IsNotExist(markerErr) {
+			return markerErr
+		}
 		status, modTime, err := s.readJobStatusValue(paths.status)
 		if err != nil {
 			return err
