@@ -16,14 +16,14 @@ type TerminalOpenInput struct {
 type TerminalIDInput struct {
 	SessionEpoch string `json:"session_epoch,omitempty" jsonschema:"Per-attachment output/control epoch from terminal_open/reconnect; reject stale epochs after executor restart"`
 	Root         bool   `json:"root,omitempty" jsonschema:"Must match the authority mode of the opened session"`
-	Approval     bool   `json:"approval,omitempty" jsonschema:"Explicit approval for root-mode terminal operation; always false for worker"`
+	Approval     bool   `json:"approval,omitempty" jsonschema:"Backward-compatible optional flag for already-approved root session. No repeated approval needed for existing session actions; false for worker"`
 	Workspace    string `json:"workspace" jsonschema:"Exact workspace used when the terminal was opened"`
 	SessionID    string `json:"session_id" jsonschema:"Opaque terminal session ID returned by terminal_open; not an authorization token"`
 }
 type TerminalReadInput struct {
 	SessionEpoch string `json:"session_epoch,omitempty" jsonschema:"Per-attachment output/control epoch from terminal_open/reconnect; reject stale epochs after executor restart"`
 	Root         bool   `json:"root,omitempty" jsonschema:"Must match the authority mode of the opened session"`
-	Approval     bool   `json:"approval,omitempty" jsonschema:"Explicit approval for root-mode terminal operation; always false for worker"`
+	Approval     bool   `json:"approval,omitempty" jsonschema:"Backward-compatible optional flag for already-approved root session. No repeated approval needed for existing session actions; false for worker"`
 	Workspace    string `json:"workspace" jsonschema:"Exact workspace used when the terminal was opened"`
 	SessionID    string `json:"session_id" jsonschema:"Opaque session identity"`
 	Cursor       uint64 `json:"cursor,omitempty" jsonschema:"Last successfully consumed output cursor; zero reads from available beginning"`
@@ -33,7 +33,7 @@ type TerminalReadInput struct {
 type TerminalWriteInput struct {
 	SessionEpoch string `json:"session_epoch,omitempty" jsonschema:"Per-attachment output/control epoch from terminal_open/reconnect; reject stale epochs after executor restart"`
 	Root         bool   `json:"root,omitempty" jsonschema:"Must match the authority mode of the opened session"`
-	Approval     bool   `json:"approval,omitempty" jsonschema:"Explicit approval for root-mode terminal operation; always false for worker"`
+	Approval     bool   `json:"approval,omitempty" jsonschema:"Backward-compatible optional flag for already-approved root session. No repeated approval needed for existing session actions; false for worker"`
 	Workspace    string `json:"workspace" jsonschema:"Exact workspace used when the terminal was opened"`
 	SessionID    string `json:"session_id" jsonschema:"Opaque session identity"`
 	Content      string `json:"content" jsonschema:"Literal terminal input including control bytes; max 65536 UTF-8 bytes per call, delivered in ordered bounded tmux chunks; on uncertain failure inspect state before retry"`
@@ -41,7 +41,7 @@ type TerminalWriteInput struct {
 type TerminalResizeInput struct {
 	SessionEpoch string `json:"session_epoch,omitempty" jsonschema:"Per-attachment output/control epoch from terminal_open/reconnect; reject stale epochs after executor restart"`
 	Root         bool   `json:"root,omitempty" jsonschema:"Must match the authority mode of the opened session"`
-	Approval     bool   `json:"approval,omitempty" jsonschema:"Explicit approval for root-mode terminal operation; always false for worker"`
+	Approval     bool   `json:"approval,omitempty" jsonschema:"Backward-compatible optional flag for already-approved root session. No repeated approval needed for existing session actions; false for worker"`
 	Workspace    string `json:"workspace" jsonschema:"Exact workspace used when the terminal was opened"`
 	SessionID    string `json:"session_id" jsonschema:"Opaque session identity"`
 	Columns      int    `json:"columns" jsonschema:"New width in columns, 20..240"`
@@ -50,7 +50,7 @@ type TerminalResizeInput struct {
 
 func (s *Server) registerTerminalTools() {
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-		Name: "terminal_open", Description: "Open a persistent tmux PTY as aiworker in a workspace. root=true requires approval=true and separate operator authorization. Returns session_id for later calls.",
+		Name: "terminal_open", Description: "Open a persistent tmux PTY as aiworker in a workspace. root=true requires approval=true and separate operator authorization only at creation; subsequent actions are bound to the same principal/root session and do not repeat approval. Returns session_id for later calls.",
 		Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, input TerminalOpenInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "terminal_open", Workspace: input.Workspace, Columns: input.Columns, Rows: input.Rows, Root: input.Root, Approval: input.Approval})

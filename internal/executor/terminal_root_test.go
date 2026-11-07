@@ -125,6 +125,10 @@ func TestApprovedRootTmuxRealNonProduction(t *testing.T) {
 	if err := denied.Run(); err == nil {
 		t.Fatal("aiworker could traverse root-only tmux socket")
 	}
+	// Creation approval is recorded in the principal-bound live session.
+	// Later root PTY operations (including reconnect) must not require
+	// the caller to repeat the approval flag on every packet.
+	req.Approval = false
 	workerRead := req
 	workerRead.Action = "terminal_read"
 	workerRead.Root = false

@@ -192,7 +192,11 @@ func (s *Server) terminalAction(req Request) Response {
 	if req.PrincipalID == "" || req.PrincipalClass == "" {
 		return terminalError("unauthorized_terminal", errors.New("authenticated principal required"))
 	}
-	if req.Root && !req.Approval {
+	// Authorize the privilege boundary when creating the root shell.
+	// Subsequent reads, writes and reconnections only operate on the exact
+	// existing principal/workspace/root-bound session: asking for approval
+	// again on each keystroke adds no new authority or safety.
+	if req.Root && req.Action == "terminal_open" && !req.Approval {
 		return Response{Error: "approval_required", ReasonCode: "approval_required", ErrorCode: "approval_required", ErrorClass: "approval"}
 	}
 	if !req.Root && req.Approval {
