@@ -11,6 +11,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -28,6 +29,10 @@ func TestManagedCredentialLoginPinnedChromium(t *testing.T) {
 		t.Fatal(err)
 	}
 	secret := "LOCAL-FIXTURE-CREDENTIAL-ONLY-NOT-A-REAL-SECRET"
+	var rotatingMu sync.Mutex
+	rotatingTokens := make(map[string]string)
+	var rotatingGets, rotatingCookieProbes int
+	var rotatingInitialID, rotatingPostID string
 	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
 		if r.URL.Path == "/ready" {
@@ -37,6 +42,45 @@ func TestManagedCredentialLoginPinnedChromium(t *testing.T) {
 				return
 			}
 			fmt.Fprint(w, `<h1 id="dashboard">Dashboard authenticated</h1>`)
+			return
+		}
+		if r.URL.Path == "/rotating" {
+			rotatingMu.Lock()
+			defer rotatingMu.Unlock()
+			cookie, _ := r.Cookie("rotating_session")
+			id := ""
+			if cookie != nil {
+				id = cookie.Value
+			}
+			if r.Method == http.MethodPost {
+				_ = r.ParseForm()
+				rotatingPostID = id
+				if id != "" && r.PostFormValue("token") == rotatingTokens[id] &&
+					r.PostFormValue("user") == "testadmin" && r.PostFormValue("password") == secret {
+					fmt.Fprint(w, `<h1 id="dashboard">Dashboard authenticated</h1>`)
+				} else {
+					fmt.Fprint(w, `<div id="login-error">Session token rejected</div>`)
+				}
+				return
+			}
+			rotatingGets++
+			if id == "" {
+				id = fmt.Sprintf("session-%d", rotatingGets)
+			} else {
+				rotatingCookieProbes++
+			}
+			if rotatingInitialID == "" {
+				rotatingInitialID = id
+			}
+			// A login-page GET rotates the token for its session. A readiness
+			// request must neither reuse the Browser cookie nor replace it.
+			token := fmt.Sprintf("token-%d", rotatingGets)
+			rotatingTokens[id] = token
+			http.SetCookie(w, &http.Cookie{Name: "rotating_session", Value: id, HttpOnly: true, Path: "/"})
+			fmt.Fprintf(w, `<!doctype html><form action="/rotating" method="post">
+          <input id="user" name="user"><input id="secret" name="password" type="password">
+          <input type="hidden" name="token" value="%s"><button id="submit">Sign in</button>
+        </form>`, token)
 			return
 		}
 		if r.URL.Path == "/unready" {
@@ -51,14 +95,19 @@ func TestManagedCredentialLoginPinnedChromium(t *testing.T) {
            <button id="submit">Sign in</button>
           </form>
           <div id="dashboard" style="display:none">Dashboard retained authenticated</div>
-          <div id="fieldstate">not-clean</div>
+          <div id="fieldstate">pending</div>
           <script>
            document.querySelector("#retained").addEventListener("submit",e=>{
              e.preventDefault();
+             document.querySelector("#secret").setAttribute("value",document.querySelector("#secret").value);
              document.querySelector("#dashboard").style.display="block";
            });
-           setInterval(()=>document.querySelector("#fieldstate").textContent=
-             document.querySelector("#secret").value ? "not-clean":"clean",10);
+           setInterval(()=>{
+             const field=document.querySelector("#secret");
+             document.querySelector("#fieldstate").textContent=
+               document.querySelector("#dashboard").style.display==="block" &&
+               field.value==="" && !field.hasAttribute("value") ? "cleared":"pending";
+           },10);
           </script>`)
 			return
 		}
@@ -186,10 +235,16 @@ func TestManagedCredentialLoginPinnedChromium(t *testing.T) {
 		t.Fatalf("false-positive auth: %+v", invalid)
 	}
 	navigate(app.URL+"/login", strings.Repeat("4", 32))
+	loginStarted := time.Now()
 	success := send(request(strings.Repeat("5", 32), secret))
+	loginElapsed := time.Since(loginStarted)
 	if success["event"] != "result" || success["result"].(map[string]any)["status"] != "authenticated" {
 		t.Fatalf("real Playwright login unverified: %+v stderr=%q", success, stderr.String())
 	}
+	if loginElapsed >= 10*time.Second {
+		t.Errorf("successful navigation login waited for the vanished password field: %s", loginElapsed)
+	}
+	t.Logf("successful navigation login completed in %s", loginElapsed)
 	observed := send(map[string]any{"type": "flow", "nonce": strings.Repeat("6", 32), "steps": []FlowStep{{Action: "assert_text", Selector: "#dashboard", Expected: "Dashboard authenticated"}}})
 	if observed["event"] != "result" || observed["result"].(map[string]any)["ok"] != true {
 		t.Fatalf("authenticated navigation failed: %+v", observed)
@@ -202,9 +257,23 @@ func TestManagedCredentialLoginPinnedChromium(t *testing.T) {
 		t.Fatalf("retained same-page login unverified: %+v", successRetained)
 	}
 	cleaned := send(map[string]any{"type": "flow", "nonce": strings.Repeat("9", 32),
-		"steps": []FlowStep{{Action: "assert_text", Selector: "#fieldstate", Expected: "clean"}}})
+		"steps": []FlowStep{{Action: "assert_text", Selector: "#fieldstate", Expected: "cleared"}}})
 	if cleaned["event"] != "result" || cleaned["result"].(map[string]any)["ok"] != true {
 		t.Fatalf("password field not wiped after successful same-page login: %+v", cleaned)
+	}
+	navigate(app.URL+"/rotating", strings.Repeat("0", 31)+"1")
+	rotating := request(strings.Repeat("0", 31)+"2", secret)
+	rotating["service_endpoint"] = origin + "/rotating"
+	rotated := send(rotating)
+	if rotated["event"] != "result" || rotated["result"].(map[string]any)["status"] != "authenticated" {
+		t.Errorf("readiness invalidated the rendered login session: %+v", rotated)
+	}
+	rotatingMu.Lock()
+	gets, cookieProbes, initialID, postID := rotatingGets, rotatingCookieProbes, rotatingInitialID, rotatingPostID
+	rotatingMu.Unlock()
+	if gets != 2 || cookieProbes != 0 || postID != initialID {
+		t.Errorf("readiness cookie isolation: GETs=%d Browser-cookie probes=%d original session preserved=%t",
+			gets, cookieProbes, postID == initialID)
 	}
 	navigate(app.URL+"/mfa", strings.Repeat("a", 32))
 	mfa := request(strings.Repeat("b", 32), secret)
