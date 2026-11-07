@@ -614,6 +614,47 @@ try {
       }
       continue;
     }
+    // Execute advanced Playwright on the SAME authenticated page/context.
+    // Caller JavaScript runs under the existing isolated Browser OS identity,
+    // not as root, and never receives the private credential-store secret.
+    // A custom script can mutate DOM/navigation: invalidate snapshot refs.
+    if (input?.type === 'script' && typeof input.nonce === 'string' &&
+        /^[0-9a-f]{32}$/.test(input.nonce) &&
+        typeof input.script === 'string' && input.script.trim() &&
+        Buffer.byteLength(input.script, 'utf8') <= 15360) {
+      state.refs.clear();
+      const logs = [];
+      let logBytes = 0;
+      const sink = {log(...values) {
+        const line = values.map(v => typeof v === 'string' ? v : String(v)).join(' ');
+        const bytes = Buffer.byteLength(line,'utf8');
+        if (logBytes + bytes > 8000) {
+          if (!logs.includes('[log budget exceeded]')) logs.push('[log budget exceeded]');
+          return;
+        }
+        logs.push(line);
+        logBytes += bytes;
+      }};
+      let result;
+      try {
+        const value = await new AsyncFunction('page','context','browser','console',input.script)(page,context,browser,sink);
+        result = {ok:true,value:value === undefined ? null : value,logs};
+      } catch (error) {
+        result = {ok:false,error:String(error?.message || error).slice(0,1000),logs};
+      }
+      // A custom result can contain arbitrary page data. Reject oversized
+      // frames explicitly instead of silently truncating JSON or violating the
+      // existing bounded broker ring. Known errors leave the session usable.
+      let wire;
+      try { wire = JSON.stringify({event:'result',nonce:input.nonce,result}); }
+      catch { wire = ''; }
+      if (!wire || Buffer.byteLength(wire,'utf8') > 15000) {
+        reply({event:'result',nonce:input.nonce,result:{ok:false,error:'script_result_too_large_or_unserializable',logs:[]}});
+      } else {
+        process.stdout.write('ASA_BROWSER_SESSION ' + wire + '\n');
+      }
+      continue;
+    }
     if (input?.type !== 'flow' || !Array.isArray(input.steps) || input.steps.length < 1 || input.steps.length > 12 ||
         typeof input.nonce !== 'string' || !/^[0-9a-f]{32}$/.test(input.nonce)) {
       reply({event:'error',reason:'invalid_request'}); break;

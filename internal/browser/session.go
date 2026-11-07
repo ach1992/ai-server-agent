@@ -17,6 +17,7 @@ type SessionOptions struct {
 	Workspace         string
 	SessionID         string
 	Steps             []FlowStep
+	Script            string
 	TimeoutMS         int64
 	IgnoreHTTPSErrors bool
 	ChromiumSandbox   bool
@@ -280,6 +281,35 @@ func (m *Manager) SessionImage(ctx context.Context, opts SessionOptions) (execut
 	}
 	if !resp.OK && resp.Error == "unknown action" {
 		return browserError("browser_image_unavailable", "compatibility", "installed Executor does not support staged JPEGs; upgrade both components"), nil
+	}
+	return resp, nil
+}
+
+// SessionScript runs arbitrary Playwright JavaScript on the already-open
+// session (including a credential-authenticated session) with the same
+// principal/workspace binding, bounded broker frame and timeout.
+func (m *Manager) SessionScript(ctx context.Context, opts SessionOptions) (executor.Response, error) {
+	if opts.SessionID == "" || opts.Workspace == "" || strings.TrimSpace(opts.Script) == "" {
+		return browserError("invalid_browser_script", "validation", "workspace, session_id and nonempty script are required"), nil
+	}
+	if len(opts.Script) > 15<<10 {
+		return browserError("input_too_large", "validation", "script exceeds the existing 16 KiB managed-session frame; use a shorter script"), nil
+	}
+	timeout, err := normalizeRunTimeout(opts.TimeoutMS)
+	if err != nil {
+		return browserError("invalid_timeout", "validation", err.Error()), nil
+	}
+	ctx, _, err = executor.EnsureRequestCorrelationContext(ctx)
+	if err != nil {
+		return browserUnknown("browser script correlation", err, false), nil
+	}
+	callCtx, cancel := context.WithTimeout(ctx, timeout+browserExecutorClientGrace)
+	defer cancel()
+	resp, err := executor.ClientCallContext(callCtx, m.cfg.ExecutorSocket, m.token, executor.Request{
+		Action: "browser_session_script", Workspace: opts.Workspace, SessionID: opts.SessionID, Content: opts.Script, TimeoutMS: int64(timeout / time.Millisecond),
+	})
+	if err != nil {
+		return browserUnknown("browser script transport", err, false), nil
 	}
 	return resp, nil
 }

@@ -362,7 +362,9 @@ func (s *Server) browserSessionAction(ctx context.Context, req Request) Response
 	case "browser_session_open":
 		return s.browserSessionOpen(ctx, req)
 	case "browser_session_flow":
-		return s.credentialFlowEvidenceGate(req, s.browserSessionFlow(ctx, req))
+		return s.browserSessionFlow(ctx, req)
+	case "browser_session_script":
+		return s.browserSessionScript(ctx, req)
 	case "browser_session_capture":
 		return s.browserSessionCapture(ctx, req)
 	case "browser_session_trace":
@@ -640,6 +642,75 @@ func (s *Server) browserSessionReadFrame(ctx context.Context, req Request, state
 		case <-time.After(15 * time.Millisecond):
 		}
 	}
+}
+
+// browserSessionScript runs user-supplied Playwright JavaScript on the existing
+// principal/workspace-bound page. The executable is the SAME managed Browser,
+// not browser_run's independently created process/profile. Stdio framing,
+// audit, session ownership, uncertainty and credential revocation are shared.
+func (s *Server) browserSessionScript(ctx context.Context, req Request) Response {
+	entry, err := s.browserSessionEntry(req)
+	if err != nil {
+		return browserSessionError("browser_session_not_found", "authorization", errSessionNotFound)
+	}
+	if strings.TrimSpace(req.Content) == "" || len(req.Content) > maxStdioInputBytes-1024 {
+		return browserSessionError("invalid_browser_script", "validation", errors.New("nonempty Playwright script required within session frame budget"))
+	}
+	timeout := time.Duration(req.TimeoutMS) * time.Millisecond
+	if req.TimeoutMS == 0 {
+		timeout = 90 * time.Second
+	}
+	if req.TimeoutMS < 0 || timeout > 5*time.Minute {
+		return browserSessionError("invalid_timeout", "validation", errors.New("Browser script timeout maximum is 5 minutes"))
+	}
+	state := entry.browser
+	if !state.mu.TryLock() {
+		return browserSessionBusy()
+	}
+	defer state.mu.Unlock()
+	if state.uncertain {
+		return browserSessionError("browser_session_uncertain", "state", errors.New("prior Browser action completion unverified; close this session"))
+	}
+	var random [16]byte
+	if _, err := rand.Read(random[:]); err != nil {
+		return browserSessionError("browser_nonce_unavailable", "security", err)
+	}
+	nonce := hex.EncodeToString(random[:])
+	payload, err := json.Marshal(struct {
+		Type   string `json:"type"`
+		Nonce  string `json:"nonce"`
+		Script string `json:"script"`
+	}{Type: "script", Nonce: nonce, Script: req.Content})
+	if err != nil || len(payload)+1 > maxStdioInputBytes {
+		return browserSessionError("input_too_large", "validation", errors.New("encoded Playwright script exceeds existing session frame budget"))
+	}
+	if err := s.workerStdioWrite(req, entry.id, append(payload, '\n')); err != nil {
+		state.uncertain = true
+		return browserSessionError("browser_session_action_uncertain", "state", errors.New("Playwright script delivery unverified; close before retry"))
+	}
+	frameCtx, cancel := context.WithTimeout(ctx, timeout+time.Second)
+	defer cancel()
+	frame, err := s.browserSessionReadFrame(frameCtx, req, state, entry.id, nonce)
+	if err != nil || frame.Event != "result" || len(frame.Result) == 0 {
+		state.uncertain = true
+		return browserSessionError("browser_session_action_uncertain", "state", errors.New("Playwright script completion unknown; inspect and close rather than replaying side effects"))
+	}
+	var outcome struct {
+		OK *bool `json:"ok"`
+	}
+	if json.Unmarshal(frame.Result, &outcome) != nil || outcome.OK == nil {
+		state.uncertain = true
+		return browserSessionError("browser_session_action_uncertain", "state", errors.New("invalid Playwright script result"))
+	}
+	resp := Response{OK: *outcome.OK, Status: "result", SessionID: entry.id, Output: string(frame.Result), OutputEncoding: "json", BytesSeen: int64(len(frame.Result)), BytesReturned: int64(len(frame.Result))}
+	if !*outcome.OK {
+		resp.Status = "failed"
+		resp.ReasonCode = "browser_script_failed"
+		resp.ErrorCode = "browser_script_failed"
+		resp.ErrorClass = "action"
+		resp.Error = "Playwright script failed after a known completion; inspect returned diagnostics; do not automatically replay mutations"
+	}
+	return resp
 }
 
 func (s *Server) browserSessionFlow(ctx context.Context, req Request) Response {
