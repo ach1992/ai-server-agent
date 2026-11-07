@@ -211,7 +211,7 @@ func (b *stdioSessionBroker) getWithIdlePolicy(req Request, id string, renew boo
 	b.mu.Lock()
 	session := b.sessions[id]
 	b.mu.Unlock()
-	if session == nil || session.ownerID != req.PrincipalID || session.ownerClass != req.PrincipalClass || filepath.Clean(req.Workspace) != session.workspace || (session.terminal != nil && session.terminal.root != req.Root) || (session.terminal == nil && (req.Root || req.Approval)) || (session.terminal != nil && req.Approval != req.Root) {
+	if session == nil || session.ownerID != req.PrincipalID || session.ownerClass != req.PrincipalClass || filepath.Clean(req.Workspace) != session.workspace || (session.terminal != nil && session.terminal.root != req.Root) || (session.terminal == nil && (req.Root || req.Approval)) || (session.terminal != nil && !req.Root && req.Approval) {
 		// Do not reveal whether another principal's opaque session exists.
 		return nil, errSessionNotFound
 	}
@@ -407,7 +407,11 @@ func (s *Server) startProcessSessionWithOptions(req Request, kind, workspace, bi
 	if containment != nil && ((kind != "dap" && kind != "browser") || terminal != nil || priorID != "" || req.Root || req.Approval || os.Geteuid() != 0) {
 		return "", errors.New("private cgroup is only valid for fresh unprivileged DAP or Browser sessions")
 	}
-	if s.sessions == nil || req.PrincipalID == "" || req.PrincipalClass == "" || req.Root != (terminal != nil && terminal.root) || req.Approval != req.Root {
+	// The initial privileged PTY creation is approved in terminal_open and
+	// rootTmuxProcessSession. A verified recovered terminal reattaches to its
+	// existing owner-bound scope; it must not demand another approval flag.
+	recoveredRoot := kind == "terminal" && priorID != "" && terminal != nil && terminal.recovered && req.Root && !req.Approval
+	if s.sessions == nil || req.PrincipalID == "" || req.PrincipalClass == "" || req.Root != (terminal != nil && terminal.root) || (req.Approval != req.Root && !recoveredRoot) {
 		return "", errors.New("session requires authenticated worker authority")
 	}
 	if kind != "lsp" && kind != "dap" && kind != "browser" && (kind != "terminal" || terminal == nil) {

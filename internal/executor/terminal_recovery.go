@@ -376,7 +376,7 @@ func (s *Server) readOwnedTerminalRecordIdentity(req Request) (terminalRecord, e
 	if err = json.Unmarshal(body, &rec); err != nil {
 		return rec, errors.New("terminal_record_invalid")
 	}
-	if !validTerminalRecordVersion(rec) || rec.ID != req.SessionID || rec.OwnerID != req.PrincipalID || rec.OwnerClass != req.PrincipalClass || rec.Workspace != filepath.Clean(req.Workspace) || rec.Root != req.Root || req.Approval != req.Root || !validTmuxSessionName(rec.Name) || !validTerminalID(rec.ID) ||
+	if !validTerminalRecordVersion(rec) || rec.ID != req.SessionID || rec.OwnerID != req.PrincipalID || rec.OwnerClass != req.PrincipalClass || rec.Workspace != filepath.Clean(req.Workspace) || rec.Root != req.Root || !validTmuxSessionName(rec.Name) || !validTerminalID(rec.ID) ||
 		(rec.Lifecycle != "" && rec.Lifecycle != "active" && rec.Lifecycle != "pending") {
 		return terminalRecord{}, errSessionNotFound
 	}

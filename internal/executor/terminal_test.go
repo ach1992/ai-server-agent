@@ -18,6 +18,166 @@ import (
 	"time"
 )
 
+// A live, unprivileged Control Mode protocol fixture exercises the real
+// broker and Terminal handlers with an already-authorized root SESSION label.
+// It never creates a privileged shell. The real root process/scope proof is
+// the separately authorized TestApprovedRootTmuxRealNonProduction test.
+func TestRootTerminalApprovalIsOnlyForInitialOpen(t *testing.T) {
+	s, worker, workspace := testStdioBroker(t)
+	owner := worker
+	owner.Action, owner.Root, owner.Columns, owner.Rows = "terminal_open", true, 80, 24
+	if got := s.terminalAction(owner); got.OK || got.ErrorCode != "approval_required" {
+		t.Fatalf("unapproved root creation allowed: %+v", got)
+	}
+	// Spawn only an ordinary worker shell that acknowledges tmux-style
+	// commands, then attach a root-bound test session identity to its broker
+	// entry. This tests actual read/write/resize/interrupt/close behavior,
+	// rather than accepting session_not_found as a successful regression.
+	id, err := s.workerStdioSession(worker, "lsp", workspace, "/bin/sh", "-c",
+		`while IFS= read -r line; do printf '%s\n' '%begin 1 2 3' '%end 1 2 3'; done`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry, err := s.sessions.get(worker, id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	badWorker := worker
+	badWorker.Approval = true
+	if _, err := s.sessions.get(badWorker, id); !errors.Is(err, errSessionNotFound) {
+		t.Fatalf("unprivileged terminal broker accepted worker approval=true: %v", err)
+	}
+	t.Cleanup(func() { _ = s.sessions.removeAndStop(entry) })
+	const epoch = "0123456789abcdef01234567"
+	entry.mu.Lock()
+	entry.kind = "terminal"
+	entry.terminal = &tmuxTerminalState{root: true, epoch: epoch,
+		name: "asa_0123456789abcdef01234567", columns: 80, rows: 24}
+	entry.terminal.accept([]byte("%output %1 ROOT_BOUND_READ_OK\n"))
+	entry.mu.Unlock()
+
+	owner.SessionID, owner.SessionEpoch, owner.Approval = id, epoch, false
+	for _, approval := range []bool{false, true} {
+		request := owner
+		request.Action, request.Approval = "terminal_read", approval
+		got := s.terminalAction(request)
+		if !got.OK {
+			t.Fatalf("authenticated root read approval=%t: %+v", approval, got)
+		}
+		decoded, err := base64.StdEncoding.DecodeString(got.Output)
+		if err != nil || !bytes.Contains(decoded, []byte("ROOT_BOUND_READ_OK")) {
+			t.Fatalf("root terminal read lost actual output: %q (%v)", decoded, err)
+		}
+	}
+	for _, change := range []struct {
+		name    string
+		rewrite func(*Request)
+	}{
+		{"different principal", func(r *Request) { r.PrincipalID = "other" }},
+		{"different principal class", func(r *Request) { r.PrincipalClass = "other" }},
+		{"different workspace", func(r *Request) { r.Workspace += "-other" }},
+		{"worker cannot access root", func(r *Request) { r.Root = false }},
+	} {
+		t.Run(change.name, func(t *testing.T) {
+			bad := owner
+			bad.Action = "terminal_read"
+			change.rewrite(&bad)
+			if got := s.terminalAction(bad); got.OK || got.ErrorCode != "session_not_found" {
+				t.Fatalf("unauthorized root read: %+v", got)
+			}
+		})
+	}
+	stale := owner
+	stale.Action, stale.SessionEpoch = "terminal_write", "stale-epoch"
+	stale.Content = "NOT_DELIVERED\n"
+	if got := s.terminalAction(stale); got.OK || got.ErrorCode != "terminal_epoch_changed" {
+		t.Fatalf("stale root epoch allowed write: %+v", got)
+	}
+	workerEscalation := owner
+	workerEscalation.Action, workerEscalation.Root, workerEscalation.Approval = "terminal_read", false, true
+	if got := s.terminalAction(workerEscalation); got.OK || got.ErrorCode != "invalid_authority" {
+		t.Fatalf("worker approval spoofed root: %+v", got)
+	}
+	reconnect := owner
+	reconnect.Action = "terminal_reconnect"
+	if got := s.terminalAction(reconnect); !got.OK || got.Status != "already_connected" || got.SessionEpoch != epoch {
+		t.Fatalf("already-connected authorized root session rejected: %+v", got)
+	}
+	for _, action := range []string{"terminal_write", "terminal_resize", "terminal_interrupt"} {
+		request := owner
+		request.Action = action
+		request.Content, request.Columns, request.Rows = "echo ACCEPTED\n", 67, 19
+		if got := s.terminalAction(request); !got.OK {
+			t.Fatalf("root %s without repeated approval: %+v", action, got)
+		}
+	}
+	entry.mu.Lock()
+	width, height := entry.terminal.columns, entry.terminal.rows
+	entry.mu.Unlock()
+	if width != 67 || height != 19 {
+		t.Fatalf("root resize not applied: %d x %d", width, height)
+	}
+	// The fixture close must take the normal live-session broker path,
+	// revoke the entry, and retire its child process and terminal record.
+	record, err := s.terminalRecordPath(id)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(record), 0700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(record, []byte("fixture"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	closeReq := owner
+	closeReq.Action = "terminal_close"
+	if got := s.terminalAction(closeReq); !got.OK {
+		t.Fatalf("normal live root close failed: %+v", got)
+	}
+	waitForStdioExit(t, entry)
+	if _, err := s.sessions.get(owner, id); !errors.Is(err, errSessionNotFound) {
+		t.Fatalf("closed root broker entry retained: %v", err)
+	}
+	if _, err := os.Stat(record); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("closed root terminal record retained: %v", err)
+	}
+}
+
+// The recovered Control Mode subprocess reattaches to an existing verified
+// root scope. Initial creation and unrelated privileged process admission
+// still require the original explicit approval; no root process is started.
+func TestRootTerminalRecoveredAttachmentDoesNotReapproveCreation(t *testing.T) {
+	s, worker, workspace := testStdioBroker(t)
+	request := worker
+	request.Root = true
+	const priorID = "stdio_0123456789abcdef0123456789abcdef"
+	terminal := &tmuxTerminalState{root: true, recovered: true}
+	// An intentionally invalid executable verifies that the recovered root
+	// request passed authority validation, but cannot launch any process.
+	for _, approval := range []bool{false, true} {
+		request.Approval = approval
+		if _, err := s.startProcessSessionWithID(request, "terminal", workspace,
+			"relative-executable", terminal, priorID); err == nil || err.Error() != "invalid session executable" {
+			t.Fatalf("verified recovery approval=%t did not reach executable validation: %v", approval, err)
+		}
+	}
+	request.Approval = false
+	unverified := &tmuxTerminalState{root: true}
+	if _, err := s.startProcessSessionWithID(request, "terminal", workspace,
+		"relative-executable", unverified, priorID); err == nil || err.Error() != "session requires authenticated worker authority" {
+		t.Fatalf("unverified root attachment skipped initial authority: %v", err)
+	}
+	if _, err := s.startProcessSessionWithID(request, "terminal", workspace,
+		"relative-executable", terminal, ""); err == nil || err.Error() != "session requires authenticated worker authority" {
+		t.Fatalf("fresh root session skipped creation approval: %v", err)
+	}
+	request.Root, request.Approval = false, true
+	if _, err := s.startProcessSessionWithID(request, "terminal", workspace,
+		"relative-executable", &tmuxTerminalState{recovered: true}, priorID); err == nil || err.Error() != "session requires authenticated worker authority" {
+		t.Fatalf("worker privilege escalation accepted: %v", err)
+	}
+}
+
 func TestTerminalPasteCommandsBoundedAndLossless(t *testing.T) {
 	for _, length := range []int{1, terminalInputChunk - 1, terminalInputChunk, terminalInputChunk + 1, 8192, terminalMaxInput} {
 		t.Run(fmt.Sprintf("length_%d", length), func(t *testing.T) {
@@ -679,13 +839,18 @@ func TestRootTerminalIdentityCannotBeUsedAsWorker(t *testing.T) {
 	if _, err := s.sessions.get(owner, id); !errors.Is(err, errSessionNotFound) {
 		t.Fatalf("worker opened root terminal: %v", err)
 	}
+	workerWithApproval := owner
+	workerWithApproval.Approval = true
+	if _, err := s.sessions.get(workerWithApproval, id); !errors.Is(err, errSessionNotFound) {
+		t.Fatalf("worker approval flag bypassed root session authority: %v", err)
+	}
 	owner.Root = true
-	if _, err := s.sessions.get(owner, id); !errors.Is(err, errSessionNotFound) {
-		t.Fatalf("root session without approval: %v", err)
+	if got, err := s.sessions.get(owner, id); err != nil || got != e {
+		t.Fatalf("verified existing root session incorrectly required repeated approval: %v", err)
 	}
 	owner.Approval = true
-	if _, err := s.sessions.get(owner, id); err != nil {
-		t.Fatal(err)
+	if got, err := s.sessions.get(owner, id); err != nil || got != e {
+		t.Fatalf("legacy root approval flag broke owner access: %v", err)
 	}
 	owner.PrincipalClass = "other"
 	if _, err := s.sessions.get(owner, id); !errors.Is(err, errSessionNotFound) {
