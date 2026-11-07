@@ -130,9 +130,14 @@ func TestCredentialLoginInputBoundToOrigin(t *testing.T) {
 	if err := valid.validate("https://app.example"); err != nil {
 		t.Fatal(err)
 	}
+	redirected := valid
+	redirected.SuccessURL = "https://sso.example/application/dashboard"
+	if err := redirected.validate("https://app.example"); err != nil {
+		t.Fatalf("post-auth cross-origin success URL denied: %v", err)
+	}
 	for _, c := range []credentialLoginOptions{
 		{SecretSelector: "#password", SubmitSelector: "button.login"},
-		{SecretSelector: "#password", SubmitSelector: "button.login", SuccessURL: "https://evil.example/callback"},
+		{SecretSelector: "#password", SubmitSelector: "button.login", SuccessURL: "https://evil.example/callback?token=leak"},
 		{SecretSelector: strings.Repeat("X", 600), SubmitSelector: "a", SuccessSelector: "#dashboard"},
 	} {
 		if err := c.validate("https://app.example"); err == nil {

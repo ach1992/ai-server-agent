@@ -16,6 +16,7 @@ type RuntimeSettings struct {
 	CommandTimeoutSeconds        int `json:"command_timeout_seconds"`
 	WorkspaceFileTimeoutSeconds  int `json:"workspace_file_timeout_seconds"`
 	TextFallbackBytes            int `json:"text_fallback_bytes"`
+	SyncOutputSpoolMiB           int `json:"sync_output_spool_mib"`
 	TransferStagingMiB           int `json:"transfer_staging_mib"`
 	TransferSessionTTLSeconds    int `json:"transfer_session_ttl_seconds"`
 	TransferActiveSessions       int `json:"transfer_active_sessions"`
@@ -41,6 +42,7 @@ var runtimeSettingSpecs = []RuntimeSettingSpec{
 	{Key: "command_timeout_seconds", Default: 300, Minimum: 10, Maximum: 1800, Unit: "seconds", Description: "Maximum synchronous worker/root command duration; use start_job for longer work"},
 	{Key: "workspace_file_timeout_seconds", Default: 30, Minimum: 5, Maximum: 300, Unit: "seconds", Description: "Per-call worker workspace file helper timeout; large files use version-pinned windows"},
 	{Key: "text_fallback_bytes", Default: 32768, Minimum: 4096, Maximum: 262144, Unit: "bytes", Description: "Maximum serialized text-only MCP fallback; structuredContent and model context have separate budgets"},
+	{Key: "sync_output_spool_mib", Default: 64, Minimum: 8, Maximum: 1024, Unit: "MiB", Description: "Maximum complete recoverable synchronous command output; excess fails explicitly, use start_job for unbounded streams"},
 	{Key: "transfer_staging_mib", Default: 512, Minimum: 16, Maximum: 1048576, Unit: "MiB", Description: "Cumulative declared bytes for concurrent staged worker transfers; not a permanent file-size limit"},
 	{Key: "transfer_session_ttl_seconds", Default: 3600, Minimum: 60, Maximum: 86400, Unit: "seconds", Description: "Idle lifetime for resumable worker transfers, including final status receipts"},
 	{Key: "transfer_active_sessions", Default: 8, Minimum: 1, Maximum: 64, Unit: "sessions", Description: "Maximum simultaneous durable worker transfer sessions"},
@@ -64,6 +66,7 @@ func DefaultRuntimeSettings() RuntimeSettings {
 		CommandTimeoutSeconds:        300,
 		WorkspaceFileTimeoutSeconds:  30,
 		TextFallbackBytes:            32768,
+		SyncOutputSpoolMiB:           64,
 		TransferStagingMiB:           512,
 		TransferSessionTTLSeconds:    3600,
 		TransferActiveSessions:       8,
@@ -82,6 +85,7 @@ func (r RuntimeSettings) Validate() error {
 		"command_timeout_seconds":          r.CommandTimeoutSeconds,
 		"workspace_file_timeout_seconds":   r.WorkspaceFileTimeoutSeconds,
 		"text_fallback_bytes":              r.TextFallbackBytes,
+		"sync_output_spool_mib":            r.SyncOutputSpoolMiB,
 		"transfer_staging_mib":             r.TransferStagingMiB,
 		"transfer_session_ttl_seconds":     r.TransferSessionTTLSeconds,
 		"transfer_active_sessions":         r.TransferActiveSessions,

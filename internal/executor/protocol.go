@@ -6,6 +6,17 @@ import (
 	"time"
 )
 
+type ServiceUseSpec struct {
+	Method      string `json:"method,omitempty"`
+	Path        string `json:"path,omitempty"`
+	Body        string `json:"body,omitempty"`
+	ContentType string `json:"content_type,omitempty"`
+	AuthHeader  string `json:"auth_header,omitempty"`
+	AuthMode    string `json:"auth_mode,omitempty"`
+	Command     string `json:"command,omitempty"`
+	Query       string `json:"query,omitempty"`
+}
+
 type Request struct {
 	Token              string               `json:"token"`
 	Action             string               `json:"action"`
@@ -82,6 +93,7 @@ type Request struct {
 	ChunkSHA256        string               `json:"chunk_sha256,omitempty"`
 	ManagedEnv         managedincus.Request `json:"managed_env,omitempty"`
 	ServiceAccess      serviceaccess.Input  `json:"service_access,omitempty"`
+	ServiceUse         ServiceUseSpec       `json:"service_use,omitempty"`
 	CredentialRef      string               `json:"credential_ref,omitempty"`
 }
 

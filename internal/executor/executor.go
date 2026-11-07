@@ -41,6 +41,10 @@ type Server struct {
 	phpIndexMu                        sync.Mutex              // single fresh index/build/lookup at a time; bounded, no second broker
 	terminalAdmissionMu               sync.Mutex              // serializes disk-backed terminal capacity and scope creation
 	browserAdmission                  browserSessionAdmission // shared, isolated and maintenance admission
+	serviceSSHBinary                  string                  // private native client test fixture; production uses /usr/bin/ssh
+	serviceSSHPassBinary              string                  // private native client test fixture; production uses /usr/bin/sshpass
+	servicePSQLBinary                 string                  // private native client test fixture; production uses /usr/bin/psql
+	serviceMySQLBinary                string                  // private native client test fixture; production uses /usr/bin/mysql
 	browserNodeBinary                 string                  // test-only private fixture override; production always uses root-owned pinned Node
 	browserRunTerminateTestHook       func(int) (bool, error) // private one-shot Browser uncertain-stop test hook
 	browserKillTestHook               func() error            // private root-fixture pause/fault, never public API
@@ -232,6 +236,8 @@ func (s *Server) dispatch(req Request) Response {
 	switch req.Action {
 	case "service_access":
 		return s.serviceAccessAction(context.Background(), req)
+	case "service_use":
+		return s.serviceUseAction(context.Background(), req)
 	case "managed_environment":
 		return s.managedEnvironmentAction(context.Background(), req)
 	case "run":

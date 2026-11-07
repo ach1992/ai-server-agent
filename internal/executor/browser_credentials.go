@@ -27,7 +27,7 @@ type credentialLoginOptions struct {
 // Never let client-supplied selectors or service URLs contain a secret or
 // executable code. CSS is only used as Playwright locator input. The secret
 // itself only enters the protected executor and the pinned Browser's stdin.
-func (a credentialLoginOptions) validate(origin string) error {
+func (a credentialLoginOptions) validate(_ string) error {
 	for _, v := range []string{a.UsernameSelector, a.SecretSelector, a.SubmitSelector, a.SuccessSelector, a.ChallengeSelector, a.LoginErrorSelector} {
 		if len(v) > 512 || strings.IndexFunc(v, func(r rune) bool { return r < 32 || r == 127 }) >= 0 {
 			return errors.New("invalid or oversized CSS selector")
@@ -40,9 +40,9 @@ func (a credentialLoginOptions) validate(origin string) error {
 		if err := serviceaccess.ValidEndpoint(a.SuccessURL); err != nil {
 			return errors.New("success_url must be an absolute HTTP(S) URL without secrets")
 		}
-		if serviceaccess.Origin(a.SuccessURL) != origin {
-			return errors.New("success URL must have the same origin as the enrolled endpoint")
-		}
+		// The credential is injected and submitted only on the registered
+		// form origin. A successful SSO or redirected login may legitimately
+		// land on another HTTP(S) origin after the secret has been cleared.
 	}
 	return nil
 }

@@ -30,7 +30,7 @@ func TestIssue65ToolsDiscoveredWithoutCredentialInput(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := map[string]bool{"managed_environment": false, "service_access": false, "browser_session_credential_login": false}
+	want := map[string]bool{"managed_environment": false, "service_access": false, "service_use": false, "browser_session_credential_login": false}
 	for _, tool := range result.Tools {
 		if _, ok := want[tool.Name]; !ok {
 			continue

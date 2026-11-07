@@ -551,9 +551,19 @@ try {
         }
         // Require a meaningful success transition rather than accepting a
         // pre-existing body element or the same URL as evidence of login.
+        // URL prefixes alone can match attacker-controlled lookalike hosts.
+        // Require exact origin for the *result* URL, which may differ from
+        // the credential submission origin after a legitimate SSO redirect.
+        const matchesSuccessURL = href => {
+          try {
+            const observed = new URL(href);
+            const expected = new URL(input.success_url);
+            return observed.origin === expected.origin && observed.href.startsWith(expected.href);
+          } catch { return false; }
+        };
         const wasSuccess = input.success_selector ?
           await page.locator(input.success_selector).first().isVisible().catch(() => false) :
-          page.url().startsWith(input.success_url);
+          matchesSuccessURL(page.url());
         if (wasSuccess) throw new Error('already_matches_success');
         if (input.username_selector) {
           await page.locator(input.username_selector).first().fill(input.username, {timeout:10000});
@@ -582,7 +592,7 @@ try {
         if (input.success_selector) {
           events.push(page.locator(input.success_selector).first().waitFor({state:'visible',timeout:15000}).then(()=> 'success'));
         } else {
-          events.push(page.waitForURL(url => url.href.startsWith(input.success_url),{timeout:15000}).then(()=> 'success'));
+          events.push(page.waitForURL(url => matchesSuccessURL(url.href),{timeout:15000}).then(()=> 'success'));
         }
         if (input.login_error_selector) {
           events.push(page.locator(input.login_error_selector).first().waitFor({state:'visible',timeout:15000}).then(()=> 'invalid'));
@@ -607,7 +617,8 @@ try {
             }
           });
         } catch {}
-        if (!rightOrigin()) { reason='credential_origin_mismatch'; throw new Error('refused'); }
+        // Post-authenticated navigation is not credential delivery. The
+        // pre-fill, pre-submit and form-action origin checks above remain.
         reply({event:'result',nonce,result:{ok:true,status:'authenticated'}});
       } catch {
         input.secret = '';

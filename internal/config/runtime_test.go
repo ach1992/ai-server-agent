@@ -185,6 +185,8 @@ func override(t *testing.T, r *RuntimeSettings, key string, value int) {
 		r.WorkspaceFileTimeoutSeconds = value
 	case "text_fallback_bytes":
 		r.TextFallbackBytes = value
+	case "sync_output_spool_mib":
+		r.SyncOutputSpoolMiB = value
 	case "transfer_staging_mib":
 		r.TransferStagingMiB = value
 	case "transfer_session_ttl_seconds":
