@@ -602,13 +602,13 @@ The pinned Chromium GitHub CI acceptance job must run and require an actual PASS
 
 ### Operator-local protected-login smoke client (existing Agent instance)
 
-For an **authorized disposable Test host** when the normal MCP connector cannot target an isolated localhost Agent fixture, use \`tests/installed_browser_auth_smoke.py\`. This opt-in **test client** uses only existing MCP methods: \`browser_status\`, \`service_access.inspect\`, \`browser_session_open(profile_mode=isolated)\`, \`browser_session_flow\`, \`browser_session_credential_login\`, and \`browser_session_close\`. It is **not** a new authentication endpoint, privileged Executor mode or alternative credential retrieval API. It reads the local bearer privately from the selected root-owned Agent config, speaks HTTP only to \`127.0.0.1:<port>\` without proxies or redirects, and passes only opaque service refs and nonsecret locators to the MCP tool. Actual target-service credentials remain exclusively in the existing protected Executor/Browser workflow.
+For an **authorized disposable Test host** when the normal MCP connector cannot target another installed localhost Agent, use `tests/installed_browser_auth_smoke.py`. Browser execution still requires the product's protected **canonical** `ai-server-agent-executor.service` cgroup on that host. A sidecar service such as `asa65-issue65-executor.service` can report `browser_status.ready=true` (the pinned engine is ready) but still fail `browser_session_open` with `browser_containment_unavailable`: its systemd unit identity is not the trusted Executor cgroup. Do not relax that check, retag an occupied primary unit or claim sidecar Browser acceptance. This opt-in **test client** uses only existing MCP methods: `browser_status`, `service_access.inspect`, `browser_session_open(profile_mode=isolated)`, `browser_session_flow`, `browser_session_credential_login`, and `browser_session_close`. It is **not** a new authentication endpoint, privileged Executor mode or alternative credential retrieval API. It reads the local bearer privately from the selected root-owned Agent config, speaks HTTP only to `127.0.0.1:<port>` without proxies or redirects, and passes only opaque service refs and nonsecret locators to the MCP tool. Actual target-service credentials remain exclusively in the existing protected Executor/Browser workflow.
 
 The runner enforces root-owned, nonwritable config/bearer/helper path ancestry, verifies that the registered credential belongs to the expected Agent instance and is ready, refuses malformed endpoint URLs, uses explicit opt-in for private HTTPS certificate exceptions, verifies a real authenticated admin UI with bounded text assertions, and closes the Browser session even after failed login. If closure is uncertain, it fails instead of reporting success. It never sends credentials in CLI args, shell environment, terminal output, generic logs, screenshots or traces. No automatic login retries.
 
 **Operator procedure:** inspect and verify exact source/commit and running Test binary/instance; copy the reviewed Python file from its clean checkout to a separately owned, private **root-only** directory and verify the copy's SHA256; invoke that root-owned copy using Python 3 with:
 
-\`\`\`bash
+```bash
 sudo python3 /root/verified/installed_browser_auth_smoke.py \
   --config /etc/<isolated-agent>/config.json \
   --port <isolated-loopback-MCP-port> \
@@ -618,9 +618,9 @@ sudo python3 /root/verified/installed_browser_auth_smoke.py \
   --profile wordpress
 # For aaPanel, use --profile aapanel and add --ignore-https-errors
 # only when the registered private endpoint uses its known test certificate.
-\`\`\`
+```
 
-The runner reports only \`status=authenticated\`, number of completed admin assertions, elapsed time, verified close and stable nonsecret \`reason_code\` on errors. The test references are not automatically revoked; clean up **only** task-owned temporary refs by the existing \`service_access\` operations after checking their ownership. Do not copy stores, expose bearer values, change Agent primary credentials, alter another Agent's live service, or infer an installed auth PASS from source/CI tests. Unit-test this client without secrets via \`python3 -B -m unittest discover -s tests -p 'test_installed_browser_auth_smoke.py' -v\`. External AI-client safety refusals can still occur independently of Agent correctness; this narrow supported test route avoids generating ad-hoc sensitive root commands but cannot disable client-side policy.
+The runner reports only `status=authenticated`, number of completed admin assertions, elapsed time, verified close and stable nonsecret `reason_code` on errors. The test references are not automatically revoked; clean up **only** task-owned temporary refs by the existing `service_access` operations after checking their ownership. Do not copy stores, expose bearer values, change Agent primary credentials, alter another Agent's live service, or infer an installed auth PASS from source/CI tests. Unit-test this client without secrets via `python3 -B -m unittest discover -s tests -p 'test_installed_browser_auth_smoke.py' -v`. External AI-client safety refusals can still occur independently of Agent correctness; this narrow supported test route avoids generating ad-hoc sensitive root commands but cannot disable client-side policy.
 
 
 ### Remediation verification matrix for F1–F6 (Reviewer 2026-11-06)

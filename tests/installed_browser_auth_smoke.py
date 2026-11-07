@@ -87,13 +87,21 @@ def require_regular_root_file(path: str, *, label: str) -> str:
     return path
 
 
-def load_private_bearer(config_path: str) -> str:
+def load_private_bearer(config_path: str, *, port: int, instance: str) -> str:
     require_regular_root_file(config_path, label="config")
     try:
         with open(config_path, encoding="utf-8") as stream:
             config = json.load(stream)
         if not isinstance(config, dict):
             raise ValueError("not an object")
+        # Bind the private bearer to the *configured* local MCP listener,
+        # not an arbitrary loopback port supplied in CLI arguments.
+        if (config.get("listen_address") != f"127.0.0.1:{port}" or
+                config.get("mcp_path") != "/mcp" or
+                config.get("instance_id") != instance or
+                config.get("auth_mode") != "bearer" or
+                config.get("tls_cert_file") or config.get("tls_key_file")):
+            raise SmokeError("local_agent_identity_mismatch")
         bearer_path = require_regular_root_file(config.get("bearer_token_file", ""), label="bearer")
         with open(bearer_path, encoding="utf-8") as stream:
             bearer = stream.read().strip()
@@ -295,7 +303,8 @@ def main(argv: list[str]) -> int:
         # Never execute the helper as root from a mutable worker worktree.
         # Explicitly stage the reviewed bytes under a root-owned directory.
         require_regular_root_file(__file__, label="client_script")
-        bearer = load_private_bearer(args.config)
+        bearer = load_private_bearer(args.config, port=args.port,
+                                     instance=args.expected_instance)
         client = LocalMCP(port=args.port, bearer=bearer)
         result = run_smoke(
             client, profile=args.profile, ref=args.ref, instance=args.expected_instance,

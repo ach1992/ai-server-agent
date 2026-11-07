@@ -149,6 +149,25 @@ class LocalLoginAcceptance(unittest.TestCase):
         self.assertEqual(connection.request_count, 1)
         self.assertTrue(connection.closed)
 
+    def test_private_bearer_bound_to_configured_listener_and_instance(self):
+        token_path = Path(self.temp.name) / "test-token"
+        token_path.write_text("SYNTHETIC-TEST-TOKEN-ONLY")
+        config_path = Path(self.temp.name) / "test-config.json"
+        config = {"listen_address": "127.0.0.1:13265", "mcp_path": "/mcp",
+                  "instance_id": INSTANCE, "auth_mode": "bearer",
+                  "bearer_token_file": str(token_path)}
+        config_path.write_text(json.dumps(config))
+        with mock.patch.object(auth, "require_regular_root_file", side_effect=lambda path, **_: path):
+            self.assertEqual(auth.load_private_bearer(str(config_path), port=13265, instance=INSTANCE),
+                             "SYNTHETIC-TEST-TOKEN-ONLY")
+            for port, instance in ((13266, INSTANCE), (13265, "asa_" + "c" * 32)):
+                with self.assertRaisesRegex(auth.SmokeError, "local_agent_identity_mismatch"):
+                    auth.load_private_bearer(str(config_path), port=port, instance=instance)
+            config["tls_cert_file"] = "/tmp/fake.crt"
+            config_path.write_text(json.dumps(config))
+            with self.assertRaisesRegex(auth.SmokeError, "local_agent_identity_mismatch"):
+                auth.load_private_bearer(str(config_path), port=13265, instance=INSTANCE)
+
     def test_bogus_refs_fail_before_network_calls(self):
         client = FakeMCP()
         with self.assertRaisesRegex(auth.SmokeError, "reference_or_instance_format_invalid"):
