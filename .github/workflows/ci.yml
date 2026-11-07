@@ -125,6 +125,8 @@ jobs:
       - name: Unit tests
         if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
         run: go test -race -vet=off ./...
+      - name: Local protected Browser acceptance client tests
+        run: python3 -B -m unittest discover -s tests -p 'test_installed_browser_auth_smoke.py' -v
       - name: Non-skipped real tmux long-paste acceptance
         if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
         run: |
