@@ -53,6 +53,48 @@ func New(protected []string) *Guard {
 	}
 }
 
+// literalOutputCommand recognizes a deliberately small set of side-effect-free
+// shell commands. Destructive words inside a plain echo/printf argument are
+// DATA, not an operation. Reject any expansions, substitutions, redirections,
+// pipelines, control operators or additional statements; ambiguous Bash stays
+// subject to the ordinary approval checks (including bash -c and eval).
+func literalOutputCommand(command string) bool {
+	var args string
+	for _, cmd := range []string{"printf", "echo"} {
+		if strings.HasPrefix(command, cmd+" ") || strings.HasPrefix(command, cmd+"\t") {
+			args = command[len(cmd):]
+			break
+		}
+	}
+	if args == "" || strings.ContainsAny(args, "\r\n") {
+		return false
+	}
+	var quote byte
+	for i := 0; i < len(args); i++ {
+		c := args[i]
+		switch quote {
+		case '\x27':
+			if c == '\x27' {
+				quote = 0
+			}
+		case '"':
+			if c == '"' {
+				quote = 0
+			} else if c == '$' || c == '\x60' || c == '\\' {
+				return false
+			}
+		default:
+			switch c {
+			case '\x27', '"':
+				quote = c
+			case ';', '&', '|', '>', '<', '$', '\x60', '\\', '(', ')':
+				return false
+			}
+		}
+	}
+	return quote == 0
+}
+
 func (g *Guard) Evaluate(command string, root bool) Decision {
 	s := strings.TrimSpace(command)
 	if s == "" {
@@ -60,6 +102,9 @@ func (g *Guard) Evaluate(command string, root bool) Decision {
 	}
 	if !root {
 		return Decision{Allowed: true, Category: "worker", Reason: "runs as the unprivileged worker user"}
+	}
+	if literalOutputCommand(s) {
+		return Decision{Allowed: true, Category: "root", Reason: "literal text output does not execute the quoted operation"}
 	}
 	for _, p := range g.protected {
 		if p != "" && strings.Contains(s, p) {
