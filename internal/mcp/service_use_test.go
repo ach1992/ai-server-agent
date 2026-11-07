@@ -78,6 +78,7 @@ func TestServiceUseDirectMCPMaintainsCallerIdentityAndNoPlaintextArgument(t *tes
 			"body":           "{}",
 			"auth_mode":      "header",
 			"auth_header":    "X-Custom-Key",
+			"headers":        map[string]string{"Accept": "application/json"},
 		},
 	})
 	if err != nil || result.IsError {
@@ -90,7 +91,7 @@ func TestServiceUseDirectMCPMaintainsCallerIdentityAndNoPlaintextArgument(t *tes
 			req.Root || req.Approval || req.Token != "exec-token" ||
 			req.ServiceUse.Method != "PROPFIND" || req.ServiceUse.AuthMode != "header" ||
 			req.ServiceUse.AuthHeader != "X-Custom-Key" ||
-			req.ServiceUse.Path != "/custom/api?window=1" || req.ServiceUse.Body != "{}" ||
+			req.ServiceUse.Path != "/custom/api?window=1" || req.ServiceUse.Body != "{}" || req.ServiceUse.Headers["Accept"] != "application/json" ||
 			req.TimeoutMS <= 0 {
 			t.Fatalf("MCP-Executor caller/protocol identity lost: %+v", req)
 		}

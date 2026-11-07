@@ -78,7 +78,7 @@ func TestServiceHTTPNonAllowlistedMethodAndLargeAuthorizedBody(t *testing.T) {
 	const bodySize = 300 << 10
 	const token = "registered-api-credential"
 	service := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.Method != "PROPFIND" || r.Header.Get("Authorization") != "Bearer "+token {
+		if r.Method != "PROPFIND" || r.Header.Get("Authorization") != "Bearer "+token || r.Header.Get("Accept") != "application/vnd.custom+json" {
 			t.Errorf("legitimate API method/auth rejected: %s", r.Method)
 		}
 		payload, err := io.ReadAll(r.Body)
@@ -89,9 +89,12 @@ func TestServiceHTTPNonAllowlistedMethodAndLargeAuthorizedBody(t *testing.T) {
 	}))
 	defer service.Close()
 	s, ref := serviceFixture(t, service.URL, "opaque_vendor_kind", "", token)
-	ok := useService(s, ref, ServiceUseSpec{Method: "PROPFIND", Body: strings.Repeat("x", bodySize), AuthMode: "bearer"})
+	ok := useService(s, ref, ServiceUseSpec{Method: "PROPFIND", Body: strings.Repeat("x", bodySize), AuthMode: "bearer", Headers: map[string]string{"Accept": "application/vnd.custom+json"}})
 	if !ok.OK || ok.Output != "authorized" {
 		t.Fatalf("arbitrary authorized HTTP method/body rejected: %+v", ok)
+	}
+	if forbidden := useService(s, ref, ServiceUseSpec{Headers: map[string]string{"Authorization": "Bearer untrusted-override"}}); forbidden.OK || forbidden.ErrorCode != "invalid_http_header" {
+		t.Fatalf("HTTP auth override accepted: %+v", forbidden)
 	}
 	if invalid := useService(s, ref, ServiceUseSpec{Method: "bad method"}); invalid.OK || invalid.ErrorCode != "invalid_http_request" {
 		t.Fatalf("invalid HTTP method accepted: %+v", invalid)

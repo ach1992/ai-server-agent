@@ -168,7 +168,7 @@ func validServiceHeader(name string) bool {
 		return false
 	}
 	switch http.CanonicalHeaderKey(name) {
-	case "Host", "Cookie", "Proxy-Authorization", "Connection", "Transfer-Encoding", "Content-Length":
+	case "Host", "Authorization", "Proxy-Authorization", "Connection", "Proxy-Connection", "Transfer-Encoding", "Content-Length":
 		return false
 	}
 	return true
@@ -179,7 +179,7 @@ func (s *Server) useHTTPService(ctx context.Context, rec serviceaccess.Record, t
 		return fileError("invalid_http_target", "validation", err)
 	}
 	if in.Command != "" || in.Query != "" {
-		return fileError("invalid_service_operation", "validation", errors.New("HTTP uses method/path/body, not command/query"))
+		return fileError("invalid_service_operation", "validation", errors.New("HTTP uses method/path/body/headers, not command/query"))
 	}
 	method := strings.ToUpper(in.Method)
 	if method == "" {
@@ -200,6 +200,12 @@ func (s *Server) useHTTPService(ctx context.Context, rec serviceaccess.Record, t
 	request, err := http.NewRequestWithContext(ctx, method, target.String(), strings.NewReader(in.Body))
 	if err != nil {
 		return fileError("invalid_http_request", "validation", err)
+	}
+	for name, value := range in.Headers {
+		if !validServiceHeader(name) || strings.ContainsAny(value, "\r\n\x00") {
+			return fileError("invalid_http_header", "validation", errors.New("invalid or reserved HTTP header"))
+		}
+		request.Header.Set(name, value)
 	}
 	if in.ContentType != "" {
 		if len(in.ContentType) > 120 || strings.ContainsAny(in.ContentType, "\r\n\x00") {
@@ -381,7 +387,7 @@ func privateServiceTempFile(st *serviceaccess.Store, prefix, content string) (st
 }
 
 func (s *Server) useSSHService(ctx context.Context, st *serviceaccess.Store, rec serviceaccess.Record, target *url.URL, in ServiceUseSpec) Response {
-	if in.Command == "" || in.Query != "" || in.Method != "" || in.Path != "" || in.Body != "" {
+	if in.Command == "" || in.Query != "" || in.Method != "" || in.Path != "" || in.Body != "" || len(in.Headers) != 0 {
 		return fileError("invalid_service_operation", "validation", errors.New("SSH requires command and no HTTP/SQL arguments"))
 	}
 	if rec.Username == "" {
@@ -424,7 +430,7 @@ func mysqlEscape(v string) string {
 	return strings.NewReplacer("\\", "\\\\", "\"", "\\\"", "\r", "\\r", "\n", "\\n").Replace(v)
 }
 func (s *Server) useDatabaseService(ctx context.Context, st *serviceaccess.Store, rec serviceaccess.Record, target *url.URL, in ServiceUseSpec) Response {
-	if in.Query == "" || in.Command != "" || in.Method != "" || in.Path != "" || in.Body != "" || in.AuthHeader != "" {
+	if in.Query == "" || in.Command != "" || in.Method != "" || in.Path != "" || in.Body != "" || in.AuthHeader != "" || len(in.Headers) != 0 {
 		return fileError("invalid_service_operation", "validation", errors.New("database requires query, not HTTP/SSH arguments"))
 	}
 	if rec.Username == "" {

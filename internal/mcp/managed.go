@@ -70,15 +70,16 @@ func (s *Server) registerManagedTools() {
 }
 
 type ServiceUseInput struct {
-	CredentialRef string `json:"credential_ref" jsonschema:"Opaque protected service_access reference; never paste the secret"`
-	Method        string `json:"method,omitempty" jsonschema:"HTTP method; defaults to GET"`
-	Path          string `json:"path,omitempty" jsonschema:"Optional absolute HTTP path on the registered origin, with query; cannot change host"`
-	Body          string `json:"body,omitempty" jsonschema:"Optional HTTP request body; bounded by existing Executor 8 MiB serialized request frame"`
-	ContentType   string `json:"content_type,omitempty" jsonschema:"Optional HTTP request content type; defaults to application/json when body is given"`
-	AuthHeader    string `json:"auth_header,omitempty" jsonschema:"Optional HTTP header name for auth_mode=header, default X-API-Key"`
-	AuthMode      string `json:"auth_mode,omitempty" jsonschema:"HTTP auth mode: bearer, basic, or header; defaults from credential kind but does not constrain it"`
-	Command       string `json:"command,omitempty" jsonschema:"SSH remote command: native enrolled private key, or optional sshpass for password/token; strict known-host verification"`
-	Query         string `json:"query,omitempty" jsonschema:"SQL over native PostgreSQL or MySQL/MariaDB stdin; registered credential is used as password independent of its descriptive kind"`
+	CredentialRef string            `json:"credential_ref" jsonschema:"Opaque protected service_access reference; never paste the secret"`
+	Method        string            `json:"method,omitempty" jsonschema:"HTTP method; defaults to GET"`
+	Path          string            `json:"path,omitempty" jsonschema:"Optional absolute HTTP path on the registered origin, with query; cannot change host"`
+	Body          string            `json:"body,omitempty" jsonschema:"Optional HTTP request body; bounded by existing Executor 8 MiB serialized request frame"`
+	ContentType   string            `json:"content_type,omitempty" jsonschema:"Optional HTTP request content type; defaults to application/json when body is given"`
+	AuthHeader    string            `json:"auth_header,omitempty" jsonschema:"Optional HTTP header name for auth_mode=header, default X-API-Key"`
+	AuthMode      string            `json:"auth_mode,omitempty" jsonschema:"HTTP auth mode: bearer, basic, or header; defaults from credential kind but does not constrain it"`
+	Headers       map[string]string `json:"headers,omitempty" jsonschema:"Optional HTTP request headers on registered origin (except reserved Host/Authorization and transport fields); never include enrolled secret"`
+	Command       string            `json:"command,omitempty" jsonschema:"SSH remote command: native enrolled private key, or optional sshpass for password/token; strict known-host verification"`
+	Query         string            `json:"query,omitempty" jsonschema:"SQL over native PostgreSQL or MySQL/MariaDB stdin; registered credential is used as password independent of its descriptive kind"`
 }
 
 func (s *Server) registerServiceUseTool() {
@@ -89,7 +90,7 @@ func (s *Server) registerServiceUseTool() {
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in ServiceUseInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{
 			Action: "service_use", CredentialRef: in.CredentialRef, TimeoutMS: s.commandTimeoutMS(),
-			ServiceUse: executor.ServiceUseSpec{Method: in.Method, Path: in.Path, Body: in.Body, ContentType: in.ContentType, AuthHeader: in.AuthHeader, AuthMode: in.AuthMode, Command: in.Command, Query: in.Query},
+			ServiceUse: executor.ServiceUseSpec{Method: in.Method, Path: in.Path, Body: in.Body, ContentType: in.ContentType, AuthHeader: in.AuthHeader, AuthMode: in.AuthMode, Headers: in.Headers, Command: in.Command, Query: in.Query},
 		})
 		if err != nil {
 			return executorTransportErrorResult(err)
