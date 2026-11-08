@@ -9,6 +9,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"regexp"
 	"strings"
 )
 
@@ -17,6 +18,11 @@ const (
 	VerifierAlgorithm = "sha256-v1"
 	TokenHexLength    = 64
 )
+
+// Direct client names are operator-selected, not a fixed two-client list.
+// Require a canonical ID/name pair so authenticated principal identity stays
+// stable and unambiguous in Executor session ownership and audit evidence.
+var namedDirectID = regexp.MustCompile(`^direct-[a-z0-9][a-z0-9_-]*$`)
 
 type Principal struct {
 	ID    string `json:"id"`
@@ -61,37 +67,26 @@ func (s *Store) Validate() error {
 	if len(s.Credentials) == 0 {
 		return errors.New("MCP credential store has no credential records")
 	}
-	if len(s.Credentials) > 2 {
-		return errors.New("MCP credential store exceeds the bounded principal set")
-	}
 	ids := make(map[string]struct{}, len(s.Credentials))
 	names := make(map[string]struct{}, len(s.Credentials))
 	verifiers := make(map[string]struct{}, len(s.Credentials))
 	active := 0
-	directFound := false
 	for i, rec := range s.Credentials {
 		if strings.TrimSpace(rec.Principal.ID) == "" || strings.TrimSpace(rec.Principal.Class) == "" || strings.TrimSpace(rec.Principal.Name) == "" {
 			return fmt.Errorf("MCP credential record %d has empty principal metadata", i)
 		}
-		switch rec.Principal.ID {
-		case "direct-default":
-			directFound = true
-			if rec.Principal.Class != "direct" || rec.Principal.Name != "direct/default" {
-				return fmt.Errorf("MCP principal %q metadata does not match its fixed identity", rec.Principal.ID)
-			}
-		case "direct-secondary":
-			if rec.Principal.Class != "direct" || rec.Principal.Name != "direct/secondary" {
-				return fmt.Errorf("MCP principal %q metadata does not match its fixed identity", rec.Principal.ID)
-			}
-		case "mcp-gateway":
-			// Pre-retirement stores can still contain this reserved identity.
-			// Validate its original metadata but never authorize its bearer.
+		if rec.Principal.ID == "mcp-gateway" {
+			// Historical gateway identity remains inert, never a new direct
+			// principal or a privilege-bearing alias.
 			if rec.Principal.Class != "gateway" || rec.Principal.Name != "mcp-gateway" {
-				return fmt.Errorf("MCP principal %q metadata does not match its fixed identity", rec.Principal.ID)
+				return fmt.Errorf("retired MCP principal %q metadata mismatch", rec.Principal.ID)
 			}
-		default:
-			return fmt.Errorf("unsupported MCP principal id %q", rec.Principal.ID)
+		} else if !namedDirectID.MatchString(rec.Principal.ID) ||
+			rec.Principal.Class != "direct" ||
+			rec.Principal.Name != "direct/"+strings.TrimPrefix(rec.Principal.ID, "direct-") {
+			return fmt.Errorf("MCP principal %q has invalid direct client identity", rec.Principal.ID)
 		}
+
 		if strings.TrimSpace(rec.CreatedAt) == "" {
 			return fmt.Errorf("MCP credential %q has no creation timestamp", rec.Principal.ID)
 		}
@@ -125,9 +120,6 @@ func (s *Store) Validate() error {
 		} else if rec.RevokedAt == "" {
 			return fmt.Errorf("disabled MCP credential %q has no revocation timestamp", rec.Principal.ID)
 		}
-	}
-	if !directFound {
-		return errors.New("MCP credential store is missing the direct-default principal")
 	}
 	if active == 0 {
 		return errors.New("MCP credential store has no active credential")

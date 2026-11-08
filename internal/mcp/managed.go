@@ -14,7 +14,7 @@ type ManagedEnvironmentInput struct {
 	Operation     string   `json:"operation" jsonschema:"status, pending_creates, list, inspect, create, abandon_create, start, stop, exec, snapshots, snapshot, restore, operation_list, operation_status, resolve_uncertain or delete"`
 	Project       string   `json:"project,omitempty" jsonschema:"Actual Incus project. Required for per-instance operations; list without project searches all projects"`
 	Instance      string   `json:"instance,omitempty" jsonschema:"Exact native Incus instance name"`
-	UUID          string   `json:"uuid,omitempty" jsonschema:"Native volatile.uuid obtained from inspect; required before mutating an existing guest"`
+	UUID          string   `json:"uuid,omitempty" jsonschema:"Currently observed Incus volatile.uuid from inspect, required for operations on both Agent-created and pre-existing native guests"`
 	Image         string   `json:"image,omitempty" jsonschema:"Native Incus image alias or fingerprint for create (e.g. images:debian/13)"`
 	Type          string   `json:"type,omitempty" jsonschema:"container or virtual-machine for create"`
 	WorkID        string   `json:"work_id,omitempty" jsonschema:"Stable Issue/project-owned work identifier for create, not a chat/session name"`
@@ -47,7 +47,7 @@ type ServiceAccessInput struct {
 
 func (s *Server) registerManagedTools() {
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "managed_environment",
-		Description: "Optional native Incus guests through the root Executor; never installs Incus. status/list/inspect discover guests. create is idempotent with stable operation_id, native UUID and storage capacity checks; abandon_create requires approval and native absence proof. start/stop/exec/delete enforce guest identity; restore/delete require approval. snapshot/restore submit nonblocking native operations with durable IDs; operation_list/status recover after restart/new chat. resolve_uncertain requires approval and native absence evidence, never claims success or blindly retries.",
+		Description: "Optional native Incus guests through the root Executor; never installs Incus. status/list/inspect discover guests. create is idempotent with stable operation_id, native UUID and storage capacity checks; abandon_create requires approval and native absence proof. Existing native Incus guests are operable through exact project/name/observed UUID without requiring an Agent creation tag; start/stop/exec/delete enforce guest identity; restore/delete require approval. snapshot/restore submit nonblocking native operations with durable IDs; operation_list/status recover after restart/new chat. resolve_uncertain requires approval and native absence evidence, never claims success or blindly retries.",
 		Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in ManagedEnvironmentInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		native := managedincus.Request{Operation: in.Operation, Project: in.Project, Instance: in.Instance, UUID: in.UUID, Image: in.Image, Type: in.Type, WorkID: in.WorkID, OperationID: in.OperationID, CPU: in.CPU, MemoryMiB: in.MemoryMiB, DiskGiB: in.DiskGiB, StoragePool: in.StoragePool, Command: in.Command, Snapshot: in.Snapshot}
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "managed_environment", ManagedEnv: native, CredentialRef: in.CredentialRef, Approval: in.Approval})
@@ -69,6 +69,36 @@ func (s *Server) registerManagedTools() {
 	})
 }
 
+type ServiceUseInput struct {
+	CredentialRef string            `json:"credential_ref" jsonschema:"Opaque protected service_access reference; never paste the secret"`
+	Method        string            `json:"method,omitempty" jsonschema:"HTTP method; defaults to GET"`
+	Path          string            `json:"path,omitempty" jsonschema:"Optional absolute HTTP path on the registered origin, with query; cannot change host"`
+	Body          string            `json:"body,omitempty" jsonschema:"Optional HTTP request body; bounded by existing Executor 8 MiB serialized request frame"`
+	ContentType   string            `json:"content_type,omitempty" jsonschema:"Optional HTTP request content type; defaults to application/json when body is given"`
+	AuthHeader    string            `json:"auth_header,omitempty" jsonschema:"Optional HTTP header name for auth_mode=header, default X-API-Key"`
+	AuthMode      string            `json:"auth_mode,omitempty" jsonschema:"HTTP auth mode: bearer, basic, or header; defaults from credential kind but does not constrain it"`
+	Headers       map[string]string `json:"headers,omitempty" jsonschema:"Optional HTTP request headers on registered origin (except reserved Host/Authorization and transport fields); never include enrolled secret"`
+	Command       string            `json:"command,omitempty" jsonschema:"SSH remote command: native enrolled private key, or optional sshpass for password/token; strict known-host verification"`
+	Query         string            `json:"query,omitempty" jsonschema:"SQL via native PostgreSQL SQL-only --command or MySQL/MariaDB --binary-mode stdin; registered credential used privately independent of kind. PostgreSQL SQL text is exposed in native process argv; avoid unrelated secrets in SQL literals"`
+}
+
+func (s *Server) registerServiceUseTool() {
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
+		Name:        "service_use",
+		Description: "Use a registered protected target-service credential without receiving its plaintext: HTTP(S) bearer/API-key/basic request on the registered origin (no redirects); SSH remote command using native enrolled private key or optional sshpass and strict known_hosts; or PostgreSQL/MySQL query via optional native system client and private credential delivery. Inputs contain no secret or arbitrary destination. Guest-bound refs require fresh native UUID proof. Exact plaintext credentials are scrubbed from returned output. Long results are retrievable via job_output; optional client prerequisites and OS authorization apply. Production/destructive changes still need Owner consent.",
+		Annotations: annotations(false, true, false, true),
+	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in ServiceUseInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{
+			Action: "service_use", CredentialRef: in.CredentialRef, TimeoutMS: s.commandTimeoutMS(),
+			ServiceUse: executor.ServiceUseSpec{Method: in.Method, Path: in.Path, Body: in.Body, ContentType: in.ContentType, AuthHeader: in.AuthHeader, AuthMode: in.AuthMode, Headers: in.Headers, Command: in.Command, Query: in.Query},
+		})
+		if err != nil {
+			return executorTransportErrorResult(err)
+		}
+		return s.responseResult(resp)
+	})
+}
+
 // BrowserCredentialLoginInput contains only non-secret page locators and an
 // opaque reference. The root Executor sends the credential directly to its
 // isolated pinned Chromium process over a private stdin frame.
@@ -80,7 +110,7 @@ type BrowserCredentialLoginInput struct {
 	SecretSelector     string `json:"secret_selector" jsonschema:"CSS login password/token field locator"`
 	SubmitSelector     string `json:"submit_selector" jsonschema:"CSS submit control locator"`
 	SuccessSelector    string `json:"success_selector,omitempty" jsonschema:"CSS element that becomes visible only after successful authenticated login"`
-	SuccessURL         string `json:"success_url,omitempty" jsonschema:"Alternative absolute same-origin URL prefix that is reached after a successful login"`
+	SuccessURL         string `json:"success_url,omitempty" jsonschema:"Alternative HTTP(S) URL prefix reached after successful login; may be a different post-auth SSO origin but credential submission stays bound to registered form origin"`
 	ChallengeSelector  string `json:"challenge_selector,omitempty" jsonschema:"Optional CSS MFA/CAPTCHA/manual-intervention element locator to return an actionable challenge outcome"`
 	LoginErrorSelector string `json:"login_error_selector,omitempty" jsonschema:"Optional CSS element visible only on failed sign-in; report invalid credentials only when this evidence is observed"`
 }

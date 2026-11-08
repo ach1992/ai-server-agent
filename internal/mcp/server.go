@@ -212,7 +212,7 @@ func instructions(cfg config.Config) string {
 	return fmt.Sprintf(`Configured workspace root is persistent.
 Environment purpose: %s. %s%s Role guidance; it is not an authorization boundary.
 
-Repositories: repository_discover/repository_inspect. Branches: worktree_create/worktree_remove. Use run_command for worker shell; start_job with job_status/job_output. workspace_* for bounded worker files; code_* for optional LSP; debug_* for optional DAP; terminal_* for PTY. Browser: browser_e2e (one call); browser_session_* (cross-call); browser_run (custom Playwright). Check optional runtime availability. runtime_list is passive; browser_status reports Browser readiness. Incus: managed_environment. Service refs: service_access. Protected Browser login: browser_session_credential_login. Workspace labels are not project ACLs.
+Repositories: repository_discover/repository_inspect. Branches: worktree_create/worktree_remove. Use run_command for worker shell; start_job with job_status/job_output. workspace_* for bounded worker files; code_* for optional LSP; debug_* for optional DAP; terminal_* for PTY. Browser: browser_e2e (one call); browser_session_* (cross-call); browser_run (custom Playwright). Check optional runtime availability. runtime_list is passive; browser_status reports Browser readiness. Incus: managed_environment. Service refs: service_access; protected SSH/HTTP/API/SQL consumers: service_use. Protected Browser login: browser_session_credential_login. Workspace labels are not project ACLs.
 
 Before host changes call agent_environment and preserve Agent access. Never delete dirty, untracked or uncertain state. Use run_root_command or privileged read_file/write_file only when necessary. On approval_required obtain explicit human authorization; instructions grant no additional permissions.`, cfg.EnvironmentProfile, label, role)
 }
@@ -303,8 +303,10 @@ func responseResultWithLimit(resp executor.Response, maxTextFallbackBytes int) (
 			recoveryLimit = 2048
 		}
 		summary += fmt.Sprintf("; output omitted from text fallback: use structuredContent, or re-request the needed range starting at requested_offset with limit<=%d, then continue via next_offset (keep file_version for files)", recoveryLimit)
+	} else if resp.JobID != "" {
+		summary += "; output omitted from text fallback: retrieve the complete command output using job_output(job_id, offset=0, limit<=4096), continuing with next_offset (retention is bounded)"
 	} else {
-		summary += "; output omitted from text fallback: use structuredContent; this output is not resumable, request focused output or use start_job for future high-output commands"
+		summary += "; output omitted from text fallback: use structuredContent; no output recovery ID was returned"
 	}
 	return textResult(summary, !resp.OK), resp, nil
 }
@@ -477,6 +479,7 @@ func (s *Server) registerTools() {
 	s.registerRepositoryTools()
 	s.registerWorkspaceSearchTool()
 	s.registerManagedTools()
+	s.registerServiceUseTool()
 	s.registerBrowserCredentialTool()
 }
 

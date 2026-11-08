@@ -13,6 +13,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -32,12 +33,36 @@ func TestManagedCredentialLoginPinnedChromium(t *testing.T) {
 		t.Fatal(err)
 	}
 	secret := "LOCAL-FIXTURE-CREDENTIAL-ONLY-NOT-A-REAL-SECRET"
+	// A separate real HTTP origin models a post-auth SSO callback. It must
+	// receive navigation only, never the credential form submission.
+	var ssoArrivals atomic.Int32
+	ssoDestination := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		ssoArrivals.Add(1)
+		if r.Method != http.MethodGet || r.URL.Path != "/dashboard" || strings.Contains(r.URL.String(), secret) {
+			t.Errorf("SSO destination received credential or unexpected method/path: %s %s", r.Method, r.URL.String())
+		}
+		fmt.Fprint(w, `<h1 id="sso-dashboard">Post-auth redirect completed</h1>`)
+	}))
+	defer ssoDestination.Close()
 	var rotatingMu sync.Mutex
 	rotatingTokens := make(map[string]string)
 	var rotatingGets, rotatingCookieProbes int
 	var rotatingInitialID, rotatingPostID string
 	app := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
+		if r.URL.Path == "/sso" {
+			if r.Method == http.MethodPost {
+				_ = r.ParseForm()
+				if r.PostFormValue("user") == "testadmin" && r.PostFormValue("password") == secret {
+					http.Redirect(w, r, ssoDestination.URL+"/dashboard", http.StatusFound)
+				} else {
+					fmt.Fprint(w, `<div id="login-error">Credentials rejected</div>`)
+				}
+				return
+			}
+			fmt.Fprint(w, `<form action="/sso" method="post"><input id="user" name="user"><input id="secret" name="password" type="password"><button id="submit">Sign in</button></form>`)
+			return
+		}
 		if r.URL.Path == "/origin-parity" {
 			// Use the real Chromium URL parser, not a mock, to compare
 			// cross-language default/nondefault-port origin semantics.
@@ -387,6 +412,23 @@ func TestManagedCredentialLoginPinnedChromium(t *testing.T) {
 	discardedTrace := send(map[string]any{"type": "trace_discard", "nonce": fmt.Sprintf("%032x", 110), "file_version": traceVersion})
 	if discardedTrace["event"] != "trace_discarded" {
 		t.Fatalf("trace discard failed: %+v", discardedTrace)
+	}
+	// A legitimate login can submit the secret to the registered origin and
+	// then navigate to a different authorized application origin. This is
+	// distinct from permitting a cross-origin credential form action.
+	navigate(app.URL+"/sso", fmt.Sprintf("%032x", 111))
+	ssoLogin := request(fmt.Sprintf("%032x", 112), secret)
+	ssoLogin["service_endpoint"] = app.URL + "/sso"
+	ssoLogin["success_selector"] = ""
+	ssoLogin["success_url"] = ssoDestination.URL + "/dashboard"
+	ssoResult := send(ssoLogin)
+	if ssoResult["event"] != "result" || ssoResult["result"].(map[string]any)["status"] != "authenticated" {
+		t.Fatalf("post-auth redirected login not confirmed: %+v", ssoResult)
+	}
+	ssoVisible := send(map[string]any{"type": "flow", "nonce": fmt.Sprintf("%032x", 113),
+		"steps": []FlowStep{{Action: "assert_text", Selector: "#sso-dashboard", Expected: "Post-auth redirect completed"}}})
+	if ssoVisible["event"] != "result" || ssoVisible["result"].(map[string]any)["ok"] != true || ssoArrivals.Load() == 0 {
+		t.Fatalf("post-SSO Browser flow unusable: %+v arrivals=%d", ssoVisible, ssoArrivals.Load())
 	}
 	navigate(app.URL+"/retain", strings.Repeat("7", 32))
 	retained := request(strings.Repeat("8", 32), secret)

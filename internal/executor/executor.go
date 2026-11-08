@@ -41,6 +41,10 @@ type Server struct {
 	phpIndexMu                        sync.Mutex              // single fresh index/build/lookup at a time; bounded, no second broker
 	terminalAdmissionMu               sync.Mutex              // serializes disk-backed terminal capacity and scope creation
 	browserAdmission                  browserSessionAdmission // shared, isolated and maintenance admission
+	serviceSSHBinary                  string                  // private native client test fixture; production uses /usr/bin/ssh
+	serviceSSHPassBinary              string                  // private native client test fixture; production uses /usr/bin/sshpass
+	servicePSQLBinary                 string                  // private native client test fixture; production uses /usr/bin/psql
+	serviceMySQLBinary                string                  // private native client test fixture; production uses /usr/bin/mysql
 	browserNodeBinary                 string                  // test-only private fixture override; production always uses root-owned pinned Node
 	browserRunTerminateTestHook       func(int) (bool, error) // private one-shot Browser uncertain-stop test hook
 	browserKillTestHook               func() error            // private root-fixture pause/fault, never public API
@@ -50,7 +54,9 @@ type Server struct {
 	managedWatchActive                int
 	managedWatchObserveTestHook       func(context.Context, string) bool // test-only bounded observer scheduler fixture
 	jobsMu                            sync.Mutex
-	jobUnknownBeforeWriteTestHook     func() // test-only deterministic status reconciliation interleaving
+	syncSpoolMu                       sync.Mutex                               // short, shared persistent-Job/sync-spool disk admission
+	syncSpoolReserveCheckTestHook     func(string, int64) (bool, int64, error) // private deterministic disk-pressure fixture
+	jobUnknownBeforeWriteTestHook     func()                                   // test-only deterministic status reconciliation interleaving
 	lifecycleLockPath                 string
 	fileWriteHooks                    *fileWriteTestHooks
 	workspaceHooks                    *workspaceTestHooks
@@ -170,6 +176,19 @@ func (s *Server) Serve() error {
 		return err
 	}
 	defer ln.Close()
+	// Only files marked as interrupted synchronous transcripts are retired
+	// at startup. Normal persistent Jobs and complete output stay untouched.
+	if _, err := os.Lstat(filepath.Join(s.cfg.StateDir, "jobs")); err == nil {
+		jobsDir, _, stateErr := s.ensureJobState()
+		if stateErr != nil {
+			return fmt.Errorf("inspect Job state on Executor startup: %w", stateErr)
+		}
+		if err := s.cleanupInterruptedSyncSpools(jobsDir); err != nil {
+			return fmt.Errorf("reconcile interrupted synchronous output: %w", err)
+		}
+	} else if !os.IsNotExist(err) {
+		return fmt.Errorf("inspect Job state directory on Executor startup: %w", err)
+	}
 	if err := os.Chmod(s.cfg.ExecutorSocket, 0660); err != nil {
 		return err
 	}
@@ -232,6 +251,8 @@ func (s *Server) dispatch(req Request) Response {
 	switch req.Action {
 	case "service_access":
 		return s.serviceAccessAction(context.Background(), req)
+	case "service_use":
+		return s.serviceUseAction(context.Background(), req)
 	case "managed_environment":
 		return s.managedEnvironmentAction(context.Background(), req)
 	case "run":

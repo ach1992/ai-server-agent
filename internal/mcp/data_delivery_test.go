@@ -83,20 +83,37 @@ func TestLargeTextFallbackKeepsJobRetentionMetadata(t *testing.T) {
 	}
 }
 
-func TestLargeCommandOutputNotAdvertisedAsResumable(t *testing.T) {
+func TestLargeCommandOutputOnlyAdvertisesRecoveryWhenArtifactExists(t *testing.T) {
 	resp := executor.Response{
 		OK: true, Output: strings.Repeat("command-output", 4096),
 		OutputEncoding: "utf-8", BytesSeen: 100000, BytesReturned: 65536,
 		Truncated: true, OmittedBytes: 34464, ExitCode: 0,
 	}
+	// A client must never be promised a resumable transcript when the
+	// Executor did not return a persisted artifact identity.
 	summary, _ := fallbackText(t, resp)
-	for _, token := range []string{"bytes_seen=100000", "omitted_bytes=34464", "not resumable", "start_job"} {
+	for _, token := range []string{"bytes_seen=100000", "omitted_bytes=34464", "no output recovery ID"} {
 		if !strings.Contains(summary, token) {
 			t.Errorf("command fallback missing %q", token)
 		}
 	}
-	if strings.Contains(summary, "next_offset=") {
-		t.Fatal("non-resumable command output must not expose a synthetic cursor")
+	if strings.Contains(summary, "next_offset=") || strings.Contains(summary, "job_output(") {
+		t.Fatal("command output without job_id falsely advertised as recoverable")
+	}
+	// OUT-01: the Executor spools complete output and returns a persisted
+	// job_id when a large preview or text-only payload would drop bytes.
+	resp.JobID = "123456789"
+	recoverable, structured := fallbackText(t, resp)
+	if structured.JobID != resp.JobID {
+		t.Fatal("structured fallback discarded the recoverable transcript identity")
+	}
+	for _, token := range []string{`job_id="123456789"`, "job_output(", "next_offset", "offset=0"} {
+		if !strings.Contains(recoverable, token) {
+			t.Errorf("large recoverable fallback missing %q", token)
+		}
+	}
+	if strings.Contains(recoverable, "command-output") {
+		t.Fatal("text-only fallback included oversized payload")
 	}
 }
 

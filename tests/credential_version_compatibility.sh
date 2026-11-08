@@ -87,6 +87,17 @@ assert_refuse "$TMP/old-agent"
 MODE=secondary-revoked; write_fixture "$MODE"
 assert_accept "$TMP/new-agent"
 assert_refuse "$TMP/old-agent"
+# Dynamic named clients: the current Agent accepts 3+ distinct principals,
+# but an older target must refuse the extra credential before replacement.
+MODE=named-multiple; write_fixture secondary-active
+jq '.credentials += [{
+  principal:{id:"direct-chatgpt",class:"direct",name:"direct/chatgpt"},
+  verifier_algorithm:"sha256-v1",verifier:("c"*64),
+  created_at:"2026-11-07T00:00:00Z",enabled:true
+}]' "$CREDENTIAL_STORE" > "$TMP/named-multiple.json"
+mv "$TMP/named-multiple.json" "$CREDENTIAL_STORE"
+assert_accept "$TMP/new-agent"
+assert_refuse "$TMP/old-agent"
 # The staged-store command validates the supplied candidate instead of the
 # running store; an invalid replacement must fail without any writes.
 printf '%s\n' '{"version":1,"credentials":[]}' > "$TMP/invalid.json"
@@ -137,6 +148,15 @@ MODE=secondary-active; write_fixture "$MODE"
 assert_update_accept install.sh
 assert_update_refuse "$TMP/old-source/install.sh"
 MODE=secondary-revoked; write_fixture "$MODE"
+assert_update_refuse "$TMP/old-source/install.sh"
+MODE=named-multiple; write_fixture secondary-active
+jq '.credentials += [{
+  principal:{id:"direct-chatgpt",class:"direct",name:"direct/chatgpt"},
+  verifier_algorithm:"sha256-v1",verifier:("c"*64),
+  created_at:"2026-11-07T00:00:00Z",enabled:true
+}]' "$CREDENTIAL_STORE" > "$TMP/named-multiple.json"
+mv "$TMP/named-multiple.json" "$CREDENTIAL_STORE"
+assert_update_accept install.sh
 assert_update_refuse "$TMP/old-source/install.sh"
 MODE=direct-only; write_fixture "$MODE"
 assert_update_refuse "$TMP/too-old-agent"

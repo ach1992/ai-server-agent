@@ -358,7 +358,17 @@ func (b Backend) submitNativeLocked(ctx context.Context, req Request, x Summary)
 			return result, err
 		}
 	}
-	entry := NativeOperation{HostID: b.HostID, WorkID: latest.WorkID, ActorID: req.ActorID, ID: req.OperationID, Project: req.Project, Instance: req.Instance, UUID: req.UUID, Action: req.Operation, Snapshot: req.Snapshot, State: "submitted", SubmittedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
+	workID := latest.WorkID
+	if workID == "" {
+		// Native guests created outside this Agent have no Agent work tag.
+		// Do not add or rewrite their native configuration just to keep a
+		// valid local operation journal. Caller context is optional.
+		workID = req.WorkID
+		if !validName(workID) {
+			workID = "existing-native"
+		}
+	}
+	entry := NativeOperation{HostID: b.HostID, WorkID: workID, ActorID: req.ActorID, ID: req.OperationID, Project: req.Project, Instance: req.Instance, UUID: req.UUID, Action: req.Operation, Snapshot: req.Snapshot, State: "submitted", SubmittedAt: time.Now().UTC(), UpdatedAt: time.Now().UTC()}
 	pruneNativeOperations(&journal)
 	journal.Operations = append(journal.Operations, entry)
 	if err = b.saveNativeOperations(journal); err != nil {
@@ -629,7 +639,7 @@ func (b Backend) nativeStatusLocked(ctx context.Context, req Request) (Result, e
 	}
 	if v.State == "native_succeeded" {
 		current, found, inspectErr := b.inspect(ctx, v.Project, v.Instance)
-		if inspectErr != nil || !found || current.UUID != v.UUID || !current.Managed || b.checkConfirmedIdentity(current) != nil {
+		if inspectErr != nil || !found || current.UUID != v.UUID || b.checkConfirmedIdentity(current) != nil {
 			v.State = "outcome_uncertain"
 			v.Diagnostic = "Native operation succeeded but guest identity could not be reverified"
 		} else if v.Action == "snapshot" {

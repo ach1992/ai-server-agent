@@ -57,6 +57,15 @@ func stringsContains(s, sub string) bool {
 	// into an Error value or returned to a client.
 	return len(sub) > 0 && strings.Contains(s, sub)
 }
+
+// Creation tags are descriptive, not a second admission policy for the
+// already-authenticated root operator. Native project/name/UUID/host must
+// still be matched against a fresh Incus observation.
+func nativeGuestIdentityMatches(x *managedincus.Summary, uuid, project, guest, hostID string) bool {
+	return x != nil && x.HostID == hostID && x.Project == project &&
+		x.Name == guest && x.UUID != "" && x.UUID == uuid
+}
+
 func (s *Server) managedBackend() managedincus.Backend {
 	return managedincus.Backend{HostID: s.cfg.InstanceID, StateDir: s.cfg.StateDir}
 }
@@ -116,7 +125,7 @@ func (s *Server) serviceAccessAction(ctx context.Context, req Request) Response 
 				break
 			}
 			x, err := s.managedBackend().Run(ctx, managedincus.Request{Operation: "inspect", Project: r.Project, Instance: r.Guest}, false, "")
-			if err != nil || x.Instance == nil || !x.Instance.Managed || x.Instance.UUID != r.GuestUUID {
+			if err != nil || !nativeGuestIdentityMatches(x.Instance, r.GuestUUID, r.Project, r.Guest, s.cfg.InstanceID) {
 				resp = managedErr(errors.New("native_guest_identity_mismatch: inspect current local Incus project/instance/UUID"))
 				break
 			}

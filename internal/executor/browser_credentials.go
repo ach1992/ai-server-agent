@@ -27,7 +27,7 @@ type credentialLoginOptions struct {
 // Never let client-supplied selectors or service URLs contain a secret or
 // executable code. CSS is only used as Playwright locator input. The secret
 // itself only enters the protected executor and the pinned Browser's stdin.
-func (a credentialLoginOptions) validate(origin string) error {
+func (a credentialLoginOptions) validate(_ string) error {
 	for _, v := range []string{a.UsernameSelector, a.SecretSelector, a.SubmitSelector, a.SuccessSelector, a.ChallengeSelector, a.LoginErrorSelector} {
 		if len(v) > 512 || strings.IndexFunc(v, func(r rune) bool { return r < 32 || r == 127 }) >= 0 {
 			return errors.New("invalid or oversized CSS selector")
@@ -40,9 +40,9 @@ func (a credentialLoginOptions) validate(origin string) error {
 		if err := serviceaccess.ValidEndpoint(a.SuccessURL); err != nil {
 			return errors.New("success_url must be an absolute HTTP(S) URL without secrets")
 		}
-		if serviceaccess.Origin(a.SuccessURL) != origin {
-			return errors.New("success URL must have the same origin as the enrolled endpoint")
-		}
+		// The credential is injected and submitted only on the registered
+		// form origin. A successful SSO or redirected login may legitimately
+		// land on another HTTP(S) origin after the secret has been cleared.
 	}
 	return nil
 }
@@ -88,8 +88,8 @@ func (s *Server) browserSessionCredentialLogin(ctx context.Context, req Request)
 			return browserSessionError("credential_guest_identity_unavailable", "dependency", errors.New("Incus is not ready on this Agent host; restore native access before credential login"))
 		}
 		target, err := s.managedBackend().Run(ctx, managedincus.Request{Operation: "inspect", Project: rec.Project, Instance: rec.Guest}, false, "")
-		if err != nil || target.Instance == nil || !target.Instance.Managed || target.Instance.UUID != rec.GuestUUID {
-			return browserSessionError("credential_guest_identity_mismatch", "authorization", errors.New("native managed guest identity changed or unavailable; reconcile guest identity before Browser login"))
+		if err != nil || !nativeGuestIdentityMatches(target.Instance, rec.GuestUUID, rec.Project, rec.Guest, s.cfg.InstanceID) {
+			return browserSessionError("credential_guest_identity_mismatch", "authorization", errors.New("native Incus guest identity changed or unavailable; reconcile project/name/UUID before Browser login"))
 		}
 	}
 	var opts credentialLoginOptions

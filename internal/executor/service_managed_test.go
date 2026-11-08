@@ -130,9 +130,14 @@ func TestCredentialLoginInputBoundToOrigin(t *testing.T) {
 	if err := valid.validate("https://app.example"); err != nil {
 		t.Fatal(err)
 	}
+	redirected := valid
+	redirected.SuccessURL = "https://sso.example/application/dashboard"
+	if err := redirected.validate("https://app.example"); err != nil {
+		t.Fatalf("post-auth cross-origin success URL denied: %v", err)
+	}
 	for _, c := range []credentialLoginOptions{
 		{SecretSelector: "#password", SubmitSelector: "button.login"},
-		{SecretSelector: "#password", SubmitSelector: "button.login", SuccessURL: "https://evil.example/callback"},
+		{SecretSelector: "#password", SubmitSelector: "button.login", SuccessURL: "https://evil.example/callback?token=leak"},
 		{SecretSelector: strings.Repeat("X", 600), SubmitSelector: "a", SuccessSelector: "#dashboard"},
 	} {
 		if err := c.validate("https://app.example"); err == nil {
@@ -268,5 +273,34 @@ func TestGenericCredentialRefCannotBeSubmittedToBrowser(t *testing.T) {
 	}
 	if s.sessions.sessions[sid].browser.credentialRef != "" {
 		t.Fatal("Browser received secret-derived state")
+	}
+}
+
+// Existing Incus services should work with the protected credential/login
+// mechanism, not only guests created by this Agent. Fresh native IDs govern
+// ownership; Agent creation tags do not.
+func TestNativeGuestCredentialBindingAcceptsExistingNativeIdentity(t *testing.T) {
+	x := &managedincus.Summary{
+		HostID: "asa_verified_host", Project: "default", Name: "operator-vm",
+		UUID: "12345678-1234-1234-1234-123456789abc", Managed: false,
+	}
+	same := func(host, project, guest, uuid string) bool {
+		return nativeGuestIdentityMatches(x, uuid, project, guest, host)
+	}
+	if !same("asa_verified_host", "default", "operator-vm", x.UUID) {
+		t.Fatal("legitimate pre-existing native guest refused")
+	}
+	for _, tc := range []struct{ host, project, guest, uuid string }{
+		{"other_host", "default", "operator-vm", x.UUID},
+		{"asa_verified_host", "other_project", "operator-vm", x.UUID},
+		{"asa_verified_host", "default", "other-vm", x.UUID},
+		{"asa_verified_host", "default", "operator-vm", "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee"},
+	} {
+		if same(tc.host, tc.project, tc.guest, tc.uuid) {
+			t.Fatalf("unverified native identity accepted: %+v", tc)
+		}
+	}
+	if nativeGuestIdentityMatches(nil, x.UUID, "default", "operator-vm", "asa_verified_host") {
+		t.Fatal("absent provider guest accepted")
 	}
 }

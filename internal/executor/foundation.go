@@ -109,13 +109,15 @@ func connectionContext(c net.Conn) (context.Context, context.CancelFunc) {
 
 func (s *Server) dispatchContext(ctx context.Context, req Request) Response {
 	switch req.Action {
-	case "service_access", "managed_environment", "browser_admission_status", "browser_session_open", "browser_session_credential_login", "browser_session_flow", "browser_session_script", "browser_session_capture", "browser_session_trace", "browser_session_image", "browser_session_status", "browser_session_close", "run", "runtime_list", "code_inspect", "debug_adapter_status", "debug_launch", "debug_action", "debug_status", "debug_stop", "workspace_stat", "workspace_read", "workspace_write", "workspace_apply_edits", "workspace_transfer", "workspace_text_search", "workspace_search", "repository_environment", "repository_discover", "repository_inspect", "worktree_create", "worktree_remove":
+	case "service_access", "service_use", "managed_environment", "browser_admission_status", "browser_session_open", "browser_session_credential_login", "browser_session_flow", "browser_session_script", "browser_session_capture", "browser_session_trace", "browser_session_image", "browser_session_status", "browser_session_close", "run", "runtime_list", "code_inspect", "debug_adapter_status", "debug_launch", "debug_action", "debug_status", "debug_stop", "workspace_stat", "workspace_read", "workspace_write", "workspace_apply_edits", "workspace_transfer", "workspace_text_search", "workspace_search", "repository_environment", "repository_discover", "repository_inspect", "worktree_create", "worktree_remove":
 		if !s.auth(req.Token) {
 			return Response{Error: "unauthorized"}
 		}
 		switch req.Action {
 		case "service_access":
 			return s.serviceAccessAction(ctx, req)
+		case "service_use":
+			return s.serviceUseAction(ctx, req)
 		case "managed_environment":
 			return s.managedEnvironmentAction(ctx, req)
 		case "browser_admission_status":
@@ -355,7 +357,7 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 		return *blocked
 	}
 
-	out := newBoundedOutputCollector(maxSyncOutputBytes)
+	out := newSyncOutputCapture(s)
 	cmd.Stdout = out
 	cmd.Stderr = out
 	var browserGroup *dapCgroup
@@ -514,7 +516,18 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 		DurationMS: time.Since(started).Milliseconds(),
 		TimedOut:   timedOut,
 	}
-	applyOutputResult(&resp, out.Result())
+	applyOutputResult(&resp, out.preview.Result())
+	if captureErr := out.Finish(&resp, s.cfg.EffectiveRuntime().TextFallbackBytes); captureErr != nil {
+		resp.OK = false
+		resp.Status = "output_incomplete"
+		resp.ErrorClass = "data"
+		resp.ErrorCode = "output_capture_unavailable"
+		if errors.Is(captureErr, errSyncOutputLimit) {
+			resp.ErrorCode = "output_limit_exceeded"
+		}
+		resp.ReasonCode = resp.ErrorCode
+		resp.Error = "command may have run, but its complete output could not be retained: " + captureErr.Error()
+	}
 	return s.finishActionAudit(req, "run", auditMode(req.Root), req.Command, dec.Category, started, resp)
 }
 func encodeExecutorResponse(resp Response) []byte {
@@ -553,13 +566,13 @@ func ClientCallContext(ctx context.Context, socket, token string, req Request) (
 	// connecting; otherwise the decoder would reject a valid raw-size batch
 	// with a transport error rather than a bounded resource result.
 	if req.Action == "workspace_write" || req.Action == "workspace_apply_edits" ||
-		req.Action == "workspace_read" || req.Action == "workspace_transfer" || req.Action == "workspace_text_search" {
+		req.Action == "workspace_read" || req.Action == "workspace_transfer" || req.Action == "workspace_text_search" || req.Action == "service_use" {
 		wire, err := json.Marshal(req)
 		if err != nil {
 			return fileError("invalid_request", "validation", err), nil
 		}
 		if len(wire)+1 > maxExecutorRequestBytes {
-			return fileError("input_too_large", "resource", fmt.Errorf("serialized workspace executor request exceeds %d-byte frame", maxExecutorRequestBytes)), nil
+			return fileError("input_too_large", "resource", fmt.Errorf("serialized executor request exceeds %d-byte frame", maxExecutorRequestBytes)), nil
 		}
 	}
 	dialer := net.Dialer{Timeout: 5 * time.Second}
