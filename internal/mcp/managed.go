@@ -24,7 +24,7 @@ type ManagedEnvironmentInput struct {
 	DiskGiB       int      `json:"disk_gib,omitempty" jsonschema:"Explicit guest root disk size in GiB at create; checked against host capacity"`
 	StoragePool   string   `json:"storage_pool,omitempty" jsonschema:"Actual Incus storage pool for root disk; required on create to verify native free capacity"`
 	Command       []string `json:"command,omitempty" jsonschema:"Native guest exec argv, no shell interpretation and never include secret values"`
-	CredentialRef string   `json:"credential_ref,omitempty" jsonschema:"Optional confidential guest-exec stdin reference bound to exact host/project/guest/UUID; native diagnostics retain nonsecret details"`
+	CredentialRef string   `json:"credential_ref,omitempty" jsonschema:"Guest-bound service_access ref; host/project/guest/UUID must match. Secret reaches guest exec stdin (not argv); command must read stdin. Redacted diagnostics remain available"`
 	Snapshot      string   `json:"snapshot,omitempty" jsonschema:"Exact snapshot name for snapshot/restore"`
 	Approval      bool     `json:"approval,omitempty" jsonschema:"Set only after explicit Owner approval for delete/restore, uncertain create abandonment or uncertain native operation retirement; no automatic privilege escalation"`
 }
@@ -57,7 +57,7 @@ func (s *Server) registerManagedTools() {
 		return s.responseResult(resp)
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "service_access",
-		Description: "Store protected service credentials for host commands, Incus guests, Browser, HTTP APIs, SSH and SQL. register then generate creates a private password/token; externally issued secrets use root-local service-access add/enroll. list/inspect return refs and metadata; update, renew, revoke, delete, cleanup manage lifecycle. AI must choose a target-bound private consumer, not request plaintext. To let the human owner see a ready secret, give the local root terminal command: sudo ai-server-agent -config /etc/ai-server-agent/config.json service-access reveal --ref svc_ID. reveal is NOT an MCP operation.",
+		Description: "Manage protected service credentials for host/Incus/HTTP/SSH/SQL/Browser. register then generate stores a private password/token; local add/enroll imports existing secrets. list/inspect expose metadata only; update/renew/revoke/delete/cleanup manage lifecycle. Use an authorized target-specific consumer and verify real login/role. For the owner to copy a ready secret, provide sudo ai-server-agent -config /etc/ai-server-agent/config.json service-access reveal --ref svc_ID, to run in their own root-capable local terminal (SSH -t if needed), never via MCP or run_root_command.",
 		Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in ServiceAccessInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		reg := serviceaccess.Registration{Project: in.Project, Guest: in.Guest, GuestUUID: in.GuestUUID, Service: in.Service, Purpose: in.Purpose, Endpoint: in.Endpoint, Username: in.Username}
 		op := serviceaccess.Input{Operation: in.Operation, Ref: in.Ref, Registration: reg, Kind: in.Kind, Username: in.Username, TTLDays: in.TTLDays, NeverExpires: in.NeverExpires}

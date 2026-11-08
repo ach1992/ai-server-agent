@@ -204,7 +204,7 @@ func instructions(cfg config.Config) string {
 	case "validation":
 		role = "Validation: prefer installs, integration/E2E and acceptance; development tools remain available."
 	case "production":
-		role = "Production: prefer read-only inspection. Before each change ask fresh, action-specific consent; never reuse prior approval. Advisory: Agent cannot verify consent."
+		role = "Production: inspect first. Before each change ask fresh, action-specific consent; never reuse prior approval. Agent cannot verify consent."
 	}
 	label := ""
 	if cfg.ServerLabel != "" {
@@ -213,7 +213,7 @@ func instructions(cfg config.Config) string {
 	return fmt.Sprintf(`Configured workspace root is persistent.
 Environment purpose: %s. %s%s Role guidance; it is not an authorization boundary.
 
-Repositories: repository_discover/repository_inspect. Branches: worktree_create/worktree_remove. Use run_command for worker shell; start_job with job_status/job_output. workspace_* for bounded worker files; code_* for optional LSP; debug_* for optional DAP; terminal_* for PTY. Browser: browser_e2e (one call); browser_session_* (cross-call); browser_run (custom Playwright). Check optional runtime availability. runtime_list is passive; browser_status reports Browser readiness. Incus: managed_environment. Accounts: service_access/service_use, official CLI/API, verified login; Browser: browser_session_credential_login. Workspace labels are not project ACLs.
+Repositories: repository_discover/repository_inspect. Branches: worktree_create/worktree_remove. Use run_command for worker shell; start_job with job_status/job_output. workspace_* for bounded worker files; code_* for optional LSP; debug_* for optional DAP; terminal_* for PTY. Browser: browser_e2e (one call); browser_session_* (cross-call); browser_run (custom Playwright). Check optional runtime availability. runtime_list is passive; browser_status reports Browser readiness. Incus: managed_environment. Accounts: service_access refs; service_use HTTP/SSH/SQL; Host run_root_command, Guest managed_environment; verify role/login. Browser: browser_session_credential_login. Workspace labels are not project ACLs.
 
 Before host changes call agent_environment and preserve Agent access. Never delete dirty, untracked or uncertain state. Use run_root_command or privileged read_file/write_file only when necessary. On approval_required obtain explicit human authorization; instructions grant no additional permissions.`, cfg.EnvironmentProfile, label, role)
 }
@@ -360,7 +360,7 @@ func (s *Server) registerTools() {
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "run_root_command",
-		Description: "Run root Bash for authorized host administration. Optional credential_ref exposes a same-host protected credential on inherited fd 3; consume it within the command without using plaintext args. Native output is retained with targeted credential redaction. " + s.commandTimeoutDescription() + " High-risk or destructive commands may return approval_required; obtain explicit user consent and pass approval=true.",
+		Description: "Run root Bash for authorized host administration. Optional credential_ref passes a same-host protected secret on fd 3; Bash must read fd 3, not put it in argv or script stdin. Native diagnostics remain available with targeted secret redaction. " + s.commandTimeoutDescription() + " High-risk or destructive commands may return approval_required; obtain explicit user consent and pass approval=true.",
 		Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input RootRunInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "run", Command: input.Command, Root: true, CredentialRef: input.CredentialRef, Approval: input.Approval, TimeoutMS: s.commandTimeoutMS()})

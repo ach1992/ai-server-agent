@@ -62,7 +62,7 @@ Use the [ChatGPT connection guide](docs/CONNECT_CHATGPT.md) to set up a custom M
 | Longer tasks | Run persistent jobs and bounded interactive worker/root terminals; newer installed builds support longer pastes and optional output waiting |
 | Testing and browsers | Run tests, managed Browser sessions, isolated profiles, bounded screenshots and private traces when supported by the installed build |
 | Disposable test environments | Discover and manage optional local Incus containers/VMs with verified identity and recoverable operations; Incus remains an optional host dependency |
-| Protected service access | Enroll target credentials privately and use opaque references for authenticated Browser, HTTP(S), SSH or database operations without exposing the saved secret to the AI client |
+| Protected service access | Keep service credentials private for Host, Guest, HTTP, SSH, SQL and Browser operations. The human owner can retrieve a stored ready secret from a local root terminal (see [Operations](docs/OPERATIONS.md#service-credentials-provisioning-and-operator-retrieval)); MCP credential records expose metadata, not secrets |
 | Code intelligence | Use Go/gopls and optional language-aware analysis; supported SQL source navigation stays offline and never executes SQL |
 | Debugging | Use Go/Delve and supported optional debuggers; check actual adapter readiness |
 | File transfer | Transfer and inspect files in bounded, integrity-aware chunks |
