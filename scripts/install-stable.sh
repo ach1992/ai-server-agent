@@ -114,7 +114,21 @@ expected_url="https://github.com/$REPO/releases/download/$VERSION/install.sh"
 tmp="$(mktemp -d)"
 trap 'rm -rf "$tmp"' EXIT
 umask 077
-curl -fsSL --proto '=https' --tlsv1.2 "$installer_url" -o "$tmp/install.sh" || die "Could not download the stable installer asset."
+# Recover from a failed release CDN download using the SAME immutable asset
+# through GitHub's official API; both paths must pass the published digest.
+if ! curl -fsSL --proto '=https' --tlsv1.2 "$installer_url" -o "$tmp/install.sh"; then
+  asset_id="$(jq -er '.id | select(type=="number" and . > 0 and (floor == .))' <<<"$asset_json")" || \
+    die "Stable release install.sh has no usable asset ID for the GitHub API fallback."
+  asset_api_url="$(jq -r '.url // empty' <<<"$asset_json")"
+  expected_api_url="https://api.github.com/repos/$REPO/releases/assets/$asset_id"
+  [ "$asset_api_url" = "$expected_api_url" ] || \
+    die "Stable release install.sh asset API URL does not match the verified repository asset."
+  curl -fsSL --proto '=https' --tlsv1.2 \
+    -H 'Accept: application/octet-stream' \
+    -H "X-GitHub-Api-Version: $API_VERSION" \
+    "$asset_api_url" -o "$tmp/install.sh" || \
+    die "Could not download the stable installer asset through either GitHub release endpoint."
+fi
 [ -s "$tmp/install.sh" ] || die "Downloaded stable installer asset is empty."
 actual_digest="sha256:$(sha256sum "$tmp/install.sh" | awk '{print $1}')"
 [ "$actual_digest" = "$installer_digest" ] || \

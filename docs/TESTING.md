@@ -343,6 +343,7 @@ They verify that the updater:
 - refuses a mutable/non-immutable stable release before installer execution;
 - accepts a valid immutable Stable installer only when its exact release-asset SHA-256 digest matches **and** the installer advertises the reviewed installed privileged lifecycle/startup trust contract;
 - refuses even an otherwise genuine immutable historical release without that contract, before executing the old installer or changing the active Agent;
+- falls back from a failed release download URL to the verified GitHub asset API endpoint without weakening the published digest, the trust marker or the installer-execution boundary;
 - rejects digest mismatch **before** considering the compatibility marker or executing any downloaded installer;
 - never turns the Stable path into an implicit `main` source update or offers a legacy bypass.
 

@@ -53,7 +53,7 @@ Although its public **source** comes from reviewed `main`, the Stable bootstrap 
 3. requires a published, non-draft, non-prerelease, immutable release;
 4. requires exactly one uploaded `install.sh` asset at the exact tag-scoped release URL;
 5. requires the GitHub release asset `sha256:` digest;
-6. downloads `install.sh` without root execution and verifies its bytes against that digest;
+6. downloads `install.sh` without root execution through the exact release URL, or its verified GitHub asset API URL if the first endpoint fails, and checks the same SHA-256 digest;
 7. enters the separate privileged **release-installer staging** path only after verifying downloaded installer bytes (the optional OS prerequisite privilege operation precedes this);
 8. copies the candidate into a root-controlled staging directory, re-verifies the same authenticated digest on the protected copy, and executes only that protected copy.
 
@@ -355,7 +355,7 @@ The stable updater does not trust a mutable `main` installer. It:
 2. resolves the latest published immutable stable release unless an explicit stable tag is requested;
 3. requires the release to be non-draft, non-prerelease and immutable;
 4. requires exactly one uploaded tag-scoped `install.sh` asset;
-5. verifies the downloaded `install.sh` bytes against the SHA-256 digest recorded on that GitHub release asset **before executing it**;
+5. downloads `install.sh` from the release URL or the verified GitHub asset API fallback, then checks its bytes against the exact published SHA-256 digest **before executing it**;
 6. requires the authenticated installer to declare the reviewed installed privileged lifecycle/startup trust contract; older releases without it are refused even if credentials are compatible;
 7. performs the existing credential/config checks before invoking the eligible installer;
 8. lets the release-scoped installer verify the release archive against `SHA256SUMS`.
