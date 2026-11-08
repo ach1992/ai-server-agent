@@ -20,6 +20,24 @@ func managedJSON(v any) Response {
 	return Response{OK: true, Status: "observed", Output: string(b), OutputEncoding: "json", BytesSeen: int64(len(b)), BytesReturned: int64(len(b))}
 }
 func managedErr(err error) Response {
+	// Provider text must not alter reason-code classification: the native
+	// command's typed failure carries the evidence in the response output.
+	var native *managedincus.NativeCommandError
+	if errors.As(err, &native) {
+		resp := fileError("native_command_failed", "process", err)
+		resp.Status = "native_command_failed"
+		resp.ExitCode = native.ExitCode
+		resp.Output = native.Diagnostic
+		resp.OutputEncoding = "utf-8"
+		resp.BytesSeen = native.BytesSeen
+		resp.BytesReturned = int64(len(native.Diagnostic))
+		if resp.BytesSeen < resp.BytesReturned {
+			resp.BytesSeen = resp.BytesReturned
+		}
+		resp.OmittedBytes = resp.BytesSeen - resp.BytesReturned
+		resp.Truncated = native.Truncated
+		return resp
+	}
 	code := "managed_operation_failed"
 	if err != nil {
 		switch {
@@ -265,6 +283,19 @@ func (s *Server) managedEnvironmentAction(ctx context.Context, req Request) Resp
 		}
 	} else if !result.Available && in.Operation != "status" && in.Operation != "pending_creates" {
 		resp = fileError("incus_unavailable", "dependency", errors.New(result.Diagnostic))
+		// Readiness failure happens before dispatching the requested guest
+		// action. Preserve the native query's bounded evidence separately.
+		resp.Status = "native_preflight_unavailable"
+		resp.ExitCode = result.ExitCode
+		resp.Output = result.Output
+		resp.OutputEncoding = "utf-8"
+		resp.BytesSeen = result.OutputBytesSeen
+		resp.BytesReturned = int64(len(result.Output))
+		if resp.BytesSeen < resp.BytesReturned {
+			resp.BytesSeen = resp.BytesReturned
+		}
+		resp.OmittedBytes = resp.BytesSeen - resp.BytesReturned
+		resp.Truncated = result.OutputTruncated
 	} else {
 		resp = managedJSON(result)
 	}

@@ -16,6 +16,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/ach1992/ai-server-agent/internal/audit"
+	"github.com/ach1992/ai-server-agent/internal/secretoutput"
 	"golang.org/x/sys/unix"
 )
 
@@ -62,6 +63,25 @@ const (
 	// JSON escaping can turn 1 MiB of valid UTF-8 content into >2 MiB.
 	maxWorkspaceHelperRequestBytes = maxExecutorRequestBytes
 )
+
+const workspaceHelperDiagnosticBytes = 4096
+
+// The helper's stderr is never a substitute for its authoritative JSON
+// response; retain a bounded independent native diagnostic on failure.
+type workspaceHelperDiagnosticBuffer struct {
+	buf  bytes.Buffer
+	seen int64
+}
+
+func (b *workspaceHelperDiagnosticBuffer) Write(p []byte) (int, error) {
+	b.seen += int64(len(p))
+	if n := workspaceHelperDiagnosticBytes - b.buf.Len(); n > 0 {
+		_, _ = b.buf.Write(p[:min(n, len(p))])
+	}
+	return len(p), nil
+}
+
+func (b *workspaceHelperDiagnosticBuffer) String() string { return b.buf.String() }
 
 func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp Response) {
 	write := req.Action == "workspace_write" || req.Action == "workspace_apply_edits" || req.Action == "workspace_transfer" || req.Action == "workspace_transfer_gc"
@@ -198,24 +218,84 @@ func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp 
 		return fileError("worker_identity_unavailable", "policy", errors.New("executor cannot adopt configured worker identity"))
 	}
 	stdout := &boundedGitBuffer{limit: maxExecutorResponseBytes}
+	stderr := &workspaceHelperDiagnosticBuffer{}
 	cmd.Stdout = stdout
-	// No raw stderr or request content is included in audit/error responses.
-	cmd.Stderr = io.Discard
-	if err := cmd.Run(); err != nil || stdout.overflow || ctx.Err() != nil {
-		return unknownFileCompletion("worker file operation outcome could not be verified; inspect workspace before retrying", nil)
+	cmd.Stderr = stderr
+	// A failed Start is definitive: no helper code executed and no workspace
+	// mutation happened. Wait and invalid responses are different phases.
+	if startErr := cmd.Start(); startErr != nil {
+		failed := fileError("workspace_helper_start_failed", "process",
+			fmt.Errorf("workspace helper did not start (%s): %w; inspect helper executable and worker permissions", req.Action, startErr))
+		failed.Status = "helper_not_started"
+		failed.Retryable = true // No helper process started; retry is side-effect safe after remediation.
+		failed.ExitCode = -1
+		failed.TimedOut = errors.Is(ctx.Err(), context.DeadlineExceeded)
+		return failed
+	}
+	waitErr := cmd.Wait()
+	helperFailure := func(stage string, cause error, uncertain bool) Response {
+		message := fmt.Sprintf("workspace helper %s for %s: %v", stage, req.Action, cause)
+		if uncertain {
+			message += "; operation may have taken effect; inspect workspace state before retrying"
+		} else {
+			message += "; no workspace result was obtained; inspect helper and retry read-only inspection"
+		}
+		var failed Response
+		if uncertain {
+			failed = unknownFileCompletion(message, nil)
+			failed.Status = "unknown"
+		} else {
+			failed = fileError("workspace_helper_failed", "process", errors.New(message))
+			failed.Status = "helper_failed"
+			failed.Retryable = true
+		}
+		failed.ExitCode = -1
+		if cmd.ProcessState != nil {
+			failed.ExitCode = cmd.ProcessState.ExitCode()
+		}
+		failed.TimedOut = errors.Is(ctx.Err(), context.DeadlineExceeded)
+		failed.Output = secretoutput.RedactDiagnosticText(stderr.String())
+		failed.OutputEncoding = "utf-8"
+		failed.BytesSeen = stderr.seen
+		failed.BytesReturned = int64(len(failed.Output))
+		if failed.BytesSeen < failed.BytesReturned {
+			failed.BytesSeen = failed.BytesReturned
+		}
+		failed.OmittedBytes = failed.BytesSeen - failed.BytesReturned
+		failed.Truncated = stderr.seen > workspaceHelperDiagnosticBytes
+		return failed
+	}
+	if waitErr != nil || stdout.overflow || ctx.Err() != nil {
+		switch {
+		case ctx.Err() != nil:
+			waitErr = errors.Join(waitErr, fmt.Errorf("helper context: %w", ctx.Err()))
+		case stdout.overflow:
+			waitErr = errors.Join(waitErr, errors.New("helper response exceeded bounded output"))
+		}
+		return helperFailure("exited without a verified response", waitErr, write)
 	}
 	if err := json.Unmarshal(stdout.Bytes(), &resp); err != nil {
-		return unknownFileCompletion("worker file helper returned an invalid response; inspect before retrying", nil)
+		return helperFailure("returned invalid JSON response", err, write)
 	}
 	if !write && resp.OK && s.audit != nil {
 		// Read-only audit is diagnostic, never an authorization gate.
 		// The pathname is fingerprinted; source content is not recorded.
-		_ = s.audit.Write(audit.Entry{
+		if auditErr := s.audit.Write(audit.Entry{
 			Phase: "complete", Action: req.Action, Mode: "worker",
 			Command: req.Workspace + "\x00" + req.Path, Success: audit.Bool(true),
 			RequestID: req.RequestID, PrincipalID: req.PrincipalID,
 			PrincipalClass: req.PrincipalClass, PrincipalName: req.PrincipalName,
-		})
+		}); auditErr != nil {
+			// Read-only logging is diagnostic, not an authorization gate.
+			// The successful read stays successful, but hiding the failed
+			// audit would mislead callers and hinder later diagnosis.
+			resp.AuditDegraded = true
+			detail := secretoutput.RedactDiagnosticText(auditErr.Error())
+			if len(detail) > 256 {
+				detail = detail[:256] + " [audit diagnostic truncated]"
+			}
+			resp.AuditError = "workspace read succeeded, but diagnostic audit record could not be written: " + detail
+		}
 	}
 	return resp
 }

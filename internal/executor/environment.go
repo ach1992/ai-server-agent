@@ -8,7 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+
+	"github.com/ach1992/ai-server-agent/internal/secretoutput"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -95,7 +96,11 @@ func (s *Server) inspectRepositoryEnvironment(ctx context.Context, inputPath str
 		return RepositoryEnvironmentSummary{}, "environment_probe_failed", err
 	}
 	headAfter, headCode, headErr := s.environmentGit(ctx, root, "rev-parse", "--verify", "HEAD")
-	if headErr != nil || headCode != 0 || strings.TrimSpace(headAfter) != head {
+	if headErr != nil || headCode != 0 {
+		return RepositoryEnvironmentSummary{}, "environment_probe_failed",
+			fmt.Errorf("recheck repository HEAD with git rev-parse (exit_code=%d): %v", headCode, headErr)
+	}
+	if strings.TrimSpace(headAfter) != head {
 		return RepositoryEnvironmentSummary{}, "repository_changed", errors.New("repository HEAD changed during environment inspection")
 	}
 	return b.summary(), "", nil
@@ -130,15 +135,18 @@ func (s *Server) environmentRepositoryIdentity(ctx context.Context, inputPath st
 	}
 	rootOut, code, err := s.environmentGit(ctx, path, "rev-parse", "--show-toplevel")
 	if err != nil || code != 0 {
-		return "", "", "not_repository", errors.New("path is not a usable Git worktree")
+		return "", "", "not_repository", fmt.Errorf("git rev-parse --show-toplevel for %q failed (exit_code=%d): %v", path, code, err)
 	}
 	root, err := filepath.EvalSymlinks(strings.TrimSpace(rootOut))
 	if err != nil || !pathWithin(workspace, root) {
 		return "", "", "invalid_repository_path", errors.New("repository root resolves outside the configured workspace")
 	}
 	head, code, err := s.environmentGit(ctx, root, "rev-parse", "--verify", "HEAD")
-	if err != nil || code != 0 || !fullEnvironmentSHA(strings.TrimSpace(head)) {
-		return "", "", "not_repository", errors.New("repository HEAD is unavailable")
+	if err != nil || code != 0 {
+		return "", "", "not_repository", fmt.Errorf("git rev-parse --verify HEAD for %q failed (exit_code=%d): %v", root, code, err)
+	}
+	if !fullEnvironmentSHA(strings.TrimSpace(head)) {
+		return "", "", "not_repository", errors.New("repository HEAD is not a full commit hash")
 	}
 	return filepath.Clean(root), strings.TrimSpace(head), "", nil
 }
@@ -195,7 +203,8 @@ func (s *Server) environmentGit(ctx context.Context, dir string, args ...string)
 	}
 	stdout := &environmentLimitedBuffer{limit: maxEnvironmentOutputBytes}
 	cmd.Stdout = stdout
-	cmd.Stderr = io.Discard
+	stderr := &boundedGitBuffer{limit: 4096}
+	cmd.Stderr = stderr
 	err := cmd.Run()
 	if errors.Is(err, errEnvironmentOutputLimit) {
 		return "", -1, errors.New("git metadata output exceeded environment discovery limit")
@@ -205,12 +214,17 @@ func (s *Server) environmentGit(ctx context.Context, dir string, args ...string)
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		return strings.TrimSpace(stdout.String()), exitErr.ExitCode(), nil
+		detail := secretoutput.RedactDiagnosticText(strings.TrimSpace(stderr.String()))
+		if stderr.overflow {
+			detail += " [native stderr truncated at 4096 bytes]"
+		}
+		return strings.TrimSpace(stdout.String()), exitErr.ExitCode(),
+			fmt.Errorf("git %s exited %d: %w; stderr=%q", args[0], exitErr.ExitCode(), err, detail)
 	}
 	if ctx.Err() != nil {
-		return "", -1, ctx.Err()
+		return "", -1, fmt.Errorf("git %s canceled: %w", args[0], ctx.Err())
 	}
-	return "", -1, err
+	return "", -1, fmt.Errorf("git %s could not start or complete: %w", args[0], err)
 }
 
 func (b *environmentBuilder) readDeclaration(ctx context.Context, rel, kind string) ([]byte, bool) {
@@ -220,7 +234,7 @@ func (b *environmentBuilder) readDeclaration(ctx context.Context, rel, kind stri
 		return nil, false
 	}
 	if err != nil {
-		b.warnings = append(b.warnings, fmt.Sprintf("%s could not be inspected", rel))
+		b.warnings = append(b.warnings, fmt.Sprintf("%s could not be inspected: %v", rel, err))
 		return nil, false
 	}
 	resolved, resolveErr := filepath.EvalSymlinks(full)
@@ -241,7 +255,7 @@ func (b *environmentBuilder) readDeclaration(ctx context.Context, rel, kind stri
 	}
 	data, err := b.server.readEnvironmentFileAsWorker(ctx, full)
 	if err != nil {
-		b.warnings = append(b.warnings, fmt.Sprintf("%s could not be read with worker authority", rel))
+		b.warnings = append(b.warnings, fmt.Sprintf("%s could not be read with worker authority: %v", rel, err))
 		return nil, false
 	}
 	hash := sha256.Sum256(data)
@@ -274,23 +288,37 @@ func (s *Server) readEnvironmentFileAsWorker(ctx context.Context, path string) (
 	}
 	output := &environmentLimitedBuffer{limit: maxEnvironmentFileBytes}
 	cmd.Stdout = output
-	cmd.Stderr = io.Discard
+	stderr := &boundedGitBuffer{limit: 4096}
+	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
 		if errors.Is(err, errEnvironmentOutputLimit) {
 			return nil, errEnvironmentOutputLimit
 		}
-		return nil, err
+		detail := secretoutput.RedactDiagnosticText(strings.TrimSpace(stderr.String()))
+		if stderr.overflow {
+			detail += " [native stderr truncated at 4096 bytes]"
+		}
+		return nil, fmt.Errorf("read declaration with worker cat %q: %w; stderr=%q", path, err, detail)
 	}
 	return []byte(output.String()), nil
 }
 
 func (b *environmentBuilder) declarationDurability(ctx context.Context, rel string) (tracked, matchesHead bool) {
-	if _, code, err := b.server.environmentGit(ctx, b.root, "ls-files", "--error-unmatch", "--", rel); err != nil || code != 0 {
+	_, code, err := b.server.environmentGit(ctx, b.root, "ls-files", "--error-unmatch", "--", rel)
+	if code != 0 || err != nil {
+		// Exit 1 is the normal Git absence result for an optional untracked
+		// declaration. Other native Git failures deserve actionable context.
+		if code != 1 {
+			b.warnings = append(b.warnings, fmt.Sprintf("%s Git tracking probe failed: %v", rel, err))
+		}
 		return false, false
 	}
 	tracked = true
-	if _, code, err := b.server.environmentGit(ctx, b.root, "diff", "--quiet", "HEAD", "--", rel); err == nil && code == 0 {
+	_, code, err = b.server.environmentGit(ctx, b.root, "diff", "--quiet", "HEAD", "--", rel)
+	if err == nil && code == 0 {
 		matchesHead = true
+	} else if code != 1 {
+		b.warnings = append(b.warnings, fmt.Sprintf("%s Git HEAD comparison failed: %v", rel, err))
 	}
 	return tracked, matchesHead
 }

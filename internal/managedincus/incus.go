@@ -184,15 +184,40 @@ func (b Backend) cliProtected(ctx context.Context, stdin io.Reader, discardOutpu
 	// 64 KiB diagnostic window; do not expose secret plaintext volume.
 	return out.b.String(), code, out.seen > maxOutput, int64(out.seen), err
 }
+
+// NativeCommandError keeps provider output out of the error string used by
+// Executor reason-code classification. The bounded diagnostic is delivered
+// separately in the authenticated managed_environment response.
+type NativeCommandError struct {
+	Stage      string
+	ExitCode   int
+	Diagnostic string
+	BytesSeen  int64
+	Truncated  bool
+	Cause      error
+}
+
+func (e *NativeCommandError) Error() string {
+	return fmt.Sprintf("native Incus %s failed (exit_code=%d): %v", e.Stage, e.ExitCode, e.Cause)
+}
+
+func (e *NativeCommandError) Unwrap() error { return e.Cause }
+
 func (b Backend) command(ctx context.Context, timeout time.Duration, args ...string) (string, error) {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	out, _, truncated, err := b.cli(runCtx, nil, false, args...)
+	out, code, truncated, seen, err := b.cliProtected(runCtx, nil, false, "", args...)
+	if err != nil {
+		// A failed native command may also have returned partial stdout.
+		// The native diagnostics are independently bounded, never trusted
+		// as classification input, and cannot change command certainty.
+		return "", &NativeCommandError{
+			Stage: args[0], ExitCode: code, Diagnostic: secretoutput.RedactDiagnosticText(out),
+			BytesSeen: seen, Truncated: truncated, Cause: err,
+		}
+	}
 	if truncated {
 		return "", errors.New("incus output exceeded bounded response")
-	}
-	if err != nil {
-		return "", fmt.Errorf("native Incus operation failed (%s): %w", strings.Join(args[:min(2, len(args))], " "), err)
 	}
 	return out, nil
 }
@@ -359,6 +384,13 @@ func (b Backend) Ready(ctx context.Context) Result {
 	root, err := b.command(ctx, 12*time.Second, "query", "/1.0")
 	if err != nil {
 		r.Diagnostic = "incus_unready: native daemon/socket/project not initialized or unavailable; inspect incus admin status and initialization"
+		var native *NativeCommandError
+		if errors.As(err, &native) {
+			r.ExitCode = native.ExitCode
+			r.Output = native.Diagnostic
+			r.OutputBytesSeen = native.BytesSeen
+			r.OutputTruncated = native.Truncated
+		}
 		return r
 	}
 	var api struct {

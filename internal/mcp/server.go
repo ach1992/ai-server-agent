@@ -270,45 +270,9 @@ func responseResultWithLimit(resp executor.Response, maxTextFallbackBytes int) (
 			return textResult(string(b), !resp.OK), resp, nil
 		}
 	}
-	// A text-only MCP client may hide structuredContent. Keep this fallback
-	// bounded and free of payload bytes, but retain enough continuation and
-	// consistency metadata for the caller to request a smaller useful range.
-	summary := fmt.Sprintf(
-		"ok=%t status=%q error_code=%q exit_code=%d bytes_seen=%d bytes_returned=%d output_encoding=%q truncated=%t omitted_bytes=%d",
-		resp.OK, resp.Status, resp.ErrorCode, resp.ExitCode, resp.BytesSeen, resp.BytesReturned, resp.OutputEncoding, resp.Truncated, resp.OmittedBytes,
-	)
-	if resp.FileSize != nil {
-		summary += fmt.Sprintf(" file_size=%d", *resp.FileSize)
-	}
-	if resp.FileVersion != "" {
-		summary += fmt.Sprintf(" file_version=%q", resp.FileVersion)
-	}
-	if resp.JobID != "" {
-		summary += fmt.Sprintf(" job_id=%q", resp.JobID)
-	}
-	if resp.NextOffset != nil {
-		summary += fmt.Sprintf(" requested_offset=%d next_offset=%d", resp.RequestedOffset, *resp.NextOffset)
-		if resp.EOF != nil {
-			summary += fmt.Sprintf(" eof=%t", *resp.EOF)
-		}
-		if resp.JobID != "" {
-			summary += fmt.Sprintf(" available_from_offset=%d current_end=%d retention_truncated=%t",
-				resp.AvailableFromOffset, resp.CurrentEnd, resp.RetentionTruncated)
-		}
-		// The output byte limit is BEFORE Base64 expansion (4/3) and
-		// serialized JSON metadata. A 4096-raw-byte Base64 window cannot
-		// fit the minimum configured 4096-byte text-only MCP envelope.
-		// Use a conservative, already-tested 2048-raw-byte recovery window.
-		recoveryLimit := 4096
-		if resp.OutputEncoding == "base64" {
-			recoveryLimit = 2048
-		}
-		summary += fmt.Sprintf("; output omitted from text fallback: use structuredContent, or re-request the needed range starting at requested_offset with limit<=%d, then continue via next_offset (keep file_version for files)", recoveryLimit)
-	} else if resp.JobID != "" {
-		summary += "; output omitted from text fallback: retrieve the complete command output using job_output(job_id, offset=0, limit<=4096), continuing with next_offset (retention is bounded)"
-	} else {
-		summary += "; output omitted from text fallback: use structuredContent; no output recovery ID was returned"
-	}
+	// Keep critical failure, audit and recovery metadata for text-only clients.
+	// The complete structuredContent remains unchanged.
+	summary := diagnosticTextFallback(resp, maxTextFallbackBytes)
 	return textResult(summary, !resp.OK), resp, nil
 }
 
