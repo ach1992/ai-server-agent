@@ -1,8 +1,13 @@
 package main
 
 import (
+	"bytes"
+	"os"
 	"strings"
 	"testing"
+
+	"github.com/ach1992/ai-server-agent/internal/config"
+	"github.com/ach1992/ai-server-agent/internal/serviceaccess"
 )
 
 func TestServiceAccessOperatorAddOneCommandAndExistingEnroll(t *testing.T) {
@@ -57,5 +62,38 @@ func TestServiceAccessOperatorRejectsPlaintextFlagsAndAmbiguousOptions(t *testin
 		if _, err := readRootOwnedSecretFile(path); err == nil {
 			t.Errorf("accepted unsafe private-file path %q", path)
 		}
+	}
+}
+
+func TestServiceAccessRevealFormatsExactSecretForOperatorTerminal(t *testing.T) {
+	for _, tc := range []struct {
+		name, secret string
+	}{
+		{"password", "owner-copyable-password-123!"},
+		{"multiline", "-----BEGIN PRIVATE KEY-----\nexample\n-----END PRIVATE KEY-----\n"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			record := serviceaccess.Record{
+				Service: "Example Service", Username: "admin", Kind: tc.name, Secret: tc.secret,
+			}
+			var terminal bytes.Buffer
+			if err := writeServiceCredentialToTerminal(&terminal, record); err != nil {
+				t.Fatal(err)
+			}
+			expect := "Service: Example Service\nUsername: admin\nKind: " + tc.name + "\nCredential:\n" + tc.secret + "\n"
+			if got := terminal.String(); got != expect {
+				t.Fatalf("operator terminal did not contain exact credential text: got len=%d want len=%d", len(got), len(expect))
+			}
+		})
+	}
+}
+
+func TestServiceAccessRevealRequiresRootOperator(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("non-root denial verified on ordinary aiworker tests")
+	}
+	err := revealServiceCredential(config.Config{}, []string{"--ref", "svc_example"})
+	if err == nil || !strings.Contains(err.Error(), "root operator") {
+		t.Fatalf("non-root credential reveal accepted: %v", err)
 	}
 }

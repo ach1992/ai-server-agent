@@ -63,6 +63,14 @@ func TestProtectedServiceCredentialMCPExecutorBoundary(t *testing.T) {
 	if !listed.OK || strings.Contains(listed.Output, rec.Secret) {
 		t.Fatalf("listed credential or failed: %+v", listed)
 	}
+	// The human-owner reveal subcommand is local CLI only: the MCP/Executor
+	// service_access action cannot return stored plaintext, even if an AI
+	// supplies the same operation string.
+	req.ServiceAccess = serviceaccess.Input{Operation: "reveal", Ref: meta.ID}
+	if denied := s.serviceAccessAction(context.Background(), req); denied.OK ||
+		strings.Contains(denied.Output, rec.Secret) {
+		t.Fatalf("MCP service_access revealed a protected credential: %+v", denied)
+	}
 	req.ServiceAccess = serviceaccess.Input{Operation: "revoke", Ref: meta.ID}
 	if r := s.serviceAccessAction(context.Background(), req); !r.OK {
 		t.Fatalf("revoke: %+v", r)
@@ -302,5 +310,35 @@ func TestNativeGuestCredentialBindingAcceptsExistingNativeIdentity(t *testing.T)
 	}
 	if nativeGuestIdentityMatches(nil, x.UUID, "default", "operator-vm", "asa_verified_host") {
 		t.Fatal("absent provider guest accepted")
+	}
+}
+
+// A failed native exec must retain provider output and the real exit code,
+// while an identity guard failure must not pretend it executed the command.
+func TestManagedGuestExecNativeErrorPreservesDiagnostics(t *testing.T) {
+	providerErr := errors.New("native operation failed, exit_code=255: exit status 255")
+	got := managedGuestExecFailure(managedincus.Result{
+		Output:   "incus: guest service unavailable; check status of guest agent\n",
+		ExitCode: 255, OutputTruncated: false,
+	}, providerErr)
+	if got.OK || got.ExitCode != 255 || got.ErrorCode != "native_guest_exec_failed" ||
+		got.ErrorClass != "process" || !strings.Contains(got.Output, "guest service unavailable") ||
+		got.BytesReturned != int64(len(got.Output)) {
+		t.Fatalf("failed native diagnostics were lost: %+v", got)
+	}
+
+	large := managedGuestExecFailure(managedincus.Result{
+		ExitCode: 255, Output: strings.Repeat("D", 64<<10),
+		OutputBytesSeen: 75001, OutputTruncated: true,
+	}, providerErr)
+	if !large.Truncated || large.BytesSeen != 75001 ||
+		large.BytesReturned != 64<<10 || large.OmittedBytes != 75001-(64<<10) {
+		t.Fatalf("native error truncation accounting incorrect: %+v", large)
+	}
+	validationErr := errors.New("instance_identity_changed_before_mutation: refused name-based operation")
+	beforeDispatch := managedGuestExecFailure(managedincus.Result{}, validationErr)
+	if beforeDispatch.ErrorCode != "managed_operation_failed" ||
+		beforeDispatch.Status == "native_guest_exec_failed" {
+		t.Fatalf("preflight was falsely classified as native exec failure: %+v", beforeDispatch)
 	}
 }
