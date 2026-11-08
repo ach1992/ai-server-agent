@@ -107,9 +107,19 @@ resolve_source_ref(){
   printf '%s\n' "$sha"
 }
 
+# GitHub release metadata may transiently return 5xx or close the connection.
+# Retry transport failures for a bounded period; never retry past the strict
+# immutable published-release validation at each caller.
+github_release_metadata(){
+  curl -fsSL --retry 3 --retry-all-errors --retry-delay 1 \
+    --retry-max-time 50 --connect-timeout 8 --max-time 20 \
+    -H 'Accept: application/vnd.github+json' \
+    -H 'X-GitHub-Api-Version: 2026-03-10' "$1"
+}
+
 latest_stable(){
   local json tag
-  json="$(curl -fsSL -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2026-03-10' "https://api.github.com/repos/$REPO/releases/latest")" || { cli_error "Could not read latest GitHub release"; exit 1; }
+  json="$(github_release_metadata "https://api.github.com/repos/$REPO/releases/latest")" || { cli_error "Could not read latest GitHub release"; exit 1; }
   jq -e '.draft == false and .prerelease == false and .immutable == true' >/dev/null <<<"$json" || { cli_error "Latest GitHub release is not a published immutable stable release"; exit 1; }
   tag="$(printf '%s' "$json" | jq -r '.tag_name // empty')"
   [[ "$tag" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || { cli_error "Latest release tag is not a stable semantic version: $tag"; exit 1; }
@@ -118,7 +128,7 @@ latest_stable(){
 
 verified_stable_release_json(){
   local version="$1" json
-  json="$(curl -fsSL -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2026-03-10' "https://api.github.com/repos/$REPO/releases/tags/$version")" || { cli_error "Could not read GitHub release $version"; exit 1; }
+  json="$(github_release_metadata "https://api.github.com/repos/$REPO/releases/tags/$version")" || { cli_error "Could not read GitHub release $version"; exit 1; }
   jq -e --arg version "$version" '.tag_name == $version and .draft == false and .prerelease == false and .immutable == true' >/dev/null <<<"$json" || { cli_error "Stable update requires a published immutable release for $version"; exit 1; }
   printf '%s' "$json"
 }
