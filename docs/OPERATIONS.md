@@ -26,7 +26,7 @@ To install the **latest published immutable Stable**:
 curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | bash
 ```
 
-To install a **specific published Stable**, for example `v0.1.20`:
+To install an **explicitly pinned historical Stable** on a fresh host, for example `v0.1.20` (not the latest; check [Releases](https://github.com/ach1992/ai-server-agent/releases) for an eligible immutable version):
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/ach1992/ai-server-agent/main/scripts/install-stable.sh | bash -s -- v0.1.20
