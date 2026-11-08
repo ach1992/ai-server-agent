@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"syscall"
@@ -347,5 +348,85 @@ func TestPruneCLIRejectsInvalidThresholds(t *testing.T) {
 		if code := Run(args, &stdout, &stderr); code != 2 {
 			t.Fatalf("invalid options %v accepted: code=%d output=%q", args, code, stdout.String())
 		}
+	}
+}
+
+// A killed wrapper must not make its still-running Go subprocess appear
+// abandoned. The subprocess retains an inherited lease FD until it exits.
+func TestRunGoInterruptedWrapperPreservesChildLease(t *testing.T) {
+	root := testRoot(t)
+	fake := t.TempDir()
+	ready := filepath.Join(fake, "ready")
+	releasePath := filepath.Join(fake, "release")
+	script := "#!/bin/sh\ntest -e /proc/self/fd/3 || exit 91\n: > \"$CACHE_CHILD_READY\"\nwhile [ ! -e \"$CACHE_CHILD_RELEASE\" ]; do sleep 0.02; done\n"
+	if err := os.WriteFile(filepath.Join(fake, "go"), []byte(script), 0700); err != nil {
+		t.Fatal(err)
+	}
+	command := exec.Command(os.Args[0], "-test.run=^TestRunGoWrapperHelper$")
+	command.Env = append(os.Environ(),
+		"CACHE_WRAPPER_HELPER=1",
+		"CACHE_CHILD_READY="+ready,
+		"CACHE_CHILD_RELEASE="+releasePath,
+		"XDG_CACHE_HOME="+os.Getenv("XDG_CACHE_HOME"),
+		"PATH="+fake+":"+os.Getenv("PATH"),
+	)
+	if err := command.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() {
+		_ = os.WriteFile(releasePath, nil, 0600)
+		_ = command.Process.Kill()
+		_ = command.Wait()
+	}()
+
+	var entry string
+	for until := time.Now().Add(3 * time.Second); time.Now().Before(until); time.Sleep(20 * time.Millisecond) {
+		if _, err := os.Stat(ready); err != nil {
+			continue
+		}
+		items, err := os.ReadDir(root)
+		if err == nil && len(items) == 1 {
+			entry = filepath.Join(root, items[0].Name())
+			break
+		}
+	}
+	if entry == "" {
+		t.Fatal("helper Go process did not start with private cache lease")
+	}
+	if err := command.Process.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	_ = command.Wait()
+	applied, err := prune(time.Now().Add(2*time.Hour), true, true, 0, 85, 0)
+	if err != nil || applied.ActiveEntries != 1 || applied.DeletedEntries != 0 {
+		t.Fatalf("orphan Go process lost lease after wrapper kill: %+v %v", applied, err)
+	}
+	if err := os.WriteFile(releasePath, nil, 0600); err != nil {
+		t.Fatal(err)
+	}
+	// After the Go child exits, the exact previously owned cache can be reclaimed.
+	var recovered bool
+	for until := time.Now().Add(3 * time.Second); time.Now().Before(until); time.Sleep(20 * time.Millisecond) {
+		p, err := prune(time.Now().Add(2*time.Hour), true, true, 0, 85, 0)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if p.DeletedEntries == 1 {
+			recovered = true
+			break
+		}
+	}
+	if !recovered {
+		t.Fatal("orphaned task cache remained locked after child exit")
+	}
+}
+
+func TestRunGoWrapperHelper(t *testing.T) {
+	if os.Getenv("CACHE_WRAPPER_HELPER") != "1" {
+		return
+	}
+	_, err := runGo([]string{"version"}, ioDiscard{}, ioDiscard{})
+	if err != nil {
+		t.Fatal(err)
 	}
 }

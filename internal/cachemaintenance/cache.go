@@ -488,6 +488,10 @@ func runGo(argv []string, stdout, stderr io.Writer) (exitCode int, runErr error)
 		return 1, fmt.Errorf("Go executable unavailable: %w", err)
 	}
 	cmd := exec.Command(goCmd, argv...)
+	// The child holds the same flock open-file description as the wrapper.
+	// If the wrapper is killed, a still-running Go process keeps the
+	// abandoned task cache protected until it exits.
+	cmd.ExtraFiles = []*os.File{lock}
 	cmd.Env = append(os.Environ(), "GOCACHE="+filepath.Join(entry, "data"))
 	cmd.Stdin, cmd.Stdout, cmd.Stderr = os.Stdin, stdout, stderr
 	if err := cmd.Run(); err != nil {
