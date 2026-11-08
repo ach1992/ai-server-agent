@@ -124,6 +124,9 @@ POISON_INSTALL
   if [ "$bad_url" = true ]; then
     INSTALLER_URL="https://example.invalid/install.sh"
   fi
+  ASSET_API_URL="https://api.github.com/repos/ach1992/ai-server-agent/releases/assets/123456"
+  FIXTURE_PRIMARY_FAIL=false
+  FIXTURE_API_FAIL=false
   IMMUTABLE="$immutable"
 
   cat > "$FIXTURE/bin/curl" <<'CURL'
@@ -131,9 +134,10 @@ POISON_INSTALL
 set -Eeuo pipefail
 out=''
 url=''
+octet=false
 while [ "$#" -gt 0 ]; do
   case "$1" in
-    -H) shift 2 ;;
+    -H) [ "$2" != 'Accept: application/octet-stream' ] || octet=true; shift 2 ;;
     -o) out="$2"; shift 2 ;;
     --proto) shift 2 ;;
     --tlsv1.2) shift ;;
@@ -150,12 +154,28 @@ case "$url" in
       mkdir -p -- "$BOOTSTRAP_LATE_INSTALL_MARKER"
     fi
     printf 'release-metadata\n' >> "$EVENT_MARKER"
-    printf '{"tag_name":"v0.1.2","draft":false,"prerelease":false,"immutable":%s,"assets":[{"name":"install.sh","state":"uploaded","digest":"%s","browser_download_url":"%s"}]}\n' "$IMMUTABLE" "$INSTALLER_DIGEST" "$INSTALLER_URL"
+    printf '{"tag_name":"v0.1.2","draft":false,"prerelease":false,"immutable":%s,"assets":[{"id":123456,"url":"%s","name":"install.sh","state":"uploaded","digest":"%s","browser_download_url":"%s"}]}\n' "$IMMUTABLE" "$ASSET_API_URL" "$INSTALLER_DIGEST" "$INSTALLER_URL"
     ;;
   https://github.com/ach1992/ai-server-agent/releases/download/v0.1.2/install.sh)
     [ -n "$out" ] || exit 92
+    if [ "$FIXTURE_PRIMARY_FAIL" = true ]; then
+      printf 'release-installer-direct-failed\n' >> "$EVENT_MARKER"
+      echo 'curl: (22) HTTP 504 from release CDN' >&2
+      exit 22
+    fi
     cp "$FIXTURE_INSTALLER" "$out"
     printf 'release-installer-download\n' >> "$EVENT_MARKER"
+    printf 'downloaded\n' > "$DOWNLOAD_MARKER"
+    ;;
+  https://api.github.com/repos/ach1992/ai-server-agent/releases/assets/123456)
+    [ -n "$out" ] && [ "$octet" = true ] || exit 93
+    if [ "$FIXTURE_API_FAIL" = true ]; then
+      printf 'release-asset-api-failed\n' >> "$EVENT_MARKER"
+      echo 'curl: (22) HTTP 503 from asset API' >&2
+      exit 22
+    fi
+    cp "$FIXTURE_INSTALLER" "$out"
+    printf 'release-asset-api-download\n' >> "$EVENT_MARKER"
     printf 'downloaded\n' > "$DOWNLOAD_MARKER"
     ;;
   *) echo "unexpected curl URL: $url" >&2; exit 91 ;;
@@ -198,7 +218,7 @@ unset AI_SERVER_AGENT_ENVIRONMENT_PROFILE AI_SERVER_AGENT_SERVER_LABEL AI_SERVER
 exec "$@"
 SUDO
   chmod +x "$FIXTURE/bin/curl" "$FIXTURE/bin/sudo"
-  export FIXTURE_INSTALLER="$FIXTURE/install.sh" EXEC_MARKER ENV_MARKER DOWNLOAD_MARKER RELEASE_REQUEST_MARKER PREREQ_MARKER EVENT_MARKER NO_JQ_BIN SUDO_MARKER ATTACK_MARKER PATH_ATTACK_MARKER MALICIOUS_INSTALLER INSTALLER_DIGEST INSTALLER_URL IMMUTABLE
+  export FIXTURE_INSTALLER="$FIXTURE/install.sh" EXEC_MARKER ENV_MARKER DOWNLOAD_MARKER RELEASE_REQUEST_MARKER PREREQ_MARKER EVENT_MARKER NO_JQ_BIN SUDO_MARKER ATTACK_MARKER PATH_ATTACK_MARKER MALICIOUS_INSTALLER INSTALLER_DIGEST INSTALLER_URL ASSET_API_URL FIXTURE_PRIMARY_FAIL FIXTURE_API_FAIL IMMUTABLE
   export POISON_BIN="$FIXTURE/poison-bin"
   export RACE_SOURCE_REPLACEMENT=false
   export PATH="$FIXTURE/bin:/usr/bin:/bin"
@@ -342,6 +362,47 @@ if bash "$BOOTSTRAP" > "$FIXTURE/out" 2>&1; then
   exit 1
 fi
 grep -qF 'asset URL does not match the exact release tag' "$FIXTURE/out"
+test ! -e "$DOWNLOAD_MARKER"
+test ! -e "$SUDO_MARKER"
+test ! -e "$EXEC_MARKER"
+
+# A transient release-CDN failure may use only the exact asset API URL
+# from authenticated metadata. Neither fallback nor privilege may evade hash.
+make_fixture true false false
+export FIXTURE_PRIMARY_FAIL=true
+bash "$BOOTSTRAP" > "$FIXTURE/out" 2>&1
+grep -qF 'release-asset-api-download' "$EVENT_MARKER"
+test -s "$DOWNLOAD_MARKER"
+test -s "$SUDO_MARKER"
+test -s "$EXEC_MARKER"
+test ! -e "$ATTACK_MARKER"
+
+make_fixture true true false
+export FIXTURE_PRIMARY_FAIL=true
+if bash "$BOOTSTRAP" > "$FIXTURE/out" 2>&1; then
+  echo 'fallback asset digest mismatch was accepted' >&2; exit 1
+fi
+grep -qF 'digest mismatch' "$FIXTURE/out"
+test -s "$DOWNLOAD_MARKER"
+test ! -e "$SUDO_MARKER"
+test ! -e "$EXEC_MARKER"
+
+make_fixture true false false
+export FIXTURE_PRIMARY_FAIL=true FIXTURE_API_FAIL=true
+if bash "$BOOTSTRAP" > "$FIXTURE/out" 2>&1; then
+  echo 'both failed release download endpoints were accepted' >&2; exit 1
+fi
+grep -qF 'Could not download the stable installer asset through either' "$FIXTURE/out"
+test ! -e "$DOWNLOAD_MARKER"
+test ! -e "$SUDO_MARKER"
+test ! -e "$EXEC_MARKER"
+
+make_fixture true false false
+export FIXTURE_PRIMARY_FAIL=true ASSET_API_URL='https://example.invalid/asset'
+if bash "$BOOTSTRAP" > "$FIXTURE/out" 2>&1; then
+  echo 'untrusted fallback asset URL was accepted' >&2; exit 1
+fi
+grep -qF 'asset API URL does not match the verified repository asset' "$FIXTURE/out"
 test ! -e "$DOWNLOAD_MARKER"
 test ! -e "$SUDO_MARKER"
 test ! -e "$EXEC_MARKER"

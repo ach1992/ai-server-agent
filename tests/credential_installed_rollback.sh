@@ -96,6 +96,9 @@ assert_protected_update_refused(){
     echo 'UNSAFE_PROTECTED_UPDATER_ACCEPTED' >&2; exit 1
   fi
   grep -Fq 'lacks required privileged lifecycle/startup path trust' "$SCRATCH/update-refused.log" || {
+    # Report only bounded credential-free updater failures; the full log
+    # remains private to this disposable test runner.
+    grep -E '^([[]ai-server-agent[]] ERROR:|curl: )' "$SCRATCH/update-refused.log" | tail -n 12 >&2 || true
     echo 'MISSING_PROTECTED_UPDATER_DIAGNOSTIC' >&2; exit 1;
   }
   test "$(binary_digest)" = "$before_binary"

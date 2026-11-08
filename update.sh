@@ -199,7 +199,28 @@ if [ "$CHANNEL" = "stable" ]; then
   expected_url="https://github.com/$REPO/releases/download/$TARGET_VERSION/install.sh"
   [ "$installer_url" = "$expected_url" ] || { cli_error "Stable release install.sh asset URL does not match the exact release tag"; exit 1; }
   [[ "$installer_digest" =~ ^sha256:[0-9a-f]{64}$ ]] || { cli_error "Stable release install.sh asset is missing a valid SHA-256 digest"; exit 1; }
-  curl -fsSL "$installer_url" -o "$TMP/install.sh"
+  # GitHub's release download CDN can fail while the same immutable asset
+  # remains available through its official API. Verify the exact asset URL
+  # from release metadata, and keep the SAME published SHA-256 gate.
+  if ! curl -fsSL "$installer_url" -o "$TMP/install.sh"; then
+    asset_id="$(jq -er '.id | select(type=="number" and . > 0 and (floor == .))' <<<"$asset_json")" || {
+      cli_error "Stable release install.sh has no usable asset ID for the GitHub API fallback."
+      exit 1
+    }
+    asset_api_url="$(jq -r '.url // empty' <<<"$asset_json")"
+    expected_api_url="https://api.github.com/repos/$REPO/releases/assets/$asset_id"
+    [ "$asset_api_url" = "$expected_api_url" ] || {
+      cli_error "Stable release install.sh asset API URL does not match the verified repository asset."
+      exit 1
+    }
+    curl -fsSL --proto '=https' --tlsv1.2 \
+      -H 'Accept: application/octet-stream' \
+      -H 'X-GitHub-Api-Version: 2026-03-10' \
+      "$asset_api_url" -o "$TMP/install.sh" || {
+        cli_error "Could not download the stable installer asset through either GitHub release endpoint."
+        exit 1
+      }
+  fi
   actual_digest="sha256:$(sha256sum "$TMP/install.sh" | awk '{print $1}')"
   [ "$actual_digest" = "$installer_digest" ] || {
     cli_error "Stable release install.sh digest mismatch: expected $installer_digest, got $actual_digest"

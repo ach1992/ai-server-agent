@@ -343,20 +343,35 @@ jobs:
           set -Eeuo pipefail
           out=''
           url=''
+          octet=false
           while [ "$#" -gt 0 ]; do
             case "$1" in
-              -H) shift 2 ;;
+              -H) [ "$2" != 'Accept: application/octet-stream' ] || octet=true; shift 2 ;;
               -o) out="$2"; shift 2 ;;
+              --proto) shift 2 ;;
+              --tlsv1.2) shift ;;
               -*) shift ;;
               *) url="$1"; shift ;;
             esac
           done
           case "$url" in
             */releases/tags/v0.1.2)
-              printf '{"tag_name":"v0.1.2","draft":false,"prerelease":false,"immutable":true,"assets":[{"name":"install.sh","state":"uploaded","digest":"%s","browser_download_url":"https://github.com/ach1992/ai-server-agent/releases/download/v0.1.2/install.sh"}]}\n' "$INSTALLER_DIGEST"
+              printf '{"tag_name":"v0.1.2","draft":false,"prerelease":false,"immutable":true,"assets":[{"id":123456,"url":"%s","name":"install.sh","state":"uploaded","digest":"%s","browser_download_url":"https://github.com/ach1992/ai-server-agent/releases/download/v0.1.2/install.sh"}]}\n' "${MOCK_ASSET_API_URL:-https://api.github.com/repos/ach1992/ai-server-agent/releases/assets/123456}" "$INSTALLER_DIGEST"
               ;;
             https://github.com/ach1992/ai-server-agent/releases/download/v0.1.2/install.sh)
               [ -n "$out" ] || exit 92
+              if [ "${MOCK_PRIMARY_FAIL:-false}" = true ]; then
+                echo 'curl: (22) HTTP 504 from release CDN' >&2
+                exit 22
+              fi
+              cp "$FIXTURE_INSTALLER" "$out"
+              ;;
+            https://api.github.com/repos/ach1992/ai-server-agent/releases/assets/123456)
+              [ -n "$out" ] && [ "$octet" = true ] || exit 93
+              if [ "${MOCK_API_FAIL:-false}" = true ]; then
+                echo 'curl: (22) HTTP 503 from asset API' >&2
+                exit 22
+              fi
               cp "$FIXTURE_INSTALLER" "$out"
               ;;
             *) exit 91 ;;
@@ -378,6 +393,19 @@ jobs:
             bash update.sh >/tmp/digest-update.out
           test -s "$marker"
           grep -qF "AI Server Agent update completed on the 'stable' channel." /tmp/digest-update.out
+          rm -f -- "$marker"
+          sudo env \
+            PATH="$fakebin:$PATH" \
+            MOCK_PRIMARY_FAIL=true \
+            INSTALLER_DIGEST="$digest" \
+            FIXTURE_INSTALLER="$fixture/install.sh" \
+            EXEC_MARKER="$marker" \
+            AI_SERVER_AGENT_INSTALL_STATE="$state" \
+            AI_SERVER_AGENT_VERSION=v0.1.2 \
+            AI_SERVER_AGENT_REF=v0.1.2 \
+            bash update.sh >/tmp/digest-update-fallback.out
+          test -s "$marker"
+          grep -qF "AI Server Agent update completed on the 'stable' channel." /tmp/digest-update-fallback.out
           # An authentic but old installer must be rejected even if GitHub's
           # immutable release metadata and its asset SHA-256 are fully valid.
           # No target installer execution or service-state mutation may occur.
@@ -397,6 +425,54 @@ jobs:
             exit 1
           fi
           grep -qF 'lacks required privileged lifecycle/startup path trust' /tmp/legacy-stable-refusal.out
+          test ! -e "$marker"
+          # Fallback bytes remain subject to the SAME historical trust policy.
+          if sudo env \
+            PATH="$fakebin:$PATH" \
+            MOCK_PRIMARY_FAIL=true \
+            INSTALLER_DIGEST="$legacy_digest" \
+            FIXTURE_INSTALLER="$fixture/install.sh" \
+            EXEC_MARKER="$marker" \
+            AI_SERVER_AGENT_INSTALL_STATE="$state" \
+            AI_SERVER_AGENT_VERSION=v0.1.2 \
+            AI_SERVER_AGENT_REF=v0.1.2 \
+            bash update.sh >/tmp/fallback-legacy-refusal.out 2>&1; then
+            echo 'historical release bypassed rollback trust through asset API' >&2
+            exit 1
+          fi
+          grep -qF 'lacks required privileged lifecycle/startup path trust' /tmp/fallback-legacy-refusal.out
+          test ! -e "$marker"
+          if sudo env \
+            PATH="$fakebin:$PATH" \
+            MOCK_PRIMARY_FAIL=true \
+            MOCK_API_FAIL=true \
+            INSTALLER_DIGEST="$legacy_digest" \
+            FIXTURE_INSTALLER="$fixture/install.sh" \
+            EXEC_MARKER="$marker" \
+            AI_SERVER_AGENT_INSTALL_STATE="$state" \
+            AI_SERVER_AGENT_VERSION=v0.1.2 \
+            AI_SERVER_AGENT_REF=v0.1.2 \
+            bash update.sh >/tmp/fallback-both-down.out 2>&1; then
+            echo 'both failed release endpoints unexpectedly permitted update' >&2
+            exit 1
+          fi
+          grep -qF 'Could not download the stable installer asset through either' /tmp/fallback-both-down.out
+          test ! -e "$marker"
+          if sudo env \
+            PATH="$fakebin:$PATH" \
+            MOCK_PRIMARY_FAIL=true \
+            MOCK_ASSET_API_URL=https://example.invalid/install.sh \
+            INSTALLER_DIGEST="$legacy_digest" \
+            FIXTURE_INSTALLER="$fixture/install.sh" \
+            EXEC_MARKER="$marker" \
+            AI_SERVER_AGENT_INSTALL_STATE="$state" \
+            AI_SERVER_AGENT_VERSION=v0.1.2 \
+            AI_SERVER_AGENT_REF=v0.1.2 \
+            bash update.sh >/tmp/fallback-url-mismatch.out 2>&1; then
+            echo 'untrusted asset API URL bypassed verified endpoint' >&2
+            exit 1
+          fi
+          grep -qF 'asset API URL does not match the verified repository asset' /tmp/fallback-url-mismatch.out
           test ! -e "$marker"
           echo 'IMMUTABLE_STABLE_ROLLBACK_TRUST_POLICY_PASS'
       - name: Reject stable installer asset digest mismatch before execution
