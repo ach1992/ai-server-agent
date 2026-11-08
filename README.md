@@ -59,6 +59,8 @@ Use the [ChatGPT connection guide](docs/CONNECT_CHATGPT.md) to set up a custom M
 | Projects and Git | Discover repositories/worktrees, search and edit source safely, use Git CLI |
 | Longer tasks | Run persistent jobs and bounded interactive worker/root terminals; newer installed builds support longer pastes and optional output waiting |
 | Testing and browsers | Run tests, managed Browser sessions, isolated profiles, bounded screenshots and private traces when supported by the installed build |
+| Disposable test environments | Discover and manage optional local Incus containers/VMs with verified identity and recoverable operations; Incus remains an optional host dependency |
+| Protected service access | Enroll target credentials privately and use opaque references for authenticated Browser, HTTP(S), SSH or database operations without exposing the saved secret to the AI client |
 | Code intelligence | Use Go/gopls and optional language-aware analysis; supported SQL source navigation stays offline and never executes SQL |
 | Debugging | Use Go/Delve and supported optional debuggers; check actual adapter readiness |
 | File transfer | Transfer and inspect files in bounded, integrity-aware chunks |
