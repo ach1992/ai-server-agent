@@ -318,7 +318,7 @@ func TestNativeGuestCredentialBindingAcceptsExistingNativeIdentity(t *testing.T)
 func TestManagedGuestExecNativeErrorPreservesDiagnostics(t *testing.T) {
 	providerErr := errors.New("native operation failed, exit_code=255: exit status 255")
 	got := managedGuestExecFailure(managedincus.Result{
-		Output:   "incus: guest service unavailable; check status of guest agent\n",
+		GuestExecAttempted: true, Output: "incus: guest service unavailable; check status of guest agent\n",
 		ExitCode: 255, OutputTruncated: false,
 	}, providerErr)
 	if got.OK || got.ExitCode != 255 || got.ErrorCode != "native_guest_exec_failed" ||
@@ -328,7 +328,7 @@ func TestManagedGuestExecNativeErrorPreservesDiagnostics(t *testing.T) {
 	}
 
 	large := managedGuestExecFailure(managedincus.Result{
-		ExitCode: 255, Output: strings.Repeat("D", 64<<10),
+		GuestExecAttempted: true, ExitCode: 255, Output: strings.Repeat("D", 64<<10),
 		OutputBytesSeen: 75001, OutputTruncated: true,
 	}, providerErr)
 	if !large.Truncated || large.BytesSeen != 75001 ||

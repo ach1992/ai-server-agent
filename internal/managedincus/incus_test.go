@@ -61,6 +61,9 @@ elif args[0]=='operation' and args[1]=='list':
           'devices':{'root':{'pool':'default','size':'1GiB'}}});save()
     print('[]')
 elif args[0]=='list':
+    if mode=='launch_and_inspect_fail' and os.path.exists(p+'.launched'):
+        print('native reconciliation list failed; password=RECONCILE_SECRET; inspect daemon',file=sys.stderr)
+        sys.exit(46)
     if mode=='list_unavailable':sys.exit(48)
     if '--all-projects' in args:
         if mode=='list_null':print('null');sys.exit(0)
@@ -82,6 +85,19 @@ elif args[0]=='list':
     if project: result=[x for x in result if x['project']==project]
     print(json.dumps(result))
 elif args[0]=='launch':
+    if mode=='launch_and_inspect_fail':
+        open(p+'.launched','w').write('1')
+        print('native launch stage failed; token=LAUNCH_SECRET; inspect storage',file=sys.stderr)
+        sys.exit(45)
+    if mode=='launch_then_identity_collision':
+        state['instances'].append({'name':args[2],'project':value('--project','default'),
+          'type':'container','status':'Running',
+          'config':{'user.asa.host':'foreign','user.asa.operation':'foreign',
+                    'volatile.uuid':'12345678-1234-1234-1234-123456789abc'},
+          'devices':{'root':{'pool':'default','size':'1GiB'}}})
+        save()
+        print('native launch collision failure; token=LAUNCH_SECRET',file=sys.stderr)
+        sys.exit(45)
     if mode=='sleep_launch':time.sleep(10)
     if mode=='uncertain_launch':sys.exit(45)
     if mode=='uncertain_launch_diagnostic':

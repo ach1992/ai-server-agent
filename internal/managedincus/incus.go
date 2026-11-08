@@ -92,6 +92,7 @@ type Result struct {
 	OutputBytesSeen    int64             `json:"output_bytes_seen,omitempty"`
 	OutputOmittedBytes int64             `json:"output_omitted_bytes,omitempty"`
 	TimedOut           bool              `json:"timed_out,omitempty"`
+	GuestExecAttempted bool              `json:"-"` // internal dispatch evidence: preflight does not execute guest command
 }
 type Backend struct {
 	HostID         string
@@ -417,6 +418,16 @@ func (b Backend) Ready(ctx context.Context) Result {
 	}
 	return r
 }
+
+// Preserve launch diagnostics when a more authoritative post-launch
+// verification error must be reported. The outer recovery reason stays first.
+func postLaunchFailure(message string, launchErr error) error {
+	if launchErr == nil {
+		return errors.New(message)
+	}
+	return fmt.Errorf("%s: %w", message, launchErr)
+}
+
 func (b Backend) Run(ctx context.Context, req Request, approval bool, secret string) (Result, error) {
 	if req.Operation == "operation_list" {
 		return b.Lock(func() (Result, error) {
@@ -647,16 +658,16 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 			}
 			if found && x.Managed && x.OperationID == req.OperationID && x.WorkID == req.WorkID && x.Type == req.Type {
 				if x.StoragePool == "" || x.DiskLimit == "" {
-					return base, errors.New("native_root_device_unverified: selected pool or root disk limit missing after launch")
+					return base, postLaunchFailure("native_root_device_unverified: selected pool or root disk limit missing after launch", launchErr)
 				}
 				if x.StoragePool != req.StoragePool {
-					return base, errors.New("create_outcome_uncertain: native root storage pool differs from requested pool")
+					return base, postLaunchFailure("create_outcome_uncertain: native root storage pool differs from requested pool", launchErr)
 				}
 				if !uuidPattern.MatchString(x.UUID) {
-					return base, errors.New("native_uuid_unverified: created guest UUID missing or malformed")
+					return base, postLaunchFailure("native_uuid_unverified: created guest UUID missing or malformed", launchErr)
 				}
 				if err := b.confirmCreate(req.OperationID, x.UUID); err != nil {
-					return base, errors.New("create_outcome_uncertain: native guest exists but local intent confirmation failed; do not retry")
+					return base, fmt.Errorf("create_outcome_uncertain: native guest exists but local intent confirmation failed; do not retry: %w", errors.Join(launchErr, err))
 				}
 				base.Instance = &x
 				if launchErr == nil {
@@ -676,7 +687,7 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 				return base, nil
 			}
 			if found {
-				return base, errors.New("create_collision_after_launch: unexpected guest identity")
+				return base, postLaunchFailure("create_collision_after_launch: unexpected guest identity", launchErr)
 			}
 			if launchErr != nil {
 				return base, fmt.Errorf("create_outcome_uncertain: launch reported an error and no native guest is yet visible; submission remains durably reserved for reconciliation: %w", launchErr)
@@ -758,6 +769,13 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 			}
 			latest, err := b.selectInstance(ctx, req)
 			if err != nil {
+				// Native discovery can fail at this second pre-dispatch
+				// identity check. Do not mislabel it as an observed identity
+				// change or discard the original safe Incus diagnostic.
+				var native *NativeCommandError
+				if errors.As(err, &native) {
+					return base, fmt.Errorf("native_identity_preflight_unavailable: could not recheck guest identity before operation; no guest command dispatched: %w", err)
+				}
 				return base, errors.New("instance_identity_changed_before_mutation: refused name-based operation")
 			}
 			if latest.UUID != x.UUID {
@@ -767,6 +785,9 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 			if secret != "" {
 				input = strings.NewReader(secret + "\n")
 			}
+			// Mark only the guest-exec CLI boundary; native discovery and
+			// authorization failures above it must preserve their own evidence.
+			base.GuestExecAttempted = req.Operation == "exec"
 			out, code, trunc, seen, runErr := b.cliProtected(runCtx, input, false, secret, args...)
 			base.TimedOut = errors.Is(runCtx.Err(), context.DeadlineExceeded)
 			base.Output = out

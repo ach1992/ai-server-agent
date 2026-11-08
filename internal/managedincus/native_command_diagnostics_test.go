@@ -164,3 +164,107 @@ func TestUncertainCreateAndPoolPreflightPreserveNativeEvidence(t *testing.T) {
 		t.Fatalf("storage preflight discarded safe native evidence: %+v %v", native, poolErr)
 	}
 }
+
+func TestCreateLaunchAndReconciliationFailuresPreserveBothStagesAndIntent(t *testing.T) {
+	b := fixture(t)
+	modePath := filepath.Join(b.StateDir, "native.json.mode")
+	if err := os.WriteFile(modePath, []byte("launch_and_inspect_fail"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	req := createRequest()
+	result, err := b.Run(context.Background(), req, false, "")
+	if err == nil || !strings.Contains(err.Error(), "create_outcome_uncertain") ||
+		result.Instance != nil {
+		t.Fatalf("unreconciled create falsely reported success: %+v %v", result, err)
+	}
+	var nativeLaunch *NativeCommandError
+	if !errors.As(err, &nativeLaunch) || nativeLaunch.Stage != "launch" ||
+		nativeLaunch.ExitCode != 45 || !strings.Contains(nativeLaunch.Diagnostic, "native launch stage failed") ||
+		strings.Contains(nativeLaunch.Diagnostic, "LAUNCH_SECRET") {
+		t.Fatalf("launch failure evidence missing/unsafe: %+v %v", nativeLaunch, err)
+	}
+	joined := errors.Unwrap(err)
+	branch, ok := joined.(interface{ Unwrap() []error })
+	if !ok || len(branch.Unwrap()) != 2 {
+		t.Fatalf("both launch/reconciliation errors not preserved in chain: %T %v", joined, err)
+	}
+	reconcile, ok := branch.Unwrap()[1].(*NativeCommandError)
+	if !ok || reconcile.Stage != "list" || reconcile.ExitCode != 46 ||
+		!strings.Contains(reconcile.Diagnostic, "native reconciliation list failed") ||
+		strings.Contains(reconcile.Diagnostic, "RECONCILE_SECRET") {
+		t.Fatalf("reconciliation evidence missing/unsafe: %+v", reconcile)
+	}
+	journal, loadErr := b.loadIntents()
+	if loadErr != nil || len(journal.Intents) != 1 ||
+		journal.Intents[0].State != "submitted" || journal.Intents[0].OperationID != req.OperationID {
+		t.Fatalf("unverified create did not reserve original intent: %+v %v", journal, loadErr)
+	}
+	if err := os.Remove(modePath); err != nil {
+		t.Fatal(err)
+	}
+	if _, retryErr := b.Run(context.Background(), req, false, ""); retryErr == nil ||
+		!strings.Contains(retryErr.Error(), "create_outcome_uncertain") {
+		t.Fatalf("reconnect repeated uncertain create: %v", retryErr)
+	}
+	list, listErr := b.List(context.Background(), req.Project)
+	if listErr != nil || len(list) != 0 {
+		t.Fatalf("reconnect launched a duplicate guest: %+v %v", list, listErr)
+	}
+}
+
+func TestPostLaunchIdentityCollisionPreservesNativeLaunchFailure(t *testing.T) {
+	b := fixture(t)
+	if err := os.WriteFile(filepath.Join(b.StateDir, "native.json.mode"), []byte("launch_then_identity_collision"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	req := createRequest()
+	result, err := b.Run(context.Background(), req, false, "")
+	var native *NativeCommandError
+	if err == nil || !strings.Contains(err.Error(), "create_collision_after_launch") ||
+		!errors.As(err, &native) || native.Stage != "launch" || native.ExitCode != 45 ||
+		!strings.Contains(native.Diagnostic, "native launch collision failure") ||
+		strings.Contains(native.Diagnostic, "LAUNCH_SECRET") || result.Instance != nil {
+		t.Fatalf("post-launch identity failure discarded the launch stage: %+v %+v %v", result, native, err)
+	}
+	journal, loadErr := b.loadIntents()
+	if loadErr != nil || len(journal.Intents) != 1 ||
+		journal.Intents[0].State != "submitted" || journal.Intents[0].OperationID != req.OperationID {
+		t.Fatalf("collision silently confirmed or dropped durable create intent: %+v %v", journal, loadErr)
+	}
+	guests, listErr := b.List(context.Background(), req.Project)
+	if listErr != nil || len(guests) != 1 || guests[0].Managed {
+		t.Fatalf("collision was not identified as foreign guest: %+v %v", guests, listErr)
+	}
+	if _, retryErr := b.Run(context.Background(), req, false, ""); retryErr == nil ||
+		!strings.Contains(retryErr.Error(), "instance_collision") {
+		t.Fatalf("collision retry was not refused: %v", retryErr)
+	}
+	again, listErr := b.List(context.Background(), req.Project)
+	if listErr != nil || len(again) != 1 {
+		t.Fatalf("collision retry changed native guest inventory: %+v %v", again, listErr)
+	}
+}
+
+func TestGuestExecSecondIdentityPreflightNativeFailureKeepsEvidence(t *testing.T) {
+	b := fixture(t)
+	created, err := b.Run(context.Background(), createRequest(), false, "")
+	if err != nil || created.Instance == nil {
+		t.Fatalf("fixture guest create failed: %+v %v", created, err)
+	}
+	mode := filepath.Join(b.StateDir, "native.json.mode")
+	b.beforeMutation = func(Request) {
+		if err := os.WriteFile(mode, []byte("list_unavailable"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := b.Run(context.Background(), Request{
+		Operation: "exec", Project: "default", Instance: "guest-a", UUID: created.Instance.UUID,
+		Command: []string{"true"},
+	}, false, "")
+	var native *NativeCommandError
+	if err == nil || !strings.Contains(err.Error(), "native_identity_preflight_unavailable") ||
+		!errors.As(err, &native) || native.Stage != "list" || native.ExitCode != 48 ||
+		got.GuestExecAttempted {
+		t.Fatalf("second pre-dispatch native error was lost or guest command claimed: %+v %+v %v", got, native, err)
+	}
+}
