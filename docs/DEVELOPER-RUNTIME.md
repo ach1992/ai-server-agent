@@ -108,6 +108,8 @@ Agent configuration/control state
 
 Project worktrees must not become the dumping ground for worker HOME state, tool caches, generated traces, or control-plane secrets.
 
+Go task-cache lifecycle (Issue #219) follows the same ownership boundary: `ai-server-agent cache run -- test ./...` uses an opt-in worker-owned private `GOCACHE` for one foreground Go command, not the shared Go cache, and `cache prune` inspects only its abandoned marked private entries with a nonblocking lease and disk-pressure policy. It is manual, defaults to dry-run, does not clear modules/shared caches, and requires no privileged host service or scheduler. Extend to other cache kinds only after a real consumer is justified; see [OPERATIONS](OPERATIONS.md#go-build-cache-lifecycle-issue-219-opt-in-source-v1).
+
 Exact filesystem paths are implementation details. The invariant is separation of ownership and lifecycle.
 
 ## 5. Repository/worktree identity versus Git CLI

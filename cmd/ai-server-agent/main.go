@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 
+	"github.com/ach1992/ai-server-agent/internal/cachemaintenance"
 	"github.com/ach1992/ai-server-agent/internal/config"
 	"github.com/ach1992/ai-server-agent/internal/credential"
 	"github.com/ach1992/ai-server-agent/internal/executor"
@@ -16,6 +17,9 @@ import (
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "cache" {
+		os.Exit(cachemaintenance.Run(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "job-runner" {
 		os.Exit(executor.RunJobHelper(os.Args[2:]))
 	}

@@ -455,6 +455,25 @@ Check the installed Agent version, local health, service/journal output, and the
 For current release and installed-host evidence, consult [Issue #52](https://github.com/ach1992/ai-server-agent/issues/52) and the exact immutable [GitHub release](https://github.com/ach1992/ai-server-agent/releases); client-native file/media acceptance belongs to [Issue #99](https://github.com/ach1992/ai-server-agent/issues/99). Closed [Issue #59](https://github.com/ach1992/ai-server-agent/issues/59) records historical bounded workflow acceptance and the Owner's decision to stop the exhaustive test program, not a pending gate. Earlier release-specific evidence belongs to those GitHub records, not this operator guide.
 
 
+## Go build cache lifecycle (Issue #219, opt-in Source v1)
+
+Use the installed binary as **`aiworker`**, or call the same commands through the Agent's normal `run_command` worker execution. This feature does **not** require the root service config, a new MCP tool, a daemon, a timer or a privileged management action. It is available only after an Agent build containing Issue #219 is installed; it is not part of prior published Stable versions. The Go toolchain itself is an optional prerequisite for `status` and `run`.
+
+```bash
+ai-server-agent cache status
+ai-server-agent cache run -- test ./...
+ai-server-agent cache prune
+ai-server-agent cache prune --apply
+```
+
+`status` reports JSON including the **actual effective shared `GOCACHE`** obtained from `go env GOCACHE`, shared bytes, the separate Agent-owned task-cache directory and disk usage of its actual filesystem. Status is read-only and has no scheduled side effects. Go itself already trims old shared entries; this Agent **does not** inspect Go's hashed cache internals or silently reset the shared cache. If an operator explicitly needs an exceptional full reset of the shared cache, native `go clean -cache` remains available as an ordinary worker command once the operator has ensured no Go jobs need its contents; **this removes all Go build artifacts** and may increase subsequent build time. `GOMODCACHE` is not touched.
+
+`cache run -- <go-arguments>` starts a **foreground Go command** with a fresh private `GOCACHE` under worker XDG cache state and removes that one owned cache after the command exits (including nonzero exits). Select it for expensive or temporary Go build/test jobs when preserving the shared cache matters; normal `go test`/build without this wrapper keeps the ordinary shared cache and remains supported. Do not use the wrapper for detached long-lived child processes. A process crash may leave an abandoned private task cache.
+
+`cache prune` is dry-run by default. With `--apply`, only correctly marked, private, lease-unlocked **abandoned task caches** older than one hour are eligible, and only when the task-cache filesystem is at least 85% used **or** has less than 2 GiB available. `--older-than`, `--max-used-percent` and `--min-free-mib` adjust these settings; `--force` bypasses only the pressure threshold for explicit operator cleanup, not ownership/age/active-lease safeguards. JSON includes invalid/recent/active skips, eligible and deleted entry counts, measured deleted contents, and the actual free-space delta (which can differ under concurrent filesystem activity). Active private cache leases are not removed. Unknown directories, symlinked entries and unrelated files are never candidates. The **shared** Go build cache, module/download cache, workspace, VM snapshots, Agent state and logs are never pruned by this tool.
+
+This v1 intentionally has **no automatic deletion** and no scheduled job. Its narrow private-entry ownership, lease and pressure decision are reusable for another *evidenced* cache kind later; this does not prebuild adapters for npm/pip/Cargo or a general filesystem GC engine. Status and dry-run can be performed on a real host without modifying the shared cache. Review the output before any explicit `--apply`.
+
 ## Managed test guests and service credentials (Issue #214; Browser acceptance #65)
 
 **Scope:** These tools appear in compatible source/new builds; their presence does **not** prove that Incus, KVM or Playwright is installed on an occupied Agent. Run `agent_environment` first and identify the correct host `instance_id`. Use `managed_environment(operation="status")` to check optional local Incus without altering the host. Installation/initialization of Incus and bridge/storage setup are separate authorized host-administration decisions; the Agent never installs or initializes them on demand. `managed_environment(operation="list")` with no project discovers all visible local instances. A project-bound `inspect` returns native `volatile.uuid`, status, managed tag, resource limits and discovered guest addresses.
