@@ -438,7 +438,7 @@ func prune(now time.Time, apply, force bool, minAge time.Duration, maxUsed int, 
 	return r, nil
 }
 
-func runGo(argv []string, stdout, stderr io.Writer) (int, error) {
+func runGo(argv []string, stdout, stderr io.Writer) (exitCode int, runErr error) {
 	root, err := managedPath()
 	if err != nil {
 		return 1, err
@@ -450,20 +450,32 @@ func runGo(argv []string, stdout, stderr io.Writer) (int, error) {
 	if err != nil {
 		return 1, err
 	}
-	defer os.RemoveAll(entry)
+	var lock *os.File
+	defer func() {
+		// Keep the lease held through complete removal. A failed cleanup
+		// must be observable, not silently reported as a successful lifecycle.
+		if cleanupErr := os.RemoveAll(entry); cleanupErr != nil {
+			fmt.Fprintln(stderr, "cache run: isolated cache cleanup failed:", cleanupErr)
+			if exitCode == 0 && runErr == nil {
+				runErr = cleanupErr
+			}
+		}
+		if lock != nil {
+			_ = syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+			_ = lock.Close()
+		}
+	}()
 	id := filepath.Base(entry)
 	if err := os.Mkdir(filepath.Join(entry, "data"), 0700); err != nil {
 		return 1, err
 	}
-	lock, err := os.OpenFile(filepath.Join(entry, lockName), os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
+	lock, err = os.OpenFile(filepath.Join(entry, lockName), os.O_RDWR|os.O_CREATE|os.O_EXCL, 0600)
 	if err != nil {
 		return 1, err
 	}
-	defer lock.Close()
 	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
 		return 1, err
 	}
-	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
 	b, err := json.Marshal(marker{Version: 1, Kind: cacheKind, ID: id, Created: time.Now().Unix()})
 	if err != nil {
 		return 1, err
