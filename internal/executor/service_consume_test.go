@@ -410,3 +410,79 @@ func TestPrivateJSONPointerNestedArrayAndEscaping(t *testing.T) {
 		t.Fatalf("nested pointer or JSON number changed: %q", got)
 	}
 }
+
+// A Basic-auth primary secret must retain the secondary admin credential's
+// exact and JSON-escaped output redaction patterns.
+func TestServiceHTTPBasicPrimaryAndSecondaryCredentialNeverLeak(t *testing.T) {
+	const primary = "owner-root-password-fixture!"
+	const secondary = "new-admin-<&>-secret"
+	jsonForm, err := json.Marshal(secondary)
+	if err != nil {
+		t.Fatal(err)
+	}
+	wireSecret := string(jsonForm[1 : len(jsonForm)-1])
+	basicEncoded := base64.StdEncoding.EncodeToString([]byte("primary-owner:" + primary))
+	for _, status := range []int{http.StatusCreated, http.StatusUnprocessableEntity} {
+		t.Run(fmt.Sprintf("http_%d", status), func(t *testing.T) {
+			app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.Method != http.MethodPost || r.URL.Path != "/users" {
+					t.Errorf("wrong authenticated provisioning route: %s %s", r.Method, r.URL.Path)
+				}
+				username, password, ok := r.BasicAuth()
+				if !ok || username != "primary-owner" || password != primary {
+					t.Error("original service Basic authentication not used")
+				}
+				var body map[string]map[string]string
+				if err := json.NewDecoder(r.Body).Decode(&body); err != nil || body["user"]["password"] != secondary {
+					t.Errorf("secondary JSON body not delivered: err=%v", err)
+				}
+				w.WriteHeader(status)
+				reflected := "stage=provision status=validated; plaintext=" + secondary +
+					"; json=" + wireSecret + "; basic=" + basicEncoded +
+					"; diagnostic=account-role-requires-followup"
+				// Force tiny writes, including inside protected values.
+				for _, letter := range []byte(reflected) {
+					if _, err := w.Write([]byte{letter}); err != nil {
+						return
+					}
+					if flusher, ok := w.(http.Flusher); ok {
+						flusher.Flush()
+					}
+				}
+			}))
+			defer app.Close()
+			s, ref := serviceFixture(t, app.URL+"/api", "password", "primary-owner", primary)
+			st := serviceaccess.New(s.cfg.StateDir)
+			meta, err := st.Register(serviceaccess.Registration{
+				HostID: s.cfg.InstanceID, Service: "test", Endpoint: app.URL + "/account",
+				Username: "new-admin",
+			})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if _, err := st.Enroll(meta.ID, "password", "new-admin", secondary, 30, false); err != nil {
+				t.Fatal(err)
+			}
+			got := useService(s, ref, ServiceUseSpec{
+				Method: "POST", Path: "/users", Body: "{\"user\":{\"password\":\"\"}}",
+				BodySecretRef: meta.ID, BodySecretJSONPointer: "/user/password",
+			})
+			if got.Status != fmt.Sprintf("http_%d", status) ||
+				got.OK != (status == http.StatusCreated) ||
+				!strings.Contains(got.Output, "diagnostic=account-role-requires-followup") ||
+				!strings.Contains(got.Output, "plaintext=[REDACTED]") ||
+				!strings.Contains(got.Output, "json=[REDACTED]") ||
+				!strings.Contains(got.Output, "basic=[REDACTED]") {
+				t.Fatalf("HTTP response lost diagnostic or private redaction: %+v", got)
+			}
+			for _, forbidden := range []string{primary, secondary, wireSecret, basicEncoded} {
+				if strings.Contains(got.Output, forbidden) {
+					t.Fatal("protected credential was included in MCP response")
+				}
+			}
+			if got.Truncated {
+				t.Fatal("small nonsecret response unexpectedly truncated")
+			}
+		})
+	}
+}

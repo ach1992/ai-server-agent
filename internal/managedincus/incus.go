@@ -89,6 +89,7 @@ type Result struct {
 	Operations      []NativeOperation `json:"native_operations,omitempty"`
 	Operation       *NativeOperation  `json:"native_operation,omitempty"`
 	OutputTruncated bool              `json:"output_truncated,omitempty"`
+	OutputBytesSeen int64             `json:"output_bytes_seen,omitempty"`
 }
 type Backend struct {
 	HostID         string
@@ -137,15 +138,16 @@ func (x *bounded) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 func (b Backend) cli(ctx context.Context, stdin io.Reader, discardOutput bool, args ...string) (string, int, bool, error) {
-	return b.cliProtected(ctx, stdin, discardOutput, "", args...)
+	out, code, truncated, _, err := b.cliProtected(ctx, stdin, discardOutput, "", args...)
+	return out, code, truncated, err
 }
 
 // cliProtected streams the exact private value through stdin and redacts
 // observed native output before it enters bounded diagnostic capture.
-func (b Backend) cliProtected(ctx context.Context, stdin io.Reader, discardOutput bool, secret string, args ...string) (string, int, bool, error) {
+func (b Backend) cliProtected(ctx context.Context, stdin io.Reader, discardOutput bool, secret string, args ...string) (string, int, bool, int64, error) {
 	bin, err := b.binary()
 	if err != nil {
-		return "", -1, false, err
+		return "", -1, false, 0, err
 	}
 	cmd := exec.CommandContext(ctx, bin, append([]string{"--force-local"}, args...)...)
 	cmd.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root", "LC_ALL=C.UTF-8", "LANG=C.UTF-8"}
@@ -176,9 +178,11 @@ func (b Backend) cliProtected(ctx context.Context, stdin io.Reader, discardOutpu
 		}
 	}
 	if discardOutput {
-		return "", code, false, err
+		return "", code, false, 0, err
 	}
-	return out.b.String(), code, out.seen > maxOutput, err
+	// Count post-redaction bytes, including bytes beyond the retained
+	// 64 KiB diagnostic window; do not expose secret plaintext volume.
+	return out.b.String(), code, out.seen > maxOutput, int64(out.seen), err
 }
 func (b Backend) command(ctx context.Context, timeout time.Duration, args ...string) (string, error) {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
@@ -712,10 +716,11 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 			if secret != "" {
 				input = strings.NewReader(secret + "\n")
 			}
-			out, code, trunc, runErr := b.cliProtected(runCtx, input, false, secret, args...)
+			out, code, trunc, seen, runErr := b.cliProtected(runCtx, input, false, secret, args...)
 			base.Output = out
 			base.ExitCode = code
 			base.OutputTruncated = trunc
+			base.OutputBytesSeen = seen
 			if runErr != nil {
 				if req.Operation == "exec" && x.Type == "virtual-machine" && strings.Contains(strings.ToLower(out), "agent") {
 					return base, errors.New("guest_agent_unavailable: Incus VM guest agent is required for native exec")

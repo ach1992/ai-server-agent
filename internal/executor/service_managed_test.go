@@ -63,6 +63,14 @@ func TestProtectedServiceCredentialMCPExecutorBoundary(t *testing.T) {
 	if !listed.OK || strings.Contains(listed.Output, rec.Secret) {
 		t.Fatalf("listed credential or failed: %+v", listed)
 	}
+	// The human-owner reveal subcommand is local CLI only: the MCP/Executor
+	// service_access action cannot return stored plaintext, even if an AI
+	// supplies the same operation string.
+	req.ServiceAccess = serviceaccess.Input{Operation: "reveal", Ref: meta.ID}
+	if denied := s.serviceAccessAction(context.Background(), req); denied.OK ||
+		strings.Contains(denied.Output, rec.Secret) {
+		t.Fatalf("MCP service_access revealed a protected credential: %+v", denied)
+	}
 	req.ServiceAccess = serviceaccess.Input{Operation: "revoke", Ref: meta.ID}
 	if r := s.serviceAccessAction(context.Background(), req); !r.OK {
 		t.Fatalf("revoke: %+v", r)
@@ -319,6 +327,14 @@ func TestManagedGuestExecNativeErrorPreservesDiagnostics(t *testing.T) {
 		t.Fatalf("failed native diagnostics were lost: %+v", got)
 	}
 
+	large := managedGuestExecFailure(managedincus.Result{
+		ExitCode: 255, Output: strings.Repeat("D", 64<<10),
+		OutputBytesSeen: 75001, OutputTruncated: true,
+	}, providerErr)
+	if !large.Truncated || large.BytesSeen != 75001 ||
+		large.BytesReturned != 64<<10 || large.OmittedBytes != 75001-(64<<10) {
+		t.Fatalf("native error truncation accounting incorrect: %+v", large)
+	}
 	validationErr := errors.New("instance_identity_changed_before_mutation: refused name-based operation")
 	beforeDispatch := managedGuestExecFailure(managedincus.Result{}, validationErr)
 	if beforeDispatch.ErrorCode != "managed_operation_failed" ||

@@ -226,3 +226,45 @@ func enrollServiceCredential(cfg config.Config, argv []string) error {
 	fmt.Println(string(result))
 	return nil
 }
+
+// An authorized owner can read their own stored application credentials
+// from the server's controlling terminal. This command is intentionally not
+// an MCP operation and never writes secret bytes to stdout/stderr.
+func revealServiceCredential(cfg config.Config, argv []string) error {
+	if os.Geteuid() != 0 {
+		return errors.New("service-access reveal requires a root operator shell")
+	}
+	flags := flag.NewFlagSet("service-access reveal", flag.ContinueOnError)
+	flags.SetOutput(io.Discard)
+	ref := flags.String("ref", "", "existing service reference")
+	if err := flags.Parse(argv); err != nil || *ref == "" || len(flags.Args()) != 0 {
+		return errors.New("usage: service-access reveal --ref svc_ID (root interactive terminal only)")
+	}
+	if cfg.InstanceID == "" {
+		return errors.New("configured Agent instance_id is unavailable")
+	}
+	record, err := serviceaccess.New(cfg.StateDir).Resolve(*ref, cfg.InstanceID)
+	if err != nil {
+		return fmt.Errorf("cannot reveal service credential: %w", err)
+	}
+	fd, err := unix.Open("/dev/tty", unix.O_WRONLY|unix.O_CLOEXEC|unix.O_NOCTTY, 0)
+	if err != nil {
+		return errors.New("interactive operator terminal unavailable; connect with SSH -t and run reveal locally")
+	}
+	tty := os.NewFile(uintptr(fd), "operator-tty")
+	defer tty.Close()
+	if _, err := unix.IoctlGetTermios(fd, unix.TCGETS); err != nil {
+		return errors.New("service-access reveal requires a real interactive operator terminal")
+	}
+	return writeServiceCredentialToTerminal(tty, record)
+}
+
+// The caller has already authenticated as local root and selected a real TTY.
+// Preserve exact credential bytes; even multiline keys are not reformatted.
+func writeServiceCredentialToTerminal(out io.Writer, record serviceaccess.Record) error {
+	if _, err := fmt.Fprintf(out, "Service: %s\nUsername: %s\nKind: %s\nCredential:\n", record.Service, record.Username, record.Kind); err != nil {
+		return err
+	}
+	_, err := fmt.Fprint(out, record.Secret, "\n")
+	return err
+}

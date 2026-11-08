@@ -122,6 +122,10 @@ elif args[0]=='exec':
     if mode=='fail_exec_diagnostic':
         print('native-transport-failed: guest exec refused by provider',file=sys.stderr)
         sys.exit(255)
+    if mode=='fail_exec_large':
+        print('native-transport-failed: guest exec refused; inspect guest state',file=sys.stderr,flush=True)
+        print('D'*74000,flush=True)
+        sys.exit(255)
 else: sys.exit(44)
 `
 
@@ -520,6 +524,34 @@ func TestGuestExecErrorPreservesNativeDiagnostic(t *testing.T) {
 		!strings.Contains(result.Output, "[REDACTED]") ||
 		strings.Contains(result.Output, secret) {
 		t.Fatalf("diagnostics failed: result=%+v err=%v", result, execErr)
+	}
+}
+
+// Retained native diagnostics are capped but volume metadata must account
+// for all post-redaction bytes, including the omitted tail of a failed exec.
+func TestNativeExecLargeFailureReportsActualTruncation(t *testing.T) {
+	b := fixture(t)
+	ctx := context.Background()
+	created, err := b.Run(ctx, createRequest(), false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	mode := filepath.Join(b.StateDir, "native.json.mode")
+	if err := os.WriteFile(mode, []byte("fail_exec_large"), 0600); err != nil {
+		t.Fatal(err)
+	}
+	secret := "private-password-never-emit"
+	result, runErr := b.Run(ctx, Request{
+		Operation: "exec", Project: "default", Instance: "guest-a", UUID: created.Instance.UUID,
+		Command: []string{"sh", "-c", "read -r password"},
+	}, false, secret)
+	if runErr == nil || result.ExitCode != 255 ||
+		!result.OutputTruncated || result.OutputBytesSeen <= maxOutput ||
+		len(result.Output) != maxOutput || result.OutputBytesSeen <= int64(len(result.Output)) ||
+		!strings.Contains(result.Output, "native-transport-failed") ||
+		!strings.Contains(result.Output, "[REDACTED]") ||
+		strings.Contains(result.Output, secret) {
+		t.Fatalf("oversized native error diagnostics incorrect: result=%+v err=%v", result, runErr)
 	}
 }
 

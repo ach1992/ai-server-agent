@@ -34,7 +34,7 @@ func main() {
 	flag.Parse()
 	args := flag.Args()
 	if len(args) == 0 {
-		fatal("usage: ai-server-agent [serve|executor|print-config|validate-config|validate-credential-store|runtime-settings|service-access add|enroll]")
+		fatal("usage: ai-server-agent [serve|executor|print-config|validate-config|validate-credential-store|runtime-settings|service-access add|enroll|reveal]")
 	}
 	cfg, err := config.Load(*cfgPath)
 	if err != nil {
@@ -42,7 +42,12 @@ func main() {
 	}
 	switch args[0] {
 	case "service-access":
-		if err := enrollServiceCredential(cfg, args[1:]); err != nil {
+		if len(args) > 1 && args[1] == "reveal" {
+			err = revealServiceCredential(cfg, args[2:])
+		} else {
+			err = enrollServiceCredential(cfg, args[1:])
+		}
+		if err != nil {
 			fatal(err.Error())
 		}
 	case "serve":

@@ -197,8 +197,12 @@ func managedGuestExecFailure(result managedincus.Result, err error) Response {
 	resp.ExitCode = result.ExitCode
 	resp.Output = result.Output
 	resp.OutputEncoding = "utf-8"
-	resp.BytesSeen = int64(len(result.Output))
+	resp.BytesSeen = result.OutputBytesSeen
 	resp.BytesReturned = int64(len(result.Output))
+	if resp.BytesSeen < resp.BytesReturned {
+		resp.BytesSeen = resp.BytesReturned
+	}
+	resp.OmittedBytes = resp.BytesSeen - resp.BytesReturned
 	resp.Truncated = result.OutputTruncated
 	switch {
 	case strings.Contains(err.Error(), "native operation failed, exit_code="):
