@@ -111,10 +111,25 @@ resolve_source_ref(){
 # Retry transport failures for a bounded period; never retry past the strict
 # immutable published-release validation at each caller.
 github_release_metadata(){
-  curl -fsSL --retry 3 --retry-all-errors --retry-delay 1 \
+  local output_file result
+  output_file="$(mktemp)" || return 1
+  # curl resets its output file between retries. Sending directly to stdout
+  # can concatenate partial JSON from a failed attempt with a later response.
+  if curl -fsSL --retry 3 --retry-all-errors --retry-delay 1 \
     --retry-max-time 50 --connect-timeout 8 --max-time 20 \
     -H 'Accept: application/vnd.github+json' \
-    -H 'X-GitHub-Api-Version: 2026-03-10' "$1"
+    -H 'X-GitHub-Api-Version: 2026-03-10' \
+    -o "$output_file" "$1"; then
+    if cat -- "$output_file"; then
+      result=0
+    else
+      result=$?
+    fi
+  else
+    result=$?
+  fi
+  rm -f -- "$output_file" || result=1
+  return "$result"
 }
 
 latest_stable(){

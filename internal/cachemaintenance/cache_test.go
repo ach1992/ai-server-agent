@@ -430,3 +430,92 @@ func TestRunGoWrapperHelper(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// Only verified, bounded regular files can identify Agent-owned cache entries.
+// A symlink to a stream or a FIFO must never block cache status/prune.
+func TestMarkerReadRejectsSymlinkFIFOAndOversize(t *testing.T) {
+	root := testRoot(t)
+	now := time.Now()
+	valid := testEntry(t, root, "go-run-valid-marker", now.Add(-2*time.Hour))
+	symlinked := testEntry(t, root, "go-run-symlink-marker", now.Add(-2*time.Hour))
+	fifo := testEntry(t, root, "go-run-fifo-marker", now.Add(-2*time.Hour))
+	oversize := testEntry(t, root, "go-run-oversize-marker", now.Add(-2*time.Hour))
+	if err := os.Remove(filepath.Join(symlinked, markerName)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("/dev/zero", filepath.Join(symlinked, markerName)); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Remove(filepath.Join(fifo, markerName)); err != nil {
+		t.Fatal(err)
+	}
+	if err := syscall.Mkfifo(filepath.Join(fifo, markerName), 0600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(oversize, markerName), bytes.Repeat([]byte{'x'}, 1025), 0600); err != nil {
+		t.Fatal(err)
+	}
+	validData, err := readOwnershipMarker(filepath.Join(valid, markerName))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var owned marker
+	if err := json.Unmarshal(validData, &owned); err != nil || owned.Kind != cacheKind || owned.ID != "go-run-valid-marker" {
+		t.Fatalf("valid owner marker changed: %+v %v", owned, err)
+	}
+	for _, entry := range []string{symlinked, fifo, oversize} {
+		if _, err := readOwnershipMarker(filepath.Join(entry, markerName)); err == nil {
+			t.Errorf("unsafe marker accepted at %s", entry)
+		}
+	}
+	result, err := prune(now, false, true, time.Hour, 85, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ManagedEntries != 4 || result.InvalidEntries != 3 || result.EligibleEntries != 1 || result.DeletedEntries != 0 {
+		t.Fatalf("marker checks failed: %+v", result)
+	}
+}
+
+func TestPrunePartialFailureReturnsStructuredReport(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission-denied filesystem fixture requires an unprivileged worker")
+	}
+	root := testRoot(t)
+	now := time.Now()
+	first := testEntry(t, root, "go-run-a-first", now.Add(-48*time.Hour))
+	second := testEntry(t, root, "go-run-b-second", now.Add(-48*time.Hour))
+	privateData := filepath.Join(second, "data")
+	if err := os.Chmod(privateData, 0500); err != nil {
+		t.Fatal(err)
+	}
+	defer os.Chmod(privateData, 0700)
+	var stdout, stderr bytes.Buffer
+	code := Run([]string{"prune", "--apply", "--force", "--older-than=0"}, &stdout, &stderr)
+	if code == 0 {
+		t.Fatal("partial delete failure falsely succeeded")
+	}
+	var result report
+	if err := json.Unmarshal(stdout.Bytes(), &result); err != nil {
+		t.Fatalf("missing structured error report: %s; error: %v", stdout.String(), err)
+	}
+	if result.Operation != "prune" || result.DeletedEntries != 1 || result.DeletedBytes < 4096 || !result.FreeDeltaMeasured || result.Error == "" {
+		t.Fatalf("lost partial cleanup evidence: %+v stderr=%s", result, stderr.String())
+	}
+	if !strings.Contains(result.Error, "go-run-b-second") || !strings.Contains(stderr.String(), "go-run-b-second") {
+		t.Fatalf("failure lacks the affected entry: %+v stderr=%s", result, stderr.String())
+	}
+	after, err := diskAt(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if result.ActualFreeDeltaBytes != int64(after.AvailableBytes)-int64(result.Disk.AvailableBytes) {
+		t.Fatalf("free space delta was not measured after partial failure: %+v after=%+v", result, after)
+	}
+	if _, err := os.Stat(first); !os.IsNotExist(err) {
+		t.Fatalf("first completed removal missing: %v", err)
+	}
+	if _, err := os.Stat(second); err != nil {
+		t.Fatalf("failed candidate unexpectedly removed: %v", err)
+	}
+}

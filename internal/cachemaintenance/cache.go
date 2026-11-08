@@ -53,7 +53,9 @@ type report struct {
 	EligibleEntries      int    `json:"eligible_entries,omitempty"`
 	DeletedEntries       int    `json:"deleted_entries,omitempty"`
 	DeletedBytes         int64  `json:"deleted_bytes,omitempty"`
-	ActualFreeDeltaBytes int64  `json:"actual_free_delta_bytes,omitempty"`
+	ActualFreeDeltaBytes int64  `json:"actual_free_delta_bytes"`
+	FreeDeltaMeasured    bool   `json:"free_delta_measured"`
+	Error                string `json:"error,omitempty"`
 	Pressure             bool   `json:"pressure"`
 	Apply                bool   `json:"apply"`
 	Disk                 disk   `json:"managed_filesystem"`
@@ -119,10 +121,19 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		}
 		r, err := prune(start, *apply, *force, *age, *maxUsed, uint64(*minFree)*1024*1024)
 		if err != nil {
+			r.Error = err.Error()
+		}
+		if r.Operation == "prune" {
+			if code := emit(stdout, r); code != 0 {
+				fmt.Fprintln(stderr, "cache prune: could not write report")
+				return code
+			}
+		}
+		if err != nil {
 			fmt.Fprintln(stderr, "cache prune:", err)
 			return 1
 		}
-		return emit(stdout, r)
+		return 0
 	default:
 		fmt.Fprintln(stderr, "unknown cache action:", args[0])
 		return 2
@@ -263,6 +274,40 @@ func list(root string) ([]os.DirEntry, error) {
 	return items, err
 }
 
+// readOwnershipMarker never follows a symlink or waits for a FIFO. The
+// descriptor checks defend against a file changing after the initial lstat,
+// while the size-limited read protects against races and malformed data.
+func readOwnershipMarker(path string) ([]byte, error) {
+	info, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > 1024 {
+		return nil, errors.New("ownership marker must be a small regular file")
+	}
+	fd, err := syscall.Open(path, syscall.O_RDONLY|syscall.O_CLOEXEC|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	f := os.NewFile(uintptr(fd), path)
+	defer f.Close()
+	info, err = f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() || info.Size() > 1024 {
+		return nil, errors.New("ownership marker changed or is oversized")
+	}
+	content, err := io.ReadAll(io.LimitReader(f, 1025))
+	if err != nil {
+		return nil, err
+	}
+	if len(content) > 1024 {
+		return nil, errors.New("ownership marker exceeds 1024 bytes")
+	}
+	return content, nil
+}
+
 // lockEntry never creates a missing lock. An unknown or modified directory
 // is not owned by this lifecycle, so it can never become a prune candidate.
 func lockEntry(dir, id string) (file *os.File, meta marker, active bool, err error) {
@@ -270,9 +315,9 @@ func lockEntry(dir, id string) (file *os.File, meta marker, active bool, err err
 	if err != nil || !di.IsDir() || di.Mode().Perm()&0077 != 0 {
 		return nil, marker{}, false, errors.New("unexpected entry directory")
 	}
-	b, err := os.ReadFile(filepath.Join(dir, markerName))
-	if err != nil || len(b) > 1024 {
-		return nil, marker{}, false, errors.New("missing or invalid cache ownership marker")
+	b, err := readOwnershipMarker(filepath.Join(dir, markerName))
+	if err != nil {
+		return nil, marker{}, false, fmt.Errorf("invalid cache ownership marker: %w", err)
 	}
 	if err := json.Unmarshal(b, &meta); err != nil || meta.Version != 1 || meta.Kind != cacheKind || meta.ID != id || meta.Created <= 0 {
 		return nil, marker{}, false, errors.New("cache ownership marker mismatch")
@@ -366,16 +411,32 @@ func pressure(d disk, maxUsed int, minFree uint64) bool {
 	return d.UsedPercent >= maxUsed || d.AvailableBytes < minFree
 }
 
-func prune(now time.Time, apply, force bool, minAge time.Duration, maxUsed int, minFree uint64) (report, error) {
+func prune(now time.Time, apply, force bool, minAge time.Duration, maxUsed int, minFree uint64) (r report, resultErr error) {
 	root, err := managedPath()
 	if err != nil {
 		return report{}, err
 	}
-	r := report{Operation: "prune", Kind: cacheKind, Time: now.UTC().Format(time.RFC3339), ManagedRoot: root, Apply: apply}
+	r = report{Operation: "prune", Kind: cacheKind, Time: now.UTC().Format(time.RFC3339), ManagedRoot: root, Apply: apply}
 	r.Disk, err = diskAt(root)
 	if err != nil {
 		return r, err
 	}
+	// Removal can fail after a previous entry or part of the current entry
+	// was deleted. Measure on every path that attempted a destructive change,
+	// including failures, so the operator sees partial progress.
+	removalAttempted := false
+	defer func() {
+		if !removalAttempted {
+			return
+		}
+		after, err := diskAt(root)
+		if err != nil {
+			resultErr = errors.Join(resultErr, fmt.Errorf("measure disk after cache prune: %w", err))
+			return
+		}
+		r.ActualFreeDeltaBytes = int64(after.AvailableBytes) - int64(r.Disk.AvailableBytes)
+		r.FreeDeltaMeasured = true
+	}()
 	r.Pressure = pressure(r.Disk, maxUsed, minFree)
 	r.ManagedBytes, err = measure(root)
 	if err != nil {
@@ -417,23 +478,17 @@ func prune(now time.Time, apply, force bool, minAge time.Duration, maxUsed int, 
 		}
 		r.EligibleEntries++
 		if apply {
+			removalAttempted = true
 			// The lock remains held during the entire deletion, preventing
 			// overlap with another cooperative command's use of this lease.
 			if err := os.RemoveAll(entry); err != nil {
 				release(f)
-				return r, fmt.Errorf("remove owned cache entry: %w", err)
+				return r, fmt.Errorf("remove owned cache entry %q: %w", item.Name(), err)
 			}
 			r.DeletedEntries++
 			r.DeletedBytes += size
 		}
 		release(f)
-	}
-	if apply && r.DeletedEntries > 0 {
-		after, err := diskAt(root)
-		if err != nil {
-			return r, fmt.Errorf("measure post-cleanup disk: %w", err)
-		}
-		r.ActualFreeDeltaBytes = int64(after.AvailableBytes) - int64(r.Disk.AvailableBytes)
 	}
 	return r, nil
 }
