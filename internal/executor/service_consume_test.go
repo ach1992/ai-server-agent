@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
@@ -258,4 +259,154 @@ func TestServiceMySQLNativeQueryAndPrivateOptionFile(t *testing.T) {
 		t.Fatalf("MySQL consumer failed: %+v", r)
 	}
 	noServiceTemps(t, s)
+}
+
+// A service's authenticated API can create an administrator without the AI
+// receiving the new account's password. Only the registered origin sees it.
+func TestServiceHTTPProtectedAccountBodyNoPlaintext(t *testing.T) {
+	const auth = "bearer-for-fixture"
+	const accountPassword = "private-admin-password-123!"
+	var attempts atomic.Int32
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempts.Add(1)
+		if r.Method != http.MethodPost || r.URL.Path != "/v1/users" ||
+			r.Header.Get("Authorization") != "Bearer "+auth {
+			t.Error("wrong method, endpoint or service authorization")
+		}
+		var body struct {
+			Username string `json:"username"`
+			Account  struct {
+				Password string `json:"password"`
+			} `json:"account"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&body); err != nil ||
+			body.Username != "fixture-admin" || body.Account.Password != accountPassword {
+			t.Errorf("private account password missing from native API body: %#v, %v", body.Username, err)
+		}
+		w.WriteHeader(http.StatusCreated)
+		_, _ = io.WriteString(w, "created: "+accountPassword[:11])
+		_, _ = io.WriteString(w, accountPassword[11:]+" ok")
+	}))
+	defer app.Close()
+	s, authRef := serviceFixture(t, app.URL+"/api", "token", "existing-owner", auth)
+	st := serviceaccess.New(s.cfg.StateDir)
+	meta, err := st.Register(serviceaccess.Registration{
+		HostID: s.cfg.InstanceID, Service: "test", Endpoint: app.URL + "/new-user",
+		Username: "fixture-admin",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := st.Enroll(meta.ID, "password", "fixture-admin", accountPassword, 30, false); err != nil {
+		t.Fatal(err)
+	}
+	got := useService(s, authRef, ServiceUseSpec{
+		Method: "POST", Path: "/v1/users", Body: `{"username":"fixture-admin","account":{"password":""}}`,
+		BodySecretRef: meta.ID, BodySecretJSONPointer: "/account/password",
+	})
+	if !got.OK || got.Status != "http_201" || got.Output != "created: [REDACTED] ok" ||
+		strings.Contains(got.Output, accountPassword) || attempts.Load() != 1 {
+		t.Fatalf("private HTTP provisioning leaked or failed: %+v attempts=%d", got, attempts.Load())
+	}
+	records, err := st.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, rec := range records {
+		if rec.ID == meta.ID && rec.LastUsedAt == nil {
+			t.Fatal("private account credential not marked used")
+		}
+	}
+
+	// Exact secret may also be reflected as JSON-escaped text, including
+	// characters such as ampersands that encoding/json escapes on the wire.
+	const escaped = "private<>\nsecret-123"
+	if _, err := st.Enroll(meta.ID, "password", "fixture-admin", escaped, 30, false); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	quoted, _ := json.Marshal(escaped)
+	redactor := &credentialOutputRedactor{to: &buf, additional: [][]byte{[]byte(escaped), quoted[1 : len(quoted)-1]}}
+	_, _ = redactor.Write([]byte("escaped:" + string(quoted[1:len(quoted)-1])))
+	_ = redactor.Flush()
+	if buf.String() != "escaped:[REDACTED]" {
+		t.Fatalf("JSON-escaped credential was not redacted: %q", buf.String())
+	}
+}
+
+func TestServiceHTTPProtectedBodyBindingsFailBeforeNetwork(t *testing.T) {
+	const auth = "owner-api-token"
+	var hits atomic.Int32
+	app := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		hits.Add(1)
+		_, _ = io.WriteString(w, "unexpected network operation")
+	}))
+	defer app.Close()
+	s, authRef := serviceFixture(t, app.URL+"/api", "token", "owner", auth)
+	st := serviceaccess.New(s.cfg.StateDir)
+	register := func(endpoint, service, name string) string {
+		t.Helper()
+		meta, err := st.Register(serviceaccess.Registration{HostID: s.cfg.InstanceID, Service: service, Endpoint: endpoint, Username: name})
+		if err != nil {
+			t.Fatal(err)
+		}
+		if _, err := st.Enroll(meta.ID, "password", name, "private-"+name, 30, false); err != nil {
+			t.Fatal(err)
+		}
+		return meta.ID
+	}
+	good := register(app.URL+"/new-login", "test", "new-admin")
+	wrongService := register(app.URL+"/new-login", "other-product", "other-admin")
+	other := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		t.Fatal("credential delivered to wrong service origin")
+	}))
+	defer other.Close()
+	wrongOrigin := register(other.URL+"/new-login", "test", "different-origin")
+	const payload = `{"password":""}`
+	cases := []struct {
+		title string
+		field ServiceUseSpec
+		code  string
+	}{
+		{"missing ref", ServiceUseSpec{Body: payload, BodySecretJSONPointer: "/password"}, "invalid_private_body_binding"},
+		{"missing pointer", ServiceUseSpec{Body: payload, BodySecretRef: good}, "invalid_private_body_binding"},
+		{"different service", ServiceUseSpec{Body: payload, BodySecretRef: wrongService, BodySecretJSONPointer: "/password"}, "private_body_target_mismatch"},
+		{"different origin", ServiceUseSpec{Body: payload, BodySecretRef: wrongOrigin, BodySecretJSONPointer: "/password"}, "private_body_target_mismatch"},
+		{"non-json content", ServiceUseSpec{Body: payload, ContentType: "application/x-www-form-urlencoded", BodySecretRef: good, BodySecretJSONPointer: "/password"}, "private_body_requires_json"},
+		{"missing field", ServiceUseSpec{Body: payload, BodySecretRef: good, BodySecretJSONPointer: "/missing"}, "invalid_private_body_json"},
+		{"incorrect type", ServiceUseSpec{Body: `{"password":123}`, BodySecretRef: good, BodySecretJSONPointer: "/password"}, "invalid_private_body_json"},
+		{"multiple json values", ServiceUseSpec{Body: payload + payload, BodySecretRef: good, BodySecretJSONPointer: "/password"}, "invalid_private_body_json"},
+		{"invalid pointer escape", ServiceUseSpec{Body: payload, BodySecretRef: good, BodySecretJSONPointer: "/pass~3word"}, "invalid_private_body_json"},
+		{"invalid array index", ServiceUseSpec{Body: `{"users":[""]}`, BodySecretRef: good, BodySecretJSONPointer: "/users/01"}, "invalid_private_body_json"},
+	}
+	for _, c := range cases {
+		t.Run(c.title, func(t *testing.T) {
+			c.field.Path, c.field.Method = "/api/accounts", "POST"
+			res := useService(s, authRef, c.field)
+			if res.OK || res.ErrorCode != c.code {
+				t.Fatalf("invalid private body binding accepted: %+v", res)
+			}
+		})
+	}
+	if _, err := st.Revoke(good); err != nil {
+		t.Fatal(err)
+	}
+	revoked := useService(s, authRef, ServiceUseSpec{Method: "POST", Path: "/api/accounts", Body: payload, BodySecretRef: good, BodySecretJSONPointer: "/password"})
+	if revoked.OK || revoked.ErrorCode != "private_body_credential_unavailable" {
+		t.Fatalf("revoked private body credential accepted: %+v", revoked)
+	}
+	if hits.Load() != 0 {
+		t.Fatalf("invalid private operations reached app: %d", hits.Load())
+	}
+}
+
+func TestPrivateJSONPointerNestedArrayAndEscaping(t *testing.T) {
+	body := `{"items":[{"a/b":{"password~type":""}}],"n":1.10}`
+	got, err := bindPrivateJSONSecret(body, "/items/0/a~1b/password~0type", "confidential")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(got, `"password~type":"confidential"`) || !strings.Contains(got, `"n":1.10`) {
+		t.Fatalf("nested pointer or JSON number changed: %q", got)
+	}
 }

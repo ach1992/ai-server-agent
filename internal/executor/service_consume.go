@@ -1,14 +1,16 @@
 package executor
 
 import (
-	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"github.com/ach1992/ai-server-agent/internal/managedincus"
+	"github.com/ach1992/ai-server-agent/internal/secretoutput"
 	"github.com/ach1992/ai-server-agent/internal/serviceaccess"
 	"io"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -20,96 +22,31 @@ import (
 	"time"
 )
 
-// Private service responses may reflect both enrolled plaintext and exact
-// wire representations produced by this Agent (not arbitrary transformations).
-// Keep the longest possible match across Write boundaries before emitting
-// bytes into the inline preview or durable job-output transcript.
+// Keep the internal test fixture surface while sharing one streaming
+// implementation with native Incus and private root command execution.
 type credentialOutputRedactor struct {
 	mu         sync.Mutex
 	to         io.Writer
 	secret     []byte
 	additional [][]byte
-	pending    []byte
+	impl       *secretoutput.Redactor
 }
 
-func (r *credentialOutputRedactor) patterns() [][]byte {
-	patterns := make([][]byte, 0, 1+len(r.additional))
-	if len(r.secret) > 0 {
-		patterns = append(patterns, r.secret)
+func (r *credentialOutputRedactor) inner() *secretoutput.Redactor {
+	if r.impl == nil {
+		r.impl = secretoutput.New(r.to, r.secret, r.additional...)
 	}
-	for _, p := range r.additional {
-		if len(p) > 0 {
-			patterns = append(patterns, p)
-		}
-	}
-	return patterns
+	return r.impl
 }
-
-func (r *credentialOutputRedactor) emit(final bool) error {
-	patterns := r.patterns()
-	if len(patterns) == 0 {
-		_, err := r.to.Write(r.pending)
-		r.pending = nil
-		return err
-	}
-	maxLen := 0
-	for _, p := range patterns {
-		maxLen = max(maxLen, len(p))
-	}
-	safeEnd := len(r.pending) - maxLen + 1
-	if final {
-		safeEnd = len(r.pending)
-	}
-	if safeEnd < 0 {
-		safeEnd = 0
-	}
-	data := r.pending
-	pos := 0
-	for pos < safeEnd {
-		start, matchLen := len(data), 0
-		for _, p := range patterns {
-			if i := bytes.Index(data[pos:], p); i >= 0 {
-				i += pos
-				if i < start || (i == start && len(p) > matchLen) {
-					start, matchLen = i, len(p)
-				}
-			}
-		}
-		if matchLen == 0 || start >= safeEnd {
-			if _, err := r.to.Write(data[pos:safeEnd]); err != nil {
-				return err
-			}
-			pos = safeEnd
-			break
-		}
-		if start > pos {
-			if _, err := r.to.Write(data[pos:start]); err != nil {
-				return err
-			}
-		}
-		if _, err := io.WriteString(r.to, "[REDACTED]"); err != nil {
-			return err
-		}
-		pos = start + matchLen
-	}
-	r.pending = append(r.pending[:0], data[pos:]...)
-	return nil
-}
-
 func (r *credentialOutputRedactor) Write(p []byte) (int, error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.pending = append(r.pending, p...)
-	if err := r.emit(false); err != nil {
-		return 0, err
-	}
-	return len(p), nil
+	return r.inner().Write(p)
 }
-
 func (r *credentialOutputRedactor) Flush() error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	return r.emit(true)
+	return r.inner().Flush()
 }
 
 func (s *Server) serviceUseAction(parent context.Context, req Request) Response {
@@ -158,13 +95,38 @@ func (s *Server) serviceUseAction(parent context.Context, req Request) Response 
 	ctx, cancel := context.WithTimeout(parent, requestRunTimeout(req))
 	defer cancel()
 	var resp Response
+	// A payload credential is usable only in a JSON field of this authenticated
+	// service's own registered origin. The requester sees neither secret.
+	var bodySecret string
+	if in.BodySecretRef != "" || in.BodySecretJSONPointer != "" {
+		if in.BodySecretRef == "" || in.BodySecretJSONPointer == "" ||
+			(scheme != "http" && scheme != "https") {
+			return s.finishActionAudit(req, "service_use", "root", "service_use "+scheme, "managed", started,
+				fileError("invalid_private_body_binding", "validation", errors.New("both JSON pointer and body_secret_ref are required for an HTTP service")))
+		}
+		bodyRec, secretErr := st.Resolve(in.BodySecretRef, s.cfg.InstanceID)
+		if secretErr != nil {
+			return s.finishActionAudit(req, "service_use", "root", "service_use "+scheme, "managed", started,
+				fileError("private_body_credential_unavailable", "authorization", secretErr))
+		}
+		if bodyRec.HostID != rec.HostID || bodyRec.Project != rec.Project ||
+			bodyRec.Guest != rec.Guest || bodyRec.GuestUUID != rec.GuestUUID ||
+			!strings.EqualFold(bodyRec.Service, rec.Service) ||
+			bodyRec.Endpoint == "" || serviceaccess.ValidEndpoint(bodyRec.Endpoint) != nil ||
+			serviceaccess.Origin(bodyRec.Endpoint) != serviceaccess.Origin(rec.Endpoint) {
+			return s.finishActionAudit(req, "service_use", "root", "service_use "+scheme, "managed", started,
+				fileError("private_body_target_mismatch", "authorization",
+					errors.New("private body credential must be registered for the exact same service origin and native guest")))
+		}
+		bodySecret = bodyRec.Secret
+	}
 	switch scheme {
 	case "http", "https":
 		release, ok := s.runs.acquire(false)
 		if !ok {
 			resp = runCapacityResponse(false)
 		} else {
-			resp = s.useHTTPService(ctx, rec, target, in)
+			resp = s.useHTTPService(ctx, rec, target, in, bodySecret)
 			release()
 		}
 	case "ssh":
@@ -173,6 +135,9 @@ func (s *Server) serviceUseAction(parent context.Context, req Request) Response 
 		resp = s.useDatabaseService(ctx, st, rec, target, in)
 	default:
 		resp = fileError("service_protocol_unsupported", "validation", errors.New("supported consumers: HTTP(S), SSH, PostgreSQL and MySQL/MariaDB"))
+	}
+	if bodySecret != "" && (resp.OK || strings.HasPrefix(resp.Status, "http_")) {
+		_ = st.MarkUsed(in.BodySecretRef)
 	}
 	resp.DurationMS = time.Since(started).Milliseconds()
 	if resp.OK || strings.HasPrefix(resp.Status, "http_") || resp.Status == "native_completed" {
@@ -217,7 +182,75 @@ func validServiceHeader(name string) bool {
 	return true
 }
 
-func (s *Server) useHTTPService(ctx context.Context, rec serviceaccess.Record, target *url.URL, in ServiceUseSpec) Response {
+// bindPrivateJSONSecret assigns an existing JSON string value without putting
+// the credential in MCP arguments. This is a field substitution, not an API
+// account-creation adapter or a promise about what a remote service will do.
+func bindPrivateJSONSecret(raw, pointer, secret string) (string, error) {
+	if len(pointer) < 2 || len(pointer) > 512 || pointer[0] != '/' || secret == "" {
+		return "", errors.New("non-empty JSON pointer and enrolled private secret required")
+	}
+	var document any
+	decoder := json.NewDecoder(strings.NewReader(raw))
+	decoder.UseNumber()
+	if err := decoder.Decode(&document); err != nil {
+		return "", fmt.Errorf("invalid JSON body: %w", err)
+	}
+	var trailing any
+	if err := decoder.Decode(&trailing); err != io.EOF {
+		return "", errors.New("JSON body must contain exactly one document")
+	}
+	keys := strings.Split(pointer[1:], "/")
+	var current any = document
+	for index, segment := range keys {
+		for i := 0; i < len(segment); i++ {
+			if segment[i] == '~' {
+				if i+1 >= len(segment) || (segment[i+1] != '0' && segment[i+1] != '1') {
+					return "", errors.New("invalid JSON pointer escape")
+				}
+				i++
+			}
+		}
+		key := strings.ReplaceAll(strings.ReplaceAll(segment, "~1", "/"), "~0", "~")
+		last := index == len(keys)-1
+		switch value := current.(type) {
+		case map[string]any:
+			child, found := value[key]
+			if !found {
+				return "", errors.New("JSON pointer must reference an existing field")
+			}
+			if last {
+				if _, ok := child.(string); !ok {
+					return "", errors.New("JSON secret destination must be a string")
+				}
+				value[key] = secret
+			} else {
+				current = child
+			}
+		case []any:
+			pos, err := strconv.Atoi(key)
+			if err != nil || pos < 0 || pos >= len(value) || strconv.Itoa(pos) != key {
+				return "", errors.New("JSON pointer array index invalid")
+			}
+			if last {
+				if _, ok := value[pos].(string); !ok {
+					return "", errors.New("JSON secret destination must be a string")
+				}
+				value[pos] = secret
+			} else {
+				current = value[pos]
+			}
+		default:
+			return "", errors.New("JSON pointer traverses a scalar value")
+		}
+	}
+	encoded, err := json.Marshal(document)
+	if err != nil {
+		return "", err
+	}
+	return string(encoded), nil
+}
+
+func (s *Server) useHTTPService(ctx context.Context, rec serviceaccess.Record, target *url.URL, in ServiceUseSpec, bodySecret string) Response {
 	if err := serviceaccess.ValidEndpoint(rec.Endpoint); err != nil {
 		return fileError("invalid_http_target", "validation", err)
 	}
@@ -240,7 +273,26 @@ func (s *Server) useHTTPService(ctx context.Context, rec serviceaccess.Record, t
 		}
 		target.Path, target.RawPath, target.RawQuery = relative.Path, relative.RawPath, relative.RawQuery
 	}
-	request, err := http.NewRequestWithContext(ctx, method, target.String(), strings.NewReader(in.Body))
+	body := in.Body
+	if bodySecret != "" {
+		contentType := in.ContentType
+		if contentType == "" {
+			contentType = "application/json"
+		}
+		mediaType, _, mediaErr := mime.ParseMediaType(contentType)
+		if mediaErr != nil || (mediaType != "application/json" && !strings.HasSuffix(mediaType, "+json")) {
+			return fileError("private_body_requires_json", "validation", errors.New("private body injection requires an application/json compatible Content-Type"))
+		}
+		var bindErr error
+		body, bindErr = bindPrivateJSONSecret(in.Body, in.BodySecretJSONPointer, bodySecret)
+		if bindErr != nil {
+			return fileError("invalid_private_body_json", "validation", bindErr)
+		}
+		if len(body) > maxExecutorRequestBytes-8192 {
+			return fileError("private_body_too_large", "validation", errors.New("JSON body exceeds bounded private request size"))
+		}
+	}
+	request, err := http.NewRequestWithContext(ctx, method, target.String(), strings.NewReader(body))
 	if err != nil {
 		return fileError("invalid_http_request", "validation", err)
 	}
@@ -303,6 +355,12 @@ func (s *Server) useHTTPService(ctx context.Context, rec serviceaccess.Record, t
 	defer result.Body.Close()
 	c := newSyncOutputCapture(s)
 	filter := &credentialOutputRedactor{to: c, secret: []byte(rec.Secret)}
+	if bodySecret != "" {
+		filter.additional = append(filter.additional, []byte(bodySecret))
+		if js, err := json.Marshal(bodySecret); err == nil && len(js) > 2 {
+			filter.additional = append(filter.additional, js[1:len(js)-1])
+		}
+	}
 	if mode == "basic" {
 		// Exact reversible Basic header generated by request.SetBasicAuth.
 		// Filter both the full header and its encoded value if reflected.

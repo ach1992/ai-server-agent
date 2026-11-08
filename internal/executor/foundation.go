@@ -17,6 +17,7 @@ import (
 
 	"github.com/ach1992/ai-server-agent/internal/credential"
 	"github.com/ach1992/ai-server-agent/internal/policy"
+	"github.com/ach1992/ai-server-agent/internal/serviceaccess"
 	"golang.org/x/sys/unix"
 )
 
@@ -275,6 +276,30 @@ func runCapacityResponse(root bool) Response {
 	}
 }
 
+// provisionPrivateHostFD creates an anonymous, sealed in-memory credential
+// descriptor. Bash keeps its script on stdin and reads the credential from
+// fd 3 only when the authorized script explicitly needs it. The descriptor
+// is never a path or inherited environment plaintext.
+func provisionPrivateHostFD(secret string) (*os.File, error) {
+	fd, err := unix.MemfdCreate("asa-private-service-stdin", unix.MFD_CLOEXEC|unix.MFD_ALLOW_SEALING)
+	if err != nil {
+		return nil, err
+	}
+	f := os.NewFile(uintptr(fd), "asa-private-service-stdin")
+	if _, err = f.WriteString(secret + "\n"); err == nil {
+		_, err = f.Seek(0, io.SeekStart)
+	}
+	if err == nil {
+		_, err = unix.FcntlInt(f.Fd(), unix.F_ADD_SEALS,
+			unix.F_SEAL_WRITE|unix.F_SEAL_SHRINK|unix.F_SEAL_GROW|unix.F_SEAL_SEAL)
+	}
+	if err != nil {
+		_ = f.Close()
+		return nil, err
+	}
+	return f, nil
+}
+
 func (s *Server) runContext(parent context.Context, req Request) Response {
 	started := time.Now()
 	if bad := commandInputError(req.Command); bad != nil {
@@ -300,6 +325,25 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 		req.Workspace = cwd
 	}
 	cmd, dec := s.commandContext(ctx, req)
+	var secretValue string
+	if req.CredentialRef != "" {
+		if !req.Root || req.PrincipalID == "" || req.PrincipalClass == "" {
+			return fileError("private_root_requires_authorized_principal", "authorization",
+				errors.New("root credential use requires an authenticated principal and root command"))
+		}
+		if s.cfg.InstanceID == "" {
+			return fileError("host_identity_unavailable", "state", errors.New("Agent instance identity is required"))
+		}
+		stored, err := serviceaccess.New(s.cfg.StateDir).Resolve(req.CredentialRef, s.cfg.InstanceID)
+		if err != nil {
+			return fileError("private_root_credential_unavailable", "authorization", err)
+		}
+		if stored.Project != "" || stored.Guest != "" || stored.GuestUUID != "" {
+			return fileError("private_root_target_mismatch", "authorization",
+				errors.New("host-root execution cannot consume a guest-bound credential"))
+		}
+		secretValue = stored.Secret
+	}
 	if !dec.Allowed {
 		return Response{Error: dec.Reason, ReasonCode: "policy_denied", ErrorCode: "policy_denied", ErrorClass: "policy", DurationMS: time.Since(started).Milliseconds()}
 	}
@@ -358,8 +402,23 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 	}
 
 	out := newSyncOutputCapture(s)
-	cmd.Stdout = out
-	cmd.Stderr = out
+	var secretFilter *credentialOutputRedactor
+	if secretValue != "" {
+		secretFD, err := provisionPrivateHostFD(secretValue)
+		if err != nil {
+			return s.finishActionAudit(req, "run", "root", req.Command, dec.Category, started,
+				fileError("private_root_descriptor_unavailable", "dependency", err))
+		}
+		defer secretFD.Close()
+		// Root Bash receives its script via stdin, so a dedicated inherited fd
+		// is necessary to avoid script corruption or secrets in process argv.
+		cmd.ExtraFiles = append(cmd.ExtraFiles, secretFD)
+		cmd.Env = append(cmd.Env, "ASA_SERVICE_SECRET_FD=3")
+		secretFilter = &credentialOutputRedactor{to: out, secret: []byte(secretValue)}
+		cmd.Stdout, cmd.Stderr = secretFilter, secretFilter
+	} else {
+		cmd.Stdout, cmd.Stderr = out, out
+	}
 	var browserGroup *dapCgroup
 	browserGroupFD := -1
 	browserScratch := ""
@@ -419,6 +478,16 @@ func (s *Server) runContext(parent context.Context, req Request) Response {
 		}
 	} else {
 		err = cmd.Run()
+	}
+	if secretFilter != nil {
+		if filterErr := secretFilter.Flush(); filterErr != nil {
+			err = errors.Join(err, fmt.Errorf("private command output filter failed: %w", filterErr))
+		}
+		// The exact bound reference is marked used only when execution started;
+		// a command's nonzero exit does not prove that it had no side effects.
+		if cmd.Process != nil {
+			_ = serviceaccess.New(s.cfg.StateDir).MarkUsed(req.CredentialRef)
+		}
 	}
 	lingeringGroup := false
 	var cleanupErr error

@@ -72,13 +72,15 @@ func TestServiceUseDirectMCPMaintainsCallerIdentityAndNoPlaintextArgument(t *tes
 	result, err := session.CallTool(ctx, &mcpsdk.CallToolParams{
 		Name: "service_use",
 		Arguments: map[string]any{
-			"credential_ref": "svc_nonsecret-fixture",
-			"method":         "PROPFIND",
-			"path":           "/custom/api?window=1",
-			"body":           "{}",
-			"auth_mode":      "header",
-			"auth_header":    "X-Custom-Key",
-			"headers":        map[string]string{"Accept": "application/json"},
+			"credential_ref":           "svc_nonsecret-fixture",
+			"method":                   "PROPFIND",
+			"path":                     "/custom/api?window=1",
+			"body":                     "{\"user\":{\"password\":\"\"}}",
+			"body_secret_ref":          "svc_new-admin-nonsecret",
+			"body_secret_json_pointer": "/user/password",
+			"auth_mode":                "header",
+			"auth_header":              "X-Custom-Key",
+			"headers":                  map[string]string{"Accept": "application/json"},
 		},
 	})
 	if err != nil || result.IsError {
@@ -91,7 +93,9 @@ func TestServiceUseDirectMCPMaintainsCallerIdentityAndNoPlaintextArgument(t *tes
 			req.Root || req.Approval || req.Token != "exec-token" ||
 			req.ServiceUse.Method != "PROPFIND" || req.ServiceUse.AuthMode != "header" ||
 			req.ServiceUse.AuthHeader != "X-Custom-Key" ||
-			req.ServiceUse.Path != "/custom/api?window=1" || req.ServiceUse.Body != "{}" || req.ServiceUse.Headers["Accept"] != "application/json" ||
+			req.ServiceUse.Path != "/custom/api?window=1" || req.ServiceUse.Body != "{\"user\":{\"password\":\"\"}}" ||
+			req.ServiceUse.BodySecretRef != "svc_new-admin-nonsecret" || req.ServiceUse.BodySecretJSONPointer != "/user/password" ||
+			req.ServiceUse.Headers["Accept"] != "application/json" ||
 			req.TimeoutMS <= 0 {
 			t.Fatalf("MCP-Executor caller/protocol identity lost: %+v", req)
 		}

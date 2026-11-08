@@ -7,15 +7,17 @@ import (
 )
 
 type ServiceUseSpec struct {
-	Method      string            `json:"method,omitempty"`
-	Path        string            `json:"path,omitempty"`
-	Body        string            `json:"body,omitempty"`
-	ContentType string            `json:"content_type,omitempty"`
-	AuthHeader  string            `json:"auth_header,omitempty"`
-	AuthMode    string            `json:"auth_mode,omitempty"`
-	Headers     map[string]string `json:"headers,omitempty"`
-	Command     string            `json:"command,omitempty"`
-	Query       string            `json:"query,omitempty"`
+	Method                string            `json:"method,omitempty"`
+	Path                  string            `json:"path,omitempty"`
+	Body                  string            `json:"body,omitempty"`
+	BodySecretRef         string            `json:"body_secret_ref,omitempty"`
+	BodySecretJSONPointer string            `json:"body_secret_json_pointer,omitempty"`
+	ContentType           string            `json:"content_type,omitempty"`
+	AuthHeader            string            `json:"auth_header,omitempty"`
+	AuthMode              string            `json:"auth_mode,omitempty"`
+	Headers               map[string]string `json:"headers,omitempty"`
+	Command               string            `json:"command,omitempty"`
+	Query                 string            `json:"query,omitempty"`
 }
 
 type Request struct {

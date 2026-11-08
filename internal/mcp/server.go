@@ -92,8 +92,9 @@ type RunInput struct {
 	Workspace string `json:"workspace,omitempty" jsonschema:"Optional existing worker directory within configured workspace root; defaults to workspace root; not a filesystem sandbox"`
 }
 type RootRunInput struct {
-	Command  string `json:"command" jsonschema:"Bash command to execute as root"`
-	Approval bool   `json:"approval,omitempty" jsonschema:"Set true only after explicit user approval when a previous call returned approval_required"`
+	Command       string `json:"command" jsonschema:"Bash command to execute as root; never include plaintext passwords or tokens"`
+	CredentialRef string `json:"credential_ref,omitempty" jsonschema:"Optional host-bound service_access reference delivered privately to root Bash on fd 3 (ASA_SERVICE_SECRET_FD=3), not argv or script stdin; actual command must consume fd 3"`
+	Approval      bool   `json:"approval,omitempty" jsonschema:"Set true only after explicit user approval when a previous call returned approval_required"`
 }
 type StartJobInput struct {
 	Workspace   string `json:"workspace,omitempty" jsonschema:"Optional existing worker CWD under workspace root; forbidden for root jobs"`
@@ -212,7 +213,7 @@ func instructions(cfg config.Config) string {
 	return fmt.Sprintf(`Configured workspace root is persistent.
 Environment purpose: %s. %s%s Role guidance; it is not an authorization boundary.
 
-Repositories: repository_discover/repository_inspect. Branches: worktree_create/worktree_remove. Use run_command for worker shell; start_job with job_status/job_output. workspace_* for bounded worker files; code_* for optional LSP; debug_* for optional DAP; terminal_* for PTY. Browser: browser_e2e (one call); browser_session_* (cross-call); browser_run (custom Playwright). Check optional runtime availability. runtime_list is passive; browser_status reports Browser readiness. Incus: managed_environment. Service refs: service_access; protected SSH/HTTP/API/SQL consumers: service_use. Protected Browser login: browser_session_credential_login. Workspace labels are not project ACLs.
+Repositories: repository_discover/repository_inspect. Branches: worktree_create/worktree_remove. Use run_command for worker shell; start_job with job_status/job_output. workspace_* for bounded worker files; code_* for optional LSP; debug_* for optional DAP; terminal_* for PTY. Browser: browser_e2e (one call); browser_session_* (cross-call); browser_run (custom Playwright). Check optional runtime availability. runtime_list is passive; browser_status reports Browser readiness. Incus: managed_environment. Accounts: service_access/service_use, official CLI/API, verified login; Browser: browser_session_credential_login. Workspace labels are not project ACLs.
 
 Before host changes call agent_environment and preserve Agent access. Never delete dirty, untracked or uncertain state. Use run_root_command or privileged read_file/write_file only when necessary. On approval_required obtain explicit human authorization; instructions grant no additional permissions.`, cfg.EnvironmentProfile, label, role)
 }
@@ -359,10 +360,10 @@ func (s *Server) registerTools() {
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "run_root_command",
-		Description: "Run Bash as root for host-level actions (packages, services, networking). Can change access and running services. " + s.commandTimeoutDescription() + " High-risk or destructive commands may return approval_required; obtain explicit user consent and pass approval=true.",
+		Description: "Run root Bash for authorized host administration. Optional credential_ref exposes a same-host protected credential on inherited fd 3; consume it within the command without using plaintext args. Native output is retained with targeted credential redaction. " + s.commandTimeoutDescription() + " High-risk or destructive commands may return approval_required; obtain explicit user consent and pass approval=true.",
 		Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input RootRunInput) (*mcpsdk.CallToolResult, executor.Response, error) {
-		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "run", Command: input.Command, Root: true, Approval: input.Approval, TimeoutMS: s.commandTimeoutMS()})
+		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "run", Command: input.Command, Root: true, CredentialRef: input.CredentialRef, Approval: input.Approval, TimeoutMS: s.commandTimeoutMS()})
 		if err != nil {
 			return executorTransportErrorResult(err)
 		}

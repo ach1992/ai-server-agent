@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"github.com/ach1992/ai-server-agent/internal/secretoutput"
 	"io"
 	"net/url"
 	"os"
@@ -136,6 +137,12 @@ func (x *bounded) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 func (b Backend) cli(ctx context.Context, stdin io.Reader, discardOutput bool, args ...string) (string, int, bool, error) {
+	return b.cliProtected(ctx, stdin, discardOutput, "", args...)
+}
+
+// cliProtected streams the exact private value through stdin and redacts
+// observed native output before it enters bounded diagnostic capture.
+func (b Backend) cliProtected(ctx context.Context, stdin io.Reader, discardOutput bool, secret string, args ...string) (string, int, bool, error) {
 	bin, err := b.binary()
 	if err != nil {
 		return "", -1, false, err
@@ -144,14 +151,22 @@ func (b Backend) cli(ctx context.Context, stdin io.Reader, discardOutput bool, a
 	cmd.Env = []string{"PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin", "HOME=/root", "LC_ALL=C.UTF-8", "LANG=C.UTF-8"}
 	cmd.Stdin = stdin
 	var out bounded
+	var redactor *secretoutput.Redactor
 	if discardOutput {
 		cmd.Stdout = io.Discard
 		cmd.Stderr = io.Discard
+	} else if secret != "" {
+		redactor = secretoutput.New(&out, []byte(secret))
+		cmd.Stdout, cmd.Stderr = redactor, redactor
 	} else {
-		cmd.Stdout = &out
-		cmd.Stderr = &out
+		cmd.Stdout, cmd.Stderr = &out, &out
 	}
 	err = cmd.Run()
+	if redactor != nil {
+		if flushErr := redactor.Flush(); flushErr != nil {
+			err = errors.Join(err, fmt.Errorf("private output flush failed: %w", flushErr))
+		}
+	}
 	code := 0
 	if err != nil {
 		code = -1
@@ -697,7 +712,7 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 			if secret != "" {
 				input = strings.NewReader(secret + "\n")
 			}
-			out, code, trunc, runErr := b.cli(runCtx, input, secret != "", args...)
+			out, code, trunc, runErr := b.cliProtected(runCtx, input, false, secret, args...)
 			base.Output = out
 			base.ExitCode = code
 			base.OutputTruncated = trunc

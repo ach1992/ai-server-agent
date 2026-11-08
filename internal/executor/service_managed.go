@@ -188,6 +188,31 @@ func (s *Server) serviceAccessAction(ctx context.Context, req Request) Response 
 	}
 	return s.finishActionAudit(req, "service_access", "root", "service_access "+in.Operation, "managed", started, resp)
 }
+
+// managedGuestExecFailure keeps the native diagnostic independently of the
+// summarized Go error, without confusing a validation failure with a command
+// actually dispatched to Incus.
+func managedGuestExecFailure(result managedincus.Result, err error) Response {
+	resp := managedErr(err)
+	resp.ExitCode = result.ExitCode
+	resp.Output = result.Output
+	resp.OutputEncoding = "utf-8"
+	resp.BytesSeen = int64(len(result.Output))
+	resp.BytesReturned = int64(len(result.Output))
+	resp.Truncated = result.OutputTruncated
+	switch {
+	case strings.Contains(err.Error(), "native operation failed, exit_code="):
+		resp.Status = "native_guest_exec_failed"
+		resp.ErrorCode, resp.ReasonCode = "native_guest_exec_failed", "native_guest_exec_failed"
+		resp.ErrorClass = "process"
+	case strings.Contains(err.Error(), "guest_agent_unavailable"):
+		resp.Status = "guest_agent_unavailable"
+		resp.ErrorCode, resp.ReasonCode = "guest_agent_unavailable", "guest_agent_unavailable"
+		resp.ErrorClass = "dependency"
+	}
+	return resp
+}
+
 func (s *Server) managedEnvironmentAction(ctx context.Context, req Request) Response {
 	if req.Root || req.PrincipalID == "" || req.PrincipalClass == "" {
 		return fileError("authentication_required", "authorization", errors.New("authenticated MCP principal required"))
@@ -229,7 +254,11 @@ func (s *Server) managedEnvironmentAction(ctx context.Context, req Request) Resp
 	}
 	var resp Response
 	if err != nil {
-		resp = managedErr(err)
+		if in.Operation == "exec" {
+			resp = managedGuestExecFailure(result, err)
+		} else {
+			resp = managedErr(err)
+		}
 	} else if !result.Available && in.Operation != "status" && in.Operation != "pending_creates" {
 		resp = fileError("incus_unavailable", "dependency", errors.New(result.Diagnostic))
 	} else {

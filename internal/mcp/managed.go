@@ -24,7 +24,7 @@ type ManagedEnvironmentInput struct {
 	DiskGiB       int      `json:"disk_gib,omitempty" jsonschema:"Explicit guest root disk size in GiB at create; checked against host capacity"`
 	StoragePool   string   `json:"storage_pool,omitempty" jsonschema:"Actual Incus storage pool for root disk; required on create to verify native free capacity"`
 	Command       []string `json:"command,omitempty" jsonschema:"Native guest exec argv, no shell interpretation and never include secret values"`
-	CredentialRef string   `json:"credential_ref,omitempty" jsonschema:"Optional service reference for confidential guest-exec stdin, bound to this exact host/project/guest/UUID; suppresses all guest stdout/stderr"`
+	CredentialRef string   `json:"credential_ref,omitempty" jsonschema:"Optional confidential guest-exec stdin reference bound to exact host/project/guest/UUID; native diagnostics retain nonsecret details"`
 	Snapshot      string   `json:"snapshot,omitempty" jsonschema:"Exact snapshot name for snapshot/restore"`
 	Approval      bool     `json:"approval,omitempty" jsonschema:"Set only after explicit Owner approval for delete/restore, uncertain create abandonment or uncertain native operation retirement; no automatic privilege escalation"`
 }
@@ -70,27 +70,29 @@ func (s *Server) registerManagedTools() {
 }
 
 type ServiceUseInput struct {
-	CredentialRef string            `json:"credential_ref" jsonschema:"Opaque protected service_access reference; never paste the secret"`
-	Method        string            `json:"method,omitempty" jsonschema:"HTTP method; defaults to GET"`
-	Path          string            `json:"path,omitempty" jsonschema:"Optional absolute HTTP path on the registered origin, with query; cannot change host"`
-	Body          string            `json:"body,omitempty" jsonschema:"Optional HTTP request body; bounded by existing Executor 8 MiB serialized request frame"`
-	ContentType   string            `json:"content_type,omitempty" jsonschema:"Optional HTTP request content type; defaults to application/json when body is given"`
-	AuthHeader    string            `json:"auth_header,omitempty" jsonschema:"Optional HTTP header name for auth_mode=header, default X-API-Key"`
-	AuthMode      string            `json:"auth_mode,omitempty" jsonschema:"HTTP auth mode: bearer, basic, or header; defaults from credential kind but does not constrain it"`
-	Headers       map[string]string `json:"headers,omitempty" jsonschema:"Optional HTTP request headers on registered origin (except reserved Host/Authorization and transport fields); never include enrolled secret"`
-	Command       string            `json:"command,omitempty" jsonschema:"SSH remote command: native enrolled private key, or optional sshpass for password/token; strict known-host verification"`
-	Query         string            `json:"query,omitempty" jsonschema:"SQL via native PostgreSQL SQL-only --command or MySQL/MariaDB --binary-mode stdin; registered credential used privately independent of kind. PostgreSQL SQL text is exposed in native process argv; avoid unrelated secrets in SQL literals"`
+	CredentialRef         string            `json:"credential_ref" jsonschema:"Opaque protected service_access reference; never paste the secret"`
+	Method                string            `json:"method,omitempty" jsonschema:"HTTP method; defaults to GET"`
+	Path                  string            `json:"path,omitempty" jsonschema:"Optional absolute HTTP path on the registered origin, with query; cannot change host"`
+	Body                  string            `json:"body,omitempty" jsonschema:"Optional HTTP request body; bounded by existing Executor 8 MiB serialized request frame"`
+	BodySecretRef         string            `json:"body_secret_ref,omitempty" jsonschema:"Optional second service_access reference for confidential JSON request-body field injection; must match authenticated service, origin, host and guest"`
+	BodySecretJSONPointer string            `json:"body_secret_json_pointer,omitempty" jsonschema:"Existing JSON string field to fill from body_secret_ref, e.g. /password or /user/password; never include the secret in body"`
+	ContentType           string            `json:"content_type,omitempty" jsonschema:"Optional HTTP request content type; defaults to application/json when body is given"`
+	AuthHeader            string            `json:"auth_header,omitempty" jsonschema:"Optional HTTP header name for auth_mode=header, default X-API-Key"`
+	AuthMode              string            `json:"auth_mode,omitempty" jsonschema:"HTTP auth mode: bearer, basic, or header; defaults from credential kind but does not constrain it"`
+	Headers               map[string]string `json:"headers,omitempty" jsonschema:"Optional HTTP request headers on registered origin (except reserved Host/Authorization and transport fields); never include enrolled secret"`
+	Command               string            `json:"command,omitempty" jsonschema:"SSH remote command: native enrolled private key, or optional sshpass for password/token; strict known-host verification"`
+	Query                 string            `json:"query,omitempty" jsonschema:"SQL via native PostgreSQL SQL-only --command or MySQL/MariaDB --binary-mode stdin; registered credential used privately independent of kind. PostgreSQL SQL text is exposed in native process argv; avoid unrelated secrets in SQL literals"`
 }
 
 func (s *Server) registerServiceUseTool() {
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "service_use",
-		Description: "Use a registered protected target-service credential without receiving its plaintext: HTTP(S) bearer/API-key/basic request on the registered origin (no redirects); SSH remote command using native enrolled private key or optional sshpass and strict known_hosts; or PostgreSQL/MySQL query via optional native system client and private credential delivery. Inputs contain no secret or arbitrary destination. Guest-bound refs require fresh native UUID proof. Exact plaintext credentials are scrubbed from returned output. Long results are retrievable via job_output; optional client prerequisites and OS authorization apply. Production/destructive changes still need Owner consent.",
+		Description: "Use protected service_access credentials for HTTP(S), SSH, PostgreSQL or MySQL without revealing values. Enforces registered endpoint, guest identity and no HTTP redirects. For authorized HTTP APIs, body_secret_ref plus body_secret_json_pointer privately fills an existing JSON string field from a second same-service, same-origin and same-guest credential. Never put secrets in arguments. Keep useful diagnostics with targeted secret redaction; recover large output through job_output. Optional native clients may be required. Production changes need fresh Owner consent.",
 		Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in ServiceUseInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{
 			Action: "service_use", CredentialRef: in.CredentialRef, TimeoutMS: s.commandTimeoutMS(),
-			ServiceUse: executor.ServiceUseSpec{Method: in.Method, Path: in.Path, Body: in.Body, ContentType: in.ContentType, AuthHeader: in.AuthHeader, AuthMode: in.AuthMode, Headers: in.Headers, Command: in.Command, Query: in.Query},
+			ServiceUse: executor.ServiceUseSpec{Method: in.Method, Path: in.Path, Body: in.Body, BodySecretRef: in.BodySecretRef, BodySecretJSONPointer: in.BodySecretJSONPointer, ContentType: in.ContentType, AuthHeader: in.AuthHeader, AuthMode: in.AuthMode, Headers: in.Headers, Command: in.Command, Query: in.Query},
 		})
 		if err != nil {
 			return executorTransportErrorResult(err)
