@@ -70,3 +70,44 @@ func TestDiagnosticTextFallbackExtremeMetadataStaysBounded(t *testing.T) {
 		t.Fatalf("minimum fallback lost metadata/budget: len=%d %q", len(text), text)
 	}
 }
+
+func TestDiagnosticTextFallbackPrioritizesCompleteRecoveryEnvelope(t *testing.T) {
+	next, eof, fileSize := int64(9223372036854775807), true, int64(987654321)
+	escaped := strings.Repeat("\x00\t", 2000)
+	resp := executor.Response{
+		OK: false, Status: escaped, ErrorCode: escaped, ReasonCode: escaped,
+		ErrorClass: escaped, RequestID: escaped, OperationID: escaped,
+		Error: escaped, AuditError: escaped, AuditDegraded: true,
+		JobID: "job-stable-recovery-id", FileVersion: "sha256:valid-file-recovery-version",
+		FileSize: &fileSize, RequestedOffset: 214, NextOffset: &next, EOF: &eof,
+		AvailableFromOffset: 12, CurrentEnd: next, RetentionTruncated: true,
+		OutputEncoding: "base64", Output: escaped,
+	}
+	result, structured, err := responseResultWithLimit(resp, 4096)
+	if err != nil {
+		t.Fatal(err)
+	}
+	got := result.Content[0].(*mcpsdk.TextContent).Text
+	for _, want := range []string{
+		"diagnostic_truncated=true", "job_id=\"job-stable-recovery-id\"",
+		"file_version=\"sha256:valid-file-recovery-version\"",
+		"file_size=987654321", "requested_offset=214",
+		"next_offset=9223372036854775807", "eof=true",
+		"available_from_offset=12", "current_end=9223372036854775807",
+		"retention_truncated=true", "limit<=2048", "structuredContent",
+		"retryable=false", "audit_degraded=true",
+		"status=", "error_code=", "reason_code=", "error_class=",
+		"request_id=", "operation_id=", "error=", "audit_error=",
+	} {
+		if !strings.Contains(got, want) {
+			t.Errorf("recovery-critical fallback fragment lost: %s: %q", want, got)
+		}
+	}
+	if len(got) > 4096 || strings.Contains(got, "\x00") {
+		t.Fatalf("fallback exceeded exact text-byte budget: %d", len(got))
+	}
+	if structured.Output != resp.Output || structured.ErrorCode != resp.ErrorCode ||
+		structured.FileVersion != resp.FileVersion || structured.RequestID != resp.RequestID {
+		t.Fatal("priority fallback mutated structured content")
+	}
+}

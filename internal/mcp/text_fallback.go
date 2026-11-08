@@ -41,7 +41,11 @@ func diagnosticTextFallback(resp executor.Response, maxBytes int) string {
 			shortened = true
 		}
 		prefix := " " + key + "="
-		remaining := budget - b.Len() - len(prefix)
+		// Limit each quoted field's *encoded* footprint as well as its
+		// source length. Otherwise control-byte escape expansion in a
+		// single early field could displace later correlation/diagnostic
+		// fields even with the continuation envelope already prioritized.
+		remaining := min(budget-b.Len()-len(prefix), maxRaw*2+2)
 		if remaining < 2 {
 			shortened = true
 			return
@@ -59,34 +63,19 @@ func diagnosticTextFallback(resp executor.Response, maxBytes int) string {
 		}
 		add(prefix + encoded)
 	}
+	// Place the actionable continuation envelope before expandable provider
+	// text. The minimum 4096-byte budget can fit these bounded identifiers,
+	// numeric windows and recovery instructions even with quoted control bytes.
 	add(fmt.Sprintf("ok=%t audit_degraded=%t", resp.OK, resp.AuditDegraded))
-	addQuoted("status", resp.Status, 80)
-	addQuoted("error_code", resp.ErrorCode, 80)
-	addQuoted("reason_code", resp.ReasonCode, 80)
-	addQuoted("error_class", resp.ErrorClass, 80)
 	add(fmt.Sprintf(" retryable=%t timed_out=%t exit_code=%d", resp.Retryable, resp.TimedOut, resp.ExitCode))
-	addQuoted("request_id", resp.RequestID, 96)
-	addQuoted("operation_id", resp.OperationID, 96)
-	if resp.Error != "" {
-		addQuoted("error", resp.Error, 240)
+	if resp.JobID != "" {
+		addQuoted("job_id", resp.JobID, 64)
 	}
-	if resp.AuditDegraded {
-		addQuoted("audit_error", resp.AuditError, 160)
-		if resp.AuditError == "" {
-			add(" audit_recovery=inspect_audit_and_operation_status")
-		}
-	}
-	add(fmt.Sprintf(" bytes_seen=%d bytes_returned=%d", resp.BytesSeen, resp.BytesReturned))
-	addQuoted("output_encoding", resp.OutputEncoding, 64)
-	add(fmt.Sprintf(" truncated=%t omitted_bytes=%d", resp.Truncated, resp.OmittedBytes))
 	if resp.FileSize != nil {
 		add(fmt.Sprintf(" file_size=%d", *resp.FileSize))
 	}
 	if resp.FileVersion != "" {
 		addQuoted("file_version", resp.FileVersion, 120)
-	}
-	if resp.JobID != "" {
-		addQuoted("job_id", resp.JobID, 64)
 	}
 	if resp.NextOffset != nil {
 		add(fmt.Sprintf(" requested_offset=%d next_offset=%d", resp.RequestedOffset, *resp.NextOffset))
@@ -98,7 +87,6 @@ func diagnosticTextFallback(resp executor.Response, maxBytes int) string {
 				resp.AvailableFromOffset, resp.CurrentEnd, resp.RetentionTruncated))
 		}
 		// The output budget is raw bytes BEFORE Base64 and JSON encoding.
-		// Recovery windows must fit even the 4096-byte text-only minimum.
 		recoveryLimit := 4096
 		if resp.OutputEncoding == "base64" {
 			recoveryLimit = 2048
@@ -108,6 +96,24 @@ func diagnosticTextFallback(resp executor.Response, maxBytes int) string {
 		add("; output omitted from text fallback: retrieve the complete command output using job_output(job_id, offset=0, limit<=4096), continuing with next_offset (retention is bounded)")
 	} else {
 		add("; output omitted from text fallback: use structuredContent; no output recovery ID was returned")
+	}
+	addQuoted("status", resp.Status, 80)
+	addQuoted("error_code", resp.ErrorCode, 80)
+	addQuoted("reason_code", resp.ReasonCode, 80)
+	addQuoted("error_class", resp.ErrorClass, 80)
+	addQuoted("request_id", resp.RequestID, 96)
+	addQuoted("operation_id", resp.OperationID, 96)
+	add(fmt.Sprintf(" bytes_seen=%d bytes_returned=%d", resp.BytesSeen, resp.BytesReturned))
+	addQuoted("output_encoding", resp.OutputEncoding, 64)
+	add(fmt.Sprintf(" truncated=%t omitted_bytes=%d", resp.Truncated, resp.OmittedBytes))
+	if resp.Error != "" {
+		addQuoted("error", resp.Error, 240)
+	}
+	if resp.AuditDegraded {
+		addQuoted("audit_error", resp.AuditError, 160)
+		if resp.AuditError == "" {
+			add(" audit_recovery=inspect_audit_and_operation_status")
+		}
 	}
 	if shortened {
 		b.WriteString(truncatedMarker)

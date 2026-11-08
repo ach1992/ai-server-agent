@@ -105,3 +105,37 @@ func TestWorkspaceHelperReadOnlyAuditFailureIsVisibleWithoutReclassifyingRead(t 
 		t.Fatalf("read-only audit failure was suppressed or misclassified: %+v", got)
 	}
 }
+
+func TestWorkspaceHelperRedactedStderrFinalBoundsAndRawAccounting(t *testing.T) {
+	s, repo := helperFailureServer(t)
+	helper := filepath.Join(t.TempDir(), "large-stderr-helper")
+	s.workspaceHelperBinary = helper
+	for _, tc := range []struct {
+		name, script string
+		seen         int64
+	}{
+		{"below-raw-window-with-mask-expansion", "#!/bin/sh\ni=0; while [ \"$i\" -lt 500 ]; do printf 'token=a;'; i=$((i+1)); done >&2\nexit 47\n", 4000},
+		{"exact-raw-window-with-mask-expansion", "#!/bin/sh\ni=0; while [ \"$i\" -lt 512 ]; do printf 'token=a;'; i=$((i+1)); done >&2\nexit 47\n", 4096},
+		{"exceeds-raw-window", "#!/bin/sh\ni=0; while [ \"$i\" -lt 600 ]; do printf 'token=a;'; i=$((i+1)); done >&2\nexit 47\n", 4800},
+		{"incomplete-quoted-secret-at-boundary", "#!/bin/sh\nprintf 'worker failed; password=\"private words near boundary ' >&2\nhead -c 6000 /dev/zero | tr '\\000' x >&2\nexit 47\n", 0},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if err := os.WriteFile(helper, []byte(tc.script), 0700); err != nil {
+				t.Fatal(err)
+			}
+			resp := s.workerWorkspaceFile(context.Background(), Request{Action: "workspace_stat", Workspace: repo, Path: "src/file"})
+			if resp.OK || resp.ExitCode != 47 || len(resp.Output) > workspaceHelperDiagnosticBytes ||
+				resp.BytesReturned != int64(len(resp.Output)) || !resp.Truncated ||
+				resp.OmittedBytes <= 0 || strings.Contains(resp.Output, "private words") ||
+				strings.Contains(resp.Output, "token=a;") {
+				t.Fatalf("native diagnostic leaked or inconsistent: %+v", resp)
+			}
+			if tc.seen != 0 && resp.BytesSeen != tc.seen {
+				t.Fatalf("raw native bytes seen were altered by redaction: got=%d want=%d", resp.BytesSeen, tc.seen)
+			}
+			if tc.seen == 0 && resp.BytesSeen <= 4096 {
+				t.Fatalf("native exceeded cap but accounting falsely bounded: %+v", resp)
+			}
+		})
+	}
+}

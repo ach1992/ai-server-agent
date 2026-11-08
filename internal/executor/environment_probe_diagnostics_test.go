@@ -61,3 +61,63 @@ func TestEnvironmentOptionalMissingRemainsNonfatalAndUnreadableIsUseful(t *testi
 		t.Fatalf("missing worker OS diagnostic in warning: %+v", summary.Warnings)
 	}
 }
+
+func TestEnvironmentDeclarationDurabilityStatesAndNativeGitFailure(t *testing.T) {
+	s, root := environmentTestServer(t)
+	repo, head := initEnvironmentFixture(t, root, map[string]string{
+		"go.mod": "module example.invalid/diagnostics\n\ngo 1.26.0\n",
+	})
+	probe := func(path string, ctx context.Context) (*environmentBuilder, EnvironmentDeclaration) {
+		t.Helper()
+		b := &environmentBuilder{server: s, root: repo}
+		if _, ok := b.readDeclaration(ctx, path, "go"); !ok || len(b.declarations) != 1 {
+			t.Fatalf("declaration not observed: %+v", b)
+		}
+		return b, b.declarations[0]
+	}
+	b, d := probe("go.mod", context.Background())
+	if !d.Tracked || !d.MatchesHead || d.DurabilityStatus != "matches_head" || len(b.warnings) != 0 {
+		t.Fatalf("unchanged Git declaration status wrong: %+v %+v", d, b.warnings)
+	}
+	if err := os.WriteFile(filepath.Join(repo, "go.mod"), []byte("module example.invalid/changed\n\ngo 1.26.0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	b, d = probe("go.mod", context.Background())
+	if !d.Tracked || d.MatchesHead || d.DurabilityStatus != "differs_from_head" ||
+		!strings.Contains(strings.Join(b.warnings, " "), "differs from HEAD") {
+		t.Fatalf("known modified declaration status wrong: %+v %+v", d, b.warnings)
+	}
+	if err := os.WriteFile(filepath.Join(repo, ".tool-versions"), []byte("go 1.26.0\n"), 0644); err != nil {
+		t.Fatal(err)
+	}
+	b, d = probe(".tool-versions", context.Background())
+	if d.Tracked || d.MatchesHead || d.DurabilityStatus != "untracked" ||
+		!strings.Contains(strings.Join(b.warnings, " "), "not Git-tracked") {
+		t.Fatalf("untracked declaration misclassified: %+v %+v", d, b.warnings)
+	}
+	// The index can still enumerate tracked paths, but diff HEAD must fail
+	// with a genuine native Git error once the fixture HEAD object is absent.
+	// This changes only the disposable fixture repository, never a live worktree.
+	object := filepath.Join(repo, ".git", "objects", head[:2], head[2:])
+	if err := os.Remove(object); err != nil {
+		t.Fatal(err)
+	}
+	b, d = probe("go.mod", context.Background())
+	warnings := strings.Join(b.warnings, " ")
+	if !d.Tracked || d.MatchesHead || d.DurabilityStatus != "unknown" ||
+		!strings.Contains(warnings, "Git HEAD comparison failed") ||
+		!strings.Contains(warnings, "git diff exited") ||
+		!strings.Contains(warnings, "stderr=") ||
+		strings.Contains(warnings, "differs from HEAD") {
+		t.Fatalf("failed diff claimed a verified content change: %+v %v", d, b.warnings)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	b = &environmentBuilder{server: s, root: repo}
+	tracked, matched, state := b.declarationDurability(canceled, "go.mod")
+	if tracked || matched || state != "unknown" ||
+		!strings.Contains(strings.Join(b.warnings, " "), "Git tracking probe failed") ||
+		strings.Contains(strings.Join(b.warnings, " "), "not Git-tracked") {
+		t.Fatalf("unable to start Git was misreported as untracked: tracked=%t matched=%t status=%s warnings=%v", tracked, matched, state, b.warnings)
+	}
+}

@@ -3,6 +3,7 @@ package managedincus
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,6 +35,9 @@ elif args[0]=='query' and args[1]=='/1.0':
     print(json.dumps({'api_version':'1.0'}))
 elif args[0]=='query' and '/1.0/storage-pools/' in args[1]:
     if mode=='pool_unavailable':sys.exit(43)
+    if mode=='pool_unavailable_diagnostic':
+        print('selected pool storage driver unavailable; password=POOLSECRET',file=sys.stderr)
+        sys.exit(43)
     total=16*(1<<30)
     used=total if mode=='pool_full' else 2*(1<<30)
     print(json.dumps({'space':{'total':total,'used':used}}))
@@ -80,6 +84,9 @@ elif args[0]=='list':
 elif args[0]=='launch':
     if mode=='sleep_launch':time.sleep(10)
     if mode=='uncertain_launch':sys.exit(45)
+    if mode=='uncertain_launch_diagnostic':
+        print('launch denied by native daemon; token=LAUNCHSECRET; inspect pool',file=sys.stderr)
+        sys.exit(45)
     image=args[1];name=args[2];project=value('--project','default')
     cfg={}
     for i,x in enumerate(args[:-1]):
@@ -832,8 +839,10 @@ func TestInterruptedNativeCreateKeepsIntentAfterCancellation(t *testing.T) {
 	defer cancel()
 	req := createRequest()
 	_, err := b.Run(ctx, req, false, "")
-	if err == nil || !strings.Contains(err.Error(), "create_outcome_uncertain") {
-		t.Fatalf("interrupt returned a definitive outcome: %v", err)
+	var native *NativeCommandError
+	if err == nil || !strings.Contains(err.Error(), "create_outcome_uncertain") ||
+		!errors.As(err, &native) || !native.TimedOut || native.Stage != "launch" {
+		t.Fatalf("interrupted launch lost timeout evidence or claimed a definitive outcome: %+v %v", native, err)
 	}
 	other := Backend{HostID: b.HostID, Binary: b.Binary, StateDir: b.StateDir, capacityProbe: b.capacityProbe}
 	status, err := other.Run(context.Background(), Request{Operation: "pending_creates"}, false, "")

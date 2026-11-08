@@ -17,47 +17,56 @@ func managedJSON(v any) Response {
 	if err != nil {
 		return fileError("managed_encode_failed", "state", err)
 	}
-	return Response{OK: true, Status: "observed", Output: string(b), OutputEncoding: "json", BytesSeen: int64(len(b)), BytesReturned: int64(len(b))}
+	resp := Response{OK: true, Status: "observed", Output: string(b), OutputEncoding: "json", BytesSeen: int64(len(b)), BytesReturned: int64(len(b))}
+	if native, ok := v.(managedincus.Result); ok {
+		// The observation itself can succeed while its native readiness
+		// probe timed out. Keep both facts visible at the top level.
+		resp.TimedOut = native.TimedOut
+	}
+	return resp
 }
 func managedErr(err error) Response {
-	// Provider text must not alter reason-code classification: the native
-	// command's typed failure carries the evidence in the response output.
+	// Classify the higher-level operation and recovery semantics first.
+	// A wrapped native command is evidence, not grounds for converting an
+	// uncertain create or storage preflight into an ordinary process failure.
+	code := "managed_operation_failed"
+	switch {
+	case contains(err, "_missing", "not_found"):
+		code = "resource_missing"
+	case contains(err, "_mismatch", "_collision", "_conflict"):
+		code = "identity_conflict"
+	case contains(err, "_expired"):
+		code = "credential_expired"
+	case contains(err, "_revoked"):
+		code = "credential_revoked"
+	case contains(err, "approval_required"):
+		code = "approval_required"
+	case contains(err, "_unavailable", "_unready"):
+		code = "dependency_unavailable"
+	case contains(err, "_uncertain", "_unverified"):
+		code = "outcome_uncertain"
+	}
 	var native *managedincus.NativeCommandError
-	if errors.As(err, &native) {
-		resp := fileError("native_command_failed", "process", err)
-		resp.Status = "native_command_failed"
+	hasNative := errors.As(err, &native)
+	class := "managed"
+	if hasNative && code == "managed_operation_failed" {
+		code, class = "native_command_failed", "process"
+	}
+	resp := fileError(code, class, err)
+	if hasNative {
+		if code == "native_command_failed" {
+			resp.Status = "native_command_failed"
+		}
 		resp.ExitCode = native.ExitCode
+		resp.TimedOut = native.TimedOut
 		resp.Output = native.Diagnostic
 		resp.OutputEncoding = "utf-8"
 		resp.BytesSeen = native.BytesSeen
 		resp.BytesReturned = int64(len(native.Diagnostic))
-		if resp.BytesSeen < resp.BytesReturned {
-			resp.BytesSeen = resp.BytesReturned
-		}
-		resp.OmittedBytes = resp.BytesSeen - resp.BytesReturned
+		resp.OmittedBytes = native.OmittedBytes
 		resp.Truncated = native.Truncated
-		return resp
 	}
-	code := "managed_operation_failed"
-	if err != nil {
-		switch {
-		case contains(err, "_missing", "not_found"):
-			code = "resource_missing"
-		case contains(err, "_mismatch", "_collision", "_conflict"):
-			code = "identity_conflict"
-		case contains(err, "_expired"):
-			code = "credential_expired"
-		case contains(err, "_revoked"):
-			code = "credential_revoked"
-		case contains(err, "approval_required"):
-			code = "approval_required"
-		case contains(err, "_unavailable", "_unready"):
-			code = "dependency_unavailable"
-		case contains(err, "_uncertain", "_unverified"):
-			code = "outcome_uncertain"
-		}
-	}
-	return fileError(code, "managed", err)
+	return resp
 }
 func contains(err error, needles ...string) bool {
 	if err == nil {
@@ -212,6 +221,7 @@ func (s *Server) serviceAccessAction(ctx context.Context, req Request) Response 
 // actually dispatched to Incus.
 func managedGuestExecFailure(result managedincus.Result, err error) Response {
 	resp := managedErr(err)
+	resp.TimedOut = resp.TimedOut || result.TimedOut
 	resp.ExitCode = result.ExitCode
 	resp.Output = result.Output
 	resp.OutputEncoding = "utf-8"
@@ -232,6 +242,22 @@ func managedGuestExecFailure(result managedincus.Result, err error) Response {
 		resp.ErrorCode, resp.ReasonCode = "guest_agent_unavailable", "guest_agent_unavailable"
 		resp.ErrorClass = "dependency"
 	}
+	return resp
+}
+
+// A failed native readiness query is a preflight failure, not evidence that
+// the requested stateful operation was dispatched.
+func managedUnavailableResult(result managedincus.Result) Response {
+	resp := fileError("incus_unavailable", "dependency", errors.New(result.Diagnostic))
+	resp.Status = "native_preflight_unavailable"
+	resp.ExitCode = result.ExitCode
+	resp.TimedOut = result.TimedOut
+	resp.Output = result.Output
+	resp.OutputEncoding = "utf-8"
+	resp.BytesSeen = result.OutputBytesSeen
+	resp.BytesReturned = int64(len(result.Output))
+	resp.OmittedBytes = result.OutputOmittedBytes
+	resp.Truncated = result.OutputTruncated
 	return resp
 }
 
@@ -282,20 +308,7 @@ func (s *Server) managedEnvironmentAction(ctx context.Context, req Request) Resp
 			resp = managedErr(err)
 		}
 	} else if !result.Available && in.Operation != "status" && in.Operation != "pending_creates" {
-		resp = fileError("incus_unavailable", "dependency", errors.New(result.Diagnostic))
-		// Readiness failure happens before dispatching the requested guest
-		// action. Preserve the native query's bounded evidence separately.
-		resp.Status = "native_preflight_unavailable"
-		resp.ExitCode = result.ExitCode
-		resp.Output = result.Output
-		resp.OutputEncoding = "utf-8"
-		resp.BytesSeen = result.OutputBytesSeen
-		resp.BytesReturned = int64(len(result.Output))
-		if resp.BytesSeen < resp.BytesReturned {
-			resp.BytesSeen = resp.BytesReturned
-		}
-		resp.OmittedBytes = resp.BytesSeen - resp.BytesReturned
-		resp.Truncated = result.OutputTruncated
+		resp = managedUnavailableResult(result)
 	} else {
 		resp = managedJSON(result)
 	}

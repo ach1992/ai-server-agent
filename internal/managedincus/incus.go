@@ -76,20 +76,22 @@ type Summary struct {
 	Managed     bool     `json:"managed"`
 }
 type Result struct {
-	Status          string            `json:"status"`
-	HostID          string            `json:"host_id"`
-	Available       bool              `json:"available"`
-	Diagnostic      string            `json:"diagnostic,omitempty"`
-	Instances       []Summary         `json:"instances,omitempty"`
-	Instance        *Summary          `json:"instance,omitempty"`
-	Output          string            `json:"output,omitempty"`
-	ExitCode        int               `json:"exit_code,omitempty"`
-	Snapshots       []string          `json:"snapshots,omitempty"`
-	Pending         []CreateIntent    `json:"pending_creates,omitempty"`
-	Operations      []NativeOperation `json:"native_operations,omitempty"`
-	Operation       *NativeOperation  `json:"native_operation,omitempty"`
-	OutputTruncated bool              `json:"output_truncated,omitempty"`
-	OutputBytesSeen int64             `json:"output_bytes_seen,omitempty"`
+	Status             string            `json:"status"`
+	HostID             string            `json:"host_id"`
+	Available          bool              `json:"available"`
+	Diagnostic         string            `json:"diagnostic,omitempty"`
+	Instances          []Summary         `json:"instances,omitempty"`
+	Instance           *Summary          `json:"instance,omitempty"`
+	Output             string            `json:"output,omitempty"`
+	ExitCode           int               `json:"exit_code,omitempty"`
+	Snapshots          []string          `json:"snapshots,omitempty"`
+	Pending            []CreateIntent    `json:"pending_creates,omitempty"`
+	Operations         []NativeOperation `json:"native_operations,omitempty"`
+	Operation          *NativeOperation  `json:"native_operation,omitempty"`
+	OutputTruncated    bool              `json:"output_truncated,omitempty"`
+	OutputBytesSeen    int64             `json:"output_bytes_seen,omitempty"`
+	OutputOmittedBytes int64             `json:"output_omitted_bytes,omitempty"`
+	TimedOut           bool              `json:"timed_out,omitempty"`
 }
 type Backend struct {
 	HostID         string
@@ -189,12 +191,14 @@ func (b Backend) cliProtected(ctx context.Context, stdin io.Reader, discardOutpu
 // Executor reason-code classification. The bounded diagnostic is delivered
 // separately in the authenticated managed_environment response.
 type NativeCommandError struct {
-	Stage      string
-	ExitCode   int
-	Diagnostic string
-	BytesSeen  int64
-	Truncated  bool
-	Cause      error
+	Stage        string
+	ExitCode     int
+	Diagnostic   string
+	BytesSeen    int64
+	OmittedBytes int64
+	Truncated    bool
+	TimedOut     bool
+	Cause        error
 }
 
 func (e *NativeCommandError) Error() string {
@@ -209,11 +213,15 @@ func (b Backend) command(ctx context.Context, timeout time.Duration, args ...str
 	out, code, truncated, seen, err := b.cliProtected(runCtx, nil, false, "", args...)
 	if err != nil {
 		// A failed native command may also have returned partial stdout.
-		// The native diagnostics are independently bounded, never trusted
-		// as classification input, and cannot change command certainty.
+		// Keep actual captured-native bytes separate from presentation size:
+		// redaction can expand or contract the bounded diagnostic.
+		safe, clipped := secretoutput.BoundedDiagnosticText(out, maxOutput)
 		return "", &NativeCommandError{
-			Stage: args[0], ExitCode: code, Diagnostic: secretoutput.RedactDiagnosticText(out),
-			BytesSeen: seen, Truncated: truncated, Cause: err,
+			Stage: args[0], ExitCode: code, Diagnostic: safe,
+			BytesSeen: seen, OmittedBytes: seen - int64(len(out)) + clipped,
+			Truncated: truncated || clipped > 0,
+			TimedOut:  errors.Is(runCtx.Err(), context.DeadlineExceeded),
+			Cause:     err,
 		}
 	}
 	if truncated {
@@ -389,7 +397,9 @@ func (b Backend) Ready(ctx context.Context) Result {
 			r.ExitCode = native.ExitCode
 			r.Output = native.Diagnostic
 			r.OutputBytesSeen = native.BytesSeen
+			r.OutputOmittedBytes = native.OmittedBytes
 			r.OutputTruncated = native.Truncated
+			r.TimedOut = native.TimedOut
 		}
 		return r
 	}
@@ -633,7 +643,7 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 			// A launch response alone does not establish identity or completion.
 			x, found, inspectErr := b.inspect(ctx, req.Project, req.Instance)
 			if inspectErr != nil {
-				return base, errors.New("create_outcome_uncertain: native state could not be reconciled; inspect before retry")
+				return base, fmt.Errorf("create_outcome_uncertain: native state could not be reconciled; inspect before retry: %w", errors.Join(launchErr, inspectErr))
 			}
 			if found && x.Managed && x.OperationID == req.OperationID && x.WorkID == req.WorkID && x.Type == req.Type {
 				if x.StoragePool == "" || x.DiskLimit == "" {
@@ -653,6 +663,15 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 					base.Status = "created"
 				} else {
 					base.Status = "created_but_launch_reported_error"
+					var native *NativeCommandError
+					if errors.As(launchErr, &native) {
+						base.Output = native.Diagnostic
+						base.ExitCode = native.ExitCode
+						base.OutputBytesSeen = native.BytesSeen
+						base.OutputOmittedBytes = native.OmittedBytes
+						base.OutputTruncated = native.Truncated
+						base.TimedOut = native.TimedOut
+					}
 				}
 				return base, nil
 			}
@@ -660,7 +679,7 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 				return base, errors.New("create_collision_after_launch: unexpected guest identity")
 			}
 			if launchErr != nil {
-				return base, errors.New("create_outcome_uncertain: launch reported an error and no native guest is yet visible; submission remains durably reserved for reconciliation")
+				return base, fmt.Errorf("create_outcome_uncertain: launch reported an error and no native guest is yet visible; submission remains durably reserved for reconciliation: %w", launchErr)
 			}
 			return base, errors.New("create_unverified: Incus reported success but instance not found")
 		})
@@ -749,6 +768,7 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 				input = strings.NewReader(secret + "\n")
 			}
 			out, code, trunc, seen, runErr := b.cliProtected(runCtx, input, false, secret, args...)
+			base.TimedOut = errors.Is(runCtx.Err(), context.DeadlineExceeded)
 			base.Output = out
 			base.ExitCode = code
 			base.OutputTruncated = trunc
@@ -830,7 +850,7 @@ func (b Backend) checkNativePool(ctx context.Context, pool string, diskGiB int) 
 	path := "/1.0/storage-pools/" + url.PathEscape(pool) + "/resources"
 	raw, err := b.command(ctx, 20*time.Second, "query", path)
 	if err != nil {
-		return errors.New("incus_storage_unavailable: selected pool resources cannot be read; inspect Incus storage pool and driver")
+		return fmt.Errorf("incus_storage_unavailable: selected pool resources cannot be read; inspect Incus storage pool and driver: %w", err)
 	}
 	var data struct {
 		Space struct {

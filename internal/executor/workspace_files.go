@@ -254,15 +254,15 @@ func (s *Server) workerWorkspaceFile(parent context.Context, req Request) (resp 
 			failed.ExitCode = cmd.ProcessState.ExitCode()
 		}
 		failed.TimedOut = errors.Is(ctx.Err(), context.DeadlineExceeded)
-		failed.Output = secretoutput.RedactDiagnosticText(stderr.String())
+		// Native bytes seen and sanitized presentation bytes are different
+		// units: masking may expand output, and cannot fabricate native bytes.
+		var clipped int64
+		failed.Output, clipped = secretoutput.BoundedDiagnosticText(stderr.String(), workspaceHelperDiagnosticBytes)
 		failed.OutputEncoding = "utf-8"
 		failed.BytesSeen = stderr.seen
 		failed.BytesReturned = int64(len(failed.Output))
-		if failed.BytesSeen < failed.BytesReturned {
-			failed.BytesSeen = failed.BytesReturned
-		}
-		failed.OmittedBytes = failed.BytesSeen - failed.BytesReturned
-		failed.Truncated = stderr.seen > workspaceHelperDiagnosticBytes
+		failed.OmittedBytes = stderr.seen - int64(stderr.buf.Len()) + clipped
+		failed.Truncated = failed.OmittedBytes > 0
 		return failed
 	}
 	if waitErr != nil || stdout.overflow || ctx.Err() != nil {

@@ -214,8 +214,8 @@ func (s *Server) environmentGit(ctx context.Context, dir string, args ...string)
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		detail := secretoutput.RedactDiagnosticText(strings.TrimSpace(stderr.String()))
-		if stderr.overflow {
+		detail, clipped := secretoutput.BoundedDiagnosticText(strings.TrimSpace(stderr.String()), 4096)
+		if stderr.overflow || clipped > 0 {
 			detail += " [native stderr truncated at 4096 bytes]"
 		}
 		return strings.TrimSpace(stdout.String()), exitErr.ExitCode(),
@@ -246,10 +246,10 @@ func (b *environmentBuilder) readDeclaration(ctx context.Context, rel, kind stri
 		b.warnings = append(b.warnings, fmt.Sprintf("%s is not a regular non-symlink declaration file and was ignored", rel))
 		return nil, false
 	}
-	tracked, matchesHead := b.declarationDurability(ctx, rel)
+	tracked, matchesHead, durability := b.declarationDurability(ctx, rel)
 	if info.Size() > maxEnvironmentFileBytes {
-		b.declarations = append(b.declarations, EnvironmentDeclaration{Path: rel, Kind: kind, Tracked: tracked, MatchesHead: matchesHead})
-		b.appendDeclarationDurabilityWarning(rel, tracked, matchesHead)
+		b.declarations = append(b.declarations, EnvironmentDeclaration{Path: rel, Kind: kind, Tracked: tracked, MatchesHead: matchesHead, DurabilityStatus: durability})
+		b.appendDeclarationDurabilityWarning(rel, durability)
 		b.warnings = append(b.warnings, fmt.Sprintf("%s exceeds the bounded parse size; presence was recorded but content was not parsed", rel))
 		return nil, true
 	}
@@ -259,8 +259,8 @@ func (b *environmentBuilder) readDeclaration(ctx context.Context, rel, kind stri
 		return nil, false
 	}
 	hash := sha256.Sum256(data)
-	b.declarations = append(b.declarations, EnvironmentDeclaration{Path: rel, Kind: kind, Tracked: tracked, MatchesHead: matchesHead, SHA256: hex.EncodeToString(hash[:])})
-	b.appendDeclarationDurabilityWarning(rel, tracked, matchesHead)
+	b.declarations = append(b.declarations, EnvironmentDeclaration{Path: rel, Kind: kind, Tracked: tracked, MatchesHead: matchesHead, DurabilityStatus: durability, SHA256: hex.EncodeToString(hash[:])})
+	b.appendDeclarationDurabilityWarning(rel, durability)
 	return data, true
 }
 
@@ -294,8 +294,8 @@ func (s *Server) readEnvironmentFileAsWorker(ctx context.Context, path string) (
 		if errors.Is(err, errEnvironmentOutputLimit) {
 			return nil, errEnvironmentOutputLimit
 		}
-		detail := secretoutput.RedactDiagnosticText(strings.TrimSpace(stderr.String()))
-		if stderr.overflow {
+		detail, clipped := secretoutput.BoundedDiagnosticText(strings.TrimSpace(stderr.String()), 4096)
+		if stderr.overflow || clipped > 0 {
 			detail += " [native stderr truncated at 4096 bytes]"
 		}
 		return nil, fmt.Errorf("read declaration with worker cat %q: %w; stderr=%q", path, err, detail)
@@ -303,31 +303,35 @@ func (s *Server) readEnvironmentFileAsWorker(ctx context.Context, path string) (
 	return []byte(output.String()), nil
 }
 
-func (b *environmentBuilder) declarationDurability(ctx context.Context, rel string) (tracked, matchesHead bool) {
+// durabilityStatus makes a failed comparison distinct from a verified
+// difference. The legacy tracked/matches_head booleans remain additive
+// compatibility fields; false alone is not proof of a difference.
+func (b *environmentBuilder) declarationDurability(ctx context.Context, rel string) (tracked, matchesHead bool, durabilityStatus string) {
 	_, code, err := b.server.environmentGit(ctx, b.root, "ls-files", "--error-unmatch", "--", rel)
 	if code != 0 || err != nil {
-		// Exit 1 is the normal Git absence result for an optional untracked
-		// declaration. Other native Git failures deserve actionable context.
-		if code != 1 {
-			b.warnings = append(b.warnings, fmt.Sprintf("%s Git tracking probe failed: %v", rel, err))
+		if code == 1 {
+			return false, false, "untracked"
 		}
-		return false, false
+		b.warnings = append(b.warnings, fmt.Sprintf("%s Git tracking probe failed: %v", rel, err))
+		return false, false, "unknown"
 	}
-	tracked = true
 	_, code, err = b.server.environmentGit(ctx, b.root, "diff", "--quiet", "HEAD", "--", rel)
-	if err == nil && code == 0 {
-		matchesHead = true
-	} else if code != 1 {
+	switch {
+	case err == nil && code == 0:
+		return true, true, "matches_head"
+	case code == 1:
+		return true, false, "differs_from_head"
+	default:
 		b.warnings = append(b.warnings, fmt.Sprintf("%s Git HEAD comparison failed: %v", rel, err))
+		return true, false, "unknown"
 	}
-	return tracked, matchesHead
 }
 
-func (b *environmentBuilder) appendDeclarationDurabilityWarning(rel string, tracked, matchesHead bool) {
-	switch {
-	case !tracked:
+func (b *environmentBuilder) appendDeclarationDurabilityWarning(rel, durabilityStatus string) {
+	switch durabilityStatus {
+	case "untracked":
 		b.warnings = append(b.warnings, fmt.Sprintf("%s is not Git-tracked; it is visible working state but not durable repository truth", rel))
-	case !matchesHead:
+	case "differs_from_head":
 		b.warnings = append(b.warnings, fmt.Sprintf("%s is Git-tracked but differs from HEAD; current working state is not durable repository truth until committed", rel))
 	}
 }
