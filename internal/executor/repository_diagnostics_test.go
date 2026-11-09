@@ -12,15 +12,20 @@ import (
 )
 
 // Fail only the named Git stage and delegate every other stage to real Git.
-func installFaultGit(t *testing.T, stage string, exitCode int, diagnostic string) {
+func installFaultGit(t *testing.T, stage string, exitCode int, diagnostic string, worktreeAddTrace ...string) {
 	t.Helper()
 	realGit, err := exec.LookPath("git")
 	if err != nil {
 		t.Fatal(err)
 	}
 	binDir := t.TempDir()
+	probe := ""
+	if len(worktreeAddTrace) > 0 {
+		probe = fmt.Sprintf("if [ \"$1 $2\" = \"worktree add\" ]; then printf invoked > %q; fi\n", worktreeAddTrace[0])
+	}
 	script := fmt.Sprintf(`#!/bin/sh
 while [ "$1" = "-c" ]; do shift 2; done
+%s
 if [ "$1" = %q ] || [ "$1 $2" = %q ]; then
 	cat >&2 <<'NATIVE_GIT_DIAGNOSTIC'
 %s
@@ -28,7 +33,7 @@ NATIVE_GIT_DIAGNOSTIC
 	exit %d
 fi
 exec %q "$@"
-`, stage, stage, diagnostic, exitCode, realGit)
+`, probe, stage, stage, diagnostic, exitCode, realGit)
 	if err := os.WriteFile(filepath.Join(binDir, "git"), []byte(script), 0755); err != nil {
 		t.Fatal(err)
 	}
@@ -255,5 +260,74 @@ func TestWorktreeAddAndRemoveNativeGitFailuresPreserveDiagnosis(t *testing.T) {
 				t.Fatalf("worktree %s failed to preserve expected target state: %v", operation, statErr)
 			}
 		})
+	}
+}
+
+func TestWorktreeCreateRefLookupFatalFailureNeverMutates(t *testing.T) {
+	for _, exitCode := range []int{47, 128} {
+		t.Run(fmt.Sprint(exitCode), func(t *testing.T) {
+			s, root := repositoryTestServer(t)
+			repo := filepath.Join(root, "repo")
+			head := initFixtureRepo(t, repo)
+			target := filepath.Join(root, "task")
+			probe := filepath.Join(root, "worktree-add-invoked")
+			// The injected lookup failure must not reach git worktree add.
+			installFaultGit(t, "for-each-ref", exitCode, diagnosticGitFailure, probe)
+			resp := s.worktreeCreateContext(context.Background(), Request{
+				RepositoryPath: repo, WorktreePath: target, Branch: "task",
+				StartRef: "main", ExpectedSHA: head,
+			})
+			if resp.OK || resp.ErrorCode != "git_failed" || resp.ExitCode != exitCode ||
+				!strings.Contains(resp.Error, "git for-each-ref exited "+fmt.Sprint(exitCode)) ||
+				!strings.Contains(resp.Error, "native Git diagnostic") {
+				t.Fatalf("fatal local branch lookup was not preserved: %+v", resp)
+			}
+			for _, secret := range []string{"PRIVATE-API-KEY", "PRIVATE-PASSWORD", "PRIVATE-URL-PASSWORD", "PRIVATE-QUERY", "PRIVATE-BEARER"} {
+				if strings.Contains(resp.Error, secret) {
+					t.Fatalf("fatal branch lookup leaked credentials: %+v", resp)
+				}
+			}
+			for _, path := range []string{probe, target} {
+				if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+					t.Fatalf("failed branch lookup invoked worktree add or changed target %q: %v", path, err)
+				}
+			}
+			if branches := fixtureGit(t, repo, "branch", "--list", "task"); branches != "" {
+				t.Fatalf("failed branch lookup created a branch: %q", branches)
+			}
+		})
+	}
+}
+
+func TestRepositoryStatusFailureRedactsMultipartAuthorization(t *testing.T) {
+	s, root := repositoryTestServer(t)
+	repo := filepath.Join(root, "repo")
+	initFixtureRepo(t, repo)
+	installFaultGit(t, "status", 51, "native Git diagnostic; Authorization: Basic PRIVATE-BASIC-BASE64; connection refused")
+	resp := s.repositoryInspectContext(context.Background(), Request{RepositoryPath: repo})
+	if resp.OK || resp.ErrorCode != "git_failed" || resp.ExitCode != 51 ||
+		!strings.Contains(resp.Error, "git status exited 51") ||
+		!strings.Contains(resp.Error, "connection refused") ||
+		!strings.Contains(resp.Error, "Authorization: [REDACTED]") ||
+		strings.Contains(resp.Error, "PRIVATE-BASIC-BASE64") {
+		t.Fatalf("public repository inspection exposed Authorization credentials: %+v", resp)
+	}
+}
+
+func TestGitNativeStderrRedactsTruncatedAuthorization(t *testing.T) {
+	for _, value := range []string{
+		"Authorization: Basic PRIVATE-BASE64-" + strings.Repeat("X", 1024),
+		"Authorization: Bearer \"PRIVATE-QUOTED-" + strings.Repeat("Y", 1024),
+	} {
+		stderr := &boundedGitBuffer{limit: maxGitStderrBytes}
+		_, _ = stderr.Write([]byte(strings.Repeat("x", maxGitStderrBytes-80) + "; " + value))
+		if !stderr.overflow {
+			t.Fatal("test did not reach bounded native stderr capture")
+		}
+		detail := gitNativeStderr(stderr)
+		if strings.Contains(detail, "PRIVATE-") || !strings.Contains(detail, "Authorization: [REDACTED]") ||
+			!strings.Contains(detail, "native stderr truncated") || len(detail) > maxGitStderrBytes {
+			t.Fatalf("bounded Authorization redaction failed: bytes=%d tail=%q", len(detail), detail[len(detail)-180:])
+		}
 	}
 }

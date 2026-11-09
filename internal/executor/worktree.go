@@ -158,12 +158,36 @@ func (s *Server) worktreeCreateContext(parent context.Context, req Request) (res
 		return repositoryError("checkout_filter_unsupported", "validation", "structured worktree creation refuses repository checkout filters; use ordinary Git CLI when repository-owned filter execution is intentionally required", false)
 	}
 
-	branchHead, branchCode, branchErr := s.gitResult(ctx, repo.Root, "rev-parse", "--verify", "refs/heads/"+req.Branch+"^{commit}")
-	if branchErr != nil && branchCode < 0 {
+	// Unlike rev-parse --verify (which exits 128 for both an absent ref and
+	// fatal failures), a successful for-each-ref query distinguishes absence
+	// from a command failure before any worktree/branch mutation.
+	refName := "refs/heads/" + req.Branch
+	refs, branchCode, branchErr := s.gitResult(ctx, repo.Root, "for-each-ref",
+		"--format=%(refname) %(objectname) %(objecttype)", refName)
+	if branchErr != nil {
 		return repositoryGitFailure("git_failed", "process", branchErr, true)
 	}
+	if branchCode != 0 {
+		return repositoryError("git_failed", "process", fmt.Sprintf("git for-each-ref exited %d", branchCode), true)
+	}
+	branchHead := ""
+	for _, line := range strings.Split(refs, "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 3 {
+			return repositoryError("git_failed", "process", "git for-each-ref returned malformed branch metadata", true)
+		}
+		if fields[0] == refName {
+			if fields[2] != "commit" || !fullCommitSHA.MatchString(fields[1]) {
+				return repositoryError("git_failed", "process", "git for-each-ref returned invalid branch commit metadata", true)
+			}
+			branchHead = fields[1]
+		}
+	}
 	args := []string{"worktree", "add"}
-	if branchCode == 0 {
+	if branchHead != "" {
 		if branchHead != req.ExpectedSHA {
 			return repositoryError("branch_head_mismatch", "state", "existing local branch does not match expected_start_sha", true)
 		}
