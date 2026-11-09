@@ -63,7 +63,7 @@ Use `service_access` to register and generate a protected account credential. Ch
 
 ### Optional multi-language code and debugger readiness
 
-The first Stable slice of Issue #140 includes only tested, bounded supported modes. Language servers and debuggers are optional administrator-owned runtimes; the core installer does **not** install Node, PHP, Python, Rust, their language adapters, database tools or Chromium automatically. MCP discovery of a tool does not mean the selected runtime is installed. Pass an exact worker workspace, `file_version` and explicit SQL dialect. A successful `debug_adapter_status` **tool call** can correctly report `status=unavailable`.
+The first Stable slice of Issue #140 includes only tested, bounded supported modes. Language servers and debuggers are optional administrator-owned runtimes; the core installer does **not** install Node, PHP, Python, Rust, their language adapters, database tools or Chromium automatically. MCP discovery of a tool does not mean the selected runtime is installed. Pass an exact worker workspace and `file_version`. Set `sql_dialect` only for SQL source files; non-SQL calls must omit it. A successful `debug_adapter_status` **tool call** can correctly report `status=unavailable`.
 
 | Language | Optional language intelligence | Optional contained DAP |
 | --- | --- | --- |

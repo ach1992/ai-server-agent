@@ -102,7 +102,7 @@ func managedErr(err error) Response {
 		for _, native := range natives {
 			if managedincus.IsUEFIFirmwareFailure(native.Diagnostic) {
 				resp.PrerequisiteCode = "uefi_firmware_not_located"
-				resp.OperatorHint = "Incus reported a UEFI issue. If an operation may have been submitted, inspect its operation_id via managed_environment(operation=operation_status) or guest state before retrying. " + managedincus.UEFIRepairHint
+				resp.OperatorHint = "Incus reported a UEFI issue. For uncertain create, inspect managed_environment(operation=pending_creates) and native guest state before retrying. For start, inspect the existing guest; never blindly retry. " + managedincus.UEFIRepairHint
 				break
 			}
 		}

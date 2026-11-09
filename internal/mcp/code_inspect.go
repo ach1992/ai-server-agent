@@ -27,7 +27,7 @@ func (s *Server) registerCodeTools() {
 	for _, tool := range tools {
 		method := tool.suffix
 		mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-			Name: "code_" + method, Description: tool.description + ". Optional adapters; requires exact file_version and explicit SQL dialect. No project execution, implicit install or database connection; unsupported methods fail closed.",
+			Name: "code_" + method, Description: tool.description + ". Optional adapters; requires exact file_version. Supply sql_dialect only for SQL source files; omit it for non-SQL files. No project execution, implicit install or database connection; unsupported methods fail closed.",
 			Annotations: annotations(true, false, true, false),
 		}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, input CodeInspectInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 			resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{

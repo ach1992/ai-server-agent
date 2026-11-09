@@ -404,18 +404,7 @@ func (s *Server) registerTools() {
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_status", Description: "Inspect bounded non-secret browser runtime readiness and pinned Node/Playwright/Chromium versions. The persistent browser profile is Agent-wide shared state, not per-client or per-user isolation.", Annotations: annotations(true, false, true, false)},
 		func(ctx context.Context, req *mcpsdk.CallToolRequest, input EmptyInput) (*mcpsdk.CallToolResult, browser.RuntimeStatus, error) {
 			status := s.browser.Status(ctx)
-			switch {
-			case !status.InspectionComplete:
-				status.OperatorHint = "Browser readiness inspection was incomplete; no installation state can be inferred."
-			case !status.Installed && status.Reason == "browser runtime is not installed":
-				status.OperatorHint = "Optional Browser runtime was not found at the expected private path."
-			case !status.Installed:
-				status.OperatorHint = "Browser runtime could not be verified; inspect the reported reason before inferring a missing installation."
-			case !status.Ready:
-				status.OperatorHint = "Browser runtime is not ready; the reported reason identifies the failed check."
-			case status.Busy:
-				status.OperatorHint = "Shared Browser is busy; isolated admission availability is reported separately."
-			}
+			status.OperatorHint = browserStatusOperatorHint(status)
 			return textResult(fmt.Sprintf("installed=%t ready=%t busy=%t shared_profile=%t shared_reserved=%t browser_slots=%d/%d isolated_available=%d reason=%q operator_hint=%q", status.Installed, status.Ready, status.Busy, status.SharedProfile, status.SharedProfileReserved, status.BrowserActive, status.BrowserLimit, status.IsolatedSlotsAvailable, status.Reason, status.OperatorHint), false), status, nil
 		})
 
@@ -532,6 +521,32 @@ func newHTTPServer(cfg config.Config, handler http.Handler) *http.Server {
 		ReadHeaderTimeout: time.Duration(r.HTTPReadHeaderTimeoutSeconds) * time.Second,
 		IdleTimeout:       time.Duration(r.HTTPIdleTimeoutSeconds) * time.Second,
 		MaxHeaderBytes:    1 << 20,
+	}
+}
+
+// Browser runtime inspection and executor-owned session admission are
+// independent observations. Never erase verified installation/readiness
+// evidence just because the admission probe could not complete.
+func browserStatusOperatorHint(status browser.RuntimeStatus) string {
+	switch {
+	case !status.InspectionComplete && status.Installed && status.Ready:
+		return "Browser runtime is installed and ready, but session admission could not be verified. Do not assume shared or isolated slots are available; inspect reason or recheck browser_status."
+	case !status.InspectionComplete && status.Installed:
+		return "Browser runtime was found, but readiness or session admission is unverified; inspect reason or recheck browser_status."
+	case !status.InspectionComplete:
+		return "Browser runtime inspection was incomplete; installation and session admission are unverified. Inspect reason or recheck browser_status."
+	case !status.Installed && status.Reason == "browser runtime is not installed":
+		return "Optional Browser runtime was not found at the expected private path."
+	case !status.Installed:
+		return "Browser runtime could not be verified; inspect the reported reason before inferring a missing installation."
+	case !status.Ready:
+		return "Browser runtime is not ready; the reported reason identifies the failed check."
+	case status.Busy && status.IsolatedSlotsAvailable > 0:
+		return "Shared Browser is busy; independently reported isolated slots are available."
+	case status.Busy:
+		return "Shared Browser is busy; isolated admission availability is reported separately."
+	default:
+		return ""
 	}
 }
 

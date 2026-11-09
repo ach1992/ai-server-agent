@@ -63,7 +63,8 @@ func TestBrowserStatusTracksExecutorAdmissionAndRecovery(t *testing.T) {
 	}
 	_ = ln.Close()
 	unknown := m.Status(context.Background())
-	if unknown.InspectionComplete || !unknown.Busy || !strings.Contains(unknown.Reason, "could not be verified") {
+	if unknown.InspectionComplete || !unknown.Busy || !unknown.Installed || !unknown.Ready ||
+		unknown.IsolatedSlotsAvailable != 0 || !strings.Contains(unknown.Reason, "could not be verified") {
 		t.Fatalf("executor outage incorrectly reported shared Browser available: %+v", unknown)
 	}
 }

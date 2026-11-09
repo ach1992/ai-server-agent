@@ -20,7 +20,8 @@ func TestNativeUEFIFirmwareFailureProvidesRecoveryWithoutRetryingCreate(t *testi
 		strings.Contains(got.OperatorHint, "firmware was not found at common paths") ||
 		got.PrerequisiteCode != "uefi_firmware_not_located" ||
 		!strings.Contains(got.OperatorHint, "ovmf") ||
-		!strings.Contains(got.OperatorHint, "operation_status") ||
+		!strings.Contains(got.OperatorHint, "pending_creates") ||
+		strings.Contains(got.OperatorHint, "operation_status") ||
 		got.ExitCode != 45 || got.Output != raw || got.BytesSeen != int64(len(raw)) {
 		t.Fatalf("UEFI dependency was mistaken for permanent unsupported/known-safe retry: %+v", got)
 	}
@@ -32,7 +33,8 @@ func TestNativeUEFIFirmwareFailureProvidesRecoveryWithoutRetryingCreate(t *testi
 	// The hint must not invent a create operation or a new operation_id.
 	startFailure := managedErr(native)
 	if startFailure.ErrorCode != "native_command_failed" ||
-		!strings.Contains(startFailure.OperatorHint, "operation_status") ||
+		!strings.Contains(startFailure.OperatorHint, "For start, inspect the existing guest") ||
+		strings.Contains(startFailure.OperatorHint, "operation_status") ||
 		strings.Contains(startFailure.OperatorHint, "VM creation") ||
 		startFailure.ExitCode != 45 || startFailure.Output != raw {
 		t.Fatalf("firmware hint assumed a create-only failure: %+v", startFailure)

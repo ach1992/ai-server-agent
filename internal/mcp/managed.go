@@ -18,7 +18,7 @@ type ManagedEnvironmentInput struct {
 	Image         string   `json:"image,omitempty" jsonschema:"Native Incus image alias or fingerprint for create (e.g. images:debian/13)"`
 	Type          string   `json:"type,omitempty" jsonschema:"container or virtual-machine for create"`
 	WorkID        string   `json:"work_id,omitempty" jsonschema:"Stable Issue/project-owned work identifier for create, not a chat/session name"`
-	OperationID   string   `json:"operation_id,omitempty" jsonschema:"Stable idempotency key for create and nonblocking snapshot/restore. operation_status reads this same ID; never resubmit uncertain work"`
+	OperationID   string   `json:"operation_id,omitempty" jsonschema:"Stable idempotency key for create and snapshot/restore. For uncertain create use pending_creates and native guest inspection; operation_status reads snapshot/restore journal entries only, with project/instance/native UUID. Never blindly resubmit uncertain work"`
 	CPU           int      `json:"cpu,omitempty" jsonschema:"Explicit CPU count at create; operator capacity also applies"`
 	MemoryMiB     int      `json:"memory_mib,omitempty" jsonschema:"Explicit guest memory size in MiB at create; checked against host capacity"`
 	DiskGiB       int      `json:"disk_gib,omitempty" jsonschema:"Explicit guest root disk size in GiB at create; checked against host capacity"`
@@ -47,7 +47,7 @@ type ServiceAccessInput struct {
 
 func (s *Server) registerManagedTools() {
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "managed_environment",
-		Description: "Manage optional native Incus guests via root Executor. status reports daemon readiness separately from VM-only KVM/UEFI observations; containers may still work without VM firmware. list/inspect are passive. Create uses stable operation_id; inspect operation_status before resubmitting uncertain operations. Existing guests require exact project/name/UUID. Restore/delete require approval; abandon_create also requires approval and native absence proof. Recover/inspect before repeating uncertain operations.",
+		Description: "Manage optional native Incus guests via root Executor. status separates daemon readiness from VM-only KVM/UEFI; containers may work without VM firmware. list/inspect are passive. For uncertain create, inspect pending_creates and native guest state using its stable operation_id; do not blindly resubmit. operation_list/operation_status cover snapshot/restore journal, with operation_status requiring verified project/name/UUID. Existing guests require exact identity. Restore/delete, abandon_create and resolve_uncertain require approval; abandonment also requires native absence proof.",
 		Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in ManagedEnvironmentInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		native := managedincus.Request{Operation: in.Operation, Project: in.Project, Instance: in.Instance, UUID: in.UUID, Image: in.Image, Type: in.Type, WorkID: in.WorkID, OperationID: in.OperationID, CPU: in.CPU, MemoryMiB: in.MemoryMiB, DiskGiB: in.DiskGiB, StoragePool: in.StoragePool, Command: in.Command, Snapshot: in.Snapshot}
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "managed_environment", ManagedEnv: native, CredentialRef: in.CredentialRef, Approval: in.Approval})

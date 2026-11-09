@@ -36,6 +36,13 @@ func TestSQLLSPRequiresExplicitDialectAndRejectsInvalidScope(t *testing.T) {
 	if x := s.codeInspect(context.Background(), req); x.OK || x.ErrorCode != "invalid_sql_dialect_scope" {
 		t.Fatalf("SQL grammar smuggled into Go: %+v", x)
 	}
+	// Non-SQL source must advance to ordinary workspace/adapter handling
+	// without a SQL dialect, never fail at SQL validation.
+	req.SQLDialect = ""
+	req.Workspace = "/not-an-authorized-workspace" // fail workspace scope after dialect validation, before worker/adapters
+	if x := s.codeInspect(context.Background(), req); x.OK || x.ErrorCode != "invalid_workspace" {
+		t.Fatalf("non-SQL request failed before workspace validation without a dialect: %+v", x)
+	}
 	req.Path = "../../outside.sql"
 	req.Language = "sql"
 	if x := s.codeInspect(context.Background(), req); x.OK || x.ErrorCode != "invalid_code_path" {
