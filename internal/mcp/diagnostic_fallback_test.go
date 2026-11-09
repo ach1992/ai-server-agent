@@ -114,26 +114,30 @@ func TestDiagnosticTextFallbackPrioritizesCompleteRecoveryEnvelope(t *testing.T)
 }
 
 func TestRepositoryGitFailureMCPEnvelopeDoesNotExposeAuthorization(t *testing.T) {
-	native := "git status exited 47: fatal: unable to read index; Authorization: Basic PRIVATE-BASE64; connection refused"
-	safe, _ := secretoutput.BoundedDiagnosticText(native, 4096)
-	for _, fallback := range []bool{false, true} {
-		resp := executor.Response{
-			OK: false, ErrorCode: "git_failed", ReasonCode: "git_failed",
-			ErrorClass: "process", ExitCode: 47, Error: safe,
-		}
-		if fallback {
-			resp.Output = strings.Repeat("X", 16384)
-		}
-		result, structured, err := responseResultWithLimit(resp, 4096)
-		if err != nil {
-			t.Fatal(err)
-		}
-		text := result.Content[0].(*mcpsdk.TextContent).Text
-		if strings.Contains(text, "PRIVATE-BASE64") || strings.Contains(structured.Error, "PRIVATE-BASE64") ||
-			!strings.Contains(text, "git_failed") || !strings.Contains(text, "exit_code") ||
-			!strings.Contains(structured.Error, "Authorization: [REDACTED]") ||
-			!strings.Contains(structured.Error, "connection refused") {
-			t.Fatalf("MCP repository diagnostic redaction/exit failed: fallback=%t text=%q structured=%+v", fallback, text, structured)
+	for _, native := range []string{
+		"git status exited 47: fatal: unable to read index; Authorization: Basic PRIVATE-BASE64; connection refused",
+		"git status exited 47: fatal: unable to read index; Authorization: AWS4-HMAC-SHA256 Credential=TEST_ID/20261109/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=PRIVATE-SIGNATURE; connection refused",
+	} {
+		safe, _ := secretoutput.BoundedDiagnosticText(native, 4096)
+		for _, fallback := range []bool{false, true} {
+			resp := executor.Response{
+				OK: false, ErrorCode: "git_failed", ReasonCode: "git_failed",
+				ErrorClass: "process", ExitCode: 47, Error: safe,
+			}
+			if fallback {
+				resp.Output = strings.Repeat("X", 16384)
+			}
+			result, structured, err := responseResultWithLimit(resp, 4096)
+			if err != nil {
+				t.Fatal(err)
+			}
+			text := result.Content[0].(*mcpsdk.TextContent).Text
+			if strings.Contains(text, "PRIVATE-") || strings.Contains(structured.Error, "PRIVATE-") ||
+				!strings.Contains(text, "git_failed") || !strings.Contains(text, "exit_code") ||
+				!strings.Contains(structured.Error, "Authorization: [REDACTED]") ||
+				!strings.Contains(structured.Error, "connection refused") {
+				t.Fatalf("MCP repository diagnostic redaction/exit failed: fallback=%t text=%q structured=%+v", fallback, text, structured)
+			}
 		}
 	}
 }

@@ -11,11 +11,11 @@ import (
 // substitute for the exact-value streaming redactor when the secret is known.
 var credentialAssignment = regexp.MustCompile("(?i)(\\b(?:authorization|password|passwd|token|secret|api[_-]?key)\\s*[:=]\\s*)(?:\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'|[^\\s,;]+)")
 
-// Authorization values can contain a scheme and a separate credential (Basic,
-// Bearer, Digest, or quoted forms). Mask through the field delimiter, including
-// unfinished quoted values at the bounded capture edge. Preserve other
-// semicolon-separated diagnostics on the same line.
-var authorizationValue = regexp.MustCompile(`(?i)(\bauthorization[ \t]*[:=][ \t]*)(?:[^;"'\r\n]|"(?:\\.|[^"\\\r\n])*"?|'(?:\\.|[^'\\\r\n])*'?)*`)
+// Authorization values may contain semicolons inside the credential, notably
+// SigV4 SignedHeaders. Only semicolon-plus-space that does not continue an
+// Authorization parameter separates independently formatted diagnostics.
+// Mask ambiguous credential continuations, including incomplete quoted values.
+var authorizationValue = regexp.MustCompile(`(?i)(\bauthorization[ \t]*[:=][ \t]*)(?:[^;"'\r\n]|;[^ \t\r\n]|;[ \t]+(?:credential|signedheaders|signature)[ \t]*=|"(?:\\.|[^"\\\r\n])*"?|'(?:\\.|[^'\\\r\n])*'?)*`)
 var bearerValue = regexp.MustCompile("(?i)(\\bbearer\\s+)[a-z0-9._~+/=-]+")
 
 // A capture window may end while an assignment's quoted value is still open.

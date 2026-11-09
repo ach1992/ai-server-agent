@@ -331,3 +331,34 @@ func TestGitNativeStderrRedactsTruncatedAuthorization(t *testing.T) {
 		}
 	}
 }
+
+func TestRepositoryStatusFailureRedactsSigV4Authorization(t *testing.T) {
+	s, root := repositoryTestServer(t)
+	repo := filepath.Join(root, "repo")
+	initFixtureRepo(t, repo)
+	installFaultGit(t, "status", 51,
+		"native Git diagnostic; Authorization: AWS4-HMAC-SHA256 Credential=TEST_ID/20261109/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=PRIVATE-SIGNATURE; connection refused")
+	resp := s.repositoryInspectContext(context.Background(), Request{RepositoryPath: repo})
+	if resp.OK || resp.ErrorCode != "git_failed" || resp.ExitCode != 51 ||
+		!strings.Contains(resp.Error, "git status exited 51") ||
+		!strings.Contains(resp.Error, "connection refused") ||
+		!strings.Contains(resp.Error, "Authorization: [REDACTED]") ||
+		strings.Contains(resp.Error, "PRIVATE-SIGNATURE") {
+		t.Fatalf("public repository inspection exposed Authorization signature: %+v", resp)
+	}
+}
+
+func TestGitNativeStderrRedactsSigV4AtCaptureBoundary(t *testing.T) {
+	stderr := &boundedGitBuffer{limit: maxGitStderrBytes}
+	sigv4 := " Authorization: AWS4-HMAC-SHA256 Credential=TEST_ID, SignedHeaders=host;x-amz-date, Signature=PRIVATE-SIGNATURE-" + strings.Repeat("X", 256)
+	_, _ = stderr.Write([]byte(strings.Repeat("Z", maxGitStderrBytes-140) + sigv4))
+	if !stderr.overflow {
+		t.Fatal("test did not reach bounded stderr capture")
+	}
+	out := gitNativeStderr(stderr)
+	if strings.Contains(out, "PRIVATE-SIGNATURE") ||
+		!strings.Contains(out, "Authorization: [REDACTED]") ||
+		!strings.Contains(out, "native stderr truncated") || len(out) > maxGitStderrBytes {
+		t.Fatalf("bounded SigV4 redaction leaked signature or lost diagnostic: %q", out[len(out)-min(len(out), 220):])
+	}
+}
