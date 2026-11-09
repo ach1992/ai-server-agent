@@ -268,3 +268,113 @@ func TestGuestExecSecondIdentityPreflightNativeFailureKeepsEvidence(t *testing.T
 		t.Fatalf("second pre-dispatch native error was lost or guest command claimed: %+v %+v %v", got, native, err)
 	}
 }
+
+func TestGuestExecSecondaryPreflightFailedObservationIsNotIdentityChange(t *testing.T) {
+	for _, tc := range []struct {
+		mode, original string
+	}{
+		{"list_null_project", "incus_native_inventory_unverified"},
+		{"list_bad_json_project", "invalid native Incus list JSON"},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			b := fixture(t)
+			created, err := b.Run(context.Background(), createRequest(), false, "")
+			if err != nil || created.Instance == nil {
+				t.Fatalf("fixture create failed: %+v %v", created, err)
+			}
+			modePath := filepath.Join(b.StateDir, "native.json.mode")
+			b.beforeMutation = func(Request) {
+				if err := os.WriteFile(modePath, []byte(tc.mode), 0600); err != nil {
+					t.Fatal(err)
+				}
+			}
+			got, err := b.Run(context.Background(), Request{
+				Operation: "exec", Project: "default", Instance: "guest-a",
+				UUID: created.Instance.UUID, Command: []string{"true"},
+			}, false, "")
+			if err == nil || !strings.Contains(err.Error(), "native_identity_preflight_unavailable") ||
+				!strings.Contains(err.Error(), tc.original) ||
+				strings.Contains(err.Error(), "instance_identity_changed_before_mutation") ||
+				got.GuestExecAttempted || got.Output != "" {
+				t.Fatalf("unverified identity was called changed or dispatched: result=%+v err=%v", got, err)
+			}
+			if _, statErr := os.Stat(filepath.Join(b.StateDir, "native.json.exec_calls")); !os.IsNotExist(statErr) {
+				t.Fatalf("guest exec was dispatched despite unverifiable preflight: %v", statErr)
+			}
+		})
+	}
+
+	// Preserve the existing different outcome for a *verified* disappearance
+	// between the initial and final native identity checks.
+	b := fixture(t)
+	created, err := b.Run(context.Background(), createRequest(), false, "")
+	if err != nil || created.Instance == nil {
+		t.Fatalf("fixture create failed: %+v %v", created, err)
+	}
+	modePath := filepath.Join(b.StateDir, "native.json.mode")
+	b.beforeMutation = func(Request) {
+		if err := os.WriteFile(modePath, []byte("list_empty_project"), 0600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got, err := b.Run(context.Background(), Request{
+		Operation: "exec", Project: "default", Instance: "guest-a",
+		UUID: created.Instance.UUID, Command: []string{"true"},
+	}, false, "")
+	if err == nil || !strings.Contains(err.Error(), "instance_identity_changed_before_mutation") ||
+		!strings.Contains(err.Error(), "instance_missing") || got.GuestExecAttempted {
+		t.Fatalf("observed native absence was not distinguished from probe failure: %+v %v", got, err)
+	}
+}
+
+func TestGuestExecPostExecutionIdentityProbeWithholdsOutputAndPreservesFailure(t *testing.T) {
+	for _, tc := range []struct {
+		mode, original string
+		native         bool
+		changed        bool
+	}{
+		{"post_exec_list_failure", "native Incus list failed", true, false},
+		{"post_exec_list_null", "incus_native_inventory_unverified", false, false},
+		{"post_exec_identity_changed", "native guest identity changed during execution", false, true},
+	} {
+		t.Run(tc.mode, func(t *testing.T) {
+			b := fixture(t)
+			created, err := b.Run(context.Background(), createRequest(), false, "")
+			if err != nil || created.Instance == nil {
+				t.Fatalf("fixture create failed: %+v %v", created, err)
+			}
+			if err := os.WriteFile(filepath.Join(b.StateDir, "native.json.mode"), []byte(tc.mode), 0600); err != nil {
+				t.Fatal(err)
+			}
+			result, err := b.Run(context.Background(), Request{
+				Operation: "exec", Project: "default", Instance: "guest-a",
+				UUID: created.Instance.UUID, Command: []string{"true"},
+			}, false, "")
+			if err == nil || !strings.Contains(err.Error(), "guest_exec_outcome_uncertain") ||
+				!strings.Contains(err.Error(), tc.original) ||
+				!result.GuestExecAttempted || result.Status == "guest_command_completed" ||
+				result.Output != "" || result.OutputBytesSeen != 0 || result.OutputTruncated ||
+				result.OutputOmittedBytes != 0 {
+				t.Fatalf("post-exec observation exposed guest output or misclassified uncertainty: result=%+v err=%v", result, err)
+			}
+			marker, readErr := os.ReadFile(filepath.Join(b.StateDir, "native.json.exec_calls"))
+			if readErr != nil || string(marker) != "1" {
+				t.Fatalf("guest command was not attempted exactly once: marker=%q err=%v", marker, readErr)
+			}
+			if !tc.changed && strings.Contains(err.Error(), "identity changed during execution") {
+				t.Fatalf("failed identity observation was called a verified UUID change: %v", err)
+			}
+			var native *NativeCommandError
+			if tc.native {
+				if !errors.As(err, &native) || native.Stage != "list" || native.ExitCode != 47 ||
+					native.BytesSeen <= 64<<10 || !native.Truncated ||
+					!strings.Contains(native.Diagnostic, "post-exec native list failed") ||
+					strings.Contains(native.Diagnostic, "POST_EXEC_SECRET") {
+					t.Fatalf("native post-exec failure lost safe stage/exit/volume: %+v %v", native, err)
+				}
+			} else if errors.As(err, &native) {
+				t.Fatalf("successful native command with invalid inventory fabricated native process failure: %+v", native)
+			}
+		})
+	}
+}

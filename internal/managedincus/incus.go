@@ -356,6 +356,25 @@ func (b Backend) selectInstance(ctx context.Context, req Request) (Summary, erro
 	}
 	return native, nil
 }
+
+// A previously observed guest disappearing or presenting a different
+// native identity is a verified change. Transport, decoding and journal
+// observation failures are not proof that the guest changed.
+func verifiedNativeIdentityChange(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch {
+	case strings.HasPrefix(err.Error(), "instance_missing:"),
+		strings.HasPrefix(err.Error(), "instance_identity_mismatch:"),
+		strings.HasPrefix(err.Error(), "create_intent_identity_mismatch:"),
+		strings.HasPrefix(err.Error(), "create_intent_native_uuid_conflict:"),
+		strings.HasPrefix(err.Error(), "create_intent_abandoned_identity_conflict:"):
+		return true
+	}
+	return false
+}
+
 func (b Backend) Lock(fn func() (Result, error)) (Result, error) {
 	// Scoped OS lock serializes Agent-owned create/reconcile and guest mutations. It is NOT
 	// a cluster lock, a project manager or a process/guest lifecycle registry.
@@ -769,14 +788,13 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 			}
 			latest, err := b.selectInstance(ctx, req)
 			if err != nil {
-				// Native discovery can fail at this second pre-dispatch
-				// identity check. Do not mislabel it as an observed identity
-				// change or discard the original safe Incus diagnostic.
-				var native *NativeCommandError
-				if errors.As(err, &native) {
-					return base, fmt.Errorf("native_identity_preflight_unavailable: could not recheck guest identity before operation; no guest command dispatched: %w", err)
+				// A confirmed missing/replaced native guest is different from
+				// a list/JSON/journal probe that could not verify identity.
+				// Neither outcome authorizes a name-based operation.
+				if verifiedNativeIdentityChange(err) {
+					return base, fmt.Errorf("instance_identity_changed_before_mutation: refused name-based operation after verified identity mismatch: %w", err)
 				}
-				return base, errors.New("instance_identity_changed_before_mutation: refused name-based operation")
+				return base, fmt.Errorf("native_identity_preflight_unavailable: native guest identity could not be verified before operation; no command dispatched: %w", err)
 			}
 			if latest.UUID != x.UUID {
 				return base, errors.New("instance_identity_changed_before_mutation")
@@ -801,9 +819,22 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 				return base, fmt.Errorf("native operation failed, exit_code=%d: %w", code, runErr)
 			}
 			if req.Operation == "exec" {
-				verified, err := b.selectInstance(ctx, req)
-				if err != nil || verified.UUID != x.UUID {
+				verified, verifyErr := b.selectInstance(ctx, req)
+				if verifyErr != nil || verified.UUID != x.UUID {
+					// Guest effects may have occurred, but the output belongs
+					// only to a verified UUID. Withhold all guest output and
+					// its presentation counters; retain only the independent
+					// native identity-probe error as a diagnostic channel.
 					base.Output = ""
+					base.OutputBytesSeen = 0
+					base.OutputOmittedBytes = 0
+					base.OutputTruncated = false
+					if verifyErr != nil {
+						if verifiedNativeIdentityChange(verifyErr) {
+							return base, fmt.Errorf("guest_exec_outcome_uncertain: native guest identity changed during execution; guest output withheld; inspect before retry: %w", verifyErr)
+						}
+						return base, fmt.Errorf("guest_exec_outcome_uncertain: post-execution native identity could not be verified; guest output withheld; inspect before retry: %w", verifyErr)
+					}
 					return base, errors.New("guest_exec_outcome_uncertain: native guest identity changed during execution; no output delivered")
 				}
 				base.Status = "guest_command_completed"

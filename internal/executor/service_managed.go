@@ -45,6 +45,11 @@ func managedErr(err error) Response {
 	natives := managedNativeFailures(err)
 	hasNative := len(natives) > 0
 	class := "managed"
+	if code == "dependency_unavailable" && strings.HasPrefix(err.Error(), "native_identity_preflight_unavailable:") {
+		// A failed native identity observation is a dependency/probe
+		// failure, not an observed change or a guest-exec failure.
+		class = "dependency"
+	}
 	if hasNative && code == "managed_operation_failed" {
 		code, class = "native_command_failed", "process"
 	}
@@ -275,6 +280,13 @@ func managedGuestExecFailure(result managedincus.Result, err error) Response {
 	if !result.GuestExecAttempted {
 		// Native identity/list/permission preflight failed before the
 		// guest command: preserve its original stage/exit/stderr evidence.
+		return resp
+	}
+	if strings.HasPrefix(err.Error(), "guest_exec_outcome_uncertain:") {
+		// Guest exec may have completed, but its output cannot be bound to
+		// a verified native UUID. The backend has withheld that output.
+		// Preserve ONLY the post-exec native observation's independent
+		// typed diagnostics; do not overwrite it with guest-exec fields.
 		return resp
 	}
 	resp.TimedOut = resp.TimedOut || result.TimedOut

@@ -65,6 +65,18 @@ elif args[0]=='list':
         print('native reconciliation list failed; password=RECONCILE_SECRET; inspect daemon',file=sys.stderr)
         sys.exit(46)
     if mode=='list_unavailable':sys.exit(48)
+    if mode=='list_null_project':
+        print('null');sys.exit(0)
+    if mode=='list_bad_json_project':
+        print('{broken-json');sys.exit(0)
+    if mode=='list_empty_project':
+        print('[]');sys.exit(0)
+    if mode in ('post_exec_list_failure','post_exec_list_null') and os.path.exists(p+'.exec_calls'):
+        if mode=='post_exec_list_null':
+            print('null');sys.exit(0)
+        print('post-exec native list failed; password="POST_EXEC_SECRET"; inspect daemon state',file=sys.stderr)
+        print('N'*70000,file=sys.stderr)
+        sys.exit(47)
     if '--all-projects' in args:
         if mode=='list_null':print('null');sys.exit(0)
         if mode=='list_null_row':print('[null]');sys.exit(0)
@@ -139,6 +151,12 @@ elif args[0] in ('start','stop','delete'):
     save()
 elif args[0]=='exec':
     if '--' not in args:sys.exit(43)
+    with open(p+'.exec_calls','a') as f:f.write('1')
+    if mode=='post_exec_identity_changed':
+        state['instances'][0]['config']['volatile.uuid']='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+        save()
+    if mode in ('post_exec_list_failure','post_exec_list_null','post_exec_identity_changed'):
+        print('UNVERIFIED_GUEST_OUTPUT_SENTINEL')
     print('native-exec-ok')
     content=sys.stdin.read()
     if content:print(content)

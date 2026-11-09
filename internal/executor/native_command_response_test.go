@@ -175,3 +175,61 @@ func TestManagedJoinedNativeLaunchAndInspectionBothRemainActionable(t *testing.T
 		t.Fatalf("combined native diagnostics exceeded budget or lost stages: %+v", huge)
 	}
 }
+
+func TestManagedPostExecIdentityUncertaintyKeepsNativeProbeNotGuestOutput(t *testing.T) {
+	native := &managedincus.NativeCommandError{
+		Stage: "list", ExitCode: 47, Diagnostic: "post-exec list failed; inspect daemon",
+		BytesSeen: 5300, OmittedBytes: 128, Truncated: true, TimedOut: true,
+		Cause: errors.New("exit status 47"),
+	}
+	// Deliberately inject residual guest output in Result: the response
+	// adapter must never use it when post-exec UUID verification failed.
+	guestResult := managedincus.Result{
+		GuestExecAttempted: true, ExitCode: 0,
+		Output: "UNVERIFIED_GUEST_OUTPUT_SENTINEL", OutputBytesSeen: 20000,
+		OutputTruncated: true, OutputOmittedBytes: 1000,
+	}
+	err := fmt.Errorf("guest_exec_outcome_uncertain: post-execution native identity could not be verified; guest output withheld; inspect before retry: %w", native)
+	resp := managedGuestExecFailure(guestResult, err)
+	if resp.OK || resp.ErrorCode != "outcome_uncertain" || resp.ReasonCode != "outcome_uncertain" ||
+		resp.ExitCode != 47 || !resp.TimedOut || !resp.Truncated ||
+		resp.BytesSeen != native.BytesSeen || resp.OmittedBytes != native.OmittedBytes ||
+		resp.BytesReturned != int64(len(native.Diagnostic)) || resp.Output != native.Diagnostic ||
+		!strings.Contains(resp.Error, "native Incus list failed") ||
+		strings.Contains(resp.Output, "UNVERIFIED_GUEST_OUTPUT_SENTINEL") ||
+		strings.Contains(resp.Error, "identity changed during execution") {
+		t.Fatalf("post-exec evidence lost or guest output leaked: %+v", resp)
+	}
+	invalidInventory := managedGuestExecFailure(guestResult, errors.New(
+		"guest_exec_outcome_uncertain: post-execution native identity could not be verified: incus_native_inventory_unverified: null"))
+	if invalidInventory.OK || invalidInventory.ErrorCode != "outcome_uncertain" ||
+		invalidInventory.Output != "" || invalidInventory.BytesReturned != 0 ||
+		!strings.Contains(invalidInventory.Error, "incus_native_inventory_unverified") ||
+		strings.Contains(invalidInventory.Output, "UNVERIFIED_GUEST_OUTPUT_SENTINEL") {
+		t.Fatalf("unverified post-exec inventory exposed guest data or lost its cause: %+v", invalidInventory)
+	}
+}
+
+func TestManagedSecondaryInventoryUnverifiedIsDependencyNotIdentityChange(t *testing.T) {
+	original := errors.New("incus_native_inventory_unverified: native list must be a non-null array")
+	err := fmt.Errorf("native_identity_preflight_unavailable: native guest identity could not be verified before operation; no command dispatched: %w", original)
+	got := managedGuestExecFailure(managedincus.Result{}, err)
+	if got.OK || got.ErrorCode != "dependency_unavailable" ||
+		got.ReasonCode != "dependency_unavailable" || got.ErrorClass != "dependency" ||
+		!strings.Contains(got.Error, "incus_native_inventory_unverified") ||
+		strings.Contains(got.Error, "identity_changed_before_mutation") ||
+		got.Output != "" || got.BytesReturned != 0 {
+		t.Fatalf("unverified inventory was mislabeled as observed identity change: %+v", got)
+	}
+	native := &managedincus.NativeCommandError{
+		Stage: "list", ExitCode: 48, Diagnostic: "native list daemon unavailable",
+		BytesSeen: 30, TimedOut: true, Cause: errors.New("exit status 48"),
+	}
+	wrapped := managedGuestExecFailure(managedincus.Result{}, fmt.Errorf(
+		"native_identity_preflight_unavailable: native identity recheck failed; no command dispatched: %w", native))
+	if wrapped.ErrorCode != "dependency_unavailable" || wrapped.ErrorClass != "dependency" ||
+		wrapped.ExitCode != 48 || !wrapped.TimedOut ||
+		wrapped.Output != native.Diagnostic || wrapped.BytesSeen != native.BytesSeen {
+		t.Fatalf("typed native preflight evidence was lost: %+v", wrapped)
+	}
+}
