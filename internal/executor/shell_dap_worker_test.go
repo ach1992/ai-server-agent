@@ -317,6 +317,65 @@ func TestShellDAPWorkerPreservesStrictBashExit(t *testing.T) {
 	}
 }
 
+// A successful strict-mode Bash script must not become a false failure when
+// the debugger snapshots variables at a real breakpoint. The first stop
+// precedes set -euo pipefail, while the breakpoint executes after it.
+func TestShellDAPWorkerStrictBashSuccessWithBreakpoint(t *testing.T) {
+	dir := t.TempDir()
+	script := filepath.Join(dir, "strict-success.sh")
+	source := "#!/usr/bin/env bash\nset -euo pipefail\nvalue=42\nresult=$((value + 1))\nprintf '%s\\n' \"$result\"\n"
+	if err := os.WriteFile(script, []byte(source), 0600); err != nil {
+		t.Fatal(err)
+	}
+	client, worker := net.Pipe()
+	defer client.Close()
+	done := make(chan error, 1)
+	go func() { defer worker.Close(); done <- serveShellDAP(worker, worker) }()
+	c := &shellDAPTestClient{t: t, conn: client, parser: &dapState{conn: client}}
+	c.success("initialize", map[string]any{})
+	c.event("initialized")
+	c.success("launch", map[string]any{
+		"program": script, "cwd": dir, "fileVersion": shellDAPTestVersion(t, script),
+		"stopOnEntry": true,
+	})
+	c.success("setBreakpoints", map[string]any{
+		"source":      map[string]any{"path": script},
+		"breakpoints": []any{map[string]any{"line": 4}},
+	})
+	c.success("configurationDone", map[string]any{})
+	c.event("process")
+	c.success("asaActivate", map[string]any{})
+	entry := c.event("stopped")
+	if !strings.Contains(string(entry.Body), "\"reason\":\"entry\"") {
+		t.Fatalf("initial entry stop expected: %s", entry.Body)
+	}
+	c.success("continue", map[string]any{"threadId": 1})
+	hit := c.event("stopped")
+	if !strings.Contains(string(hit.Body), "\"reason\":\"breakpoint\"") {
+		t.Fatalf("strict-mode breakpoint missing: %s", hit.Body)
+	}
+	vars := c.success("variables", map[string]any{"variablesReference": 1})
+	if !strings.Contains(string(vars.Body), "\"name\":\"value\"") ||
+		!strings.Contains(string(vars.Body), "\"value\":\"42\"") {
+		t.Fatalf("strict-mode scalar not available: %s", vars.Body)
+	}
+	c.success("continue", map[string]any{"threadId": 1})
+	exited := c.event("exited")
+	if !strings.Contains(string(exited.Body), "\"exitCode\":0") {
+		t.Fatalf("successful strict-mode Bash exited incorrectly: %s", exited.Body)
+	}
+	c.event("terminated")
+	c.success("disconnect", map[string]any{})
+	select {
+	case err := <-done:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("strict-mode adapter did not stop")
+	}
+}
+
 // configurationDone starts only the fixed, blocked Bash bootstrap. It
 // does not even parse script bytes until the root Executor has pinned the
 // original Bash process and explicitly activated execution. The exec of
