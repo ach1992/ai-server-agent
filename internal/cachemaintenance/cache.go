@@ -411,6 +411,12 @@ func pressure(d disk, maxUsed int, minFree uint64) bool {
 	return d.UsedPercent >= maxUsed || d.AvailableBytes < minFree
 }
 
+// freeBytesDelta compares the two snapshots taken inside one prune attempt.
+// A later filesystem observation is not equivalent on shared CI/host storage.
+func freeBytesDelta(before, after disk) int64 {
+	return int64(after.AvailableBytes) - int64(before.AvailableBytes)
+}
+
 func prune(now time.Time, apply, force bool, minAge time.Duration, maxUsed int, minFree uint64) (r report, resultErr error) {
 	root, err := managedPath()
 	if err != nil {
@@ -434,7 +440,7 @@ func prune(now time.Time, apply, force bool, minAge time.Duration, maxUsed int, 
 			resultErr = errors.Join(resultErr, fmt.Errorf("measure disk after cache prune: %w", err))
 			return
 		}
-		r.ActualFreeDeltaBytes = int64(after.AvailableBytes) - int64(r.Disk.AvailableBytes)
+		r.ActualFreeDeltaBytes = freeBytesDelta(r.Disk, after)
 		r.FreeDeltaMeasured = true
 	}()
 	r.Pressure = pressure(r.Disk, maxUsed, minFree)
