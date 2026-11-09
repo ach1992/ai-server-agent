@@ -74,6 +74,9 @@ _asa_vars() {
     ((_asa_count+=1))
     ((_asa_count>=40)) && break
   done < <(compgen -v)
+  # The loop body may end in a false capacity check; never propagate that
+  # status into a caller running with Bash errexit (-e).
+  return 0
 }
 _asa_hook() {
   local _asa_line=$1 _asa_file=$2 _asa_depth=${#FUNCNAME[@]} _asa_reason=''
