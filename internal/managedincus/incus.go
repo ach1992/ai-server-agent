@@ -80,6 +80,7 @@ type Result struct {
 	HostID             string            `json:"host_id"`
 	Available          bool              `json:"available"`
 	Diagnostic         string            `json:"diagnostic,omitempty"`
+	VMReadiness        *VMReadiness      `json:"vm_readiness,omitempty"`
 	Instances          []Summary         `json:"instances,omitempty"`
 	Instance           *Summary          `json:"instance,omitempty"`
 	Output             string            `json:"output,omitempty"`
@@ -101,6 +102,7 @@ type Backend struct {
 	capacityProbe  func(int, int) error // test-only; production always checks actual host capacity
 	beforeMutation func(Request)        // test-only adversarial interleaving before final identity check
 	apiOverride    nativeAPIFunc        // test-only native REST fixture
+	vmProbe        func() VMReadiness   // test-only passive VM prerequisite probe
 }
 
 const maxOutput = 64 << 10
@@ -431,9 +433,14 @@ func (b Backend) Ready(ctx context.Context) Result {
 		return r
 	}
 	r.Available = true
-	r.Status = "ready"
-	if _, err := os.Stat("/dev/kvm"); err != nil {
-		r.Diagnostic = "KVM unavailable for VMs; containers may still work; verify /dev/kvm and host virtualization"
+	r.Status = "ready" // Incus API readiness, NOT proof that a VM can launch.
+	vm := hostVMReadiness()
+	if b.vmProbe != nil {
+		vm = b.vmProbe()
+	}
+	r.VMReadiness = &vm
+	if vm.ReasonCode == "kvm_not_detected" {
+		r.Diagnostic = "KVM device not detected for VMs; containers may still work"
 	}
 	return r
 }

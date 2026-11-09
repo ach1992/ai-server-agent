@@ -258,6 +258,7 @@ func (s *Server) responseResult(resp executor.Response) (*mcpsdk.CallToolResult,
 }
 
 func responseResultWithLimit(resp executor.Response, maxTextFallbackBytes int) (*mcpsdk.CallToolResult, executor.Response, error) {
+	resp = annotatePrerequisiteFailure(resp)
 	if len(resp.Output) <= maxTextFallbackBytes {
 		b, err := json.MarshalIndent(resp, "", "  ")
 		if err != nil {
@@ -403,7 +404,17 @@ func (s *Server) registerTools() {
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_status", Description: "Inspect bounded non-secret browser runtime readiness and pinned Node/Playwright/Chromium versions. The persistent browser profile is Agent-wide shared state, not per-client or per-user isolation.", Annotations: annotations(true, false, true, false)},
 		func(ctx context.Context, req *mcpsdk.CallToolRequest, input EmptyInput) (*mcpsdk.CallToolResult, browser.RuntimeStatus, error) {
 			status := s.browser.Status(ctx)
-			return textResult(fmt.Sprintf("installed=%t ready=%t busy=%t shared_profile=%t shared_reserved=%t browser_slots=%d/%d isolated_available=%d reason=%q", status.Installed, status.Ready, status.Busy, status.SharedProfile, status.SharedProfileReserved, status.BrowserActive, status.BrowserLimit, status.IsolatedSlotsAvailable, status.Reason), false), status, nil
+			switch {
+			case !status.InspectionComplete:
+				status.OperatorHint = "Readiness inspection is incomplete or busy. Recheck browser_status after the current operation or inspect the Executor lease; do not assume the Browser is permanently unavailable."
+			case !status.Installed:
+				status.OperatorHint = "Optional pinned Browser runtime is not installed. Inspect browser_status and use browser_setup only after authorized host provisioning/repair; recheck browser_status before use."
+			case !status.Ready:
+				status.OperatorHint = "Browser runtime is installed but not ready. Inspect reason and pinned components; perform authorized browser_setup repair if appropriate, then recheck browser_status."
+			case status.Busy:
+				status.OperatorHint = "Browser is usable but its shared profile or process slots are busy. Recheck browser_status or use an independently available isolated session; no package installation is implied."
+			}
+			return textResult(fmt.Sprintf("installed=%t ready=%t busy=%t shared_profile=%t shared_reserved=%t browser_slots=%d/%d isolated_available=%d reason=%q operator_hint=%q", status.Installed, status.Ready, status.Busy, status.SharedProfile, status.SharedProfileReserved, status.BrowserActive, status.BrowserLimit, status.IsolatedSlotsAvailable, status.Reason, status.OperatorHint), false), status, nil
 		})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_setup", Description: "Install/repair pinned optional root-owned Node/Playwright/Chromium Browser runtime; may install OS libraries. Preserves shared profile, system Node and ports 80/443.", Annotations: annotations(false, true, true, true)},

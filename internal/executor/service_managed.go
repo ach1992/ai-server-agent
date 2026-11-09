@@ -45,9 +45,9 @@ func managedErr(err error) Response {
 	natives := managedNativeFailures(err)
 	hasNative := len(natives) > 0
 	class := "managed"
-	if code == "dependency_unavailable" && strings.HasPrefix(err.Error(), "native_identity_preflight_unavailable:") {
-		// A failed native identity observation is a dependency/probe
-		// failure, not an observed change or a guest-exec failure.
+	if code == "dependency_unavailable" {
+		// A known failed native prerequisite is distinct from uncertain
+		// execution and does not disable independent Agent capabilities.
 		class = "dependency"
 	}
 	if hasNative && code == "managed_operation_failed" {
@@ -91,6 +91,13 @@ func managedErr(err error) Response {
 			resp.Output = strings.Join(stages, "\n")
 		}
 		resp.BytesReturned = int64(len(resp.Output))
+		for _, native := range natives {
+			if managedincus.IsUEFIFirmwareFailure(native.Diagnostic) {
+				resp.PrerequisiteCode = "uefi_firmware_not_located"
+				resp.OperatorHint = "Before any new create, reconcile the original operation_id using managed_environment(operation=operation_status); the outcome may be uncertain. " + managedincus.UEFIRepairHint
+				break
+			}
+		}
 	}
 	return resp
 }
@@ -318,6 +325,17 @@ func managedGuestExecFailure(result managedincus.Result, err error) Response {
 func managedUnavailableResult(result managedincus.Result) Response {
 	resp := fileError("incus_unavailable", "dependency", errors.New(result.Diagnostic))
 	resp.Status = "native_preflight_unavailable"
+	switch {
+	case strings.HasPrefix(result.Diagnostic, "incus_missing:"):
+		resp.PrerequisiteCode = "incus_cli_not_detected"
+		resp.OperatorHint = "Incus is optional; inspect the trusted native incus executable with command -v incus and its installation. Install or repair only with host authorization, then recheck managed_environment(operation=status). All other Agent tools remain available."
+	case strings.HasPrefix(result.Diagnostic, "incus_unready:"):
+		resp.PrerequisiteCode = "incus_daemon_unready"
+		resp.OperatorHint = "Inspect native Incus daemon/socket readiness and incus admin status. After authorized repair, call managed_environment(operation=status) first; never blindly repeat an uncertain guest mutation."
+	default:
+		resp.PrerequisiteCode = "incus_preflight_unverified"
+		resp.OperatorHint = "Native Incus readiness was not verified. Inspect managed_environment(operation=status) and original diagnostics before any repair or stateful retry; unrelated Agent tools may still be usable."
+	}
 	resp.ExitCode = result.ExitCode
 	resp.TimedOut = result.TimedOut
 	resp.Output = result.Output
