@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"net/http/httptest"
 	"sort"
+	"strings"
 	"testing"
 
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
@@ -56,6 +57,46 @@ func TestMCPToolMetadataFootprint(t *testing.T) {
 		totalDescription += len(tool.Description)
 		totalMetadata += len(full)
 		totalSchema += schema
+	}
+	// Representative high-value development capabilities must be findable
+	// through real authenticated tools/list as well as initialize instructions.
+	// Names and purpose cues are the model-facing route, not mandatory steps.
+	routeSignals := map[string]string{
+		"repository_discover":    "git repositories",
+		"repository_environment": "toolchain",
+		"workspace_search":       "search",
+		"workspace_apply_edits":  "file edits",
+		"workspace_transfer":     "file transfers",
+		"code_references":        "symbol references",
+		"code_diagnostics":       "source diagnostics",
+		"debug_adapter_status":   "readiness",
+		"debug_launch":           "dap",
+		"run_command":            "bash",
+		"start_job":              "persistent worker task",
+		"terminal_open":          "pty",
+		"browser_e2e":            "browser steps",
+	}
+	seen := make(map[string]bool, len(routeSignals))
+	for _, tool := range res.Tools {
+		purpose, important := routeSignals[tool.Name]
+		if !important {
+			continue
+		}
+		seen[tool.Name] = true
+		if !strings.Contains(session.InitializeResult().Instructions, tool.Name) {
+			t.Errorf("high-value development tool %q missing from task routes", tool.Name)
+		}
+		if !strings.Contains(strings.ToLower(tool.Description), strings.ToLower(purpose)) {
+			t.Errorf("tool %q lacks useful purpose signal %q in tools/list: %q", tool.Name, purpose, tool.Description)
+		}
+		if tool.InputSchema == nil {
+			t.Errorf("tool %q has no model-visible input schema", tool.Name)
+		}
+	}
+	for name := range routeSignals {
+		if !seen[name] {
+			t.Errorf("task instructions recommend %q but authenticated tools/list does not advertise it", name)
+		}
 	}
 	sort.Slice(rows, func(i, j int) bool { return rows[i].descriptionBytes > rows[j].descriptionBytes })
 	// Model-facing descriptions should identify the action, critical constraints,
