@@ -28,6 +28,14 @@ func managedJSON(v any) Response {
 	return resp
 }
 func managedErr(err error) Response {
+	// A registered but unenrolled service credential is a credential state
+	// problem, not a missing host binary or an unavailable native runtime.
+	// This shared resolver also serves guest exec and Browser logins.
+	if err != nil && (err.Error() == "service_credential_unavailable" || err.Error() == "service_not_enrolled") {
+		resp := fileError("service_credential_not_enrolled", "state", err)
+		resp.OperatorHint = "This service reference has no enrolled secret. Inspect service_access metadata; enroll or choose another authorized credential if needed. No host package is implied."
+		return resp
+	}
 	// Classify the higher-level operation and recovery semantics first.
 	// A wrapped native command is evidence, not grounds for converting an
 	// uncertain create or storage preflight into an ordinary process failure.
@@ -94,7 +102,7 @@ func managedErr(err error) Response {
 		for _, native := range natives {
 			if managedincus.IsUEFIFirmwareFailure(native.Diagnostic) {
 				resp.PrerequisiteCode = "uefi_firmware_not_located"
-				resp.OperatorHint = "Before any new create, reconcile the original operation_id using managed_environment(operation=operation_status); the outcome may be uncertain. " + managedincus.UEFIRepairHint
+				resp.OperatorHint = "Incus reported a UEFI issue. If an operation may have been submitted, reconcile operation_id with managed_environment(operation_status) or inspect guest state before retrying. " + managedincus.UEFIRepairHint
 				break
 			}
 		}
@@ -328,13 +336,13 @@ func managedUnavailableResult(result managedincus.Result) Response {
 	switch {
 	case strings.HasPrefix(result.Diagnostic, "incus_missing:"):
 		resp.PrerequisiteCode = "incus_cli_not_detected"
-		resp.OperatorHint = "Incus is optional; inspect the trusted native incus executable with command -v incus and its installation. Install or repair only with host authorization, then recheck managed_environment(operation=status). All other Agent tools remain available."
+		resp.OperatorHint = "Trusted Incus CLI not found. Use other tools if suitable; if Incus is needed, inspect command -v incus and recheck managed_environment(status) after any authorized repair."
 	case strings.HasPrefix(result.Diagnostic, "incus_unready:"):
 		resp.PrerequisiteCode = "incus_daemon_unready"
-		resp.OperatorHint = "Inspect native Incus daemon/socket readiness and incus admin status. After authorized repair, call managed_environment(operation=status) first; never blindly repeat an uncertain guest mutation."
+		resp.OperatorHint = "If Incus is needed, inspect incus query /1.0 or incus info with authorized access, then recheck managed_environment(status). Do not repeat an uncertain guest mutation."
 	default:
 		resp.PrerequisiteCode = "incus_preflight_unverified"
-		resp.OperatorHint = "Native Incus readiness was not verified. Inspect managed_environment(operation=status) and original diagnostics before any repair or stateful retry; unrelated Agent tools may still be usable."
+		resp.OperatorHint = "Incus readiness not verified. Inspect original diagnostics and managed_environment(status) if needed; other tools may be usable."
 	}
 	resp.ExitCode = result.ExitCode
 	resp.TimedOut = result.TimedOut

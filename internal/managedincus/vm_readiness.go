@@ -17,9 +17,9 @@ type VMReadiness struct {
 	Verification string `json:"verification"`
 }
 
-const vmRecheck = "After an authorized host repair, call managed_environment(operation=status) again; a real VM create/start is still needed to prove VM operation."
+const vmRecheck = "After any authorized repair, recheck managed_environment(status); verify a real VM operation only when end-to-end proof is needed."
 
-const UEFIRepairHint = "On Debian/Ubuntu amd64, inspect dpkg-query -W ovmf and ls /usr/share/OVMF /usr/share/qemu/firmware; if missing, the operator may approve installing the optional ovmf package. For arm64 inspect the distribution's AAVMF/EDK2 firmware. If firmware is already present, inspect Incus daemon logs, its firmware path/configuration and file permissions. Do not change the host or resubmit an uncertain create automatically."
+const UEFIRepairHint = "Inspect UEFI firmware discovery for Incus/QEMU. On Debian/Ubuntu amd64 check dpkg-query -W ovmf and /usr/share/OVMF; on arm64 check AAVMF/EDK2. Custom paths may work; repair only if needed and authorized."
 
 // IsUEFIFirmwareFailure recognizes a native provider diagnostic without
 // changing its original failure/uncertainty classification.
@@ -52,13 +52,13 @@ func detectVMReadiness(kvm string, codePatterns, varsPatterns []string) VMReadin
 	if st, err := os.Stat(kvm); err != nil || st.Mode()&os.ModeDevice == 0 {
 		result.Status = "prerequisite_not_detected"
 		result.ReasonCode = "kvm_not_detected"
-		result.OperatorHint = "The KVM device was not detected. Inspect ls -l /dev/kvm and host virtualization support; fix only with the host operator's authorization. Containers may still work."
+		result.OperatorHint = "Default KVM device not detected. If a VM is needed, inspect /dev/kvm and host virtualization. Containers may still work."
 		return result
 	}
 	if !firmwareFileDetected(codePatterns) || !firmwareFileDetected(varsPatterns) {
 		result.Status = "prerequisite_not_detected"
 		result.ReasonCode = "default_uefi_firmware_not_detected"
-		result.OperatorHint = UEFIRepairHint + " Other valid custom paths may exist; this check does not prove that VM creation is impossible."
+		result.OperatorHint = UEFIRepairHint + " Check result is advisory, not proof that VM creation is impossible."
 	}
 	return result
 }

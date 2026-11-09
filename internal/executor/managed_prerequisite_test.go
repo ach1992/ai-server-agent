@@ -27,6 +27,15 @@ func TestNativeUEFIFirmwareFailureProvidesRecoveryWithoutRetryingCreate(t *testi
 		Stage: "launch", ExitCode: 44, Diagnostic: "QEMU: device initialization failed for another reason",
 		BytesSeen: 57, Cause: errors.New("exit status 44"),
 	}
+	// A firmware failure can also occur during start of an existing VM.
+	// The hint must not invent a create operation or a new operation_id.
+	startFailure := managedErr(native)
+	if startFailure.ErrorCode != "native_command_failed" ||
+		!strings.Contains(startFailure.OperatorHint, "operation_status") ||
+		strings.Contains(startFailure.OperatorHint, "VM creation") ||
+		startFailure.ExitCode != 45 || startFailure.Output != raw {
+		t.Fatalf("firmware hint assumed a create-only failure: %+v", startFailure)
+	}
 	unknown := managedErr(fmt.Errorf("create_outcome_uncertain: native create cannot be reconciled: %w", other))
 	if unknown.PrerequisiteCode != "" || unknown.OperatorHint != "" ||
 		unknown.ErrorCode != "outcome_uncertain" {
@@ -45,7 +54,7 @@ func TestNativeIncusReadinessDistinguishesMissingBinaryAndDaemon(t *testing.T) {
 				Output: "native error", OutputBytesSeen: 12})
 			if resp.OK || resp.PrerequisiteCode != tc.want || resp.ErrorCode != "incus_unavailable" ||
 				resp.ErrorClass != "dependency" || resp.Output != "native error" || resp.ExitCode != 47 ||
-				!strings.Contains(resp.OperatorHint, "managed_environment") && tc.want != "incus_daemon_unready" {
+				!strings.Contains(resp.OperatorHint, "managed_environment") || strings.Contains(resp.OperatorHint, "incus admin status") {
 				t.Fatalf("native missing/daemon readiness diagnostics wrong: %+v", resp)
 			}
 		})

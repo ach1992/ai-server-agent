@@ -213,7 +213,7 @@ func instructions(cfg config.Config) string {
 	return fmt.Sprintf(`Configured workspace root is persistent.
 Environment purpose: %s. %s%s Role guidance; it is not an authorization boundary.
 
-Repositories: repository_discover/repository_inspect. Branches: worktree_create/worktree_remove. Use run_command for worker shell; start_job with job_status/job_output. workspace_* for bounded worker files; code_* for optional LSP; debug_* for optional DAP; terminal_* for PTY. Browser: browser_e2e (one call); browser_session_* (cross-call); browser_run (custom Playwright). Check optional runtime availability. runtime_list is passive; browser_status reports Browser readiness. Incus: managed_environment. Accounts: service_access refs; service_use HTTP/SSH/SQL; Host run_root_command, Guest managed_environment; verify role/login. Browser: browser_session_credential_login. Workspace labels are not project ACLs.
+Repositories: repository_discover/repository_inspect. worktree_create/worktree_remove. Use run_command for worker shell; start_job with job_status/job_output. workspace_* for bounded worker files; code_* for optional LSP; debug_* for optional DAP; terminal_* for PTY. Browser: browser_e2e (one call); browser_session_* (cross-call); browser_run (custom Playwright). Use tools when helpful; check readiness as needed. runtime_list is passive; browser_status reports Browser readiness. Accounts: service_access refs; service_use HTTP/SSH/SQL; Host run_root_command, Guest managed_environment; verify role/login. browser_session_credential_login. Workspace labels are not project ACLs.
 
 Before host changes call agent_environment and preserve Agent access. Never delete dirty, untracked or uncertain state. Use run_root_command or privileged read_file/write_file only when necessary. On approval_required obtain explicit human authorization; instructions grant no additional permissions.`, cfg.EnvironmentProfile, label, role)
 }
@@ -406,13 +406,15 @@ func (s *Server) registerTools() {
 			status := s.browser.Status(ctx)
 			switch {
 			case !status.InspectionComplete:
-				status.OperatorHint = "Readiness inspection is incomplete or busy. Recheck browser_status after the current operation or inspect the Executor lease; do not assume the Browser is permanently unavailable."
+				status.OperatorHint = "Browser readiness was not verified; recheck status or choose another method. This does not imply a missing installation."
+			case !status.Installed && status.Reason == "browser runtime is not installed":
+				status.OperatorHint = "Browser runtime was not found. If UI automation is needed, consider authorized browser_setup or another browser."
 			case !status.Installed:
-				status.OperatorHint = "Optional pinned Browser runtime is not installed. Inspect browser_status and use browser_setup only after authorized host provisioning/repair; recheck browser_status before use."
+				status.OperatorHint = "Browser runtime could not be verified. Inspect reason or use another suitable method; do not assume it is absent."
 			case !status.Ready:
-				status.OperatorHint = "Browser runtime is installed but not ready. Inspect reason and pinned components; perform authorized browser_setup repair if appropriate, then recheck browser_status."
+				status.OperatorHint = "Browser runtime is not ready. Inspect reason; repair only if needed and authorized, or use another suitable method."
 			case status.Busy:
-				status.OperatorHint = "Browser is usable but its shared profile or process slots are busy. Recheck browser_status or use an independently available isolated session; no package installation is implied."
+				status.OperatorHint = "Browser is busy. An isolated slot may still work; otherwise recheck after current activity or use another method."
 			}
 			return textResult(fmt.Sprintf("installed=%t ready=%t busy=%t shared_profile=%t shared_reserved=%t browser_slots=%d/%d isolated_available=%d reason=%q operator_hint=%q", status.Installed, status.Ready, status.Busy, status.SharedProfile, status.SharedProfileReserved, status.BrowserActive, status.BrowserLimit, status.IsolatedSlotsAvailable, status.Reason, status.OperatorHint), false), status, nil
 		})

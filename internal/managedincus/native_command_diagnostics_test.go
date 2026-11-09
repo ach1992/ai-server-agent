@@ -51,7 +51,7 @@ func TestReadyFailedNativeQueryPreservesEvidenceWithoutClaimingAvailability(t *t
 	b := Backend{Binary: script}
 	ready := b.Ready(context.Background())
 	if ready.Available || ready.Status != "unavailable" || ready.ExitCode != 47 ||
-		!strings.HasPrefix(ready.Diagnostic, "incus_unready:") ||
+		!strings.HasPrefix(ready.Diagnostic, "incus_unready:") || !strings.Contains(ready.Diagnostic, "incus query /1.0") || strings.Contains(ready.Diagnostic, "incus admin status") ||
 		!strings.Contains(ready.Output, "cannot connect native socket") ||
 		!strings.Contains(ready.Output, "[REDACTED]") ||
 		strings.Contains(ready.Output, "private123") {

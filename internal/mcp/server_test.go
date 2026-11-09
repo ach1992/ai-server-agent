@@ -640,7 +640,7 @@ func TestInstructionsRouteToolsConciselyAndPreserveSafety(t *testing.T) {
 		"runtime_list is passive",
 		"browser_status reports Browser readiness",
 		"Workspace labels are not project ACLs",
-		"Check optional runtime availability",
+		"Use tools when helpful",
 		"service_access refs",
 		"service_use HTTP/SSH/SQL",
 		"Host run_root_command, Guest managed_environment",

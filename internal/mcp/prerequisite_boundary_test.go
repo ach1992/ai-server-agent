@@ -31,7 +31,7 @@ func TestMCPPrerequisiteGuidanceReachesStructuredAndTextOnlyClients(t *testing.T
 			t.Fatalf("MCP fallback did not provide text: %T", wire.Content[0])
 		}
 		if structured.PrerequisiteCode != "service_client_unavailable" ||
-			!strings.Contains(structured.OperatorHint, "service_use") ||
+			!strings.Contains(structured.OperatorHint, "native CLI") ||
 			structured.Error != source.Error || structured.Output != source.Output ||
 			structured.RequestID != source.RequestID || structured.BytesSeen != source.BytesSeen ||
 			!strings.Contains(txt.Text, "operator_hint") ||
@@ -42,5 +42,48 @@ func TestMCPPrerequisiteGuidanceReachesStructuredAndTextOnlyClients(t *testing.T
 		if large && strings.Contains(txt.Text, source.Output) {
 			t.Fatal("large native output should remain in structuredContent, not unbounded text fallback")
 		}
+	}
+}
+
+// The production worker helper emits workspace_sandbox_unavailable with
+// ErrorClass=security, not dependency. MCP must keep the security refusal while
+// exposing a useful alternative, without bypassing Landlock.
+func TestSecurityWorkspacePrerequisiteSurvivesMCPResponse(t *testing.T) {
+	in := executor.Response{
+		OK: false, ErrorCode: "workspace_sandbox_unavailable",
+		ReasonCode: "workspace_sandbox_unavailable", ErrorClass: "security",
+		Error: "Landlock ABI unavailable", RequestID: "req-landlock-245",
+		Output: "native worker diagnostic", OutputEncoding: "utf-8",
+	}
+	wire, structured, err := responseResultWithLimit(in, 4096)
+	if err != nil || wire == nil || !wire.IsError {
+		t.Fatalf("security failure not delivered via MCP: %+v %v", wire, err)
+	}
+	if structured.ErrorClass != "security" ||
+		structured.ErrorCode != "workspace_sandbox_unavailable" ||
+		structured.PrerequisiteCode != "workspace_sandbox_unavailable" ||
+		!strings.Contains(structured.OperatorHint, "run_command") ||
+		!strings.Contains(structured.OperatorHint, "different isolation") ||
+		structured.RequestID != in.RequestID ||
+		structured.Error != in.Error || structured.Output != in.Output {
+		t.Fatalf("MCP security path changed provider refusal or lost recovery details: %+v", structured)
+	}
+	text := wire.Content[0].(*mcpsdk.TextContent).Text
+	for _, marker := range []string{"req-landlock-245", "operator_hint", "security", "run_command"} {
+		if !strings.Contains(text, marker) {
+			t.Fatalf("text-only MCP dropped %q: %s", marker, text)
+		}
+	}
+}
+
+func TestUnsupportedSemanticOperationIsNotAPackagePrerequisite(t *testing.T) {
+	in := executor.Response{OK: false, ErrorCode: "code_capability_unsupported",
+		ErrorClass: "dependency", ReasonCode: "code_capability_unsupported",
+		Error: "selected language server lacks this method"}
+	wire, structured, err := responseResultWithLimit(in, 4096)
+	if err != nil || wire == nil || !wire.IsError ||
+		structured.ErrorCode != in.ErrorCode || structured.OperatorHint != "" ||
+		structured.PrerequisiteCode != "" || structured.Error != in.Error {
+		t.Fatalf("unsupported semantic method was mislabeled as a repairable package: %+v %v", structured, err)
 	}
 }

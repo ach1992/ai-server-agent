@@ -413,7 +413,7 @@ func (b Backend) Ready(ctx context.Context) Result {
 	// successful command with non-API output cannot falsely report readiness.
 	root, err := b.command(ctx, 12*time.Second, "query", "/1.0")
 	if err != nil {
-		r.Diagnostic = "incus_unready: native daemon/socket/project not initialized or unavailable; inspect incus admin status and initialization"
+		r.Diagnostic = "incus_unready: native daemon/socket/project not initialized or unavailable; inspect incus query /1.0 or incus info"
 		var native *NativeCommandError
 		if errors.As(err, &native) {
 			r.ExitCode = native.ExitCode
