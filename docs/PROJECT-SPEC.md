@@ -45,7 +45,7 @@ An AI/client must be able to identify server and capability state, determine the
 
 Git/GitHub remain the sources of truth for code, project specifications, unresolved work, commits, PRs, reviews, CI, and releases. Agent-owned state is limited to protected operational state needed for reliable execution and recovery; it is not a second project-management database.
 
-### 4.5 Recoverable disposable test environments and protected service access (Issue #65, Revisions 3–4)
+### 4.5 Recoverable test environments and protected service access
 
 For authorized hosts with separately installed/initialized Incus, the Agent offers optional first-class discovery and lifecycle of **system containers and Linux VMs**. It records only the minimum native identity required for safe targeting: Agent instance ID, Incus project/name/UUID, purpose/work identifier and stable creation operation ID. Cold-chat recovery reads live Incus state and durable service metadata, not chat/session IDs or a second project database. Actual guest execution uses Incus native execution when available, retaining ordinary root/worker shell and PTY escape hatches. Independent guests can coexist; shared images/caches are reused by Incus. No fixed provider allowlist, mandatory Incus install or QEMU compatibility layer is required.
 

@@ -81,6 +81,6 @@ Treat a root-authorized connection as access to the underlying server. The Agent
 
 Find the [latest published release](https://github.com/ach1992/ai-server-agent/releases), [installation and troubleshooting guide](docs/OPERATIONS.md), [ChatGPT setup guide](docs/CONNECT_CHATGPT.md), and [tool reference](docs/TOOL-REFERENCE.md).
 
-For development and review, start with the [canonical product specification](docs/PROJECT-SPEC.md), [architecture](docs/ARCHITECTURE.md), [Developer Runtime design](docs/DEVELOPER-RUNTIME.md), [testing guidance](docs/TESTING.md), and [contributor instructions](AGENTS.md). Current issues, delivery evidence and deferred decisions belong to GitHub rather than these reference documents.
+For development and review, start with the [canonical product specification](docs/PROJECT-SPEC.md), [architecture](docs/ARCHITECTURE.md), [Developer Runtime design](docs/DEVELOPER-RUNTIME.md), [testing guidance](docs/TESTING.md), and [contributor instructions](AGENTS.md). Use [current open Issues](https://github.com/ach1992/ai-server-agent/issues?q=is%3Aissue+is%3Aopen) for unresolved outcomes and [PRs](https://github.com/ach1992/ai-server-agent/pulls) for active code review; completed evidence stays in merged PRs, checks and Releases. Parked ideas are not authorized implementation work until explicitly activated.
 
 Licensed under [MIT](LICENSE).

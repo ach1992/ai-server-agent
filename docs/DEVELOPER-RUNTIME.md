@@ -2,7 +2,7 @@
 
 **Authority:** [PROJECT-SPEC.md](PROJECT-SPEC.md) is the Owner-approved product-level north star. This document owns capability-specific technical design and defer/acceptance boundaries; [ARCHITECTURE.md](ARCHITECTURE.md) owns host, security and lifecycle architecture. Current integrated and released behavior must not be inferred from target architecture alone.
 
-> **Status and evidence:** This document records accepted capability architecture, not a live release or installed-server status ledger. Verify implemented/integrated work against current source and the owning [GitHub Issues](https://github.com/ach1992/ai-server-agent/issues) and PRs; [Releases](https://github.com/ach1992/ai-server-agent/releases) own shipped versions. [Issue #59](https://github.com/ach1992/ai-server-agent/issues/59) records accepted practical workflow evidence and the decision not to run an exhaustive fault matrix, [#137](https://github.com/ach1992/ai-server-agent/issues/137) records accepted shared-runtime verification, [#99](https://github.com/ach1992/ai-server-agent/issues/99) owns conditional data/client delivery, and [#140](https://github.com/ach1992/ai-server-agent/issues/140) owns multi-language LSP/DAP. Phase A architecture was accepted; runtime integration and installed evidence remain independent.
+> **Evidence boundary:** This is a capability-design reference, not a live release or acceptance ledger. Current implementation belongs to Git/PRs, published versions to [Releases](https://github.com/ach1992/ai-server-agent/releases), and unresolved acceptance to the relevant [open Issues](https://github.com/ach1992/ai-server-agent/issues?q=is%3Aissue+is%3Aopen). [#149](https://github.com/ach1992/ai-server-agent/issues/149) owns remaining language/SQL/DAP adapter acceptance and [#99](https://github.com/ach1992/ai-server-agent/issues/99) owns conditional client data/artifact delivery. Completed [#140](https://github.com/ach1992/ai-server-agent/issues/140), [#137](https://github.com/ach1992/ai-server-agent/issues/137), and [#59](https://github.com/ach1992/ai-server-agent/issues/59) are historical evidence, not active delivery programs. Source, installed-host and client capability are distinct proofs.
 
 ## 1. Outcome
 
@@ -358,18 +358,24 @@ HTTP(S), SSH, a database, or another network-style application URI, or a
 host-local application identity with **no** endpoint for keys/codes unrelated
 to a network service; recording a target does not confer the ability to
 authenticate or make a network request.
-The secret remains private to the root Executor and is never an ordinary
-MCP/worker-shell/environment value. Today, existing authorized consumers are
-an isolated Browser form login (**HTTP(S)-only, same-origin**) and an explicitly
-guest/UUID-bound native Incus exec with confidential stdin. Both use the same
-ref/lifecycle and check identity and expiry when invoked. Other applications
-must add a **real, bounded typed consumer** only when needed: independently
-validate their exact destination/protocol and operation permissions, deliver
-credentials through a private channel (not argv, logs or tool output), handle
-retry/revoke/uncertain outcomes, and return only safe diagnostics. Never add a
-generic "resolve secret" public endpoint, auto-export tokens to a shell, or
-couple the store to Playwright/aaPanel/WordPress. Existing MCP principal
-authentication is independent from these target-service credentials.
+The secret remains private to the root Executor, never an ordinary
+MCP/worker-shell/environment value. Existing authorized consumers reuse the
+same target-bound reference, expiry/revocation and operation-specific checks:
+
+- `run_root_command` passes an authorized host credential privately on inherited fd 3;
+- native Incus guest `exec` sends the credential via private stdin, bound to the exact guest UUID;
+- `service_use` supports registered HTTP(S) authentication and private JSON-field secret injection, native SSH and PostgreSQL/MySQL/MariaDB clients, with bounded redacted diagnostics;
+- isolated Browser credential login checks the credential-entry origin before submission and verified success, then retains the same authorized session's Browser evidence capabilities.
+
+The human operator may retrieve an eligible reversible service credential only
+through the protected **local root terminal** command `service-access reveal`;
+there is no MCP secret-reveal API. Other service workflows should reuse these
+verified primitives and their own supported native CLI/API rather than adding a
+vendor-specific credential store or asserting a universal account protocol.
+Any new typed consumer must independently validate its destination, authority,
+private credential transport, retries/uncertainty and diagnostics. Never add a
+generic public secret resolver or auto-export target credentials to shell argv,
+logs or tool output. MCP principal authentication remains separate.
 
 ### Generated evidence and artifacts
 
