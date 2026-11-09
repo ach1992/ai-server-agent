@@ -17,6 +17,7 @@ func TestNativeUEFIFirmwareFailureProvidesRecoveryWithoutRetryingCreate(t *testi
 	}
 	got := managedErr(fmt.Errorf("create_outcome_uncertain: native create submitted and no guest visible: %w", native))
 	if got.OK || got.ErrorCode != "outcome_uncertain" || got.ErrorClass == "dependency" ||
+		strings.Contains(got.OperatorHint, "firmware was not found at common paths") ||
 		got.PrerequisiteCode != "uefi_firmware_not_located" ||
 		!strings.Contains(got.OperatorHint, "ovmf") ||
 		!strings.Contains(got.OperatorHint, "operation_status") ||
@@ -40,6 +41,29 @@ func TestNativeUEFIFirmwareFailureProvidesRecoveryWithoutRetryingCreate(t *testi
 	if unknown.PrerequisiteCode != "" || unknown.OperatorHint != "" ||
 		unknown.ErrorCode != "outcome_uncertain" {
 		t.Fatalf("unrelated native failure misdiagnosed as UEFI: %+v", unknown)
+	}
+}
+
+func TestUncertainNativeOperationIDRemainsAvailableForRecovery(t *testing.T) {
+	request := managedincus.Request{Operation: "create", OperationID: "issue245-create-recovery"}
+	uncertain := withUncertainNativeOperationID(
+		managedErr(errors.New("create_outcome_uncertain: submitted but guest not yet observed")), request)
+	if uncertain.ErrorCode != "outcome_uncertain" ||
+		uncertain.OperationID != request.OperationID ||
+		uncertain.OperatorHint != "" {
+		t.Fatalf("uncertain native operation lost its submitted identity: %+v", uncertain)
+	}
+
+	// A failed preflight must not be mistaken for a submitted operation.
+	preflight := withUncertainNativeOperationID(
+		managedErr(errors.New("incus_storage_unavailable: preflight failed")), request)
+	if preflight.OperationID != "" || preflight.ErrorCode != "dependency_unavailable" {
+		t.Fatalf("preflight acquired misleading submitted-operation identity: %+v", preflight)
+	}
+	previous := withUncertainNativeOperationID(
+		Response{ErrorCode: "outcome_uncertain", OperationID: "existing-id"}, request)
+	if previous.OperationID != "existing-id" {
+		t.Fatalf("existing correlation ID overwritten: %+v", previous)
 	}
 }
 

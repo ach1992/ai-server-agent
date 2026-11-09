@@ -28,6 +28,13 @@ const (
 	maxStoreBytes = 16 << 20
 )
 
+// Stable error identities let consumers classify wrapped credential-state
+// failures without guessing from error text. Wire-facing messages stay the same.
+var (
+	ErrNotEnrolled           = errors.New("service_not_enrolled")
+	ErrCredentialUnavailable = errors.New("service_credential_unavailable")
+)
+
 type Record struct {
 	ID         string     `json:"id"`
 	HostID     string     `json:"host_id"`
@@ -516,7 +523,7 @@ func (s *Store) Renew(id string, ttlDays int, never bool) (Metadata, error) {
 			return errors.New("service_revoked")
 		}
 		if r.Secret == "" {
-			return errors.New("service_not_enrolled")
+			return ErrNotEnrolled
 		}
 		r.ExpiresAt = exp
 		return nil
@@ -573,7 +580,7 @@ func (s *Store) Resolve(id, host string) (Record, error) {
 		case "revoked":
 			return Record{}, errors.New("service_credential_revoked")
 		default:
-			return Record{}, errors.New("service_credential_unavailable")
+			return Record{}, ErrCredentialUnavailable
 		}
 	}
 	return Record{}, errors.New("service_reference_not_found")

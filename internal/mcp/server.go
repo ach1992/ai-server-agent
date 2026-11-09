@@ -204,7 +204,7 @@ func instructions(cfg config.Config) string {
 	case "validation":
 		role = "Validation: prefer installs, integration/E2E and acceptance; development tools remain available."
 	case "production":
-		role = "Production: inspect first. Before each change ask fresh, action-specific consent; never reuse prior approval. Agent cannot verify consent."
+		role = "Production: inspect first. Require fresh, action-specific consent for each change; never reuse approval. Agent cannot verify consent."
 	}
 	label := ""
 	if cfg.ServerLabel != "" {
@@ -215,7 +215,7 @@ Environment purpose: %s. %s%s Role guidance; it is not an authorization boundary
 
 Repositories: repository_discover/repository_inspect. worktree_create/worktree_remove. Use run_command for worker shell; start_job with job_status/job_output. workspace_* for bounded worker files; code_* for optional LSP; debug_* for optional DAP; terminal_* for PTY. Browser: browser_e2e (one call); browser_session_* (cross-call); browser_run (custom Playwright). Hints are advisory, not mandatory workflows. runtime_list is passive; browser_status reports Browser readiness. Accounts: service_access refs; service_use HTTP/SSH/SQL; Host run_root_command, Guest managed_environment; verify role/login. browser_session_credential_login. Workspace labels are not project ACLs.
 
-Before host changes call agent_environment and preserve Agent access. Never delete dirty, untracked or uncertain state. Use run_root_command or privileged read_file/write_file only when necessary. On approval_required obtain explicit human authorization; instructions grant no additional permissions.`, cfg.EnvironmentProfile, label, role)
+Preserve Agent access before host-wide changes; agent_environment provides current evidence when available. Never delete dirty, untracked or uncertain state. Use run_root_command or privileged read_file/write_file only when necessary. On approval_required obtain explicit human authorization; instructions grant no additional permissions.`, cfg.EnvironmentProfile, label, role)
 }
 
 func annotations(readOnly, destructive, idempotent, openWorld bool) *mcpsdk.ToolAnnotations {
@@ -301,7 +301,7 @@ func (s *Server) commandTimeoutDescription() string {
 func (s *Server) registerTools() {
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "agent_environment",
-		Description: "Read the AI Server Agent self-preservation manifest. Call this before host-wide package, service, firewall, network, disk, user, web-stack, or control-panel changes.",
+		Description: "Read current AI Server Agent self-preservation details for safe host-wide package, service, network, firewall, disk or web-stack planning. This read-only tool does not grant approval.",
 		Annotations: annotations(true, false, true, false),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input EmptyInput) (*mcpsdk.CallToolResult, any, error) {
 		b, err := json.MarshalIndent(manifest.Build(s.cfg), "", "  ")

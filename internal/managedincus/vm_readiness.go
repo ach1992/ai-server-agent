@@ -19,7 +19,7 @@ type VMReadiness struct {
 
 const vmRecheck = "Recheck managed_environment(operation=status) after host changes; only a real VM operation proves launch readiness."
 
-const UEFIRepairHint = "UEFI firmware was not found at common paths. Check optional ovmf and /usr/share/OVMF on amd64 or AAVMF/EDK2 on arm64 if relevant; custom paths may exist."
+const UEFIRepairHint = "Inspect Incus/QEMU UEFI firmware discovery if needed: ovmf paths on amd64, AAVMF/EDK2 on arm64, or custom firmware paths. Installed files alone do not prove QEMU can use them."
 
 // IsUEFIFirmwareFailure recognizes a native provider diagnostic without
 // changing its original failure/uncertainty classification.
@@ -58,7 +58,7 @@ func detectVMReadiness(kvm string, codePatterns, varsPatterns []string) VMReadin
 	if !firmwareFileDetected(codePatterns) || !firmwareFileDetected(varsPatterns) {
 		result.Status = "prerequisite_not_detected"
 		result.ReasonCode = "default_uefi_firmware_not_detected"
-		result.OperatorHint = UEFIRepairHint + " This is advisory, not proof that VM launch is impossible."
+		result.OperatorHint = "The passive check did not find complete UEFI firmware in its common paths. " + UEFIRepairHint + " This does not prove that VM launch is impossible."
 	}
 	return result
 }

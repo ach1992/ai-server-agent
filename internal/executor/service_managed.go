@@ -31,7 +31,7 @@ func managedErr(err error) Response {
 	// A registered but unenrolled service credential is a credential state
 	// problem, not a missing host binary or an unavailable native runtime.
 	// This shared resolver also serves guest exec and Browser logins.
-	if err != nil && (err.Error() == "service_credential_unavailable" || err.Error() == "service_not_enrolled") {
+	if errors.Is(err, serviceaccess.ErrCredentialUnavailable) || errors.Is(err, serviceaccess.ErrNotEnrolled) {
 		resp := fileError("service_credential_not_enrolled", "state", err)
 		resp.OperatorHint = "This service reference has no enrolled secret; inspect service_access metadata if needed. It is not evidence of a missing host package."
 		return resp
@@ -411,7 +411,18 @@ func (s *Server) managedEnvironmentAction(ctx context.Context, req Request) Resp
 		// normal Agent output. Successful exec is not proof of guest login.
 		_ = serviceaccess.New(s.cfg.StateDir).MarkUsed(req.CredentialRef)
 	}
-	return s.finishActionAudit(req, "managed_environment", "root", "incus "+in.Operation, "managed", started, resp)
+	// The native idempotency key lives inside ManagedEnv, not the generic
+	// start_job-only Request.OperationID. Echo it on uncertainty so a
+	// reconnecting client can reconcile without guessing or resubmitting.
+	return withUncertainNativeOperationID(
+		s.finishActionAudit(req, "managed_environment", "root", "incus "+in.Operation, "managed", started, resp), in)
+}
+
+func withUncertainNativeOperationID(resp Response, in managedincus.Request) Response {
+	if resp.ErrorCode == "outcome_uncertain" && resp.OperationID == "" && in.OperationID != "" {
+		resp.OperationID = in.OperationID
+	}
+	return resp
 }
 
 // nativeWatchTicket is at most one pending observation per durable operation.

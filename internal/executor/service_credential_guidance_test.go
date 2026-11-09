@@ -2,6 +2,7 @@ package executor
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -53,12 +54,20 @@ func TestServiceCredentialUnenrolledDoesNotTriggerHostPrerequisite(t *testing.T)
 }
 
 func TestManagedCredentialResolveFailureSharedConsumers(t *testing.T) {
-	for _, message := range []string{"service_credential_unavailable", "service_not_enrolled"} {
-		out := managedErr(errors.New(message))
-		if out.OK || out.ErrorClass != "state" ||
-			out.ErrorCode != "service_credential_not_enrolled" ||
-			out.PrerequisiteCode != "" || out.OperatorHint == "" {
-			t.Fatalf("known unenrolled secret should not trigger host repair: %+v", out)
+	for _, cause := range []error{serviceaccess.ErrCredentialUnavailable, serviceaccess.ErrNotEnrolled} {
+		for _, err := range []error{cause, fmt.Errorf("credential-derived Browser access denied: %w", cause)} {
+			out := managedErr(err)
+			if out.OK || out.ErrorClass != "state" ||
+				out.ErrorCode != "service_credential_not_enrolled" ||
+				out.PrerequisiteCode != "" || out.OperatorHint == "" ||
+				!strings.Contains(out.Error, cause.Error()) {
+				t.Fatalf("wrapped unenrolled secret was misclassified as host dependency: %+v", out)
+			}
 		}
+	}
+	// A matching word in an unrelated error is not proof of an unenrolled credential.
+	unknown := managedErr(errors.New("unrelated provider text service_credential_unavailable"))
+	if unknown.ErrorCode == "service_credential_not_enrolled" || unknown.OperatorHint != "" {
+		t.Fatalf("untrusted provider text was treated as a credential state fact: %+v", unknown)
 	}
 }

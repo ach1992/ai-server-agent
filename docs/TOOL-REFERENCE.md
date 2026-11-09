@@ -20,7 +20,7 @@ The MCP server exposes its supported tool catalog through authenticated `tools/l
 
 | Tool | Purpose |
 | --- | --- |
-| `agent_environment` | read the current self-preservation manifest before host-wide changes |
+| `agent_environment` | inspect the current authenticated self-preservation manifest when planning host-wide changes; does not grant approval |
 | `run_command` | run ordinary Bash as `aiworker` in `/srv/ai-workspace` |
 | `workspace_search` | run bounded read-only `text` regex/literal searches with trusted `ripgrep` under worker authority, or `structural` AST searches with `ast-grep`; LSP continues to own semantic meaning |
 | `workspace_stat` | metadata-only readable regular-file size/version as `aiworker`, without reading/returning file content |
@@ -134,7 +134,7 @@ This is a safety guardrail, not a claim that arbitrary root shell access is math
 
 ### Self-preservation manifest
 
-Before host-wide package, service, firewall, network, disk, user, web-stack or control-panel changes, connected clients/models are instructed to call `agent_environment` and preserve the critical resources it reports.
+Before host-wide package, service, firewall, network, disk, user, web-stack or control-panel changes, verify Agent survivability and preserve access. The authenticated `agent_environment` manifest is the native source when available; unavailability of this single tool does not waive the preservation or approval requirements.
 
 The manifest identifies, among other things:
 

@@ -87,3 +87,25 @@ func TestUnsupportedSemanticOperationIsNotAPackagePrerequisite(t *testing.T) {
 		t.Fatalf("unsupported semantic method was mislabeled as a repairable package: %+v %v", structured, err)
 	}
 }
+
+// Uncertain native work must retain the exact stable idempotency key in both
+// structured and bounded text results; a reconnect must not invent a new ID.
+func TestNativeUncertainOperationIdentitySurvivesMCPFallback(t *testing.T) {
+	const operationID = "issue245-native-create-recover"
+	in := executor.Response{
+		OK: false, ErrorCode: "outcome_uncertain", ReasonCode: "outcome_uncertain",
+		ErrorClass: "managed", OperationID: operationID, RequestID: "req-native-uncertain",
+		Error: "native guest launch was submitted; outcome not yet verified",
+	}
+	wire, structured, err := responseResultWithLimit(in, 4096)
+	if err != nil || wire == nil || !wire.IsError || structured.OperationID != operationID ||
+		structured.ErrorCode != in.ErrorCode || structured.RequestID != in.RequestID {
+		t.Fatalf("native uncertainty lost recoverable identity: %+v %v", structured, err)
+	}
+	fallback := wire.Content[0].(*mcpsdk.TextContent).Text
+	if !strings.Contains(fallback, operationID) ||
+		!strings.Contains(fallback, "operation_id") ||
+		!strings.Contains(fallback, "outcome_uncertain") {
+		t.Fatalf("text-only MCP client lost safe reconciliation key: %s", fallback)
+	}
+}
