@@ -358,6 +358,13 @@ HTTP(S), SSH, a database, or another network-style application URI, or a
 host-local application identity with **no** endpoint for keys/codes unrelated
 to a network service; recording a target does not confer the ability to
 authenticate or make a network request.
+Registration binds full account/purpose and endpoint identity (not endpoint URL alone),
+with optional immutable guest UUID; the same endpoint may have separately authorized
+accounts. The default secret lifetime is 30 days, with renewal, revocation and an
+explicit no-expiry option. Metadata changes retain the enrolled value; a changed
+destination origin requires approval. Enrollment does not prove the service account
+exists or has the required role.
+
 The secret remains private to the root Executor, never an ordinary
 MCP/worker-shell/environment value. Existing authorized consumers reuse the
 same target-bound reference, expiry/revocation and operation-specific checks:
