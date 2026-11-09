@@ -104,6 +104,8 @@ type Response struct {
 	OK                  bool                       `json:"ok"`
 	Error               string                     `json:"error,omitempty"`
 	ReasonCode          string                     `json:"reason_code,omitempty"`
+	PrerequisiteCode    string                     `json:"prerequisite_code,omitempty"`
+	OperatorHint        string                     `json:"operator_hint,omitempty"`
 	ErrorCode           string                     `json:"error_code"`
 	ErrorClass          string                     `json:"error_class"`
 	Retryable           bool                       `json:"retryable,omitempty"`

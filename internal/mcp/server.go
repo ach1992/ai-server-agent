@@ -213,9 +213,9 @@ func instructions(cfg config.Config) string {
 	return fmt.Sprintf(`Configured workspace root is persistent.
 Environment purpose: %s. %s%s Role guidance; it is not an authorization boundary.
 
-Repositories: repository_discover/repository_inspect. Branches: worktree_create/worktree_remove. Use run_command for worker shell; start_job with job_status/job_output. workspace_* for bounded worker files; code_* for optional LSP; debug_* for optional DAP; terminal_* for PTY. Browser: browser_e2e (one call); browser_session_* (cross-call); browser_run (custom Playwright). Check optional runtime availability. runtime_list is passive; browser_status reports Browser readiness. Incus: managed_environment. Accounts: service_access refs; service_use HTTP/SSH/SQL; Host run_root_command, Guest managed_environment; verify role/login. Browser: browser_session_credential_login. Workspace labels are not project ACLs.
+Git: repository_discover, repository_inspect, worktree_create, worktree_remove; repository_environment: toolchains. Source: workspace_search, workspace_read, workspace_apply_edits, workspace_transfer; code_definition, code_references, code_symbols, code_diagnostics (optional LSP). Build/test: run_command or start_job with job_status/job_output. Debug: debug_adapter_status, debug_launch (DAP); terminal_open (PTY). Browser: browser_e2e (one call), browser_session_flow (cross-call), browser_run (Playwright). Choose by task; hints advisory, no blanket preflight. runtime_list passive; browser_status readiness. Credentials: service_access refs, service_use HTTP/SSH/SQL; Host run_root_command, Guest managed_environment; verify role/login. Browser: browser_session_credential_login. Workspace labels are not project ACLs.
 
-Before host changes call agent_environment and preserve Agent access. Never delete dirty, untracked or uncertain state. Use run_root_command or privileged read_file/write_file only when necessary. On approval_required obtain explicit human authorization; instructions grant no additional permissions.`, cfg.EnvironmentProfile, label, role)
+Preserve Agent access before host changes; agent_environment may help. Never delete dirty, untracked or uncertain state. Use run_root_command or privileged read_file/write_file only when necessary. On approval_required obtain explicit human authorization; instructions grant no additional permissions.`, cfg.EnvironmentProfile, label, role)
 }
 
 func annotations(readOnly, destructive, idempotent, openWorld bool) *mcpsdk.ToolAnnotations {
@@ -258,6 +258,7 @@ func (s *Server) responseResult(resp executor.Response) (*mcpsdk.CallToolResult,
 }
 
 func responseResultWithLimit(resp executor.Response, maxTextFallbackBytes int) (*mcpsdk.CallToolResult, executor.Response, error) {
+	resp = annotatePrerequisiteFailure(resp)
 	if len(resp.Output) <= maxTextFallbackBytes {
 		b, err := json.MarshalIndent(resp, "", "  ")
 		if err != nil {
@@ -300,7 +301,7 @@ func (s *Server) commandTimeoutDescription() string {
 func (s *Server) registerTools() {
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "agent_environment",
-		Description: "Read the AI Server Agent self-preservation manifest. Call this before host-wide package, service, firewall, network, disk, user, web-stack, or control-panel changes.",
+		Description: "Read current AI Server Agent self-preservation details for safe host-wide package, service, network, firewall, disk or web-stack planning. This read-only tool does not grant approval.",
 		Annotations: annotations(true, false, true, false),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input EmptyInput) (*mcpsdk.CallToolResult, any, error) {
 		b, err := json.MarshalIndent(manifest.Build(s.cfg), "", "  ")
@@ -403,7 +404,8 @@ func (s *Server) registerTools() {
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_status", Description: "Inspect bounded non-secret browser runtime readiness and pinned Node/Playwright/Chromium versions. The persistent browser profile is Agent-wide shared state, not per-client or per-user isolation.", Annotations: annotations(true, false, true, false)},
 		func(ctx context.Context, req *mcpsdk.CallToolRequest, input EmptyInput) (*mcpsdk.CallToolResult, browser.RuntimeStatus, error) {
 			status := s.browser.Status(ctx)
-			return textResult(fmt.Sprintf("installed=%t ready=%t busy=%t shared_profile=%t shared_reserved=%t browser_slots=%d/%d isolated_available=%d reason=%q", status.Installed, status.Ready, status.Busy, status.SharedProfile, status.SharedProfileReserved, status.BrowserActive, status.BrowserLimit, status.IsolatedSlotsAvailable, status.Reason), false), status, nil
+			status.OperatorHint = browserStatusOperatorHint(status)
+			return textResult(fmt.Sprintf("installed=%t ready=%t busy=%t shared_profile=%t shared_reserved=%t browser_slots=%d/%d isolated_available=%d reason=%q operator_hint=%q", status.Installed, status.Ready, status.Busy, status.SharedProfile, status.SharedProfileReserved, status.BrowserActive, status.BrowserLimit, status.IsolatedSlotsAvailable, status.Reason, status.OperatorHint), false), status, nil
 		})
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "browser_setup", Description: "Install/repair pinned optional root-owned Node/Playwright/Chromium Browser runtime; may install OS libraries. Preserves shared profile, system Node and ports 80/443.", Annotations: annotations(false, true, true, true)},
@@ -519,6 +521,32 @@ func newHTTPServer(cfg config.Config, handler http.Handler) *http.Server {
 		ReadHeaderTimeout: time.Duration(r.HTTPReadHeaderTimeoutSeconds) * time.Second,
 		IdleTimeout:       time.Duration(r.HTTPIdleTimeoutSeconds) * time.Second,
 		MaxHeaderBytes:    1 << 20,
+	}
+}
+
+// Browser runtime inspection and executor-owned session admission are
+// independent observations. Never erase verified installation/readiness
+// evidence just because the admission probe could not complete.
+func browserStatusOperatorHint(status browser.RuntimeStatus) string {
+	switch {
+	case !status.InspectionComplete && status.Installed && status.Ready:
+		return "Browser runtime is installed and ready, but session admission could not be verified. Do not assume shared or isolated slots are available; inspect reason or recheck browser_status."
+	case !status.InspectionComplete && status.Installed:
+		return "Browser runtime was found, but readiness or session admission is unverified; inspect reason or recheck browser_status."
+	case !status.InspectionComplete:
+		return "Browser runtime inspection was incomplete; installation and session admission are unverified. Inspect reason or recheck browser_status."
+	case !status.Installed && status.Reason == "browser runtime is not installed":
+		return "Optional Browser runtime was not found at the expected private path."
+	case !status.Installed:
+		return "Browser runtime could not be verified; inspect the reported reason before inferring a missing installation."
+	case !status.Ready:
+		return "Browser runtime is not ready; the reported reason identifies the failed check."
+	case status.Busy && status.IsolatedSlotsAvailable > 0:
+		return "Shared Browser is busy; independently reported isolated slots are available."
+	case status.Busy:
+		return "Shared Browser is busy; isolated admission availability is reported separately."
+	default:
+		return ""
 	}
 }
 

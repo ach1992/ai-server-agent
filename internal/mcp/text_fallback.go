@@ -101,6 +101,8 @@ func diagnosticTextFallback(resp executor.Response, maxBytes int) string {
 	addQuoted("error_code", resp.ErrorCode, 80)
 	addQuoted("reason_code", resp.ReasonCode, 80)
 	addQuoted("error_class", resp.ErrorClass, 80)
+	addQuoted("prerequisite_code", resp.PrerequisiteCode, 96)
+	addQuoted("operator_hint", resp.OperatorHint, 520)
 	addQuoted("request_id", resp.RequestID, 96)
 	addQuoted("operation_id", resp.OperationID, 96)
 	add(fmt.Sprintf(" bytes_seen=%d bytes_returned=%d", resp.BytesSeen, resp.BytesReturned))

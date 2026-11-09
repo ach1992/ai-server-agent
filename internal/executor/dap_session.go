@@ -81,13 +81,13 @@ func (s *Server) debugAction(ctx context.Context, req Request) Response {
 					modes = append(modes, "browser")
 				}
 			}
-			body, _ := json.Marshal(map[string]any{
+			body, _ := json.Marshal(optionalDAPPrerequisite(map[string]any{
 				"adapter": "javascript/js-debug", "installed": available,
 				"modes": modes, "attach_supported": false,
 				"precompiled_typescript_source_maps": req.Language == "typescript",
 				"privileged":                         false, "provisioning": "optional_root_owned_pinned_complete_js_debug",
 				"containment": "executor_owned_private_cgroup_v2_required",
-			})
+			}, available, req.Language))
 			state := "unavailable"
 			if available {
 				state = "installed_containment_unverified"
@@ -104,7 +104,7 @@ func (s *Server) debugAction(ctx context.Context, req Request) Response {
 				"modes": []string{"script", "module", "test"}, "attach_supported": false,
 				"privileged": false, "provisioning": "optional_root_owned_pinned_wheel_and_interpreter",
 				"containment": "root_owned_cgroup_v2_required_before_launch"}
-			b, _ := json.Marshal(payload)
+			b, _ := json.Marshal(optionalDAPPrerequisite(payload, available, "python"))
 			status := "unavailable"
 			if available {
 				status = "installed_containment_unverified"
@@ -114,13 +114,13 @@ func (s *Server) debugAction(ctx context.Context, req Request) Response {
 		if req.Language == "php" {
 			_, _, _, _, trustErr := systemexec.PHPDAP()
 			available := trustErr == nil || (s.phpDAPNodeBinary != "" && s.phpDAPCLIBinary != "" && s.phpDAPNativeBinary != "" && s.phpDAPXdebugModule != "")
-			payload, _ := json.Marshal(map[string]any{
+			payload, _ := json.Marshal(optionalDAPPrerequisite(map[string]any{
 				"adapter": "php/xdebug", "installed": available,
 				"modes": []string{"cli"}, "attach_supported": false,
 				"http_request_mode": "not_yet_verified", "privileged": false,
 				"transport":   "single_verified_unix_dbgp_peer",
 				"containment": "executor_owned_private_cgroup_v2_required",
-			})
+			}, available, "php"))
 			status := "unavailable"
 			if available {
 				status = "installed_containment_unverified"
@@ -130,12 +130,12 @@ func (s *Server) debugAction(ctx context.Context, req Request) Response {
 		if req.Language == "rust" {
 			_, trustErr := systemexec.RustLLDBDAP()
 			available := trustErr == nil || s.rustLLDBDAPBinary != ""
-			body, _ := json.Marshal(map[string]any{
+			body, _ := json.Marshal(optionalDAPPrerequisite(map[string]any{
 				"adapter": "rust/lldb-dap", "installed": available,
 				"modes": []string{"exec"}, "attach_supported": false,
 				"privileged": false, "provisioning": "optional_verified_LLDB19_native_distribution",
 				"containment": "executor_owned_private_cgroup_v2_required",
-			})
+			}, available, "rust"))
 			status := "unavailable"
 			if available {
 				status = "installed_containment_unverified"
@@ -148,7 +148,7 @@ func (s *Server) debugAction(ctx context.Context, req Request) Response {
 		_, err := s.debugBinary()
 		available := err == nil
 		detail := map[string]any{"adapter": "go/delve", "installed": available, "modes": []string{"exec"}, "attach_supported": false, "privileged": false, "provisioning": "optional_admin_owned_binary", "containment": "root_owned_cgroup_v2_required_before_launch"}
-		b, _ := json.Marshal(detail)
+		b, _ := json.Marshal(optionalDAPPrerequisite(detail, available, "go"))
 		return Response{OK: true, Status: func() string {
 			if available {
 				return "installed_containment_unverified"

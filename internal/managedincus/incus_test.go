@@ -710,8 +710,16 @@ func TestDurableUncertainCreateReconnectAndNameCollision(t *testing.T) {
 	if _, err := os.Stat(b.intentPath()); err != nil {
 		t.Fatalf("missing durable intent before launch: %v", err)
 	}
+	// The create-intent journal can be read without a native guest UUID;
+	// snapshot/restore operation_status is not an alternate lookup.
+	if _, statusErr := b.Run(ctx, Request{Operation: "operation_status", OperationID: req.OperationID,
+		Project: req.Project, Instance: req.Instance}, false, ""); statusErr == nil ||
+		!strings.Contains(statusErr.Error(), "requires stable operation_id and project/instance/native UUID") {
+		t.Fatalf("create incorrectly recovered through snapshot/restore status: %v", statusErr)
+	}
 	pending, err := b.Run(ctx, Request{Operation: "pending_creates"}, false, "")
-	if err != nil || len(pending.Pending) != 1 || pending.Pending[0].State != "submitted" {
+	if err != nil || len(pending.Pending) != 1 || pending.Pending[0].State != "submitted" ||
+		pending.Pending[0].OperationID != req.OperationID || pending.Pending[0].Instance != req.Instance || pending.Pending[0].NativeUUID != "" {
 		t.Fatalf("pending recovery metadata unavailable: %+v %v", pending, err)
 	}
 	restarted := Backend{HostID: b.HostID, Binary: b.Binary, StateDir: b.StateDir, capacityProbe: b.capacityProbe}

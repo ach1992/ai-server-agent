@@ -28,6 +28,14 @@ func managedJSON(v any) Response {
 	return resp
 }
 func managedErr(err error) Response {
+	// A registered but unenrolled service credential is a credential state
+	// problem, not a missing host binary or an unavailable native runtime.
+	// This shared resolver also serves guest exec and Browser logins.
+	if errors.Is(err, serviceaccess.ErrCredentialUnavailable) || errors.Is(err, serviceaccess.ErrNotEnrolled) {
+		resp := fileError("service_credential_not_enrolled", "state", err)
+		resp.OperatorHint = "This service reference has no enrolled secret; inspect service_access metadata if needed. It is not evidence of a missing host package."
+		return resp
+	}
 	// Classify the higher-level operation and recovery semantics first.
 	// A wrapped native command is evidence, not grounds for converting an
 	// uncertain create or storage preflight into an ordinary process failure.
@@ -45,9 +53,9 @@ func managedErr(err error) Response {
 	natives := managedNativeFailures(err)
 	hasNative := len(natives) > 0
 	class := "managed"
-	if code == "dependency_unavailable" && strings.HasPrefix(err.Error(), "native_identity_preflight_unavailable:") {
-		// A failed native identity observation is a dependency/probe
-		// failure, not an observed change or a guest-exec failure.
+	if code == "dependency_unavailable" {
+		// A known failed native prerequisite is distinct from uncertain
+		// execution and does not disable independent Agent capabilities.
 		class = "dependency"
 	}
 	if hasNative && code == "managed_operation_failed" {
@@ -91,6 +99,13 @@ func managedErr(err error) Response {
 			resp.Output = strings.Join(stages, "\n")
 		}
 		resp.BytesReturned = int64(len(resp.Output))
+		for _, native := range natives {
+			if managedincus.IsUEFIFirmwareFailure(native.Diagnostic) {
+				resp.PrerequisiteCode = "uefi_firmware_not_located"
+				resp.OperatorHint = "Incus reported a UEFI issue. For uncertain create, inspect managed_environment(operation=pending_creates) and native guest state before retrying. For start, inspect the existing guest; never blindly retry. " + managedincus.UEFIRepairHint
+				break
+			}
+		}
 	}
 	return resp
 }
@@ -318,6 +333,17 @@ func managedGuestExecFailure(result managedincus.Result, err error) Response {
 func managedUnavailableResult(result managedincus.Result) Response {
 	resp := fileError("incus_unavailable", "dependency", errors.New(result.Diagnostic))
 	resp.Status = "native_preflight_unavailable"
+	switch {
+	case strings.HasPrefix(result.Diagnostic, "incus_missing:"):
+		resp.PrerequisiteCode = "incus_cli_not_detected"
+		resp.OperatorHint = "Trusted native Incus CLI not found. Inspect the executable if this operation is needed; recheck managed_environment(operation=status) after any authorized repair."
+	case strings.HasPrefix(result.Diagnostic, "incus_unready:"):
+		resp.PrerequisiteCode = "incus_daemon_unready"
+		resp.OperatorHint = "Native Incus daemon/socket readiness was not verified before dispatch. An authorized host may inspect incus --force-local query /1.0 or incus info; recheck managed_environment(operation=status)."
+	default:
+		resp.PrerequisiteCode = "incus_preflight_unverified"
+		resp.OperatorHint = "Native Incus preflight did not establish readiness. Inspect the original diagnostic or managed_environment(operation=status) if needed."
+	}
 	resp.ExitCode = result.ExitCode
 	resp.TimedOut = result.TimedOut
 	resp.Output = result.Output
@@ -385,7 +411,18 @@ func (s *Server) managedEnvironmentAction(ctx context.Context, req Request) Resp
 		// normal Agent output. Successful exec is not proof of guest login.
 		_ = serviceaccess.New(s.cfg.StateDir).MarkUsed(req.CredentialRef)
 	}
-	return s.finishActionAudit(req, "managed_environment", "root", "incus "+in.Operation, "managed", started, resp)
+	// The native idempotency key lives inside ManagedEnv, not the generic
+	// start_job-only Request.OperationID. Echo it on uncertainty so a
+	// reconnecting client can reconcile without guessing or resubmitting.
+	return withUncertainNativeOperationID(
+		s.finishActionAudit(req, "managed_environment", "root", "incus "+in.Operation, "managed", started, resp), in)
+}
+
+func withUncertainNativeOperationID(resp Response, in managedincus.Request) Response {
+	if resp.ErrorCode == "outcome_uncertain" && resp.OperationID == "" && in.OperationID != "" {
+		resp.OperationID = in.OperationID
+	}
+	return resp
 }
 
 // nativeWatchTicket is at most one pending observation per durable operation.

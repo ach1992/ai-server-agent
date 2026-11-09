@@ -85,6 +85,7 @@ type RuntimeStatus struct {
 	Desired                RuntimeManifest `json:"desired"`
 	InstalledState         RuntimeManifest `json:"installed_state"`
 	Reason                 string          `json:"reason,omitempty"`
+	OperatorHint           string          `json:"operator_hint,omitempty"`
 }
 
 type RunOptions struct {

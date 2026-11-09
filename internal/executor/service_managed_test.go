@@ -122,6 +122,22 @@ func TestCredentialDerivedBrowserRevocationGate(t *testing.T) {
 		t.Fatalf("failed login allowed snapshot: %+v", g)
 	}
 	s.sessions.sessions[sid].browser.credentialAuthOK = true
+	// Browser revalidation wraps the underlying store error. It must still
+	// report credential state rather than a broken host dependency.
+	unenrolled, err := st.Register(serviceaccess.Registration{
+		HostID: s.cfg.InstanceID, Service: "OtherService",
+		Endpoint: "http://127.0.0.1:8081/login",
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.sessions.sessions[sid].browser.credentialRef = unenrolled.ID
+	if g := s.credentialSessionGate(req); g.OK ||
+		g.ErrorCode != "service_credential_not_enrolled" ||
+		g.ErrorClass != "state" || g.PrerequisiteCode != "" {
+		t.Fatalf("unenrolled Browser credential was mislabeled as host dependency: %+v", g)
+	}
+	s.sessions.sessions[sid].browser.credentialRef = meta.ID
 	if _, err := st.Revoke(meta.ID); err != nil {
 		t.Fatal(err)
 	}

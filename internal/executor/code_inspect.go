@@ -230,13 +230,7 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 	canonicalReq.Path = path
 	data, err := s.workerLSPInspection(ctx, canonicalReq, profile, binary, filepath.Join(workspace, path), source.Output, req.CodeMethod, req.Line, req.Character)
 	if err != nil {
-		if errors.Is(err, errCodeTargetUnstable) {
-			return fileError("code_target_changed", "conflict", err)
-		}
-		if strings.HasPrefix(err.Error(), "lsp_capability_not_supported: ") {
-			return fileError("code_capability_unsupported", "dependency", errors.New("the selected language server does not implement the requested semantic operation"))
-		}
-		return fileError("code_inspection_failed", "runtime", err)
+		return codeInspectionFailure(err)
 	}
 	if actualLanguage == "sql" && req.CodeMethod == "symbols" {
 		data, err = appendSQLDDLSymbols(data, source.Output, req.SQLDialect)
@@ -506,6 +500,18 @@ func inspectProfileForPath(path string) (lspInspectionProfile, string, bool) {
 		return typeScript7LSPProfile, "typescript", true
 	}
 	return typeScript7LSPProfile, "javascript", true
+}
+
+// Keep unsupported LSP methods distinct from missing adapters. The original
+// error identifies the requested method without implying a package repair.
+func codeInspectionFailure(err error) Response {
+	if errors.Is(err, errCodeTargetUnstable) {
+		return fileError("code_target_changed", "conflict", err)
+	}
+	if strings.HasPrefix(err.Error(), "lsp_capability_not_supported: ") {
+		return fileError("code_capability_unsupported", "validation", err)
+	}
+	return fileError("code_inspection_failed", "runtime", err)
 }
 
 func (s *Server) workerGoInspection(ctx context.Context, req Request, goplsPath, file, source, method string, line, character int) (json.RawMessage, error) {
