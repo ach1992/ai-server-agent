@@ -67,6 +67,16 @@ CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
 
 These cover Go unit/behavior tests, race detection and the production binary build.
 
+If a **heavy development/test command** fails with `ENOSPC` or an explicit spool/audit capacity reserve error, first inspect the filesystem actually holding its scratch/test-state files (for example `df -hT /tmp /var/tmp`), including available bytes versus the reported reserve. Where `/tmp` is a constrained tmpfs and `/var/tmp` is a writable disk-backed filesystem with enough headroom, rerun **only the affected command** with short, per-command scratch paths:
+
+```bash
+TMPDIR=/var/tmp GOTMPDIR=/var/tmp go test ./...
+# Or, for the local validation workflow:
+TMPDIR=/var/tmp GOTMPDIR=/var/tmp bash scripts/dev-check.sh --base origin/main --head HEAD
+```
+
+`GOTMPDIR` controls Go command/test scratch; `TMPDIR` also covers `os.TempDir`, directly executed test binaries and other subprocesses. Neither is the persistent `GOCACHE`. Keep paths short for Linux Unix-domain socket pathname limits, honor explicit project/tool requirements, and rely on normal completed-task cleanup. **Do not** globally override temp paths, weaken capacity reserves, clear `GOCACHE`, or delete shared/unknown files to make a test pass. No special temp configuration is needed when the selected filesystem has adequate capacity.
+
 **Direct single-target SQL DML columns:** `TestSQLDirectDMLColumnNavigationAcrossDialects`, `TestSQLDirectDMLColumnNavigationPreservesSafeScopes`, `TestSQLDirectDMLColumnNavigationDoesNotMakeConstantsOrTextColumns` and `TestSQLDirectDMLWorkerCrossFileNavigation` verify PostgreSQL/MySQL/MariaDB UPDATE assignment and DELETE/UPDATE WHERE column links, SQL keyword handling, unknown qualifiers/unsupported whole-statement fail-closed behavior, unprivileged Landlocked cross-file migration definition/references, and stale source/declaration rejection. The real authenticated MCP SDK/Agent/Executor acceptance `TestDirectMCPSQLSelectAliasClientAcceptance` also includes UPDATE/DELETE migration navigation and verifies `DIRECT_SQL_DML_MCP_PASS` before its existing overall PASS marker. This is source/isolated-client acceptance, not a claim that any installed binary or database has been upgraded or queried.
 
 When SQL SELECT alias navigation changes, the Go-scope CI acceptance runs a real unprivileged Worker/Landlock `code_definition`/`code_references` path across multiple Migration files, and a separate bearer-authenticated direct MCP SDK/Agent/Executor path for `SELECT/JOIN` aliases. The CI job explicitly rejects a skipped worker/MCP test and requires the direct-client `DIRECT_REAL_SQL_ALIAS_MCP_PASS` marker, matching the exact candidate HEAD/tree. These run on disposable isolated fixtures and never connect to a database; they prove source-integrated protocol behavior, not a refreshed installed Stable or a ChatGPT UI. Unavailable `/usr/bin/rg` or Landlock v2 cannot be reported as an acceptance PASS.
