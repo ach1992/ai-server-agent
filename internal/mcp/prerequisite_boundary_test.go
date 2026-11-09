@@ -31,7 +31,7 @@ func TestMCPPrerequisiteGuidanceReachesStructuredAndTextOnlyClients(t *testing.T
 			t.Fatalf("MCP fallback did not provide text: %T", wire.Content[0])
 		}
 		if structured.PrerequisiteCode != "service_client_unavailable" ||
-			!strings.Contains(structured.OperatorHint, "native CLI") ||
+			!strings.Contains(structured.OperatorHint, "native client") ||
 			structured.Error != source.Error || structured.Output != source.Output ||
 			structured.RequestID != source.RequestID || structured.BytesSeen != source.BytesSeen ||
 			!strings.Contains(txt.Text, "operator_hint") ||
@@ -62,14 +62,14 @@ func TestSecurityWorkspacePrerequisiteSurvivesMCPResponse(t *testing.T) {
 	if structured.ErrorClass != "security" ||
 		structured.ErrorCode != "workspace_sandbox_unavailable" ||
 		structured.PrerequisiteCode != "workspace_sandbox_unavailable" ||
-		!strings.Contains(structured.OperatorHint, "run_command") ||
-		!strings.Contains(structured.OperatorHint, "different isolation") ||
+		!strings.Contains(structured.OperatorHint, "Landlock") ||
+		!strings.Contains(structured.OperatorHint, "no bypass") ||
 		structured.RequestID != in.RequestID ||
 		structured.Error != in.Error || structured.Output != in.Output {
 		t.Fatalf("MCP security path changed provider refusal or lost recovery details: %+v", structured)
 	}
 	text := wire.Content[0].(*mcpsdk.TextContent).Text
-	for _, marker := range []string{"req-landlock-245", "operator_hint", "security", "run_command"} {
+	for _, marker := range []string{"req-landlock-245", "operator_hint", "security", "Landlock"} {
 		if !strings.Contains(text, marker) {
 			t.Fatalf("text-only MCP dropped %q: %s", marker, text)
 		}
@@ -78,7 +78,7 @@ func TestSecurityWorkspacePrerequisiteSurvivesMCPResponse(t *testing.T) {
 
 func TestUnsupportedSemanticOperationIsNotAPackagePrerequisite(t *testing.T) {
 	in := executor.Response{OK: false, ErrorCode: "code_capability_unsupported",
-		ErrorClass: "dependency", ReasonCode: "code_capability_unsupported",
+		ErrorClass: "validation", ReasonCode: "code_capability_unsupported",
 		Error: "selected language server lacks this method"}
 	wire, structured, err := responseResultWithLimit(in, 4096)
 	if err != nil || wire == nil || !wire.IsError ||

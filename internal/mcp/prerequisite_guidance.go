@@ -21,31 +21,31 @@ func annotatePrerequisiteFailure(resp executor.Response) executor.Response {
 	}
 	switch {
 	case resp.ErrorCode == "incus_unavailable":
-		resp.OperatorHint = "If Incus is needed, check managed_environment(status), then local incus query /1.0 or incus info with authorized access. Inspect daemon/socket errors; other tools may work."
+		resp.OperatorHint = "Native Incus access was not established for this request. Inspect managed_environment(operation=status) and the native diagnostic if needed."
 	case resp.ErrorCode == "search_engine_unavailable":
-		resp.OperatorHint = "Check which optional search engine this mode needs (rg or ast-grep). Use authorized run_command/git grep for suitable text searches; install only if necessary."
+		resp.OperatorHint = "The requested search engine could not be verified (rg for text, ast-grep for structural). Inspect the native error if this mode is needed."
 	case resp.ErrorCode == "search_engine_incompatible":
-		resp.OperatorHint = "The trusted ast-grep version does not match this structural mode. Check its version or use text search when suitable; update only if needed."
+		resp.OperatorHint = "The trusted ast-grep version is incompatible with this structural-search mode; inspect its version if the mode is needed."
 	case resp.ErrorCode == "workspace_sandbox_unavailable":
-		resp.OperatorHint = "Structured workspace helper needs Landlock. If necessary, inspect kernel/container support; authorized run_command is an alternative with different isolation, not a sandbox bypass."
+		resp.OperatorHint = "Structured workspace helper could not establish Landlock isolation. Inspect kernel/container support if this capability is needed; no bypass occurred."
 	case resp.ErrorCode == "browser_containment_unavailable":
-		resp.OperatorHint = "Browser containment is unavailable. Check browser_status and Executor cgroup details if UI automation is needed, or use another suitable method."
+		resp.OperatorHint = "Browser containment was not established. Inspect browser_status and Executor diagnostics if this capability is needed."
 	case resp.ErrorCode == "service_client_unavailable":
-		resp.OperatorHint = "The selected service protocol needs a trusted native CLI (ssh/sshpass/psql/mysql). Inspect the original error, or use another authorized API/client; provision only if needed."
+		resp.OperatorHint = "The selected service protocol lacks a trusted native client. Inspect the original executable error to identify the missing component."
 	case resp.ErrorCode == "gopls_unavailable":
-		resp.OperatorHint = "Go LSP unavailable. Use source search when sufficient; check trusted gopls and Go version only if semantic analysis is needed."
+		resp.OperatorHint = "The optional trusted gopls adapter is unavailable for this request. Inspect the native diagnostic if semantic analysis is needed."
 	case resp.ErrorCode == "terminal_runtime_unavailable":
-		resp.OperatorHint = "Persistent PTY unavailable. run_command/start_job may suffice; if interaction is needed, inspect tmux/session state before repair or retry."
+		resp.OperatorHint = "The persistent PTY runtime is unavailable. Inspect tmux/session diagnostics if this capability is needed."
 	case resp.ErrorCode == "worker_shell_unavailable":
-		resp.OperatorHint = "Worker shell runtime unavailable. Inspect trusted Bash/setpriv/env if required; other file/code tools can still work."
+		resp.OperatorHint = "The worker shell launch chain is unavailable. Inspect the trusted Bash/setpriv/env components if relevant."
 	case strings.HasSuffix(resp.ErrorCode, "_lsp_unavailable") ||
 		resp.ErrorCode == "python_ty_unavailable" || resp.ErrorCode == "typescript7_unavailable":
-		resp.OperatorHint = "Requested language server unavailable. Source search may suffice; otherwise inspect its trusted adapter/runtime and recheck after any authorized repair."
+		resp.OperatorHint = "The requested language server is unavailable. Inspect the trusted adapter and runtime if this semantic operation is needed."
 	case resp.ErrorCode == "dap_containment_unavailable":
-		resp.OperatorHint = "Debugger containment is unavailable. Inspect Executor cgroup support if debugging is needed; use source inspection or other authorized diagnostics instead."
+		resp.OperatorHint = "Debugger containment could not be established. Inspect Executor cgroup diagnostics if debugging is needed."
 	case resp.ErrorCode == "delve_unavailable" || resp.ErrorCode == "shell_dap_runtime_unavailable" ||
 		resp.ErrorCode == "shell_dap_ipc_unavailable" || strings.HasSuffix(resp.ErrorCode, "_dap_unavailable"):
-		resp.OperatorHint = "Optional debugger component unavailable. Inspect debug_adapter_status for the requested language; use source inspection if debugging is unnecessary."
+		resp.OperatorHint = "An optional debugger component is unavailable. Inspect debug_adapter_status for the selected language if needed."
 	default:
 		// Unknown dependency errors, including unsupported semantic methods,
 		// must not be mislabeled as a missing package or repair instruction.

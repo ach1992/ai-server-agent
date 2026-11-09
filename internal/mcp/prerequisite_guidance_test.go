@@ -9,17 +9,17 @@ import (
 
 func TestPrerequisiteGuidancePreservesFailureIdentity(t *testing.T) {
 	for _, tc := range []struct{ code, class, useful string }{
-		{"incus_unavailable", "dependency", "incus query /1.0"},
-		{"search_engine_unavailable", "dependency", "run_command"},
+		{"incus_unavailable", "dependency", "managed_environment(operation=status)"},
+		{"search_engine_unavailable", "dependency", "rg for text"},
 		{"search_engine_incompatible", "dependency", "ast-grep"},
 		{"workspace_sandbox_unavailable", "security", "Landlock"},
 		{"browser_containment_unavailable", "dependency", "browser_status"},
-		{"terminal_runtime_unavailable", "terminal", "run_command"},
+		{"terminal_runtime_unavailable", "terminal", "tmux"},
 		{"worker_shell_unavailable", "terminal", "Bash/setpriv/env"},
-		{"php_lsp_unavailable", "dependency", "Source search"},
+		{"php_lsp_unavailable", "dependency", "language server"},
 		{"gopls_unavailable", "dependency", "gopls"},
-		{"service_client_unavailable", "dependency", "authorized API/client"},
-		{"python_ty_unavailable", "dependency", "Source search"},
+		{"service_client_unavailable", "dependency", "native client"},
+		{"python_ty_unavailable", "dependency", "language server"},
 		{"delve_unavailable", "dependency", "debug_adapter_status"},
 		{"dap_containment_unavailable", "dependency", "Executor cgroup"},
 	} {

@@ -17,9 +17,9 @@ type VMReadiness struct {
 	Verification string `json:"verification"`
 }
 
-const vmRecheck = "After any authorized repair, recheck managed_environment(status); verify a real VM operation only when end-to-end proof is needed."
+const vmRecheck = "Recheck managed_environment(operation=status) after host changes; only a real VM operation proves launch readiness."
 
-const UEFIRepairHint = "Inspect UEFI firmware discovery for Incus/QEMU. On Debian/Ubuntu amd64 check dpkg-query -W ovmf and /usr/share/OVMF; on arm64 check AAVMF/EDK2. Custom paths may work; repair only if needed and authorized."
+const UEFIRepairHint = "UEFI firmware was not found at common paths. Check optional ovmf and /usr/share/OVMF on amd64 or AAVMF/EDK2 on arm64 if relevant; custom paths may exist."
 
 // IsUEFIFirmwareFailure recognizes a native provider diagnostic without
 // changing its original failure/uncertainty classification.
@@ -58,7 +58,7 @@ func detectVMReadiness(kvm string, codePatterns, varsPatterns []string) VMReadin
 	if !firmwareFileDetected(codePatterns) || !firmwareFileDetected(varsPatterns) {
 		result.Status = "prerequisite_not_detected"
 		result.ReasonCode = "default_uefi_firmware_not_detected"
-		result.OperatorHint = UEFIRepairHint + " Check result is advisory, not proof that VM creation is impossible."
+		result.OperatorHint = UEFIRepairHint + " This is advisory, not proof that VM launch is impossible."
 	}
 	return result
 }
