@@ -3,6 +3,7 @@ package managedincus
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -34,6 +35,9 @@ elif args[0]=='query' and args[1]=='/1.0':
     print(json.dumps({'api_version':'1.0'}))
 elif args[0]=='query' and '/1.0/storage-pools/' in args[1]:
     if mode=='pool_unavailable':sys.exit(43)
+    if mode=='pool_unavailable_diagnostic':
+        print('selected pool storage driver unavailable; password=POOLSECRET',file=sys.stderr)
+        sys.exit(43)
     total=16*(1<<30)
     used=total if mode=='pool_full' else 2*(1<<30)
     print(json.dumps({'space':{'total':total,'used':used}}))
@@ -57,7 +61,22 @@ elif args[0]=='operation' and args[1]=='list':
           'devices':{'root':{'pool':'default','size':'1GiB'}}});save()
     print('[]')
 elif args[0]=='list':
+    if mode=='launch_and_inspect_fail' and os.path.exists(p+'.launched'):
+        print('native reconciliation list failed; password=RECONCILE_SECRET; inspect daemon',file=sys.stderr)
+        sys.exit(46)
     if mode=='list_unavailable':sys.exit(48)
+    if mode=='list_null_project':
+        print('null');sys.exit(0)
+    if mode=='list_bad_json_project':
+        print('{broken-json');sys.exit(0)
+    if mode=='list_empty_project':
+        print('[]');sys.exit(0)
+    if mode in ('post_exec_list_failure','post_exec_list_null') and os.path.exists(p+'.exec_calls'):
+        if mode=='post_exec_list_null':
+            print('null');sys.exit(0)
+        print('post-exec native list failed; password="POST_EXEC_SECRET"; inspect daemon state',file=sys.stderr)
+        print('N'*70000,file=sys.stderr)
+        sys.exit(47)
     if '--all-projects' in args:
         if mode=='list_null':print('null');sys.exit(0)
         if mode=='list_null_row':print('[null]');sys.exit(0)
@@ -78,8 +97,24 @@ elif args[0]=='list':
     if project: result=[x for x in result if x['project']==project]
     print(json.dumps(result))
 elif args[0]=='launch':
+    if mode=='launch_and_inspect_fail':
+        open(p+'.launched','w').write('1')
+        print('native launch stage failed; token=LAUNCH_SECRET; inspect storage',file=sys.stderr)
+        sys.exit(45)
+    if mode=='launch_then_identity_collision':
+        state['instances'].append({'name':args[2],'project':value('--project','default'),
+          'type':'container','status':'Running',
+          'config':{'user.asa.host':'foreign','user.asa.operation':'foreign',
+                    'volatile.uuid':'12345678-1234-1234-1234-123456789abc'},
+          'devices':{'root':{'pool':'default','size':'1GiB'}}})
+        save()
+        print('native launch collision failure; token=LAUNCH_SECRET',file=sys.stderr)
+        sys.exit(45)
     if mode=='sleep_launch':time.sleep(10)
     if mode=='uncertain_launch':sys.exit(45)
+    if mode=='uncertain_launch_diagnostic':
+        print('launch denied by native daemon; token=LAUNCHSECRET; inspect pool',file=sys.stderr)
+        sys.exit(45)
     image=args[1];name=args[2];project=value('--project','default')
     cfg={}
     for i,x in enumerate(args[:-1]):
@@ -116,6 +151,12 @@ elif args[0] in ('start','stop','delete'):
     save()
 elif args[0]=='exec':
     if '--' not in args:sys.exit(43)
+    with open(p+'.exec_calls','a') as f:f.write('1')
+    if mode=='post_exec_identity_changed':
+        state['instances'][0]['config']['volatile.uuid']='aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee'
+        save()
+    if mode in ('post_exec_list_failure','post_exec_list_null','post_exec_identity_changed'):
+        print('UNVERIFIED_GUEST_OUTPUT_SENTINEL')
     print('native-exec-ok')
     content=sys.stdin.read()
     if content:print(content)
@@ -832,8 +873,10 @@ func TestInterruptedNativeCreateKeepsIntentAfterCancellation(t *testing.T) {
 	defer cancel()
 	req := createRequest()
 	_, err := b.Run(ctx, req, false, "")
-	if err == nil || !strings.Contains(err.Error(), "create_outcome_uncertain") {
-		t.Fatalf("interrupt returned a definitive outcome: %v", err)
+	var native *NativeCommandError
+	if err == nil || !strings.Contains(err.Error(), "create_outcome_uncertain") ||
+		!errors.As(err, &native) || !native.TimedOut || native.Stage != "launch" {
+		t.Fatalf("interrupted launch lost timeout evidence or claimed a definitive outcome: %+v %v", native, err)
 	}
 	other := Backend{HostID: b.HostID, Binary: b.Binary, StateDir: b.StateDir, capacityProbe: b.capacityProbe}
 	status, err := other.Run(context.Background(), Request{Operation: "pending_creates"}, false, "")

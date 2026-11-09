@@ -4,9 +4,11 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"log"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	"github.com/ach1992/ai-server-agent/internal/managedincus"
 	"github.com/ach1992/ai-server-agent/internal/serviceaccess"
@@ -17,45 +19,126 @@ func managedJSON(v any) Response {
 	if err != nil {
 		return fileError("managed_encode_failed", "state", err)
 	}
-	return Response{OK: true, Status: "observed", Output: string(b), OutputEncoding: "json", BytesSeen: int64(len(b)), BytesReturned: int64(len(b))}
+	resp := Response{OK: true, Status: "observed", Output: string(b), OutputEncoding: "json", BytesSeen: int64(len(b)), BytesReturned: int64(len(b))}
+	if native, ok := v.(managedincus.Result); ok {
+		// The observation itself can succeed while its native readiness
+		// probe timed out. Keep both facts visible at the top level.
+		resp.TimedOut = native.TimedOut
+	}
+	return resp
 }
 func managedErr(err error) Response {
+	// Classify the higher-level operation and recovery semantics first.
+	// A wrapped native command is evidence, not grounds for converting an
+	// uncertain create or storage preflight into an ordinary process failure.
+	// Use the outer operation reason before inspecting nested native errors.
+	// Only when that outer reason has no recognized semantic marker may a
+	// lower-level error (for example direct incus_missing) classify it.
 	code := "managed_operation_failed"
 	if err != nil {
-		switch {
-		case contains(err, "_missing", "not_found"):
-			code = "resource_missing"
-		case contains(err, "_mismatch", "_collision", "_conflict"):
-			code = "identity_conflict"
-		case contains(err, "_expired"):
-			code = "credential_expired"
-		case contains(err, "_revoked"):
-			code = "credential_revoked"
-		case contains(err, "approval_required"):
-			code = "approval_required"
-		case contains(err, "_unavailable", "_unready"):
-			code = "dependency_unavailable"
-		case contains(err, "_uncertain", "_unverified"):
-			code = "outcome_uncertain"
+		primary := strings.SplitN(err.Error(), ":", 2)[0]
+		code = managedReasonCode(primary)
+		if code == "managed_operation_failed" {
+			code = managedReasonCode(err.Error())
 		}
 	}
-	return fileError(code, "managed", err)
-}
-func contains(err error, needles ...string) bool {
-	if err == nil {
-		return false
+	natives := managedNativeFailures(err)
+	hasNative := len(natives) > 0
+	class := "managed"
+	if code == "dependency_unavailable" && strings.HasPrefix(err.Error(), "native_identity_preflight_unavailable:") {
+		// A failed native identity observation is a dependency/probe
+		// failure, not an observed change or a guest-exec failure.
+		class = "dependency"
 	}
-	for _, s := range needles {
-		if stringsContains(err.Error(), s) {
-			return true
+	if hasNative && code == "managed_operation_failed" {
+		code, class = "native_command_failed", "process"
+	}
+	resp := fileError(code, class, err)
+	if hasNative {
+		if code == "native_command_failed" {
+			resp.Status = "native_command_failed"
+		}
+		// Primary launch error remains the top-level exit code. When both
+		// launch and reconciliation fail, each stage retains its own exit
+		// code, timeout and bounded diagnostic in the returned output.
+		resp.ExitCode = natives[0].ExitCode
+		resp.OutputEncoding = "utf-8"
+		for _, native := range natives {
+			resp.TimedOut = resp.TimedOut || native.TimedOut
+			resp.BytesSeen += native.BytesSeen
+			resp.OmittedBytes += native.OmittedBytes
+			resp.Truncated = resp.Truncated || native.Truncated
+		}
+		if len(natives) == 1 {
+			resp.Output = natives[0].Diagnostic
+		} else {
+			var stages []string
+			for _, native := range natives {
+				// Quoted text can grow sixfold. 4096 source bytes/stage
+				// leaves both stage envelopes inside the 64-KiB cap.
+				excerpt := native.Diagnostic
+				if len(excerpt) > 4096 {
+					excerpt = excerpt[:4096]
+					for !utf8.ValidString(excerpt) {
+						excerpt = excerpt[:len(excerpt)-1]
+					}
+					resp.OmittedBytes += int64(len(native.Diagnostic) - len(excerpt))
+					resp.Truncated = true
+				}
+				stages = append(stages, fmt.Sprintf("native_stage=%q exit_code=%d timed_out=%t diagnostic=%q",
+					native.Stage, native.ExitCode, native.TimedOut, excerpt))
+			}
+			resp.Output = strings.Join(stages, "\n")
+		}
+		resp.BytesReturned = int64(len(resp.Output))
+	}
+	return resp
+}
+
+// Classify only recognized Agent reason markers, never provider stderr.
+func managedReasonCode(message string) string {
+	switch {
+	case strings.Contains(message, "_uncertain"), strings.Contains(message, "_unverified"):
+		return "outcome_uncertain"
+	case strings.Contains(message, "_missing"), strings.Contains(message, "not_found"):
+		return "resource_missing"
+	case strings.Contains(message, "_mismatch"), strings.Contains(message, "_collision"), strings.Contains(message, "_conflict"):
+		return "identity_conflict"
+	case strings.Contains(message, "_expired"):
+		return "credential_expired"
+	case strings.Contains(message, "_revoked"):
+		return "credential_revoked"
+	case strings.Contains(message, "approval_required"):
+		return "approval_required"
+	case strings.Contains(message, "_unavailable"), strings.Contains(message, "_unready"):
+		return "dependency_unavailable"
+	}
+	return "managed_operation_failed"
+}
+
+// Traverse only the native error chain, stopping at each typed CLI failure
+// so an errors.Join(launchErr, inspectErr) cannot discard the second stage.
+func managedNativeFailures(err error) []*managedincus.NativeCommandError {
+	var failures []*managedincus.NativeCommandError
+	var visit func(error)
+	visit = func(e error) {
+		if e == nil || len(failures) >= 2 {
+			return
+		}
+		if native, ok := e.(*managedincus.NativeCommandError); ok {
+			failures = append(failures, native)
+			return
+		}
+		if multi, ok := e.(interface{ Unwrap() []error }); ok {
+			for _, child := range multi.Unwrap() {
+				visit(child)
+			}
+		} else if child := errors.Unwrap(e); child != nil {
+			visit(child)
 		}
 	}
-	return false
-}
-func stringsContains(s, sub string) bool {
-	// kept separate to ensure native CLI stderr is not accidentally promoted
-	// into an Error value or returned to a client.
-	return len(sub) > 0 && strings.Contains(s, sub)
+	visit(err)
+	return failures
 }
 
 // Creation tags are descriptive, not a second admission policy for the
@@ -194,6 +277,19 @@ func (s *Server) serviceAccessAction(ctx context.Context, req Request) Response 
 // actually dispatched to Incus.
 func managedGuestExecFailure(result managedincus.Result, err error) Response {
 	resp := managedErr(err)
+	if !result.GuestExecAttempted {
+		// Native identity/list/permission preflight failed before the
+		// guest command: preserve its original stage/exit/stderr evidence.
+		return resp
+	}
+	if strings.HasPrefix(err.Error(), "guest_exec_outcome_uncertain:") {
+		// Guest exec may have completed, but its output cannot be bound to
+		// a verified native UUID. The backend has withheld that output.
+		// Preserve ONLY the post-exec native observation's independent
+		// typed diagnostics; do not overwrite it with guest-exec fields.
+		return resp
+	}
+	resp.TimedOut = resp.TimedOut || result.TimedOut
 	resp.ExitCode = result.ExitCode
 	resp.Output = result.Output
 	resp.OutputEncoding = "utf-8"
@@ -214,6 +310,22 @@ func managedGuestExecFailure(result managedincus.Result, err error) Response {
 		resp.ErrorCode, resp.ReasonCode = "guest_agent_unavailable", "guest_agent_unavailable"
 		resp.ErrorClass = "dependency"
 	}
+	return resp
+}
+
+// A failed native readiness query is a preflight failure, not evidence that
+// the requested stateful operation was dispatched.
+func managedUnavailableResult(result managedincus.Result) Response {
+	resp := fileError("incus_unavailable", "dependency", errors.New(result.Diagnostic))
+	resp.Status = "native_preflight_unavailable"
+	resp.ExitCode = result.ExitCode
+	resp.TimedOut = result.TimedOut
+	resp.Output = result.Output
+	resp.OutputEncoding = "utf-8"
+	resp.BytesSeen = result.OutputBytesSeen
+	resp.BytesReturned = int64(len(result.Output))
+	resp.OmittedBytes = result.OutputOmittedBytes
+	resp.Truncated = result.OutputTruncated
 	return resp
 }
 
@@ -264,7 +376,7 @@ func (s *Server) managedEnvironmentAction(ctx context.Context, req Request) Resp
 			resp = managedErr(err)
 		}
 	} else if !result.Available && in.Operation != "status" && in.Operation != "pending_creates" {
-		resp = fileError("incus_unavailable", "dependency", errors.New(result.Diagnostic))
+		resp = managedUnavailableResult(result)
 	} else {
 		resp = managedJSON(result)
 	}

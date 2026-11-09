@@ -8,7 +8,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"io"
+
+	"github.com/ach1992/ai-server-agent/internal/secretoutput"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -95,7 +96,11 @@ func (s *Server) inspectRepositoryEnvironment(ctx context.Context, inputPath str
 		return RepositoryEnvironmentSummary{}, "environment_probe_failed", err
 	}
 	headAfter, headCode, headErr := s.environmentGit(ctx, root, "rev-parse", "--verify", "HEAD")
-	if headErr != nil || headCode != 0 || strings.TrimSpace(headAfter) != head {
+	if headErr != nil || headCode != 0 {
+		return RepositoryEnvironmentSummary{}, "environment_probe_failed",
+			fmt.Errorf("recheck repository HEAD with git rev-parse (exit_code=%d): %v", headCode, headErr)
+	}
+	if strings.TrimSpace(headAfter) != head {
 		return RepositoryEnvironmentSummary{}, "repository_changed", errors.New("repository HEAD changed during environment inspection")
 	}
 	return b.summary(), "", nil
@@ -130,15 +135,18 @@ func (s *Server) environmentRepositoryIdentity(ctx context.Context, inputPath st
 	}
 	rootOut, code, err := s.environmentGit(ctx, path, "rev-parse", "--show-toplevel")
 	if err != nil || code != 0 {
-		return "", "", "not_repository", errors.New("path is not a usable Git worktree")
+		return "", "", "not_repository", fmt.Errorf("git rev-parse --show-toplevel for %q failed (exit_code=%d): %v", path, code, err)
 	}
 	root, err := filepath.EvalSymlinks(strings.TrimSpace(rootOut))
 	if err != nil || !pathWithin(workspace, root) {
 		return "", "", "invalid_repository_path", errors.New("repository root resolves outside the configured workspace")
 	}
 	head, code, err := s.environmentGit(ctx, root, "rev-parse", "--verify", "HEAD")
-	if err != nil || code != 0 || !fullEnvironmentSHA(strings.TrimSpace(head)) {
-		return "", "", "not_repository", errors.New("repository HEAD is unavailable")
+	if err != nil || code != 0 {
+		return "", "", "not_repository", fmt.Errorf("git rev-parse --verify HEAD for %q failed (exit_code=%d): %v", root, code, err)
+	}
+	if !fullEnvironmentSHA(strings.TrimSpace(head)) {
+		return "", "", "not_repository", errors.New("repository HEAD is not a full commit hash")
 	}
 	return filepath.Clean(root), strings.TrimSpace(head), "", nil
 }
@@ -195,7 +203,8 @@ func (s *Server) environmentGit(ctx context.Context, dir string, args ...string)
 	}
 	stdout := &environmentLimitedBuffer{limit: maxEnvironmentOutputBytes}
 	cmd.Stdout = stdout
-	cmd.Stderr = io.Discard
+	stderr := &boundedGitBuffer{limit: 4096}
+	cmd.Stderr = stderr
 	err := cmd.Run()
 	if errors.Is(err, errEnvironmentOutputLimit) {
 		return "", -1, errors.New("git metadata output exceeded environment discovery limit")
@@ -205,12 +214,17 @@ func (s *Server) environmentGit(ctx context.Context, dir string, args ...string)
 	}
 	var exitErr *exec.ExitError
 	if errors.As(err, &exitErr) {
-		return strings.TrimSpace(stdout.String()), exitErr.ExitCode(), nil
+		detail, clipped := secretoutput.BoundedDiagnosticText(strings.TrimSpace(stderr.String()), 4096)
+		if stderr.overflow || clipped > 0 {
+			detail += " [native stderr truncated at 4096 bytes]"
+		}
+		return strings.TrimSpace(stdout.String()), exitErr.ExitCode(),
+			fmt.Errorf("git %s exited %d: %w; stderr=%q", args[0], exitErr.ExitCode(), err, detail)
 	}
 	if ctx.Err() != nil {
-		return "", -1, ctx.Err()
+		return "", -1, fmt.Errorf("git %s canceled: %w", args[0], ctx.Err())
 	}
-	return "", -1, err
+	return "", -1, fmt.Errorf("git %s could not start or complete: %w", args[0], err)
 }
 
 func (b *environmentBuilder) readDeclaration(ctx context.Context, rel, kind string) ([]byte, bool) {
@@ -220,7 +234,7 @@ func (b *environmentBuilder) readDeclaration(ctx context.Context, rel, kind stri
 		return nil, false
 	}
 	if err != nil {
-		b.warnings = append(b.warnings, fmt.Sprintf("%s could not be inspected", rel))
+		b.warnings = append(b.warnings, fmt.Sprintf("%s could not be inspected: %v", rel, err))
 		return nil, false
 	}
 	resolved, resolveErr := filepath.EvalSymlinks(full)
@@ -232,21 +246,21 @@ func (b *environmentBuilder) readDeclaration(ctx context.Context, rel, kind stri
 		b.warnings = append(b.warnings, fmt.Sprintf("%s is not a regular non-symlink declaration file and was ignored", rel))
 		return nil, false
 	}
-	tracked, matchesHead := b.declarationDurability(ctx, rel)
+	tracked, matchesHead, durability := b.declarationDurability(ctx, rel)
 	if info.Size() > maxEnvironmentFileBytes {
-		b.declarations = append(b.declarations, EnvironmentDeclaration{Path: rel, Kind: kind, Tracked: tracked, MatchesHead: matchesHead})
-		b.appendDeclarationDurabilityWarning(rel, tracked, matchesHead)
+		b.declarations = append(b.declarations, EnvironmentDeclaration{Path: rel, Kind: kind, Tracked: tracked, MatchesHead: matchesHead, DurabilityStatus: durability})
+		b.appendDeclarationDurabilityWarning(rel, durability)
 		b.warnings = append(b.warnings, fmt.Sprintf("%s exceeds the bounded parse size; presence was recorded but content was not parsed", rel))
 		return nil, true
 	}
 	data, err := b.server.readEnvironmentFileAsWorker(ctx, full)
 	if err != nil {
-		b.warnings = append(b.warnings, fmt.Sprintf("%s could not be read with worker authority", rel))
+		b.warnings = append(b.warnings, fmt.Sprintf("%s could not be read with worker authority: %v", rel, err))
 		return nil, false
 	}
 	hash := sha256.Sum256(data)
-	b.declarations = append(b.declarations, EnvironmentDeclaration{Path: rel, Kind: kind, Tracked: tracked, MatchesHead: matchesHead, SHA256: hex.EncodeToString(hash[:])})
-	b.appendDeclarationDurabilityWarning(rel, tracked, matchesHead)
+	b.declarations = append(b.declarations, EnvironmentDeclaration{Path: rel, Kind: kind, Tracked: tracked, MatchesHead: matchesHead, DurabilityStatus: durability, SHA256: hex.EncodeToString(hash[:])})
+	b.appendDeclarationDurabilityWarning(rel, durability)
 	return data, true
 }
 
@@ -274,32 +288,50 @@ func (s *Server) readEnvironmentFileAsWorker(ctx context.Context, path string) (
 	}
 	output := &environmentLimitedBuffer{limit: maxEnvironmentFileBytes}
 	cmd.Stdout = output
-	cmd.Stderr = io.Discard
+	stderr := &boundedGitBuffer{limit: 4096}
+	cmd.Stderr = stderr
 	if err := cmd.Run(); err != nil {
 		if errors.Is(err, errEnvironmentOutputLimit) {
 			return nil, errEnvironmentOutputLimit
 		}
-		return nil, err
+		detail, clipped := secretoutput.BoundedDiagnosticText(strings.TrimSpace(stderr.String()), 4096)
+		if stderr.overflow || clipped > 0 {
+			detail += " [native stderr truncated at 4096 bytes]"
+		}
+		return nil, fmt.Errorf("read declaration with worker cat %q: %w; stderr=%q", path, err, detail)
 	}
 	return []byte(output.String()), nil
 }
 
-func (b *environmentBuilder) declarationDurability(ctx context.Context, rel string) (tracked, matchesHead bool) {
-	if _, code, err := b.server.environmentGit(ctx, b.root, "ls-files", "--error-unmatch", "--", rel); err != nil || code != 0 {
-		return false, false
+// durabilityStatus makes a failed comparison distinct from a verified
+// difference. The legacy tracked/matches_head booleans remain additive
+// compatibility fields; false alone is not proof of a difference.
+func (b *environmentBuilder) declarationDurability(ctx context.Context, rel string) (tracked, matchesHead bool, durabilityStatus string) {
+	_, code, err := b.server.environmentGit(ctx, b.root, "ls-files", "--error-unmatch", "--", rel)
+	if code != 0 || err != nil {
+		if code == 1 {
+			return false, false, "untracked"
+		}
+		b.warnings = append(b.warnings, fmt.Sprintf("%s Git tracking probe failed: %v", rel, err))
+		return false, false, "unknown"
 	}
-	tracked = true
-	if _, code, err := b.server.environmentGit(ctx, b.root, "diff", "--quiet", "HEAD", "--", rel); err == nil && code == 0 {
-		matchesHead = true
+	_, code, err = b.server.environmentGit(ctx, b.root, "diff", "--quiet", "HEAD", "--", rel)
+	switch {
+	case err == nil && code == 0:
+		return true, true, "matches_head"
+	case code == 1:
+		return true, false, "differs_from_head"
+	default:
+		b.warnings = append(b.warnings, fmt.Sprintf("%s Git HEAD comparison failed: %v", rel, err))
+		return true, false, "unknown"
 	}
-	return tracked, matchesHead
 }
 
-func (b *environmentBuilder) appendDeclarationDurabilityWarning(rel string, tracked, matchesHead bool) {
-	switch {
-	case !tracked:
+func (b *environmentBuilder) appendDeclarationDurabilityWarning(rel, durabilityStatus string) {
+	switch durabilityStatus {
+	case "untracked":
 		b.warnings = append(b.warnings, fmt.Sprintf("%s is not Git-tracked; it is visible working state but not durable repository truth", rel))
-	case !matchesHead:
+	case "differs_from_head":
 		b.warnings = append(b.warnings, fmt.Sprintf("%s is Git-tracked but differs from HEAD; current working state is not durable repository truth until committed", rel))
 	}
 }

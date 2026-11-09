@@ -76,20 +76,23 @@ type Summary struct {
 	Managed     bool     `json:"managed"`
 }
 type Result struct {
-	Status          string            `json:"status"`
-	HostID          string            `json:"host_id"`
-	Available       bool              `json:"available"`
-	Diagnostic      string            `json:"diagnostic,omitempty"`
-	Instances       []Summary         `json:"instances,omitempty"`
-	Instance        *Summary          `json:"instance,omitempty"`
-	Output          string            `json:"output,omitempty"`
-	ExitCode        int               `json:"exit_code,omitempty"`
-	Snapshots       []string          `json:"snapshots,omitempty"`
-	Pending         []CreateIntent    `json:"pending_creates,omitempty"`
-	Operations      []NativeOperation `json:"native_operations,omitempty"`
-	Operation       *NativeOperation  `json:"native_operation,omitempty"`
-	OutputTruncated bool              `json:"output_truncated,omitempty"`
-	OutputBytesSeen int64             `json:"output_bytes_seen,omitempty"`
+	Status             string            `json:"status"`
+	HostID             string            `json:"host_id"`
+	Available          bool              `json:"available"`
+	Diagnostic         string            `json:"diagnostic,omitempty"`
+	Instances          []Summary         `json:"instances,omitempty"`
+	Instance           *Summary          `json:"instance,omitempty"`
+	Output             string            `json:"output,omitempty"`
+	ExitCode           int               `json:"exit_code,omitempty"`
+	Snapshots          []string          `json:"snapshots,omitempty"`
+	Pending            []CreateIntent    `json:"pending_creates,omitempty"`
+	Operations         []NativeOperation `json:"native_operations,omitempty"`
+	Operation          *NativeOperation  `json:"native_operation,omitempty"`
+	OutputTruncated    bool              `json:"output_truncated,omitempty"`
+	OutputBytesSeen    int64             `json:"output_bytes_seen,omitempty"`
+	OutputOmittedBytes int64             `json:"output_omitted_bytes,omitempty"`
+	TimedOut           bool              `json:"timed_out,omitempty"`
+	GuestExecAttempted bool              `json:"-"` // internal dispatch evidence: preflight does not execute guest command
 }
 type Backend struct {
 	HostID         string
@@ -184,15 +187,46 @@ func (b Backend) cliProtected(ctx context.Context, stdin io.Reader, discardOutpu
 	// 64 KiB diagnostic window; do not expose secret plaintext volume.
 	return out.b.String(), code, out.seen > maxOutput, int64(out.seen), err
 }
+
+// NativeCommandError keeps provider output out of the error string used by
+// Executor reason-code classification. The bounded diagnostic is delivered
+// separately in the authenticated managed_environment response.
+type NativeCommandError struct {
+	Stage        string
+	ExitCode     int
+	Diagnostic   string
+	BytesSeen    int64
+	OmittedBytes int64
+	Truncated    bool
+	TimedOut     bool
+	Cause        error
+}
+
+func (e *NativeCommandError) Error() string {
+	return fmt.Sprintf("native Incus %s failed (exit_code=%d): %v", e.Stage, e.ExitCode, e.Cause)
+}
+
+func (e *NativeCommandError) Unwrap() error { return e.Cause }
+
 func (b Backend) command(ctx context.Context, timeout time.Duration, args ...string) (string, error) {
 	runCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	out, _, truncated, err := b.cli(runCtx, nil, false, args...)
+	out, code, truncated, seen, err := b.cliProtected(runCtx, nil, false, "", args...)
+	if err != nil {
+		// A failed native command may also have returned partial stdout.
+		// Keep actual captured-native bytes separate from presentation size:
+		// redaction can expand or contract the bounded diagnostic.
+		safe, clipped := secretoutput.BoundedDiagnosticText(out, maxOutput)
+		return "", &NativeCommandError{
+			Stage: args[0], ExitCode: code, Diagnostic: safe,
+			BytesSeen: seen, OmittedBytes: seen - int64(len(out)) + clipped,
+			Truncated: truncated || clipped > 0,
+			TimedOut:  errors.Is(runCtx.Err(), context.DeadlineExceeded),
+			Cause:     err,
+		}
+	}
 	if truncated {
 		return "", errors.New("incus output exceeded bounded response")
-	}
-	if err != nil {
-		return "", fmt.Errorf("native Incus operation failed (%s): %w", strings.Join(args[:min(2, len(args))], " "), err)
 	}
 	return out, nil
 }
@@ -322,6 +356,25 @@ func (b Backend) selectInstance(ctx context.Context, req Request) (Summary, erro
 	}
 	return native, nil
 }
+
+// A previously observed guest disappearing or presenting a different
+// native identity is a verified change. Transport, decoding and journal
+// observation failures are not proof that the guest changed.
+func verifiedNativeIdentityChange(err error) bool {
+	if err == nil {
+		return false
+	}
+	switch {
+	case strings.HasPrefix(err.Error(), "instance_missing:"),
+		strings.HasPrefix(err.Error(), "instance_identity_mismatch:"),
+		strings.HasPrefix(err.Error(), "create_intent_identity_mismatch:"),
+		strings.HasPrefix(err.Error(), "create_intent_native_uuid_conflict:"),
+		strings.HasPrefix(err.Error(), "create_intent_abandoned_identity_conflict:"):
+		return true
+	}
+	return false
+}
+
 func (b Backend) Lock(fn func() (Result, error)) (Result, error) {
 	// Scoped OS lock serializes Agent-owned create/reconcile and guest mutations. It is NOT
 	// a cluster lock, a project manager or a process/guest lifecycle registry.
@@ -359,6 +412,15 @@ func (b Backend) Ready(ctx context.Context) Result {
 	root, err := b.command(ctx, 12*time.Second, "query", "/1.0")
 	if err != nil {
 		r.Diagnostic = "incus_unready: native daemon/socket/project not initialized or unavailable; inspect incus admin status and initialization"
+		var native *NativeCommandError
+		if errors.As(err, &native) {
+			r.ExitCode = native.ExitCode
+			r.Output = native.Diagnostic
+			r.OutputBytesSeen = native.BytesSeen
+			r.OutputOmittedBytes = native.OmittedBytes
+			r.OutputTruncated = native.Truncated
+			r.TimedOut = native.TimedOut
+		}
 		return r
 	}
 	var api struct {
@@ -375,6 +437,16 @@ func (b Backend) Ready(ctx context.Context) Result {
 	}
 	return r
 }
+
+// Preserve launch diagnostics when a more authoritative post-launch
+// verification error must be reported. The outer recovery reason stays first.
+func postLaunchFailure(message string, launchErr error) error {
+	if launchErr == nil {
+		return errors.New(message)
+	}
+	return fmt.Errorf("%s: %w", message, launchErr)
+}
+
 func (b Backend) Run(ctx context.Context, req Request, approval bool, secret string) (Result, error) {
 	if req.Operation == "operation_list" {
 		return b.Lock(func() (Result, error) {
@@ -601,34 +673,43 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 			// A launch response alone does not establish identity or completion.
 			x, found, inspectErr := b.inspect(ctx, req.Project, req.Instance)
 			if inspectErr != nil {
-				return base, errors.New("create_outcome_uncertain: native state could not be reconciled; inspect before retry")
+				return base, fmt.Errorf("create_outcome_uncertain: native state could not be reconciled; inspect before retry: %w", errors.Join(launchErr, inspectErr))
 			}
 			if found && x.Managed && x.OperationID == req.OperationID && x.WorkID == req.WorkID && x.Type == req.Type {
 				if x.StoragePool == "" || x.DiskLimit == "" {
-					return base, errors.New("native_root_device_unverified: selected pool or root disk limit missing after launch")
+					return base, postLaunchFailure("native_root_device_unverified: selected pool or root disk limit missing after launch", launchErr)
 				}
 				if x.StoragePool != req.StoragePool {
-					return base, errors.New("create_outcome_uncertain: native root storage pool differs from requested pool")
+					return base, postLaunchFailure("create_outcome_uncertain: native root storage pool differs from requested pool", launchErr)
 				}
 				if !uuidPattern.MatchString(x.UUID) {
-					return base, errors.New("native_uuid_unverified: created guest UUID missing or malformed")
+					return base, postLaunchFailure("native_uuid_unverified: created guest UUID missing or malformed", launchErr)
 				}
 				if err := b.confirmCreate(req.OperationID, x.UUID); err != nil {
-					return base, errors.New("create_outcome_uncertain: native guest exists but local intent confirmation failed; do not retry")
+					return base, fmt.Errorf("create_outcome_uncertain: native guest exists but local intent confirmation failed; do not retry: %w", errors.Join(launchErr, err))
 				}
 				base.Instance = &x
 				if launchErr == nil {
 					base.Status = "created"
 				} else {
 					base.Status = "created_but_launch_reported_error"
+					var native *NativeCommandError
+					if errors.As(launchErr, &native) {
+						base.Output = native.Diagnostic
+						base.ExitCode = native.ExitCode
+						base.OutputBytesSeen = native.BytesSeen
+						base.OutputOmittedBytes = native.OmittedBytes
+						base.OutputTruncated = native.Truncated
+						base.TimedOut = native.TimedOut
+					}
 				}
 				return base, nil
 			}
 			if found {
-				return base, errors.New("create_collision_after_launch: unexpected guest identity")
+				return base, postLaunchFailure("create_collision_after_launch: unexpected guest identity", launchErr)
 			}
 			if launchErr != nil {
-				return base, errors.New("create_outcome_uncertain: launch reported an error and no native guest is yet visible; submission remains durably reserved for reconciliation")
+				return base, fmt.Errorf("create_outcome_uncertain: launch reported an error and no native guest is yet visible; submission remains durably reserved for reconciliation: %w", launchErr)
 			}
 			return base, errors.New("create_unverified: Incus reported success but instance not found")
 		})
@@ -707,7 +788,13 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 			}
 			latest, err := b.selectInstance(ctx, req)
 			if err != nil {
-				return base, errors.New("instance_identity_changed_before_mutation: refused name-based operation")
+				// A confirmed missing/replaced native guest is different from
+				// a list/JSON/journal probe that could not verify identity.
+				// Neither outcome authorizes a name-based operation.
+				if verifiedNativeIdentityChange(err) {
+					return base, fmt.Errorf("instance_identity_changed_before_mutation: refused name-based operation after verified identity mismatch: %w", err)
+				}
+				return base, fmt.Errorf("native_identity_preflight_unavailable: native guest identity could not be verified before operation; no command dispatched: %w", err)
 			}
 			if latest.UUID != x.UUID {
 				return base, errors.New("instance_identity_changed_before_mutation")
@@ -716,7 +803,11 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 			if secret != "" {
 				input = strings.NewReader(secret + "\n")
 			}
+			// Mark only the guest-exec CLI boundary; native discovery and
+			// authorization failures above it must preserve their own evidence.
+			base.GuestExecAttempted = req.Operation == "exec"
 			out, code, trunc, seen, runErr := b.cliProtected(runCtx, input, false, secret, args...)
+			base.TimedOut = errors.Is(runCtx.Err(), context.DeadlineExceeded)
 			base.Output = out
 			base.ExitCode = code
 			base.OutputTruncated = trunc
@@ -728,9 +819,22 @@ func (b Backend) Run(ctx context.Context, req Request, approval bool, secret str
 				return base, fmt.Errorf("native operation failed, exit_code=%d: %w", code, runErr)
 			}
 			if req.Operation == "exec" {
-				verified, err := b.selectInstance(ctx, req)
-				if err != nil || verified.UUID != x.UUID {
+				verified, verifyErr := b.selectInstance(ctx, req)
+				if verifyErr != nil || verified.UUID != x.UUID {
+					// Guest effects may have occurred, but the output belongs
+					// only to a verified UUID. Withhold all guest output and
+					// its presentation counters; retain only the independent
+					// native identity-probe error as a diagnostic channel.
 					base.Output = ""
+					base.OutputBytesSeen = 0
+					base.OutputOmittedBytes = 0
+					base.OutputTruncated = false
+					if verifyErr != nil {
+						if verifiedNativeIdentityChange(verifyErr) {
+							return base, fmt.Errorf("guest_exec_outcome_uncertain: native guest identity changed during execution; guest output withheld; inspect before retry: %w", verifyErr)
+						}
+						return base, fmt.Errorf("guest_exec_outcome_uncertain: post-execution native identity could not be verified; guest output withheld; inspect before retry: %w", verifyErr)
+					}
 					return base, errors.New("guest_exec_outcome_uncertain: native guest identity changed during execution; no output delivered")
 				}
 				base.Status = "guest_command_completed"
@@ -798,7 +902,7 @@ func (b Backend) checkNativePool(ctx context.Context, pool string, diskGiB int) 
 	path := "/1.0/storage-pools/" + url.PathEscape(pool) + "/resources"
 	raw, err := b.command(ctx, 20*time.Second, "query", path)
 	if err != nil {
-		return errors.New("incus_storage_unavailable: selected pool resources cannot be read; inspect Incus storage pool and driver")
+		return fmt.Errorf("incus_storage_unavailable: selected pool resources cannot be read; inspect Incus storage pool and driver: %w", err)
 	}
 	var data struct {
 		Space struct {
