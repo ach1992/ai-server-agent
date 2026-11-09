@@ -16,16 +16,21 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/ach1992/ai-server-agent/internal/secretoutput"
 )
 
 const (
 	repositoryOperationTimeout = 30 * time.Second
 	maxGitMetadataBytes        = 1 << 20
+	maxGitStderrBytes          = 4096
 	maxRepositoryResults       = 64
 	maxRepositoryMarkers       = 128
 	maxRepositoryScanDepth     = 4
 	maxStatusEntries           = 10000
 )
+
+var gitDiagnosticURL = regexp.MustCompile(`(?i)\b(?:https?|ssh|git)://[^\s<>"\x27]+`)
 
 var fullCommitSHA = regexp.MustCompile(`^[0-9a-f]{40}$`)
 
@@ -37,6 +42,18 @@ func repositoryError(code, class, message string, retryable bool) Response {
 		ErrorClass: class,
 		Retryable:  retryable,
 	}
+}
+
+// Native failures retain the actual exit status without changing the existing
+// repository error codes or retry policies.
+func repositoryGitFailure(code, class string, err error, retryable bool) Response {
+	resp := repositoryError(code, class, err.Error(), retryable)
+	resp.ExitCode = -1
+	var exitErr *exec.ExitError
+	if errors.As(err, &exitErr) {
+		resp.ExitCode = exitErr.ExitCode()
+	}
+	return resp
 }
 
 func withinPath(root, path string) bool {
@@ -178,32 +195,73 @@ func (s *Server) workerGitCommandEnv(ctx context.Context, dir string, extraEnv [
 	return cmd, nil
 }
 
-func runGitCommand(ctx context.Context, cmd *exec.Cmd, stdin []byte, raw bool) ([]byte, int, error) {
+// gitNativeStderr keeps useful Git failures while removing recognizable
+// credentials and bounding both captured and post-redaction diagnostic bytes.
+func gitNativeStderr(stderr *boundedGitBuffer) string {
+	captured := stderr.String()
+	raw := gitDiagnosticURL.ReplaceAllStringFunc(captured, func(rawURL string) string {
+		// The capture may end inside URL userinfo. Never emit an incomplete
+		// URL that could conceal a truncated password or token.
+		if stderr.overflow && strings.HasSuffix(captured, rawURL) {
+			return "[TRUNCATED_URL]"
+		}
+		u, err := url.Parse(rawURL)
+		if err != nil || u.Scheme == "" {
+			return "[REDACTED_URL]"
+		}
+		u.User = nil
+		u.RawQuery = ""
+		u.Fragment = ""
+		return u.String()
+	})
+	detail, clipped := secretoutput.BoundedDiagnosticText(strings.TrimSpace(raw), maxGitStderrBytes)
+	if stderr.overflow || clipped > 0 {
+		const note = " [native stderr truncated at 4096 bytes]"
+		detail, _ = secretoutput.BoundedDiagnosticText(strings.TrimSpace(raw), maxGitStderrBytes-len(note))
+		detail += note
+	}
+	return detail
+}
+
+func gitExecutionError(ctx context.Context, stage string, cause error, stderr *boundedGitBuffer) error {
+	detail := gitNativeStderr(stderr)
+	if ctx.Err() != nil {
+		return fmt.Errorf("git %s canceled: %w; stderr=%q", stage, ctx.Err(), detail)
+	}
+	var exitErr *exec.ExitError
+	if errors.As(cause, &exitErr) {
+		return fmt.Errorf("git %s exited %d: %w; stderr=%q", stage, exitErr.ExitCode(), cause, detail)
+	}
+	return fmt.Errorf("git %s could not start or complete: %w; stderr=%q", stage, cause, detail)
+}
+
+func runGitCommand(ctx context.Context, cmd *exec.Cmd, stdin []byte, raw bool, stage string) ([]byte, int, error) {
 	stdout := &boundedGitBuffer{limit: maxGitMetadataBytes}
+	stderr := &boundedGitBuffer{limit: maxGitStderrBytes}
 	cmd.Stdout = stdout
-	cmd.Stderr = nil
+	cmd.Stderr = stderr
 	if stdin != nil {
 		cmd.Stdin = bytes.NewReader(stdin)
 	}
-	err := cmd.Run()
+	runErr := cmd.Run()
 	if stdout.overflow {
-		return nil, -1, errGitMetadataTooLarge
+		return nil, -1, fmt.Errorf("git %s: %w", stage, errGitMetadataTooLarge)
 	}
 	if ctx.Err() != nil {
-		return nil, -1, ctx.Err()
+		return nil, -1, gitExecutionError(ctx, stage, runErr, stderr)
 	}
 	output := stdout.Bytes()
 	if !raw {
 		output = bytes.TrimSpace(output)
 	}
-	if err == nil {
+	if runErr == nil {
 		return output, 0, nil
 	}
 	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) {
-		return output, exitErr.ExitCode(), nil
+	if errors.As(runErr, &exitErr) {
+		return output, exitErr.ExitCode(), gitExecutionError(ctx, stage, runErr, stderr)
 	}
-	return nil, -1, err
+	return nil, -1, gitExecutionError(ctx, stage, runErr, stderr)
 }
 
 func (s *Server) gitResult(ctx context.Context, dir string, args ...string) (string, int, error) {
@@ -211,7 +269,7 @@ func (s *Server) gitResult(ctx context.Context, dir string, args ...string) (str
 	if err != nil {
 		return "", -1, err
 	}
-	output, code, err := runGitCommand(ctx, cmd, nil, false)
+	output, code, err := runGitCommand(ctx, cmd, nil, false, args[0])
 	return string(output), code, err
 }
 
@@ -220,7 +278,7 @@ func (s *Server) gitRawResultEnv(ctx context.Context, dir string, extraEnv []str
 	if err != nil {
 		return nil, -1, err
 	}
-	return runGitCommand(ctx, cmd, stdin, true)
+	return runGitCommand(ctx, cmd, stdin, true, args[0])
 }
 
 func requireGitSuccess(output string, code int, err error, operation string) (string, error) {
@@ -260,11 +318,12 @@ func (s *Server) repositoryStatusCounts(ctx context.Context, dir string) (staged
 	}
 	stdout, err := cmd.StdoutPipe()
 	if err != nil {
-		return 0, 0, 0, 0, false, err
+		return 0, 0, 0, 0, false, fmt.Errorf("git status stdout pipe: %w", err)
 	}
-	cmd.Stderr = nil
+	stderr := &boundedGitBuffer{limit: maxGitStderrBytes}
+	cmd.Stderr = stderr
 	if err := cmd.Start(); err != nil {
-		return 0, 0, 0, 0, false, err
+		return 0, 0, 0, 0, false, fmt.Errorf("git status could not start: %w", err)
 	}
 	scanner := bufio.NewScanner(stdout)
 	scanner.Buffer(make([]byte, 4096), 1<<20)
@@ -303,13 +362,13 @@ func (s *Server) repositoryStatusCounts(ctx context.Context, dir string) (staged
 		return staged, unstaged, untracked, conflicts, true, nil
 	}
 	if scanErr != nil {
-		return 0, 0, 0, 0, false, scanErr
+		if waitErr != nil {
+			return 0, 0, 0, 0, false, fmt.Errorf("git status output scan failed: %w", errors.Join(scanErr, gitExecutionError(ctx, "status", waitErr, stderr)))
+		}
+		return 0, 0, 0, 0, false, fmt.Errorf("git status output scan failed: %w", scanErr)
 	}
 	if waitErr != nil {
-		if ctx.Err() != nil {
-			return 0, 0, 0, 0, false, ctx.Err()
-		}
-		return 0, 0, 0, 0, false, errors.New("git status failed")
+		return 0, 0, 0, 0, false, gitExecutionError(ctx, "status", waitErr, stderr)
 	}
 	return staged, unstaged, untracked, conflicts, false, nil
 }
@@ -421,7 +480,7 @@ func describeRemote(raw string) (safeURL, identity string, external, supported b
 func (s *Server) repositoryRemotes(ctx context.Context, dir string) ([]RepositoryRemote, error) {
 	raw, code, err := s.gitResult(ctx, dir, "remote")
 	if err != nil || code != 0 {
-		return nil, errors.New("git remote inspection failed")
+		return nil, fmt.Errorf("git remote inspection failed: %w", err)
 	}
 	if strings.TrimSpace(raw) == "" {
 		return nil, nil
@@ -494,11 +553,11 @@ func (s *Server) resolveRemoteHead(ctx context.Context, dir, remoteName, remoteB
 	// Run network reconciliation outside the repository so repository-local
 	// credential helpers, SSH commands and HTTP settings cannot affect it.
 	out, exitCode, err := s.gitResult(ctx, "/", "ls-remote", "--exit-code", rawURL, ref)
-	if err != nil {
-		return "", false, "remote_verification_failed"
-	}
 	if exitCode == 2 {
 		return "", false, ""
+	}
+	if err != nil {
+		return "", false, "remote_verification_failed"
 	}
 	if exitCode != 0 {
 		return "", false, "remote_verification_failed"
@@ -614,7 +673,7 @@ func (s *Server) inspectRepository(ctx context.Context, inputPath string, verify
 		mainWorktree = filepath.Clean(worktrees[0].Path)
 	}
 	branch, branchCode, branchErr := s.gitResult(ctx, path, "symbolic-ref", "--quiet", "--short", "HEAD")
-	if branchErr != nil {
+	if branchErr != nil && branchCode != 1 {
 		return RepositoryState{}, "git_failed", branchErr
 	}
 	detached := branchCode != 0
@@ -825,6 +884,9 @@ func (s *Server) repositoryInspectContext(parent context.Context, req Request) R
 	state, code, err := s.inspectRepository(ctx, req.RepositoryPath, req.VerifyRemote && !customRemote)
 	if err != nil {
 		resp := repositoryError(code, "state", err.Error(), code == "repository_changed")
+		if code == "git_failed" {
+			resp = repositoryGitFailure(code, "state", err, false)
+		}
 		if state.Head != "" {
 			resp.Repository = &state
 		}

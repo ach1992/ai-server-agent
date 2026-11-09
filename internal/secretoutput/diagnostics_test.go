@@ -57,3 +57,33 @@ func TestBoundedDiagnosticTextEnforcesPostRedactionBytes(t *testing.T) {
 		t.Fatalf("invalid UTF-8 clipping: returned=%d omitted=%d", len(utf8Got), utf8Omitted)
 	}
 }
+
+func TestDiagnosticRedactionMasksCompleteAuthorizationField(t *testing.T) {
+	cases := []struct {
+		name, raw, secret string
+	}{
+		{"basic", "git failure; Authorization: Basic PRIVATE-BASE64; connection refused", "PRIVATE-BASE64"},
+		{"bearer", "git failure; Authorization: Bearer \"PRIVATE-BEARER\"; connection refused", "PRIVATE-BEARER"},
+		{"quoted entire header", "git failure; Authorization: \"Basic PRIVATE-QUOTED\"; connection refused", "PRIVATE-QUOTED"},
+		{"digest multipart", "git failure; Authorization: Digest username=alice, response=PRIVATE-DIGEST; connection refused", "PRIVATE-DIGEST"},
+		{"sigv4 signed headers", "git failure; Authorization: AWS4-HMAC-SHA256 Credential=TEST_ID/20261109/us-east-1/s3/aws4_request, SignedHeaders=host;x-amz-date, Signature=PRIVATE-SIGNATURE; connection refused", "PRIVATE-SIGNATURE"},
+		{"sigv4 spaced authorization parameter", "git failure; Authorization: AWS4-HMAC-SHA256 Credential=TEST_ID, SignedHeaders=host; Signature=PRIVATE-SIGNATURE-SPACED; connection refused", "PRIVATE-SIGNATURE-SPACED"},
+		{"compact semicolon in opaque header", "git failure; Authorization: Custom PRIVATE-ONE;PRIVATE-TWO; connection refused", "PRIVATE-TWO"},
+		{"quoted delimiter", "git failure; Authorization: \"Basic PRIVATE;QUOTED\"; connection refused", "PRIVATE;QUOTED"},
+		{"unfinished quote", "git failure; Authorization: Basic 'PRIVATE-UNFINISHED; still-secret", "PRIVATE-UNFINISHED"},
+		{"capture edge", "git failure; Authorization: Basic PRIVATE-TRUNCATED", "PRIVATE-TRUNCATED"},
+		{"separate line", "git failure; Authorization: Basic PRIVATE-LINE\nconnection refused", "PRIVATE-LINE"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			out := RedactDiagnosticText(tc.raw)
+			if strings.Contains(out, tc.secret) || !strings.Contains(out, "Authorization: [REDACTED]") ||
+				!strings.Contains(out, "git failure") {
+				t.Fatalf("Authorization value not fully masked: %q", out)
+			}
+			if strings.Contains(tc.raw, "connection refused") && !strings.Contains(out, "connection refused") {
+				t.Fatalf("redaction discarded independent diagnostics: %q", out)
+			}
+		})
+	}
+}

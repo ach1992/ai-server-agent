@@ -10,6 +10,12 @@ import (
 // otherwise useful native diagnostics. This is defense-in-depth, not a
 // substitute for the exact-value streaming redactor when the secret is known.
 var credentialAssignment = regexp.MustCompile("(?i)(\\b(?:authorization|password|passwd|token|secret|api[_-]?key)\\s*[:=]\\s*)(?:\"(?:\\\\.|[^\"\\\\])*\"|'(?:\\\\.|[^'\\\\])*'|[^\\s,;]+)")
+
+// Authorization values may contain semicolons inside the credential, notably
+// SigV4 SignedHeaders. Only semicolon-plus-space that does not continue an
+// Authorization parameter separates independently formatted diagnostics.
+// Mask ambiguous credential continuations, including incomplete quoted values.
+var authorizationValue = regexp.MustCompile(`(?i)(\bauthorization[ \t]*[:=][ \t]*)(?:[^;"'\r\n]|;[^ \t\r\n]|;[ \t]+(?:credential|signedheaders|signature)[ \t]*=|"(?:\\.|[^"\\\r\n])*"?|'(?:\\.|[^'\\\r\n])*'?)*`)
 var bearerValue = regexp.MustCompile("(?i)(\\bbearer\\s+)[a-z0-9._~+/=-]+")
 
 // A capture window may end while an assignment's quoted value is still open.
@@ -18,6 +24,7 @@ var bearerValue = regexp.MustCompile("(?i)(\\bbearer\\s+)[a-z0-9._~+/=-]+")
 var incompleteQuotedCredential = regexp.MustCompile("(?is)(\\b(?:authorization|password|passwd|token|secret|api[_-]?key)[ \\t]*[:=][ \\t]*)(?:\\\"(?:\\\\.|[^\\\"\\\\])*$|'(?:\\\\.|[^'\\\\])*$)")
 
 func RedactDiagnosticText(s string) string {
+	s = authorizationValue.ReplaceAllString(s, "${1}[REDACTED]")
 	s = bearerValue.ReplaceAllString(s, "${1}[REDACTED]")
 	s = incompleteQuotedCredential.ReplaceAllString(s, "${1}[REDACTED]")
 	return credentialAssignment.ReplaceAllString(s, "${1}[REDACTED]")

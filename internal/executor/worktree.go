@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -40,6 +41,13 @@ func branchInWorktree(worktrees []RepositoryWorktree, branch string) (Repository
 	return RepositoryWorktree{}, false
 }
 
+func checkoutFilterPreflightError(stage string, code int, err error) error {
+	if err != nil {
+		return fmt.Errorf("checkout-filter preflight: %w", err)
+	}
+	return fmt.Errorf("checkout-filter preflight git %s exited %d", stage, code)
+}
+
 func (s *Server) commitUsesCheckoutFilter(ctx context.Context, repositoryPath, commitSHA string) (bool, error) {
 	tmpDir, err := os.MkdirTemp("", "ai-server-agent-git-index-")
 	if err != nil {
@@ -55,27 +63,18 @@ func (s *Server) commitUsesCheckoutFilter(ctx context.Context, repositoryPath, c
 	indexPath := filepath.Join(tmpDir, "index")
 	env := []string{"GIT_INDEX_FILE=" + indexPath}
 	if _, code, err := s.gitRawResultEnv(ctx, repositoryPath, env, nil, "read-tree", commitSHA); err != nil || code != 0 {
-		if err != nil {
-			return false, err
-		}
-		return false, errors.New("git read-tree failed during checkout-filter preflight")
+		return false, checkoutFilterPreflightError("read-tree", code, err)
 	}
 	files, code, err := s.gitRawResultEnv(ctx, repositoryPath, env, nil, "ls-files", "-z")
 	if err != nil || code != 0 {
-		if err != nil {
-			return false, err
-		}
-		return false, errors.New("git ls-files failed during checkout-filter preflight")
+		return false, checkoutFilterPreflightError("ls-files", code, err)
 	}
 	if len(files) == 0 {
 		return false, nil
 	}
 	attrs, code, err := s.gitRawResultEnv(ctx, repositoryPath, env, files, "check-attr", "--cached", "-z", "--stdin", "filter")
 	if err != nil || code != 0 {
-		if err != nil {
-			return false, err
-		}
-		return false, errors.New("git check-attr failed during checkout-filter preflight")
+		return false, checkoutFilterPreflightError("check-attr", code, err)
 	}
 	parts := bytes.Split(attrs, []byte{0})
 	if len(parts) > 0 && len(parts[len(parts)-1]) == 0 {
@@ -107,7 +106,7 @@ func (s *Server) worktreeCreateContext(parent context.Context, req Request) (res
 	}
 	repo, code, err := s.inspectRepository(ctx, req.RepositoryPath, false)
 	if err != nil {
-		return repositoryError(code, "state", err.Error(), code == "repository_changed")
+		return repositoryGitFailure(code, "state", err, code == "repository_changed")
 	}
 	if err := validateBranchName(s, ctx, repo.Root, req.Branch); err != nil {
 		return repositoryError("invalid_branch", "validation", err.Error(), false)
@@ -153,18 +152,42 @@ func (s *Server) worktreeCreateContext(parent context.Context, req Request) (res
 	}
 	usesFilter, filterErr := s.commitUsesCheckoutFilter(ctx, repo.Root, req.ExpectedSHA)
 	if filterErr != nil {
-		return repositoryError("checkout_filter_scan_failed", "state", "structured worktree checkout-filter preflight could not be completed", true)
+		return repositoryGitFailure("checkout_filter_scan_failed", "state", filterErr, true)
 	}
 	if usesFilter {
 		return repositoryError("checkout_filter_unsupported", "validation", "structured worktree creation refuses repository checkout filters; use ordinary Git CLI when repository-owned filter execution is intentionally required", false)
 	}
 
-	branchHead, branchCode, branchErr := s.gitResult(ctx, repo.Root, "rev-parse", "--verify", "refs/heads/"+req.Branch+"^{commit}")
+	// Unlike rev-parse --verify (which exits 128 for both an absent ref and
+	// fatal failures), a successful for-each-ref query distinguishes absence
+	// from a command failure before any worktree/branch mutation.
+	refName := "refs/heads/" + req.Branch
+	refs, branchCode, branchErr := s.gitResult(ctx, repo.Root, "for-each-ref",
+		"--format=%(refname) %(objectname) %(objecttype)", refName)
 	if branchErr != nil {
-		return repositoryError("git_failed", "process", "could not inspect local branch state", true)
+		return repositoryGitFailure("git_failed", "process", branchErr, true)
+	}
+	if branchCode != 0 {
+		return repositoryError("git_failed", "process", fmt.Sprintf("git for-each-ref exited %d", branchCode), true)
+	}
+	branchHead := ""
+	for _, line := range strings.Split(refs, "\n") {
+		if line == "" {
+			continue
+		}
+		fields := strings.Fields(line)
+		if len(fields) != 3 {
+			return repositoryError("git_failed", "process", "git for-each-ref returned malformed branch metadata", true)
+		}
+		if fields[0] == refName {
+			if fields[2] != "commit" || !fullCommitSHA.MatchString(fields[1]) {
+				return repositoryError("git_failed", "process", "git for-each-ref returned invalid branch commit metadata", true)
+			}
+			branchHead = fields[1]
+		}
 	}
 	args := []string{"worktree", "add"}
-	if branchCode == 0 {
+	if branchHead != "" {
 		if branchHead != req.ExpectedSHA {
 			return repositoryError("branch_head_mismatch", "state", "existing local branch does not match expected_start_sha", true)
 		}
@@ -187,7 +210,10 @@ func (s *Server) worktreeCreateContext(parent context.Context, req Request) (res
 		if _, statErr := os.Lstat(target); statErr == nil {
 			return repositoryError("unknown_completion", "state", "worktree creation failed after local state appeared; inspect before retrying", true)
 		}
-		return repositoryError("worktree_create_failed", "process", "git worktree creation failed", false)
+		if gitErr != nil {
+			return repositoryGitFailure("worktree_create_failed", "process", fmt.Errorf("git worktree add: %w", gitErr), false)
+		}
+		return repositoryError("worktree_create_failed", "process", fmt.Sprintf("git worktree add exited %d", exitCode), false)
 	}
 	created, inspectCode, inspectErr := s.inspectRepository(ctx, target, false)
 	if inspectErr != nil || created.CommonGitDir != repo.CommonGitDir || created.Branch != req.Branch || created.Head != req.ExpectedSHA {
@@ -214,7 +240,7 @@ func (s *Server) worktreeRemoveContext(parent context.Context, req Request) (res
 	}
 	repo, code, err := s.inspectRepository(ctx, req.RepositoryPath, false)
 	if err != nil {
-		return repositoryError(code, "state", err.Error(), code == "repository_changed")
+		return repositoryGitFailure(code, "state", err, code == "repository_changed")
 	}
 	target, err := s.workspacePath(req.WorktreePath, false)
 	if err != nil {
@@ -300,7 +326,10 @@ func (s *Server) worktreeRemoveContext(parent context.Context, req Request) (res
 	}()
 	_, exitCode, gitErr := s.gitResult(ctx, repo.Root, "worktree", "remove", target)
 	if gitErr != nil || exitCode != 0 {
-		return repositoryError("worktree_remove_failed", "process", "git worktree removal failed", false)
+		if gitErr != nil {
+			return repositoryGitFailure("worktree_remove_failed", "process", fmt.Errorf("git worktree remove: %w", gitErr), false)
+		}
+		return repositoryError("worktree_remove_failed", "process", fmt.Sprintf("git worktree remove exited %d", exitCode), false)
 	}
 	repoAfter, inspectCode, inspectErr := s.inspectRepository(ctx, repo.Root, false)
 	if inspectErr != nil {
