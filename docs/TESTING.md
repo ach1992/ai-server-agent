@@ -460,7 +460,7 @@ The detailed target capability architecture is `docs/DEVELOPER-RUNTIME.md`.
 > [#149](https://github.com/ach1992/ai-server-agent/issues/149) (language/DAP),
 > [#60](https://github.com/ach1992/ai-server-agent/issues/60) (Terminal),
 > [#203](https://github.com/ach1992/ai-server-agent/issues/203) (sandbox platforms),
-> or a focused Issue for newly demonstrated quality defects (current diagnostic-fidelity work: [#238](https://github.com/ach1992/ai-server-agent/issues/238); [#214](https://github.com/ach1992/ai-server-agent/issues/214) is closed).
+> or a focused Issue for newly demonstrated quality defects (completed diagnostic-fidelity work: [#238](https://github.com/ach1992/ai-server-agent/issues/238) and [#240](https://github.com/ach1992/ai-server-agent/issues/240); [#214](https://github.com/ach1992/ai-server-agent/issues/214) is also closed).
 > Closed [#59](https://github.com/ach1992/ai-server-agent/issues/59)
 > preserves bounded historical evidence and the Owner-discontinued exhaustive
 > program; it is not an active acceptance destination.
