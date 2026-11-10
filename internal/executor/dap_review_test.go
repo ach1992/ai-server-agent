@@ -224,3 +224,40 @@ func TestReviewB1OlderKernelFallbackRequiresUnreapedDirectChild(t *testing.T) {
 		t.Fatalf("still-unreaped direct child cannot use guarded fallback: %v", err)
 	}
 }
+
+// The close path must not treat a signal being sent as evidence that a
+// SIGTERM-resistant worker actually stopped. The same pinned direct-child
+// identity is retained through the deadline and SIGKILL verification.
+func TestTerminatePinnedGroupEscalatesAndVerifiesTermResistantWorker(t *testing.T) {
+	cmd := exec.Command("/bin/sh", "-c", "trap '' TERM; printf ready; exec /bin/sleep 12")
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	defer func() { _ = cmd.Process.Kill(); _ = cmd.Wait() }()
+	var ready [5]byte
+	if _, err := io.ReadFull(stdout, ready[:]); err != nil || string(ready[:]) != "ready" {
+		t.Fatalf("worker did not install TERM ignore handler: ready=%q err=%v", ready, err)
+	}
+	pid := cmd.Process.Pid
+	fd, err := unix.PidfdOpen(pid, 0)
+	if err != nil {
+		t.Skipf("pidfd not available: %v", err)
+	}
+	pin := os.NewFile(uintptr(fd), "term-resistant-direct-child")
+	defer pin.Close()
+	started := time.Now()
+	if sent, err := terminatePinnedGroup(pid, pin, true); err != nil || !sent {
+		t.Fatalf("TERM-resistant worker stop not verified: sent=%t err=%v", sent, err)
+	}
+	if elapsed := time.Since(started); elapsed < processGroupTerminateGrace {
+		t.Fatalf("stop incorrectly skipped KILL escalation after %s", elapsed)
+	}
+	if count, err := liveGroupMembers(pid); err != nil || count != 0 {
+		t.Fatalf("reported stopped group retains %d live members: %v", count, err)
+	}
+}

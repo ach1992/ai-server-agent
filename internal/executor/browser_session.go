@@ -909,7 +909,16 @@ func (s *Server) browserSessionClose(req Request) Response {
 	closeErr := s.workerStdioClose(req, entry.id)
 	if !s.sessions.cleanlyRemoved(entry) {
 		state.uncertain = true
-		return browserSessionError("browser_session_cleanup_unverified", "state", errors.New("Browser worker stop was not proved; shared profile remains reserved"))
+		// Retain the broker's actual failure stage for the authenticated
+		// caller; a generic "cleanup unverified" message obscures whether
+		// stop verification, child wait, or the prerequisite audit failed.
+		// No session reservation is released until reconciliation succeeds.
+		if closeErr != nil {
+			return browserSessionError("browser_session_cleanup_unverified", "state",
+				fmt.Errorf("Browser cleanup unverified; session reservation retained: %w", closeErr))
+		}
+		return browserSessionError("browser_session_cleanup_unverified", "state",
+			errors.New("Browser cleanup unverified; session reservation retained; broker completion could not be confirmed"))
 	}
 	// The broker atomically reconciles the Browser lease BEFORE deleting
 	// the clean entry. An audit completion failure cannot strand the lease.

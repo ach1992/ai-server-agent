@@ -229,8 +229,10 @@ func TestBrowserSessionCloseBeforeActionAuditFailureRetainsLease(t *testing.T) {
 		return nil
 	}
 	denied := s.browserSessionAction(ctx, browserOwnerControl(owner, id, "browser_session_close"))
-	if denied.OK || denied.ErrorCode != "browser_session_cleanup_unverified" {
-		t.Fatalf("unverified close succeeded: %+v", denied)
+	if denied.OK || denied.ErrorCode != "browser_session_cleanup_unverified" ||
+		!strings.Contains(denied.Error, "session reservation retained") ||
+		!strings.Contains(denied.Error, "audit") {
+		t.Fatalf("unverified close lost its original broker/audit failure or lease truth: %+v", denied)
 	}
 	if s.browserAdmission.acquireRun() {
 		t.Fatal("unverified close released profile")
@@ -316,6 +318,10 @@ done
 		t.Fatalf("open through real dispatcher: %+v", open)
 	}
 	id := open.SessionID
+	entry, entryErr := s.browserSessionEntry(browserOwnerControl(owner, id, "browser_session_status"))
+	if entryErr != nil {
+		t.Fatal(entryErr)
+	}
 	defer func() {
 		if s.browserAdmission.matches(id) {
 			_ = s.browserSessionClose(browserOwnerControl(owner, id, "browser_session_close"))
@@ -379,7 +385,11 @@ done
 	}
 	closed := s.dispatchContext(context.Background(), browserOwnerControl(owner, id, "browser_session_close"))
 	if !closed.OK || closed.Status != "closed" {
-		t.Fatalf("cannot close Browser promptly after client disconnect: %+v", closed)
+		entry.mu.Lock()
+		cleanupErr, exited, pinned, pid := entry.cleanupErr, entry.exited, entry.pidPin != nil, entry.pid
+		entry.mu.Unlock()
+		live, procErr := liveGroupMembers(pid)
+		t.Fatalf("cannot close Browser promptly after client disconnect: %+v (broker exited=%t pinned=%t cleanup=%v; liveGroupMembers=%d procErr=%v)", closed, exited, pinned, cleanupErr, live, procErr)
 	}
 	if s.browserAdmission.reserved() {
 		t.Fatal("canceled script stranded original Browser admission")

@@ -137,5 +137,15 @@ func terminatePinnedGroup(pgid int, pin *os.File, unreapedChild bool) (bool, err
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
+	// The final sleep may cross the deadline just as SIGKILL finishes.
+	// Reobserve the real kernel state rather than rejecting cleanup using a
+	// stale last count. This does not extend the deadline or assume success.
+	count, err = liveGroupMembers(pgid)
+	if err != nil {
+		return true, err
+	}
+	if count == 0 {
+		return true, nil
+	}
 	return true, fmt.Errorf("pinned process group still has %d live members", count)
 }
