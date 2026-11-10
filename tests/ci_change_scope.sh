@@ -41,6 +41,11 @@ expect_flag true stable_provenance_changed README.md
 expect_flag true runtime_changed internal/browser/browser.go
 expect_flag true go_changed internal/browser/browser.go
 expect_flag true browser_flow_changed internal/browser/browser.go
+for path in internal/executor/browser_session.go internal/executor/browser_session_review_test.go internal/executor/browser_sandbox.go internal/executor/sessions.go internal/executor/pinned_group.go; do
+  expect_flag true runtime_changed "$path"
+  expect_flag true browser_flow_changed "$path"
+  expect_flag true root_trust_security_changed "$path"
+done
 expect_flag false browser_flow_changed internal/mcp/server.go
 expect_flag false lsp_changed internal/mcp/server.go
 expect_flag false lsp_changed internal/executor/executor.go

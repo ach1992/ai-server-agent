@@ -63,6 +63,14 @@ classify_paths(){
         go_changed=true
         browser_flow_changed=true
         ;;
+      internal/executor/browser_*|internal/executor/sessions.go|internal/executor/pinned_group.go)
+        # Browser admission/stop semantics also live in the root Executor
+        # broker; changes here must exercise the real pinned Browser runner.
+        runtime_changed=true
+        go_changed=true
+        browser_flow_changed=true
+        set_security_all
+        ;;
       internal/executor/lsp_*|internal/executor/code_inspect*|internal/mcp/code_inspect*)
         runtime_changed=true
         go_changed=true
