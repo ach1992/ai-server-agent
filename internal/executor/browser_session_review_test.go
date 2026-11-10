@@ -248,6 +248,92 @@ func TestBrowserSessionCloseBeforeActionAuditFailureRetainsLease(t *testing.T) {
 	s.browserAdmission.releaseRun()
 }
 
+// The broker can report an unverified stop while its completion audit also
+// fails. Neither cause may be hidden by the Browser's typed error, and the
+// original owner must retain the reservation until a verified reconciliation.
+func TestBrowserClosePreservesStopAndAuditCompletionFailures(t *testing.T) {
+	s, owner, _ := browserAuditFixture(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
+	defer cancel()
+	opened := s.browserSessionAction(ctx, owner)
+	if !opened.OK {
+		t.Fatalf("open: %+v", opened)
+	}
+	id := opened.SessionID
+	entry, err := s.browserSessionEntry(browserOwnerControl(owner, id, "browser_session_status"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	entry.mu.Lock()
+	child, pid := entry.cmd.Process, entry.pid
+	entry.mu.Unlock()
+	if err := child.Kill(); err != nil {
+		t.Fatal(err)
+	}
+	waitForStdioExit(t, entry)
+	entry.mu.Lock()
+	exited, clean, pinned := entry.exited, entry.cleanupErr == nil, entry.pidPin != nil
+	entry.mu.Unlock()
+	live, liveErr := liveGroupMembers(pid)
+	if !exited || !clean || pinned || liveErr != nil || live != 0 {
+		t.Fatalf("fixture must have a previously verified physical stop: exited=%t clean=%t pinned=%t live=%d err=%v", exited, clean, pinned, live, liveErr)
+	}
+
+	// Fault injection after the verified physical stop: force the broker's
+	// unverified-stop identity path, without creating or signalling another
+	// process. The artificially introduced uncertainty is removed ONLY
+	// after the test has independently checked zero live group members.
+	entry.mu.Lock()
+	entry.cleanupErr = errors.New("injected synthetic stop-proof uncertainty")
+	entry.mu.Unlock()
+	auditPath := filepath.Join(t.TempDir(), "audit-close-double-failure")
+	s.audit = audit.New(auditPath)
+	completions := 0
+	s.auditBeforeCompletionHook = func() {
+		completions++
+		// First completion is the attempted graceful write to the already
+		// exited fixture. The second is the failed broker close.
+		if completions == 2 {
+			breakAuditCompletion(t, auditPath)
+		}
+	}
+	denied := s.browserSessionAction(ctx, browserOwnerControl(owner, id, "browser_session_close"))
+	if denied.OK || denied.ErrorCode != "browser_session_cleanup_unverified" ||
+		!strings.Contains(denied.Error, "session_stop_outcome_unknown: process identity unavailable") ||
+		!strings.Contains(denied.Error, "session_close_outcome_audit_degraded") ||
+		!strings.Contains(denied.Error, "session reservation retained") ||
+		completions != 2 {
+		t.Fatalf("simultaneous stop and audit failure lost evidence: %+v, completions=%d", denied, completions)
+	}
+	if !s.browserAdmission.matches(id) || s.browserAdmission.acquireRun() {
+		t.Fatal("unverified cleanup released the exact Browser reservation")
+	}
+	other := browserOwnerControl(owner, id, "browser_session_close")
+	other.PrincipalID = "another-principal"
+	if unauthorized := s.browserSessionAction(ctx, other); unauthorized.OK || unauthorized.ErrorCode != "browser_session_not_found" {
+		t.Fatalf("unrelated principal could reconcile original session: %+v", unauthorized)
+	}
+
+	s.auditBeforeCompletionHook = nil
+	if err := os.Remove(auditPath); err != nil {
+		t.Fatal(err)
+	}
+	s.audit = audit.New(auditPath)
+	// The only remaining failure is the test-injected marker. The original
+	// child was already reaped and its exact process group observed empty.
+	entry.mu.Lock()
+	entry.cleanupErr = nil
+	entry.mu.Unlock()
+	reconciled := s.browserSessionAction(ctx, browserOwnerControl(owner, id, "browser_session_close"))
+	if !reconciled.OK || reconciled.Status != "closed" || s.browserAdmission.matches(id) {
+		t.Fatalf("verified, audited owner reconciliation failed: %+v", reconciled)
+	}
+	if !s.browserAdmission.acquireRun() {
+		t.Fatal("verified reconciliation did not release the original reservation")
+	}
+	s.browserAdmission.releaseRun()
+}
+
 func TestBrowserSessionKnownFlowFailurePreservesSession(t *testing.T) {
 	s, owner, _ := browserAuditFixture(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 7*time.Second)
