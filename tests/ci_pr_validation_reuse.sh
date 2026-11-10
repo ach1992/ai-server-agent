@@ -28,6 +28,37 @@ git commit -qm 'squash merged candidate'
 merged="$(git rev-parse HEAD)"
 [ "$(git rev-parse HEAD^{tree})" = "$candidate_tree" ]
 
+# Reproduce a GitHub merge commit: exact validated head as second parent.
+git switch -qc merge-case "$base"
+git merge --no-ff -qm 'merge validated PR' "$candidate"
+[ "$(git rev-parse HEAD^{tree})" = "$candidate_tree" ]
+[ "$(git show -s --format='%P' HEAD)" = "$base $candidate" ]
+
+# Different second parent with an identical tree is not valid PR evidence.
+git switch -qc foreign-head "$base"
+git checkout -q "$candidate" -- source.txt
+git add source.txt
+git commit -qm 'foreign candidate with matching tree'
+foreign_head="$(git rev-parse HEAD)"
+[ "$foreign_head" != "$candidate" ]
+git switch -qc mismatched-parent-case "$base"
+git merge --no-ff -qm 'merge different second parent' "$foreign_head"
+[ "$(git rev-parse HEAD^{tree})" = "$candidate_tree" ]
+
+# A matching second parent still cannot cover additional merge edits.
+git switch -qc changed-merge-case "$base"
+git merge --no-ff --no-commit -q "$candidate"
+printf 'untested merge edit\n' > extra.txt
+git add extra.txt
+git commit -qm 'merge with unreviewed content'
+[ "$(git rev-parse HEAD^{tree})" != "$candidate_tree" ]
+
+# Octopus commits do not represent a single validated PR merge.
+octopus_commit="$(printf 'octopus fixture\n' | git commit-tree "$candidate_tree" -p "$base" -p "$candidate" -p "$foreign_head")"
+git switch -qc octopus-case "$octopus_commit"
+[ "$(git rev-list --parents -n1 HEAD | wc -w)" -eq 4 ]
+git switch -q main
+
 cat > "$tmp/fakebin/gh" <<'MOCK_GH'
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -232,6 +263,15 @@ export MOCK_API_LOG="$tmp/gh-api-paths.log"
 jq -n --arg before "$base" --arg after "$merged" --arg repo "$GITHUB_REPOSITORY" \
   '{before:$before,after:$after,ref:"refs/heads/main",repository:{full_name:$repo},forced:false,deleted:false,created:false}' > "$GITHUB_EVENT_PATH"
 
+select_fixture(){
+  git switch -q "$1"
+  GITHUB_SHA="$(git rev-parse HEAD)"
+  TEST_MAIN="$GITHUB_SHA"
+  export GITHUB_SHA TEST_MAIN
+  jq -n --arg before "$base" --arg after "$GITHUB_SHA" --arg repo "$GITHUB_REPOSITORY" \
+    '{before:$before,after:$after,ref:"refs/heads/main",repository:{full_name:$repo},forced:false,deleted:false,created:false}' > "$GITHUB_EVENT_PATH"
+}
+
 cases_checked=0
 check(){
   local what="$1" want="$2" got
@@ -261,6 +301,61 @@ grep -qF "needs.change-scope.outputs.reuse_validated_pr != 'true'" "$ROOT/.githu
 grep -qF "needs.change-scope.outputs.reuse_validated_pr != 'true'" "$ROOT/.github/workflows/security.yml"
 grep -qF "needs.change-scope.outputs.reuse_validated_pr == 'true'" "$ROOT/.github/workflows/ci.yml"
 grep -qF 'gh run download "$run_id"' "$ROOT/.github/workflows/release.yml"
+# The branch-protected `test` check must aggregate every independently
+# selected acceptance job. Parallelizing installed tests must not leave their
+# success optional merely because they run in a separate Actions job.
+[ "$(grep -Fc '      - name: First-run deferral is not an installation failure' "$ROOT/.github/workflows/ci.yml")" -eq 1 ] || {
+  echo 'Installed acceptance step must run exactly once' >&2; exit 1;
+}
+# The cold-runner split was not bounded reliably. Keep installed acceptance
+# after the established lifecycle/credential bootstrap on the same core host.
+awk '
+  /^  core-test:$/ { in_core=1; next }
+  in_core && /^  [a-z0-9_-]+:$/ { exit }
+  in_core && /- name: Real named-credential migration and historical Stable rollback refusal$/ { migration=NR }
+  in_core && /- name: First-run deferral is not an installation failure$/ { first=NR }
+  END { if (migration == 0 || first <= migration) exit 1 }
+' "$ROOT/.github/workflows/ci.yml" || {
+  echo 'Installed acceptance must follow verified core credential lifecycle' >&2
+  exit 1
+}
+awk '
+  /^  test:$/ { in_gate=1; next }
+  in_gate && /^  [a-z0-9_-]+:$/ { exit }
+  in_gate && /^    name: test$/ { name++ }
+  in_gate && /needs: \[change-scope, core-test, go-race\]/ { needs++ }
+  in_gate && /test "\$CLASSIFIER_RESULT" = success/ { classifier++ }
+  in_gate && /test "\$CORE_RESULT" = success/ { core++ }
+  in_gate && /test "\$GO_RACE_RESULT" = success/ { race++ }
+  in_gate && /test "\$GO_RACE_RESULT" = skipped/ { race_skip++ }
+  END { if (name != 1 || needs != 1 || classifier != 1 || core != 1 || race != 1 || race_skip != 1) exit 1 }
+' "$ROOT/.github/workflows/ci.yml" || {
+  echo 'Protected test check must require all selected exact-candidate acceptance' >&2; exit 1;
+}
+# The Go race suite executes exactly once on a separate disposable runner,
+# and no ordinary core step is allowed to silently replay or bypass it.
+[ "$(grep -Fc '        run: go test -race -vet=off ./...' "$ROOT/.github/workflows/ci.yml")" -eq 1 ] || {
+  echo 'Full Go race suite must run once through its selected job' >&2; exit 1;
+}
+grep -qF '  go-race:' "$ROOT/.github/workflows/ci.yml"
+grep -qF '          GO_RACE_RESULT: ${{ needs.go-race.result }}' "$ROOT/.github/workflows/ci.yml"
+# Keep the real selected Go worker tests with the race shard; otherwise
+# moving them into another job could skip the non-skipped acceptance proofs.
+awk '
+  /^  go-race:$/ { in_go=1; next }
+  in_go && /^  [a-z0-9_-]+:$/ { exit }
+  in_go && /- name: Non-skipped real tmux long-paste acceptance$/ { tmux++ }
+  in_go && /- name: Non-skipped real worker\/Landlock transfer acceptance$/ { transfer++ }
+  in_go && /- name: Provision trusted ripgrep for SQL worker acceptance$/ { ripgrep++ }
+  in_go && /- name: Non-skipped materialized SQL real worker\/Landlock acceptance$/ { sql++ }
+  in_go && /- name: Non-skipped ordinary PostgreSQL relation-move Worker\/Landlock acceptance$/ { sql2++ }
+  in_go && /- name: Non-skipped SQL SELECT alias worker and direct MCP acceptance$/ { alias++ }
+  in_go && /- name: Real pinned gopls large-Go semantic acceptance$/ { gopls++ }
+  END { if (tmux != 1 || transfer != 1 || ripgrep != 1 || sql != 1 || sql2 != 1 || alias != 1 || gopls != 1) exit 1 }
+' "$ROOT/.github/workflows/ci.yml" || {
+  echo 'Required real Go-worker acceptance steps must stay on the race shard' >&2
+  exit 1
+}
 # The main-only artifact job runs on a separate disposable runner. The PR
 # test job's preparation does not carry over to its root installer check.
 awk '
@@ -336,6 +431,22 @@ GITHUB_SHA="$base" check matching_squash false
 GH_TOKEN= check matching_squash false
 GITHUB_REPOSITORY=wrong/repo check matching_squash false
 
-# A historical valid squash, checked from the actual public GitHub API in
-# developer smoke checks, provides a non-mock confirmation of API semantics.
+# Preserve the same strict provenance gates for real two-parent PR merges.
+select_fixture merge-case
+check matching_merge true
+for scenario in stale_base changed_tree latest_ci_failure failed_security \
+  newer_ci_missing_link; do
+  check "$scenario" false
+done
+
+select_fixture mismatched-parent-case
+check matching_merge false
+select_fixture changed-merge-case
+check matching_merge false
+select_fixture octopus-case
+check matching_merge false
+select_fixture main
+
+# Valid GitHub squash/merge associations are also checked against real
+# read-only API evidence during developer smoke validation.
 echo "CI PR evidence reuse tests passed ($cases_checked valid, adversarial and fail-closed scenarios)."

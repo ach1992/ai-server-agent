@@ -9,8 +9,6 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 permissions:
   contents: read
-env:
-  RELEASE_VERSION: v0.1.27
 jobs:
   change-scope:
     name: CI change scope
@@ -54,7 +52,7 @@ jobs:
       - name: Classify changed paths
         id: scope
         run: bash scripts/ci-change-scope.sh >> "$GITHUB_OUTPUT"
-      - name: Reuse validated exact-tree PR evidence on squash-merged main
+      - name: Reuse validated exact-tree PR evidence after PR merge
         id: reuse
         env:
           GH_TOKEN: ${{ github.token }}
@@ -83,13 +81,12 @@ jobs:
           test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
           bash tests/browser_flow_ci.sh
 
-  test:
+  go-race:
+    name: Go race unit tests
     needs: change-scope
-    if: ${{ always() && needs.change-scope.outputs.reuse_validated_pr != 'true' && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed != 'false') }}
+    if: ${{ always() && needs.change-scope.result == 'success' && needs.change-scope.outputs.reuse_validated_pr != 'true' && needs.change-scope.outputs.go_changed != 'false' }}
     runs-on: ubuntu-22.04
     steps:
-      - name: Require successful change classification
-        run: test "${{ needs.change-scope.result }}" = success
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.event.pull_request.head.sha || github.sha }}
@@ -97,36 +94,16 @@ jobs:
         env:
           EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
-          actual_sha="$(git rev-parse HEAD)"
-          printf 'EXACT_CHECKED_OUT_HEAD=%s\n' "$actual_sha"
-          test "$actual_sha" = "$EXPECTED_SOURCE_SHA"
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_SHA"
+          printf 'EXACT_GO_RACE_HEAD=%s\n' "$EXPECTED_SOURCE_SHA"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26.x'
           cache: false
-      - name: Prepare trusted install destinations on disposable Ubuntu runner
+      - name: Prepare trusted paths on disposable Go runner
         run: sudo env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" bash scripts/ci-prepare-trusted-install-paths.sh
-      - name: Format
-        if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
-        run: |
-          unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
-            echo "gofmt required for:" >&2
-            printf '%s\n' "$unformatted" >&2
-            echo "gofmt diff:" >&2
-            while IFS= read -r file; do
-              gofmt -d "$file" >&2
-            done <<< "$unformatted"
-            exit 1
-          fi
-      - name: Vet
-        if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
-        run: go vet ./...
       - name: Unit tests
-        if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
         run: go test -race -vet=off ./...
-      - name: Local protected Browser acceptance client tests
-        run: python3 -B -m unittest discover -s tests -p 'test_installed_browser_auth_smoke.py' -v
       - name: Non-skipped real tmux long-paste acceptance
         if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
         run: |
@@ -153,21 +130,6 @@ jobs:
             exit 1
           fi
           echo 'REAL_TMUX_LONG_PASTE_CI_PASS'
-      - name: Shell DAP root-provisioned IPC same-UID denial
-        if: ${{ needs.change-scope.outputs.root_trust_security_changed != 'false' }}
-        run: |
-          set -Eeuo pipefail
-          printf 'SHELL_IPC_PROOF_HEAD=%s\nSHELL_IPC_PROOF_TREE=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
-          fixture="$(mktemp -d)"
-          trap 'rm -rf -- "$fixture"' EXIT
-          go test -c -o "$fixture/executor.test" ./internal/executor
-          sudo env ASA_REQUIRE_ROOT_SHELL_IPC=1 "$fixture/executor.test" -test.run '^TestShellDAPRootOwnedIPCRejectsSameUIDPeerAndPreservesActivation$' -test.v -test.timeout=60s 2>&1 | tee "$fixture/results.log"
-          grep -Fq -- '--- PASS: TestShellDAPRootOwnedIPCRejectsSameUIDPeerAndPreservesActivation' "$fixture/results.log"
-          if grep -Fq -- '--- SKIP: TestShellDAPRootOwnedIPCRejectsSameUIDPeerAndPreservesActivation' "$fixture/results.log"; then
-            echo 'Mandatory real root-owned Shell IPC peer-denial test was skipped' >&2
-            exit 1
-          fi
-          echo 'ROOT_SHELL_DAP_IPC_PEER_DENIAL_PASS'
       - name: Non-skipped real worker/Landlock transfer acceptance
         if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
         env:
@@ -345,6 +307,76 @@ jobs:
           grep -Fq "GOPLS_SELECTED_BINARY_PATH=/usr/bin/gopls SHA256=$pinned_sha" "$log"
           grep -Fq 'DIRECT_REAL_GOPLS_PASS' "$log"
           echo 'REAL_GOPLS_DIRECT_MCP_CLIENT_PROOF_PASS'
+
+  core-test:
+    name: CI core acceptance
+    needs: change-scope
+    if: ${{ always() && needs.change-scope.outputs.reuse_validated_pr != 'true' && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed != 'false') }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Require successful change classification
+        run: test "${{ needs.change-scope.result }}" = success
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify exact checked-out commit
+        env:
+          EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          actual_sha="$(git rev-parse HEAD)"
+          printf 'EXACT_CHECKED_OUT_HEAD=%s\n' "$actual_sha"
+          test "$actual_sha" = "$EXPECTED_SOURCE_SHA"
+      - name: Validate release candidate version
+        id: release-version
+        run: |
+          set -Eeuo pipefail
+          test "$(wc -l < scripts/release-candidate-version.txt)" -eq 1
+          version="$(cat scripts/release-candidate-version.txt)"
+          [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo 'Invalid release candidate version marker' >&2
+            exit 1
+          }
+          printf 'RELEASE_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - name: Prepare trusted install destinations on disposable Ubuntu runner
+        run: sudo env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" bash scripts/ci-prepare-trusted-install-paths.sh
+      - name: Format
+        if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt required for:" >&2
+            printf '%s\n' "$unformatted" >&2
+            echo "gofmt diff:" >&2
+            while IFS= read -r file; do
+              gofmt -d "$file" >&2
+            done <<< "$unformatted"
+            exit 1
+          fi
+      - name: Vet
+        if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
+        run: go vet ./...
+      - name: Local protected Browser acceptance client tests
+        run: python3 -B -m unittest discover -s tests -p 'test_installed_browser_auth_smoke.py' -v
+      - name: Shell DAP root-provisioned IPC same-UID denial
+        if: ${{ needs.change-scope.outputs.root_trust_security_changed != 'false' }}
+        run: |
+          set -Eeuo pipefail
+          printf 'SHELL_IPC_PROOF_HEAD=%s\nSHELL_IPC_PROOF_TREE=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
+          fixture="$(mktemp -d)"
+          trap 'rm -rf -- "$fixture"' EXIT
+          go test -c -o "$fixture/executor.test" ./internal/executor
+          sudo env ASA_REQUIRE_ROOT_SHELL_IPC=1 "$fixture/executor.test" -test.run '^TestShellDAPRootOwnedIPCRejectsSameUIDPeerAndPreservesActivation$' -test.v -test.timeout=60s 2>&1 | tee "$fixture/results.log"
+          grep -Fq -- '--- PASS: TestShellDAPRootOwnedIPCRejectsSameUIDPeerAndPreservesActivation' "$fixture/results.log"
+          if grep -Fq -- '--- SKIP: TestShellDAPRootOwnedIPCRejectsSameUIDPeerAndPreservesActivation' "$fixture/results.log"; then
+            echo 'Mandatory real root-owned Shell IPC peer-denial test was skipped' >&2
+            exit 1
+          fi
+          echo 'ROOT_SHELL_DAP_IPC_PEER_DENIAL_PASS'
       - name: Build static binary
         if: ${{ needs.change-scope.outputs.go_changed != 'false' || needs.change-scope.outputs.root_trust_security_changed != 'false' }}
         run: |
@@ -1187,13 +1219,16 @@ jobs:
           script -qefc "sudo ai-server-agent-manage credential-rotate direct-default" "$profile_credential_log" >/dev/null
           profile_bearer="$(grep -oE 'Authorization: Bearer [0-9a-f]{64}' "$profile_credential_log" | tail -n1 | cut -d' ' -f3)"
           [[ "$profile_bearer" =~ ^[0-9a-f]{64}$ ]]
+          printf 'INSTALLED_ACCEPTANCE_STAGE=profiles START %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           printf '%s\n' "$profile_bearer" | bash tests/installed_environment_profiles.sh
           # #118: prove configured vs effective settings, true concurrent worker
           # and persistent capacity, quota/timeout controls and rollback on
           # the same freshly installed disposable systemd runner.
+          printf 'INSTALLED_ACCEPTANCE_STAGE=runtime START %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           printf '%s\n' "$profile_bearer" | ASA_DISPOSABLE_RUNTIME_ACCEPTANCE=1 bash tests/installed_runtime_settings.sh
           # #147: fresh installed human-facing console, actual PTY Ctrl+C
           # and protected runtime rollback. Only on this disposable CI host.
+          printf 'INSTALLED_ACCEPTANCE_STAGE=console START %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           ASA_DISPOSABLE_OPERATOR_ACCEPTANCE=1 bash tests/installed_operator_console.sh
           unset profile_bearer
           rm -f -- "$profile_credential_log"
@@ -1202,14 +1237,41 @@ jobs:
           id aiworker >/dev/null
           getent group aiworker >/dev/null
           sudo test -e /srv/ai-workspace/lifecycle-workspace-sentinel
+
       - name: Upload release candidate artifacts
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ai-server-agent-${{ env.RELEASE_VERSION }}-${{ github.sha }}
+          name: ai-server-agent-${{ steps.release-version.outputs.version }}-${{ github.sha }}
           path: dist/
           if-no-files-found: error
           retention-days: 7
+
+
+  test:
+    name: test
+    needs: [change-scope, core-test, go-race]
+    # Keep the original branch-protected "test" result: real installed
+    # acceptance stays in core's proven lifecycle environment, while the
+    # complete Go/race suite runs on an independent disposable runner.
+    if: ${{ always() && needs.change-scope.outputs.reuse_validated_pr != 'true' && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed != 'false') }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Require complete exact-candidate validation
+        env:
+          CLASSIFIER_RESULT: ${{ needs.change-scope.result }}
+          CORE_RESULT: ${{ needs.core-test.result }}
+          GO_RACE_RESULT: ${{ needs.go-race.result }}
+          GO_CHANGED: ${{ needs.change-scope.outputs.go_changed }}
+        run: |
+          set -Eeuo pipefail
+          test "$CLASSIFIER_RESULT" = success
+          test "$CORE_RESULT" = success
+          if [ "$GO_CHANGED" = false ]; then
+            test "$GO_RACE_RESULT" = skipped
+          else
+            test "$GO_RACE_RESULT" = success
+          fi
 
 
   main-release-artifact:
@@ -1228,6 +1290,18 @@ jobs:
           actual_sha="$(git rev-parse HEAD)"
           printf 'EXACT_CHECKED_OUT_HEAD=%s\n' "$actual_sha"
           test "$actual_sha" = "$EXPECTED_SOURCE_SHA"
+      - name: Validate release candidate version
+        id: release-version
+        run: |
+          set -Eeuo pipefail
+          test "$(wc -l < scripts/release-candidate-version.txt)" -eq 1
+          version="$(cat scripts/release-candidate-version.txt)"
+          [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo 'Invalid release candidate version marker' >&2
+            exit 1
+          }
+          printf 'RELEASE_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26.x'
@@ -1243,7 +1317,7 @@ jobs:
       - name: Upload release candidate artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ai-server-agent-${{ env.RELEASE_VERSION }}-${{ github.sha }}
+          name: ai-server-agent-${{ steps.release-version.outputs.version }}-${{ github.sha }}
           path: dist/
           if-no-files-found: error
           retention-days: 7
@@ -1251,7 +1325,7 @@ jobs:
   debian-compatibility:
     needs: change-scope
     # Required per-Debian PR checks still run. On a proven identical main
-    # squash, omit the entire three-runner matrix rather than starting empty VMs.
+    # PR merge, omit the entire three-runner matrix rather than starting empty VMs.
     if: ${{ always() && needs.change-scope.outputs.reuse_validated_pr != 'true' }}
     name: Debian ${{ matrix.version }} stable compatibility
     runs-on: ubuntu-24.04

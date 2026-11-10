@@ -109,6 +109,12 @@ classify_paths(){
         arm64_lifecycle_changed=true
         root_trust_security_changed=true
         ;;
+      scripts/release-candidate-version.txt)
+        # This is data, not a workflow/installer change. Validate its exact
+        # release artifact through the normal core job and Stable provenance.
+        runtime_changed=true
+        stable_provenance_changed=true
+        ;;
       scripts/build-release.sh)
         runtime_changed=true
         shell_changed=true

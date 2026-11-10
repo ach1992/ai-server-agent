@@ -43,7 +43,7 @@ jobs:
       - name: Classify changed paths
         id: scope
         run: bash scripts/ci-change-scope.sh >> "$GITHUB_OUTPUT"
-      - name: Reuse validated exact-tree PR evidence on squash-merged main
+      - name: Reuse validated exact-tree PR evidence after PR merge
         id: reuse
         env:
           GH_TOKEN: ${{ github.token }}

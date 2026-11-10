@@ -2,8 +2,8 @@
 set -Eeuo pipefail
 
 # Fail-closed, read-only admission check for reusing completed PR CI/Security
-# evidence on a single squash-merged main push. The release builder still
-# runs for the exact main SHA. A missing/ambiguous proof runs full main suites.
+# evidence on a same-tree squash or two-parent PR merge to main. The release
+# builder still runs for the exact main SHA. Missing/ambiguous proof runs full suites.
 refuse(){
   printf 'reuse_validated_pr=false\n'
   printf 'CI reuse: full validation required (%s).\n' "$1" >&2
@@ -22,8 +22,10 @@ sha="${GITHUB_SHA:-}"
 [[ "$repo" =~ ^[a-zA-Z0-9_.-]+/[a-zA-Z0-9_.-]+$ ]] || refuse 'invalid repository identity'
 [[ "$sha" =~ ^[0-9a-f]{40}$ ]] || refuse 'invalid main commit SHA'
 
-# Require a single ordinary squash commit. This excludes direct/multi-commit
-# pushes, merge commits, force pushes, and ambiguous history transitions.
+# A push must introduce exactly one commit on top of the event's previous main.
+# Accept either a squash commit or an ordinary two-parent PR merge whose second
+# parent is subsequently proven to be the exact validated PR head. Refuse direct
+# multi-commit pushes, octopus merges, rebases and ambiguous history transitions.
 before="$(jq -r '.before // empty' "$GITHUB_EVENT_PATH" 2>/dev/null)" || refuse 'malformed push event'
 after="$(jq -r '.after // empty' "$GITHUB_EVENT_PATH" 2>/dev/null)" || refuse 'malformed push event'
 [ "$after" = "$sha" ] || refuse 'push SHA mismatch'
@@ -32,7 +34,11 @@ after="$(jq -r '.after // empty' "$GITHUB_EVENT_PATH" 2>/dev/null)" || refuse 'm
 jq -e --arg repo "$repo" '.forced == false and .deleted == false and .created == false and .ref == "refs/heads/main" and .repository.full_name == $repo' "$GITHUB_EVENT_PATH" >/dev/null 2>&1 || refuse 'unsafe push event'
 [ "$(git rev-parse HEAD 2>/dev/null)" = "$sha" ] || refuse 'checkout does not match push'
 parents="$(git show -s --format='%P' "$sha" 2>/dev/null)" || refuse 'missing pushed commit'
-[ "$parents" = "$before" ] || refuse 'not a single squash commit based on before'
+read -r -a parent_shas <<< "$parents"
+case "${#parent_shas[@]}" in
+  1|2) [ "${parent_shas[0]}" = "$before" ] || refuse 'pushed commit is not based on previous main' ;;
+  *) refuse 'not a single squash or two-parent PR merge commit' ;;
+esac
 main_tree="$(git rev-parse "$sha^{tree}" 2>/dev/null)" || refuse 'unreadable main tree'
 
 # GitHub's associated-PR endpoint retains the merged PR linkage after branch
@@ -63,6 +69,9 @@ head="$(jq -r '.head.sha' <<< "$pr")"
 branch="$(jq -r '.head.ref' <<< "$pr")"
 merged_at="$(jq -r '.merged_at' <<< "$pr")"
 [[ "$head" =~ ^[0-9a-f]{40}$ ]] || refuse 'invalid PR head'
+if [ "${#parent_shas[@]}" -eq 2 ]; then
+  [ "${parent_shas[1]}" = "$head" ] || refuse 'merge second parent is not the validated PR head'
+fi
 [ -n "$branch" ] && [ "$branch" != null ] || refuse 'invalid PR branch'
 [[ "$merged_at" =~ ^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}Z$ ]] || refuse 'missing or invalid merge time'
 
@@ -172,4 +181,4 @@ for workflow in ci.yml security.yml; do
 done
 
 printf 'reuse_validated_pr=true\n'
-printf 'CI reuse: verified exact Git tree, merged PR number/base/head, and successful CI/Security runs.\n' >&2
+printf 'CI reuse: verified squash/merge topology, exact Git tree, merged PR base/head, and successful CI/Security runs.\n' >&2

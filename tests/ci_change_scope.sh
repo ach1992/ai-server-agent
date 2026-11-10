@@ -38,6 +38,17 @@ expect_docs_only docs/nested/example.md
 expect_flag false runtime_changed README.md
 expect_flag true stable_provenance_changed README.md
 
+# A version marker is release *data*, not a workflow implementation edit.
+# Build and verify exact-version artifacts without unrelated Go/race/Browser
+# or privileged history suites. Real code/workflow changes stay fail-closed.
+expect_flag true runtime_changed scripts/release-candidate-version.txt
+expect_flag true stable_provenance_changed scripts/release-candidate-version.txt
+for flag in go_changed shell_changed lsp_changed browser_flow_changed platform_changed arm64_lifecycle_changed cloudflare_security_changed root_trust_security_changed stable_update_trust_changed; do
+  expect_flag false "$flag" scripts/release-candidate-version.txt
+done
+expect_flag true go_changed scripts/release-candidate-version.txt internal/executor/foundation.go
+expect_flag true root_trust_security_changed scripts/release-candidate-version.txt internal/executor/foundation.go
+
 expect_flag true runtime_changed internal/browser/browser.go
 expect_flag true go_changed internal/browser/browser.go
 expect_flag true browser_flow_changed internal/browser/browser.go
