@@ -225,6 +225,30 @@ func TestReviewB1OlderKernelFallbackRequiresUnreapedDirectChild(t *testing.T) {
 	}
 }
 
+// Regression for actual native ARM64 CI: a PID may vanish after readdir
+// but before /proc/PID/stat is read. Linux may report ESRCH ("no such
+// process"), not just ENOENT ("no such file"). Do not mistake either for
+// unverified group cleanup, and do not suppress unrelated I/O failures.
+func TestProcessStatGoneDuringGroupLivenessInspection(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		err  error
+		gone bool
+	}{
+		{"ENOENT", &os.PathError{Op: "open", Path: "/proc/123/stat", Err: unix.ENOENT}, true},
+		{"ESRCH", &os.PathError{Op: "read", Path: "/proc/123/stat", Err: unix.ESRCH}, true},
+		{"EACCES", &os.PathError{Op: "read", Path: "/proc/123/stat", Err: unix.EACCES}, false},
+		{"EIO", &os.PathError{Op: "read", Path: "/proc/123/stat", Err: unix.EIO}, false},
+		{"nil", nil, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := processStatGone(tc.err); got != tc.gone {
+				t.Fatalf("processStatGone(%v)=%t want %t", tc.err, got, tc.gone)
+			}
+		})
+	}
+}
+
 // The close path must not treat a signal being sent as evidence that a
 // SIGTERM-resistant worker actually stopped. The same pinned direct-child
 // identity is retained through the deadline and SIGKILL verification.
