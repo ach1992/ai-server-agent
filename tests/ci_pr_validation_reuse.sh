@@ -329,6 +329,23 @@ awk '
 }
 grep -qF '  go-race:' "$ROOT/.github/workflows/ci.yml"
 grep -qF '          GO_RACE_RESULT: ${{ needs.go-race.result }}' "$ROOT/.github/workflows/ci.yml"
+# Keep the real selected Go worker tests with the race shard; otherwise
+# moving them into another job could skip the non-skipped acceptance proofs.
+awk '
+  /^  go-race:$/ { in_go=1; next }
+  in_go && /^  [a-z0-9_-]+:$/ { exit }
+  in_go && /- name: Non-skipped real tmux long-paste acceptance$/ { tmux++ }
+  in_go && /- name: Non-skipped real worker\/Landlock transfer acceptance$/ { transfer++ }
+  in_go && /- name: Provision trusted ripgrep for SQL worker acceptance$/ { ripgrep++ }
+  in_go && /- name: Non-skipped materialized SQL real worker\/Landlock acceptance$/ { sql++ }
+  in_go && /- name: Non-skipped ordinary PostgreSQL relation-move Worker\/Landlock acceptance$/ { sql2++ }
+  in_go && /- name: Non-skipped SQL SELECT alias worker and direct MCP acceptance$/ { alias++ }
+  in_go && /- name: Real pinned gopls large-Go semantic acceptance$/ { gopls++ }
+  END { if (tmux != 1 || transfer != 1 || ripgrep != 1 || sql != 1 || sql2 != 1 || alias != 1 || gopls != 1) exit 1 }
+' "$ROOT/.github/workflows/ci.yml" || {
+  echo 'Required real Go-worker acceptance steps must stay on the race shard' >&2
+  exit 1
+}
 # The main-only artifact job runs on a separate disposable runner. The PR
 # test job's preparation does not carry over to its root installer check.
 awk '

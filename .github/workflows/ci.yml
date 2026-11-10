@@ -104,61 +104,6 @@ jobs:
         run: sudo env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" bash scripts/ci-prepare-trusted-install-paths.sh
       - name: Unit tests
         run: go test -race -vet=off ./...
-
-  core-test:
-    name: CI core acceptance
-    needs: change-scope
-    if: ${{ always() && needs.change-scope.outputs.reuse_validated_pr != 'true' && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed != 'false') }}
-    runs-on: ubuntu-22.04
-    steps:
-      - name: Require successful change classification
-        run: test "${{ needs.change-scope.result }}" = success
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          ref: ${{ github.event.pull_request.head.sha || github.sha }}
-      - name: Verify exact checked-out commit
-        env:
-          EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
-        run: |
-          actual_sha="$(git rev-parse HEAD)"
-          printf 'EXACT_CHECKED_OUT_HEAD=%s\n' "$actual_sha"
-          test "$actual_sha" = "$EXPECTED_SOURCE_SHA"
-      - name: Validate release candidate version
-        id: release-version
-        run: |
-          set -Eeuo pipefail
-          test "$(wc -l < scripts/release-candidate-version.txt)" -eq 1
-          version="$(cat scripts/release-candidate-version.txt)"
-          [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
-            echo 'Invalid release candidate version marker' >&2
-            exit 1
-          }
-          printf 'RELEASE_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
-          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
-      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
-        with:
-          go-version: '1.26.x'
-          cache: false
-      - name: Prepare trusted install destinations on disposable Ubuntu runner
-        run: sudo env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" bash scripts/ci-prepare-trusted-install-paths.sh
-      - name: Format
-        if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
-        run: |
-          unformatted="$(gofmt -l .)"
-          if [ -n "$unformatted" ]; then
-            echo "gofmt required for:" >&2
-            printf '%s\n' "$unformatted" >&2
-            echo "gofmt diff:" >&2
-            while IFS= read -r file; do
-              gofmt -d "$file" >&2
-            done <<< "$unformatted"
-            exit 1
-          fi
-      - name: Vet
-        if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
-        run: go vet ./...
-      - name: Local protected Browser acceptance client tests
-        run: python3 -B -m unittest discover -s tests -p 'test_installed_browser_auth_smoke.py' -v
       - name: Non-skipped real tmux long-paste acceptance
         if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
         run: |
@@ -185,21 +130,6 @@ jobs:
             exit 1
           fi
           echo 'REAL_TMUX_LONG_PASTE_CI_PASS'
-      - name: Shell DAP root-provisioned IPC same-UID denial
-        if: ${{ needs.change-scope.outputs.root_trust_security_changed != 'false' }}
-        run: |
-          set -Eeuo pipefail
-          printf 'SHELL_IPC_PROOF_HEAD=%s\nSHELL_IPC_PROOF_TREE=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
-          fixture="$(mktemp -d)"
-          trap 'rm -rf -- "$fixture"' EXIT
-          go test -c -o "$fixture/executor.test" ./internal/executor
-          sudo env ASA_REQUIRE_ROOT_SHELL_IPC=1 "$fixture/executor.test" -test.run '^TestShellDAPRootOwnedIPCRejectsSameUIDPeerAndPreservesActivation$' -test.v -test.timeout=60s 2>&1 | tee "$fixture/results.log"
-          grep -Fq -- '--- PASS: TestShellDAPRootOwnedIPCRejectsSameUIDPeerAndPreservesActivation' "$fixture/results.log"
-          if grep -Fq -- '--- SKIP: TestShellDAPRootOwnedIPCRejectsSameUIDPeerAndPreservesActivation' "$fixture/results.log"; then
-            echo 'Mandatory real root-owned Shell IPC peer-denial test was skipped' >&2
-            exit 1
-          fi
-          echo 'ROOT_SHELL_DAP_IPC_PEER_DENIAL_PASS'
       - name: Non-skipped real worker/Landlock transfer acceptance
         if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
         env:
@@ -377,6 +307,76 @@ jobs:
           grep -Fq "GOPLS_SELECTED_BINARY_PATH=/usr/bin/gopls SHA256=$pinned_sha" "$log"
           grep -Fq 'DIRECT_REAL_GOPLS_PASS' "$log"
           echo 'REAL_GOPLS_DIRECT_MCP_CLIENT_PROOF_PASS'
+
+  core-test:
+    name: CI core acceptance
+    needs: change-scope
+    if: ${{ always() && needs.change-scope.outputs.reuse_validated_pr != 'true' && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed != 'false') }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Require successful change classification
+        run: test "${{ needs.change-scope.result }}" = success
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify exact checked-out commit
+        env:
+          EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          actual_sha="$(git rev-parse HEAD)"
+          printf 'EXACT_CHECKED_OUT_HEAD=%s\n' "$actual_sha"
+          test "$actual_sha" = "$EXPECTED_SOURCE_SHA"
+      - name: Validate release candidate version
+        id: release-version
+        run: |
+          set -Eeuo pipefail
+          test "$(wc -l < scripts/release-candidate-version.txt)" -eq 1
+          version="$(cat scripts/release-candidate-version.txt)"
+          [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo 'Invalid release candidate version marker' >&2
+            exit 1
+          }
+          printf 'RELEASE_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - name: Prepare trusted install destinations on disposable Ubuntu runner
+        run: sudo env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" bash scripts/ci-prepare-trusted-install-paths.sh
+      - name: Format
+        if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
+        run: |
+          unformatted="$(gofmt -l .)"
+          if [ -n "$unformatted" ]; then
+            echo "gofmt required for:" >&2
+            printf '%s\n' "$unformatted" >&2
+            echo "gofmt diff:" >&2
+            while IFS= read -r file; do
+              gofmt -d "$file" >&2
+            done <<< "$unformatted"
+            exit 1
+          fi
+      - name: Vet
+        if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
+        run: go vet ./...
+      - name: Local protected Browser acceptance client tests
+        run: python3 -B -m unittest discover -s tests -p 'test_installed_browser_auth_smoke.py' -v
+      - name: Shell DAP root-provisioned IPC same-UID denial
+        if: ${{ needs.change-scope.outputs.root_trust_security_changed != 'false' }}
+        run: |
+          set -Eeuo pipefail
+          printf 'SHELL_IPC_PROOF_HEAD=%s\nSHELL_IPC_PROOF_TREE=%s\n' "$(git rev-parse HEAD)" "$(git rev-parse HEAD^{tree})"
+          fixture="$(mktemp -d)"
+          trap 'rm -rf -- "$fixture"' EXIT
+          go test -c -o "$fixture/executor.test" ./internal/executor
+          sudo env ASA_REQUIRE_ROOT_SHELL_IPC=1 "$fixture/executor.test" -test.run '^TestShellDAPRootOwnedIPCRejectsSameUIDPeerAndPreservesActivation$' -test.v -test.timeout=60s 2>&1 | tee "$fixture/results.log"
+          grep -Fq -- '--- PASS: TestShellDAPRootOwnedIPCRejectsSameUIDPeerAndPreservesActivation' "$fixture/results.log"
+          if grep -Fq -- '--- SKIP: TestShellDAPRootOwnedIPCRejectsSameUIDPeerAndPreservesActivation' "$fixture/results.log"; then
+            echo 'Mandatory real root-owned Shell IPC peer-denial test was skipped' >&2
+            exit 1
+          fi
+          echo 'ROOT_SHELL_DAP_IPC_PEER_DENIAL_PASS'
       - name: Build static binary
         if: ${{ needs.change-scope.outputs.go_changed != 'false' || needs.change-scope.outputs.root_trust_security_changed != 'false' }}
         run: |
