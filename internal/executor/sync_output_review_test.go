@@ -23,6 +23,48 @@ func reviewSyncServer(t *testing.T) *Server {
 	return s
 }
 
+func TestSyncSpoolCapacityFailureIdentifiesAffectedFilesystem(t *testing.T) {
+	s := reviewSyncServer(t)
+	jobsDir := filepath.Join(s.cfg.StateDir, "jobs")
+	reserve := jobAuditSafetyReserveAtStartup(s.cfg) + (int64(s.cfg.EffectiveRuntime().SyncOutputSpoolMiB) << 20)
+	const free int64 = 12345
+	checked := false
+	s.syncSpoolReserveCheckTestHook = func(path string, requested int64) (bool, int64, error) {
+		if path != jobsDir || requested != reserve {
+			t.Fatalf("wrong filesystem or reserve: path=%q requested=%d, want %q %d", path, requested, jobsDir, reserve)
+		}
+		checked = true
+		return false, free, nil
+	}
+	capture := newSyncOutputCapture(s)
+	_, err := capture.Write(bytes.Repeat([]byte("x"), maxSyncOutputBytes+1))
+	if !checked || err == nil {
+		t.Fatalf("disk reserve was not rejected: checked=%t err=%v", checked, err)
+	}
+	for _, useful := range []string{jobsDir, fmt.Sprint(free), fmt.Sprint(reserve), "output spool disk capacity is insufficient"} {
+		if !strings.Contains(err.Error(), useful) {
+			t.Errorf("missing scope or numeric diagnostic %q in %q", useful, err)
+		}
+	}
+	if capture.jobID != "" || len(syncSpoolMarkerIDs(t, jobsDir)) != 0 {
+		t.Fatal("denied output capture created a recoverable job artifact")
+	}
+
+	// A failed filesystem inspection must identify the same path while
+	// preserving the native cause; it is not proof of absent capacity.
+	s.syncSpoolReserveCheckTestHook = func(path string, _ int64) (bool, int64, error) {
+		if path != jobsDir {
+			t.Fatalf("inspected wrong path: %q", path)
+		}
+		return false, 0, os.ErrPermission
+	}
+	capture = newSyncOutputCapture(s)
+	_, err = capture.Write(bytes.Repeat([]byte("x"), maxSyncOutputBytes+1))
+	if !errors.Is(err, os.ErrPermission) || !strings.Contains(err.Error(), jobsDir) {
+		t.Fatalf("filesystem inspection failure lost path or cause: %v", err)
+	}
+}
+
 func syncSpoolMarkerIDs(t *testing.T, jobsDir string) []string {
 	t.Helper()
 	entries, err := os.ReadDir(jobsDir)

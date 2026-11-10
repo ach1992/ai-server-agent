@@ -146,6 +146,9 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			}
 		case "run_command":
 			foundRunCommand = true
+			if !strings.Contains(tool.Description, "TMPDIR") || !strings.Contains(tool.Description, "GOTMPDIR") {
+				t.Fatalf("run_command does not advertise task-local scratch environment control: %q", tool.Description)
+			}
 			if tool.Annotations == nil || tool.Annotations.ReadOnlyHint || tool.Annotations.DestructiveHint == nil || !*tool.Annotations.DestructiveHint {
 				t.Fatal("run_command must advertise potentially destructive arbitrary Bash effects")
 			}
@@ -169,6 +172,9 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 			}
 		case "start_job":
 			foundStartJob = true
+			if !strings.Contains(tool.Description, "TMPDIR") || !strings.Contains(tool.Description, "GOTMPDIR") {
+				t.Fatalf("start_job does not advertise task-local scratch environment control: %q", tool.Description)
+			}
 			b, err := json.Marshal(tool.InputSchema)
 			if err != nil {
 				t.Fatal(err)
