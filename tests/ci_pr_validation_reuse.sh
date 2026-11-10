@@ -311,15 +311,24 @@ awk '
   /^  test:$/ { in_gate=1; next }
   in_gate && /^  [a-z0-9_-]+:$/ { exit }
   in_gate && /^    name: test$/ { name++ }
-  in_gate && /needs: \[change-scope, core-test, installed-first-run\]/ { needs++ }
+  in_gate && /needs: \[change-scope, core-test, installed-first-run, go-race\]/ { needs++ }
   in_gate && /test "\$CLASSIFIER_RESULT" = success/ { classifier++ }
   in_gate && /test "\$CORE_RESULT" = success/ { core++ }
   in_gate && /test "\$INSTALLED_RESULT" = success/ { installed++ }
   in_gate && /test "\$INSTALLED_RESULT" = skipped/ { skipped++ }
-  END { if (name != 1 || needs != 1 || classifier != 1 || core != 1 || installed != 1 || skipped != 1) exit 1 }
+  in_gate && /test "\$GO_RACE_RESULT" = success/ { race++ }
+  in_gate && /test "\$GO_RACE_RESULT" = skipped/ { race_skip++ }
+  END { if (name != 1 || needs != 1 || classifier != 1 || core != 1 || installed != 1 || skipped != 1 || race != 1 || race_skip != 1) exit 1 }
 ' "$ROOT/.github/workflows/ci.yml" || {
   echo 'Protected test check must require all selected exact-candidate acceptance' >&2; exit 1;
 }
+# The Go race suite executes exactly once on a separate disposable runner,
+# and no ordinary core step is allowed to silently replay or bypass it.
+[ "$(grep -Fc '        run: go test -race -vet=off ./...' "$ROOT/.github/workflows/ci.yml")" -eq 1 ] || {
+  echo 'Full Go race suite must run once through its selected job' >&2; exit 1;
+}
+grep -qF '  go-race:' "$ROOT/.github/workflows/ci.yml"
+grep -qF '          GO_RACE_RESULT: ${{ needs.go-race.result }}' "$ROOT/.github/workflows/ci.yml"
 # The main-only artifact job runs on a separate disposable runner. The PR
 # test job's preparation does not carry over to its root installer check.
 awk '

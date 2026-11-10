@@ -81,6 +81,30 @@ jobs:
           test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
           bash tests/browser_flow_ci.sh
 
+  go-race:
+    name: Go race unit tests
+    needs: change-scope
+    if: ${{ always() && needs.change-scope.result == 'success' && needs.change-scope.outputs.reuse_validated_pr != 'true' && needs.change-scope.outputs.go_changed != 'false' }}
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify exact checked-out commit
+        env:
+          EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_SHA"
+          printf 'EXACT_GO_RACE_HEAD=%s\n' "$EXPECTED_SOURCE_SHA"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - name: Prepare trusted paths on disposable Go runner
+        run: sudo env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" bash scripts/ci-prepare-trusted-install-paths.sh
+      - name: Unit tests
+        run: go test -race -vet=off ./...
+
   core-test:
     name: CI core acceptance
     needs: change-scope
@@ -133,9 +157,6 @@ jobs:
       - name: Vet
         if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
         run: go vet ./...
-      - name: Unit tests
-        if: ${{ needs.change-scope.outputs.go_changed != 'false' }}
-        run: go test -race -vet=off ./...
       - name: Local protected Browser acceptance client tests
         run: python3 -B -m unittest discover -s tests -p 'test_installed_browser_auth_smoke.py' -v
       - name: Non-skipped real tmux long-paste acceptance
@@ -1259,10 +1280,10 @@ jobs:
 
   test:
     name: test
-    needs: [change-scope, core-test, installed-first-run]
-    # Keep the existing branch-protection check named "test". It can succeed
-    # only after BOTH selected acceptance jobs complete, even though those
-    # jobs use independent disposable runners and execute concurrently.
+    needs: [change-scope, core-test, installed-first-run, go-race]
+    # Keep the original branch-protected "test" result: core, real installed
+    # acceptance, and the complete Go/race package suite remain mandatory
+    # whenever selected, despite running on independent disposable runners.
     if: ${{ always() && needs.change-scope.outputs.reuse_validated_pr != 'true' && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed != 'false') }}
     runs-on: ubuntu-22.04
     steps:
@@ -1271,11 +1292,18 @@ jobs:
           CLASSIFIER_RESULT: ${{ needs.change-scope.result }}
           CORE_RESULT: ${{ needs.core-test.result }}
           INSTALLED_RESULT: ${{ needs.installed-first-run.result }}
+          GO_RACE_RESULT: ${{ needs.go-race.result }}
+          GO_CHANGED: ${{ needs.change-scope.outputs.go_changed }}
           ROOT_TRUST_CHANGED: ${{ needs.change-scope.outputs.root_trust_security_changed }}
         run: |
           set -Eeuo pipefail
           test "$CLASSIFIER_RESULT" = success
           test "$CORE_RESULT" = success
+          if [ "$GO_CHANGED" = false ]; then
+            test "$GO_RACE_RESULT" = skipped
+          else
+            test "$GO_RACE_RESULT" = success
+          fi
           if [ "$ROOT_TRUST_CHANGED" = false ]; then
             test "$INSTALLED_RESULT" = skipped
           else
