@@ -301,6 +301,25 @@ grep -qF "needs.change-scope.outputs.reuse_validated_pr != 'true'" "$ROOT/.githu
 grep -qF "needs.change-scope.outputs.reuse_validated_pr != 'true'" "$ROOT/.github/workflows/security.yml"
 grep -qF "needs.change-scope.outputs.reuse_validated_pr == 'true'" "$ROOT/.github/workflows/ci.yml"
 grep -qF 'gh run download "$run_id"' "$ROOT/.github/workflows/release.yml"
+# The branch-protected `test` check must aggregate every independently
+# selected acceptance job. Parallelizing installed tests must not leave their
+# success optional merely because they run in a separate Actions job.
+[ "$(grep -Fc '      - name: First-run deferral is not an installation failure' "$ROOT/.github/workflows/ci.yml")" -eq 1 ] || {
+  echo 'Installed acceptance step must run exactly once' >&2; exit 1;
+}
+awk '
+  /^  test:$/ { in_gate=1; next }
+  in_gate && /^  [a-z0-9_-]+:$/ { exit }
+  in_gate && /^    name: test$/ { name++ }
+  in_gate && /needs: \[change-scope, core-test, installed-first-run\]/ { needs++ }
+  in_gate && /test "\$CLASSIFIER_RESULT" = success/ { classifier++ }
+  in_gate && /test "\$CORE_RESULT" = success/ { core++ }
+  in_gate && /test "\$INSTALLED_RESULT" = success/ { installed++ }
+  in_gate && /test "\$INSTALLED_RESULT" = skipped/ { skipped++ }
+  END { if (name != 1 || needs != 1 || classifier != 1 || core != 1 || installed != 1 || skipped != 1) exit 1 }
+' "$ROOT/.github/workflows/ci.yml" || {
+  echo 'Protected test check must require all selected exact-candidate acceptance' >&2; exit 1;
+}
 # The main-only artifact job runs on a separate disposable runner. The PR
 # test job's preparation does not carry over to its root installer check.
 awk '

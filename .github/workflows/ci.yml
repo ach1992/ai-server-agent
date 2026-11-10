@@ -9,8 +9,6 @@ concurrency:
   cancel-in-progress: ${{ github.ref != 'refs/heads/main' }}
 permissions:
   contents: read
-env:
-  RELEASE_VERSION: v0.1.27
 jobs:
   change-scope:
     name: CI change scope
@@ -83,7 +81,8 @@ jobs:
           test "$(git rev-parse HEAD)" = "${{ github.event.pull_request.head.sha || github.sha }}"
           bash tests/browser_flow_ci.sh
 
-  test:
+  core-test:
+    name: CI core acceptance
     needs: change-scope
     if: ${{ always() && needs.change-scope.outputs.reuse_validated_pr != 'true' && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed != 'false') }}
     runs-on: ubuntu-22.04
@@ -100,6 +99,18 @@ jobs:
           actual_sha="$(git rev-parse HEAD)"
           printf 'EXACT_CHECKED_OUT_HEAD=%s\n' "$actual_sha"
           test "$actual_sha" = "$EXPECTED_SOURCE_SHA"
+      - name: Validate release candidate version
+        id: release-version
+        run: |
+          set -Eeuo pipefail
+          test "$(wc -l < scripts/release-candidate-version.txt)" -eq 1
+          version="$(cat scripts/release-candidate-version.txt)"
+          [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo 'Invalid release candidate version marker' >&2
+            exit 1
+          }
+          printf 'RELEASE_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26.x'
@@ -1162,6 +1173,49 @@ jobs:
       - name: Real named-credential migration and historical Stable rollback refusal
         if: ${{ needs.change-scope.outputs.root_trust_security_changed != 'false' }}
         run: ASA_DISPOSABLE_CREDENTIAL_ACCEPTANCE=1 bash tests/credential_installed_rollback.sh
+      - name: Upload release candidate artifacts
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ai-server-agent-${{ steps.release-version.outputs.version }}-${{ github.sha }}
+          path: dist/
+          if-no-files-found: error
+          retention-days: 7
+
+
+  installed-first-run:
+    name: Installed first-run / runtime / operator acceptance
+    needs: change-scope
+    if: ${{ always() && needs.change-scope.outputs.reuse_validated_pr != 'true' && (needs.change-scope.result != 'success' || needs.change-scope.outputs.root_trust_security_changed != 'false') }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Require successful change classification
+        run: test "${{ needs.change-scope.result }}" = success
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - name: Verify exact checked-out commit
+        env:
+          EXPECTED_SOURCE_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SOURCE_SHA"
+          printf 'EXACT_INSTALLED_ACCEPTANCE_HEAD=%s\n' "$EXPECTED_SOURCE_SHA"
+      - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
+        with:
+          go-version: '1.26.x'
+          cache: false
+      - name: Prepare isolated installed acceptance runner
+        run: |
+          set -Eeuo pipefail
+          sudo env GITHUB_ACTIONS=true RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" bash scripts/ci-prepare-trusted-install-paths.sh
+          CGO_ENABLED=0 go build -trimpath -o /tmp/ai-server-agent ./cmd/ai-server-agent
+          sudo install -d -o root -g root -m 0755 /run/asa-trusted-source-bin
+          sudo install -o root -g root -m 0755 /tmp/ai-server-agent /run/asa-trusted-source-bin/ai-server-agent
+          sudo cmp -s /tmp/ai-server-agent /run/asa-trusted-source-bin/ai-server-agent
+          # Preserve the same pre-existing-workspace proof as the former
+          # serial lifecycle step, without sharing state between runners.
+          sudo install -d -o root -g root -m 0755 /srv/ai-workspace
+          sudo touch /srv/ai-workspace/lifecycle-workspace-sentinel
       - name: First-run deferral is not an installation failure
         if: ${{ needs.change-scope.outputs.root_trust_security_changed != 'false' }}
         run: |
@@ -1202,15 +1256,31 @@ jobs:
           id aiworker >/dev/null
           getent group aiworker >/dev/null
           sudo test -e /srv/ai-workspace/lifecycle-workspace-sentinel
-      - name: Upload release candidate artifacts
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: ai-server-agent-${{ env.RELEASE_VERSION }}-${{ github.sha }}
-          path: dist/
-          if-no-files-found: error
-          retention-days: 7
 
+  test:
+    name: test
+    needs: [change-scope, core-test, installed-first-run]
+    # Keep the existing branch-protection check named "test". It can succeed
+    # only after BOTH selected acceptance jobs complete, even though those
+    # jobs use independent disposable runners and execute concurrently.
+    if: ${{ always() && needs.change-scope.outputs.reuse_validated_pr != 'true' && (needs.change-scope.result != 'success' || needs.change-scope.outputs.runtime_changed != 'false') }}
+    runs-on: ubuntu-22.04
+    steps:
+      - name: Require complete exact-candidate validation
+        env:
+          CLASSIFIER_RESULT: ${{ needs.change-scope.result }}
+          CORE_RESULT: ${{ needs.core-test.result }}
+          INSTALLED_RESULT: ${{ needs.installed-first-run.result }}
+          ROOT_TRUST_CHANGED: ${{ needs.change-scope.outputs.root_trust_security_changed }}
+        run: |
+          set -Eeuo pipefail
+          test "$CLASSIFIER_RESULT" = success
+          test "$CORE_RESULT" = success
+          if [ "$ROOT_TRUST_CHANGED" = false ]; then
+            test "$INSTALLED_RESULT" = skipped
+          else
+            test "$INSTALLED_RESULT" = success
+          fi
 
   main-release-artifact:
     name: Exact main release artifact
@@ -1228,6 +1298,18 @@ jobs:
           actual_sha="$(git rev-parse HEAD)"
           printf 'EXACT_CHECKED_OUT_HEAD=%s\n' "$actual_sha"
           test "$actual_sha" = "$EXPECTED_SOURCE_SHA"
+      - name: Validate release candidate version
+        id: release-version
+        run: |
+          set -Eeuo pipefail
+          test "$(wc -l < scripts/release-candidate-version.txt)" -eq 1
+          version="$(cat scripts/release-candidate-version.txt)"
+          [[ "$version" =~ ^v[0-9]+\.[0-9]+\.[0-9]+$ ]] || {
+            echo 'Invalid release candidate version marker' >&2
+            exit 1
+          }
+          printf 'RELEASE_VERSION=%s\n' "$version" >> "$GITHUB_ENV"
+          printf 'version=%s\n' "$version" >> "$GITHUB_OUTPUT"
       - uses: actions/setup-go@b7ad1dad31e06c5925ef5d2fc7ad053ef454303e # v7.0.0
         with:
           go-version: '1.26.x'
@@ -1243,7 +1325,7 @@ jobs:
       - name: Upload release candidate artifacts
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: ai-server-agent-${{ env.RELEASE_VERSION }}-${{ github.sha }}
+          name: ai-server-agent-${{ steps.release-version.outputs.version }}-${{ github.sha }}
           path: dist/
           if-no-files-found: error
           retention-days: 7
@@ -1251,7 +1333,7 @@ jobs:
   debian-compatibility:
     needs: change-scope
     # Required per-Debian PR checks still run. On a proven identical main
-    # squash, omit the entire three-runner matrix rather than starting empty VMs.
+    # PR merge, omit the entire three-runner matrix rather than starting empty VMs.
     if: ${{ always() && needs.change-scope.outputs.reuse_validated_pr != 'true' }}
     name: Debian ${{ matrix.version }} stable compatibility
     runs-on: ubuntu-24.04
