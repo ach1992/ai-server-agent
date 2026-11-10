@@ -313,7 +313,7 @@ func (s *Server) registerTools() {
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "run_command",
-		Description: "Run Bash as aiworker (not root) with optional workspace CWD (default: configured workspace root); may modify files or external systems. " + s.commandTimeoutDescription(),
+		Description: "Run Bash as aiworker (not root) with optional workspace CWD (default: configured workspace root); may modify files or external systems. The command can select its own temporary environment (TMPDIR/GOTMPDIR) without changing Agent-wide settings. " + s.commandTimeoutDescription(),
 		Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input RunInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "run", Command: input.Command, Workspace: input.Workspace, TimeoutMS: s.commandTimeoutMS()})
@@ -337,7 +337,7 @@ func (s *Server) registerTools() {
 
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
 		Name:        "start_job",
-		Description: "Start a persistent worker task or labeled service (optionally authorized root) through systemd; it survives MCP disconnect. Provide stable operation_id to recover uncertain launches via job_status; do not retry with a new ID. A successful launch does not prove service readiness. Root jobs cannot use worker CWD.",
+		Description: "Start a persistent worker task or labeled service (optionally authorized root) through systemd; it survives MCP disconnect. Its Bash command may set task-local TMPDIR/GOTMPDIR without affecting other jobs. Provide stable operation_id to recover uncertain launches via job_status; do not retry with a new ID. A successful launch does not prove service readiness. Root jobs cannot use worker CWD.",
 		Annotations: annotations(false, true, false, true),
 	}, func(ctx context.Context, req *mcpsdk.CallToolRequest, input StartJobInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		resp, err := executor.ClientCallContext(ctx, s.cfg.ExecutorSocket, s.executorToken, executor.Request{Action: "start_job", Command: input.Command, Workspace: input.Workspace, Kind: input.Kind, Label: input.Label, Root: input.Root, Approval: input.Approval, OperationID: input.OperationID})

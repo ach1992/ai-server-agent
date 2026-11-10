@@ -108,9 +108,9 @@ func (w *syncOutputCapture) spill() error {
 		checkReserve = w.server.syncSpoolReserveCheckTestHook
 	}
 	if safe, free, err := checkReserve(jobsDir, reserve); err != nil {
-		return fmt.Errorf("check output spool disk reserve: %w", err)
+		return fmt.Errorf("check output spool disk reserve for %q: %w", jobsDir, err)
 	} else if !safe {
-		return fmt.Errorf("output spool disk capacity is insufficient: %d bytes available; %d-byte reserve required", free, reserve)
+		return fmt.Errorf("output spool disk capacity is insufficient for %q: %d bytes available; %d-byte reserve required", jobsDir, free, reserve)
 	}
 
 	for n := 0; n < 3; n++ {
