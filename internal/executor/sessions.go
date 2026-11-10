@@ -1188,7 +1188,10 @@ func (s *Server) workerStdioClose(req Request, id string) error {
 	}
 	result = s.finishActionAudit(req, "session_close", "worker", id, "developer_session", start, result)
 	if result.AuditDegraded {
-		return errors.New("session_close_outcome_audit_degraded: inspect session before retry")
+		// The broker's stop failure and the later completion-audit failure
+		// are independent. Preserve both so the owner can reconcile the
+		// original process identity without weakening audit/admission gates.
+		return errors.Join(err, errors.New("session_close_outcome_audit_degraded: inspect session before retry"))
 	}
 	return err
 }

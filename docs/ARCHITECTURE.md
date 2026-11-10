@@ -4,7 +4,7 @@
 
 ## 1. Supported release target
 
-The supported stable release target is **Ubuntu 22.04+ and Debian 11+ on amd64/x86_64 and arm64/aarch64**, on dedicated development/test servers with systemd; current `main` follows the same platform policy. The identity of the latest immutable release is intentionally not hard-coded in this architecture document; GitHub Releases is authoritative, with README carrying the supported stable install command.
+The supported stable release target is **Ubuntu 22.04+ and Debian 11+ on amd64/x86_64 and arm64/aarch64** with systemd on authorized Linux hosts. Development/Validation are the normal engineering uses; Production is an advisory environment purpose, not a different binary, separate access tier or proof of compatibility with every live workload. Current `main` follows the same platform policy. The identity of the latest immutable release is intentionally not hard-coded in this architecture document; GitHub Releases is authoritative, with README carrying the supported stable install command.
 
 Platform compatibility is intentionally small and explicit: `install.sh` owns runtime distro/version validation and architecture normalization; the standalone stable bootstrap mirrors only the minimum distro policy needed before it can safely install `jq`; `scripts/release-arches.txt` owns the release artifact architecture list; CI asserts those boundaries stay aligned. New supported platforms should extend those policy/list/test boundaries rather than introduce parallel installer or release paths.
 

@@ -81,6 +81,17 @@ Treat a root-authorized connection as access to the underlying server. The Agent
 
 Find the [latest published release](https://github.com/ach1992/ai-server-agent/releases), [installation and troubleshooting guide](docs/OPERATIONS.md), [ChatGPT setup guide](docs/CONNECT_CHATGPT.md), and [tool reference](docs/TOOL-REFERENCE.md).
 
-For development and review, start with the [canonical product specification](docs/PROJECT-SPEC.md), [architecture](docs/ARCHITECTURE.md), [Developer Runtime design](docs/DEVELOPER-RUNTIME.md), [testing guidance](docs/TESTING.md), and [contributor instructions](AGENTS.md). Current issues, delivery evidence and deferred decisions belong to GitHub rather than these reference documents.
+Each concern has one primary source of truth:
+
+| Need | Authoritative source |
+| --- | --- |
+| Durable product mission, accepted scope, non-goals and completion criteria | [PROJECT-SPEC](docs/PROJECT-SPEC.md) |
+| Host architecture, security and lifecycle implementation | [ARCHITECTURE](docs/ARCHITECTURE.md) |
+| Developer Runtime capability design and optional-adapter boundaries | [DEVELOPER-RUNTIME](docs/DEVELOPER-RUNTIME.md) |
+| Reproducible acceptance, limitations and test procedures | [TESTING](docs/TESTING.md) |
+| Repository conventions and AI contributor rules | [AGENTS](AGENTS.md) |
+| Unresolved outcomes, active changes, validation and delivery | [open Issues](https://github.com/ach1992/ai-server-agent/issues?q=is%3Aissue+is%3Aopen), [PRs](https://github.com/ach1992/ai-server-agent/pulls), [CI](https://github.com/ach1992/ai-server-agent/actions) and [Releases](https://github.com/ach1992/ai-server-agent/releases) |
+
+Closed Issues and historical PRs are evidence, not instructions to redo the work. Owner-parked ideas are **not** authorized implementation work until explicitly activated.
 
 Licensed under [MIT](LICENSE).

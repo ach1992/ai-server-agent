@@ -10,7 +10,8 @@ ChatGPT's custom-MCP/plugin UI, workspace controls and permission labels evolve 
 
 Use the current official OpenAI guidance at connection time:
 
-- Create custom MCP server: <https://developers.openai.com/api/docs/guides/custom-mcp-server>
+- Add custom MCP server: <https://developers.openai.com/api/docs/guides/custom-mcp-server>
+- Official plugin connection walkthrough: <https://developers.openai.com/plugins/build/app-quickstart>
 - Secure MCP Tunnel: <https://developers.openai.com/api/docs/guides/secure-mcp-tunnels>
 - Plugins in ChatGPT and Codex: <https://help.openai.com/en/articles/20001256-plugins-in-chatgpt>
 - Admin controls for plugins and apps: <https://help.openai.com/en/articles/11509118-admin-controls-security-and-compliance-for-plugins-and-apps>
@@ -62,21 +63,16 @@ Use an eligible ChatGPT workspace/account with permission to create or configure
 
 For the current ChatGPT web flow:
 
-1. open the **Plugins** surface (for example the Plugins entry/directory available in the current ChatGPT UI);
-2. choose the current **Create custom MCP server** action (or the equivalent current label);
-3. choose the connection type:
-   - **Server URL** for the Agent's built-in public HTTPS MCP endpoint; or
-   - **Tunnel** only when an OpenAI Secure MCP Tunnel has already been provisioned separately with the official OpenAI tooling;
-4. provide the public Agent endpoint, or the externally provisioned Tunnel identity, using the current OpenAI flow;
-5. configure authentication using the protected Agent bearer credential only in the trusted ChatGPT connection UI; never paste that credential into chat, Issues, docs, screenshots or source control;
-6. let ChatGPT discover/validate the MCP tools using the current UI and review the exposed read/write/action surface;
-7. create/save the custom MCP configuration and verify it is available to the intended test/admin context;
-8. exercise the Agent from a normal supported ChatGPT conversation using the current plugin/tool picker or invocation path;
-9. publish/enable it for broader workspace use only after end-to-end validation and the current workspace-admin review requirements are satisfied.
+1. Open **Plugins** and use the **+** action to choose **Add custom MCP server**.
+2. Enter a name and the connection details: **Server URL** for the Agent's built-in public HTTPS MCP endpoint, or **Tunnel** only if the official OpenAI Secure MCP Tunnel is already provisioned separately.
+3. Configure authentication with the protected Agent bearer **only in the trusted connection form**; never paste it into chat, Issues, docs, screenshots or source control.
+4. Review the server's tool/permission details and risk warning, acknowledge the risks, then choose **Create as a plugin**.
+5. Install the resulting plugin in the intended personal/workspace context, subject to current administrative controls.
+6. Open a **new supported conversation**, invoke the installed plugin with `@` or the available tool picker, and verify `agent_environment` and a harmless worker action against the expected host.
+7. If the **installed** Agent tool schema changes, use **Refresh** on the existing plugin connection where supported and verify the new client-visible catalog in a fresh conversation. A source merge alone does not upgrade the Agent or refresh the client; recreate only if the platform requires it.
+8. Enable wider workspace distribution only after actual end-to-end tests, permission review and applicable workspace-admin authorization.
 
 Managed workspaces may expose plugin administration under **Admin/Workspace settings → Plugins**, while the underlying app/custom-MCP configuration may also remain visible through complementary or legacy **Apps** controls. Do not fail setup merely because an older `Apps → Create` or `Developer mode` label is absent; follow the current official product surface instead.
-
-If the installed Agent tool schema changes, first use the current ChatGPT Plugins **Refresh** action on the existing custom MCP server connection where supported; confirm tool names, descriptions and schemas are now discoverable in a new client context. Recreate the integration only when its current platform behavior actually requires it. A source merge alone cannot refresh an older installed Agent or an older client catalog. Follow current official OpenAI guidance rather than assuming a fixed UI/menu sequence.
 
 ChatGPT-side action permissions and confirmations are separate from Agent-side authorization. Client permissions may require confirmation or deny an action, but they must never be used as a reason to weaken Agent bearer authentication, tool safety metadata, root/file authority truth, or server-side policy/approval guardrails.
 

@@ -53,6 +53,13 @@ func signalPinnedGroupWith(pgid int, pin *os.File, unreapedChild bool, sig sysca
 	return err
 }
 
+// /proc entries are a snapshot. A process can exit between ReadDir and
+// ReadFile(stat): Linux may report either ENOENT or ESRCH. Both mean that
+// particular PID is gone, not that the entire group scan failed.
+func processStatGone(err error) bool {
+	return errors.Is(err, os.ErrNotExist) || errors.Is(err, unix.ESRCH)
+}
+
 // Only observability: no group signalling is authorized from /proc scans.
 // A zombie leader cannot keep the cleanup loop artificially alive.
 func liveGroupMembers(pgid int) (int, error) {
@@ -67,7 +74,7 @@ func liveGroupMembers(pgid int) (int, error) {
 			continue
 		}
 		raw, err := os.ReadFile(filepath.Join("/proc", entry.Name(), "stat"))
-		if errors.Is(err, os.ErrNotExist) {
+		if processStatGone(err) {
 			continue
 		}
 		if err != nil {
@@ -136,6 +143,16 @@ func terminatePinnedGroup(pgid int, pin *os.File, unreapedChild bool) (bool, err
 			return true, nil
 		}
 		time.Sleep(10 * time.Millisecond)
+	}
+	// The final sleep may cross the deadline just as SIGKILL finishes.
+	// Reobserve the real kernel state rather than rejecting cleanup using a
+	// stale last count. This does not extend the deadline or assume success.
+	count, err = liveGroupMembers(pgid)
+	if err != nil {
+		return true, err
+	}
+	if count == 0 {
+		return true, nil
 	}
 	return true, fmt.Errorf("pinned process group still has %d live members", count)
 }
