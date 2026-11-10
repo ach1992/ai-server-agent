@@ -108,10 +108,9 @@ grep -Fq 'MENU_EXITED' "$tmp/read-only.out" || fail 'Read-only signal exited the
   fail 'Read-only action ignored Ctrl+C'
 [ "$(snapshot)" = "$before" ] || fail 'Read-only SIGINT changed protected host state'
 
-# The installed runtime acceptance above exercised many real restarts.
-# Clear only disposable-CI start-rate counters; preserve unit policy and
-# all genuine protected transaction/rollback checks.
-sudo systemctl reset-failed ai-server-agent.service ai-server-agent-executor.service
+# Give systemd a fresh restart-rate window after the prior installed
+# runtime acceptance (which deliberately performs several real restarts).
+sleep 12
 
 # Signal test 2: distinguish a genuine in-flight protected Ctrl+C from
 # ordinary restart failure. Both use the real installed runtime_apply,
@@ -226,7 +225,7 @@ run_protected_case(){
 }
 
 run_protected_case no-signal
-# Keep the signal/no-signal distinction independent of prior restart counts.
-sudo systemctl reset-failed ai-server-agent.service ai-server-agent-executor.service
+# Protect systemd start-rate budgets after multiple installed restart tests.
+sleep 12
 run_protected_case signal
 echo 'INSTALLED_OPERATOR_CONSOLE_ACCEPTANCE_PASS real_menu=yes 50col_no_color=yes invalid_retry=yes input_cancel_no_mutation=yes read_only_sigint=recovered protected_sigint=witnessed_in_flight_then_verified_rollback no_signal_negative_control=passed credentials=preserved installed_services=healthy'

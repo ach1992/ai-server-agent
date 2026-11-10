@@ -1262,13 +1262,16 @@ jobs:
           script -qefc "sudo ai-server-agent-manage credential-rotate direct-default" "$profile_credential_log" >/dev/null
           profile_bearer="$(grep -oE 'Authorization: Bearer [0-9a-f]{64}' "$profile_credential_log" | tail -n1 | cut -d' ' -f3)"
           [[ "$profile_bearer" =~ ^[0-9a-f]{64}$ ]]
+          printf 'INSTALLED_ACCEPTANCE_STAGE=profiles START %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           printf '%s\n' "$profile_bearer" | bash tests/installed_environment_profiles.sh
           # #118: prove configured vs effective settings, true concurrent worker
           # and persistent capacity, quota/timeout controls and rollback on
           # the same freshly installed disposable systemd runner.
+          printf 'INSTALLED_ACCEPTANCE_STAGE=runtime START %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           printf '%s\n' "$profile_bearer" | ASA_DISPOSABLE_RUNTIME_ACCEPTANCE=1 bash tests/installed_runtime_settings.sh
           # #147: fresh installed human-facing console, actual PTY Ctrl+C
           # and protected runtime rollback. Only on this disposable CI host.
+          printf 'INSTALLED_ACCEPTANCE_STAGE=console START %s\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)"
           ASA_DISPOSABLE_OPERATOR_ACCEPTANCE=1 bash tests/installed_operator_console.sh
           unset profile_bearer
           rm -f -- "$profile_credential_log"

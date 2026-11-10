@@ -4,7 +4,6 @@
 set -Eeuo pipefail
 
 [ "$(id -u)" -ne 0 ] || { echo 'Run as the disposable CI runner, not root' >&2; exit 1; }
-[ "${GITHUB_ACTIONS:-}" = true ] || { echo 'Only disposable GitHub Actions CI is allowed' >&2; exit 1; }
 for tool in curl jq sudo script; do command -v "$tool" >/dev/null || exit 1; done
 test -x /usr/local/bin/ai-server-agent
 test -x /usr/local/sbin/ai-server-agent-manage
@@ -121,17 +120,16 @@ sudo ai-server-agent-manage profile-label 'Disposable CI' >/dev/null
 check_profile development 'Disposable CI'
 sudo ai-server-agent-manage profile-set production >/dev/null
 check_profile production 'Disposable CI'
-# This is disposable CI only: clear systemd's restart-rate accounting
-# rather than spending 11 seconds idle between independent profile checks.
-# The real installed units, restarts and healthy-listener checks stay intact.
-sudo systemctl reset-failed ai-server-agent.service ai-server-agent-executor.service
+# Preserve the normal systemd start-rate budget before another profile switch.
+sleep 11
 sudo ai-server-agent-manage profile-set validation >/dev/null
 check_profile validation 'Disposable CI'
 
-# The restart-fault injection is separate from startup rate limiting.
-# Clear disposable-runner counters so the failure is the injected error,
-# not exhaustion from earlier valid profile changes.
-sudo systemctl reset-failed ai-server-agent.service ai-server-agent-executor.service
+# Fresh install, credential rotation and several rapid profile switches can
+# consume systemd's normal five-starts-per-ten-seconds budget. Allow that
+# protection window to expire before fault injection, rather than resetting
+# service counters or weakening the installed unit's start limit.
+sleep 11
 
 # Fail exactly the first Agent restart: the real manager must restore the
 # previous config, re-activate its service, and clear the verified rollback.

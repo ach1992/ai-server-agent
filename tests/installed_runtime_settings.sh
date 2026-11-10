@@ -65,15 +65,8 @@ cleanup(){
   sudo rm -rf -- "$fixture"
 }
 trap cleanup EXIT
-# Each setting exercises the real installed manager's restart, but many
-# consecutive CI-only mutations hit systemd's default start-rate counter.
-# Reset just that accounting on this disposable runner; do not alter unit
-# files, disable restart limits on installed hosts, or skip health checks.
-reset_ci_restart_budget(){
-  sudo systemctl reset-failed ai-server-agent.service ai-server-agent-executor.service
-}
 set_runtime(){
-  reset_ci_restart_budget
+  sleep 11 # Preserve normal systemd start-rate windows.
   sudo ai-server-agent-manage runtime-set "$1" "$2" >"$scratch/manage" 2>&1 ||
     fail "runtime-set failed: $1"
   sudo jq -e --arg key "$1" --argjson n "$2" '.runtime[$key]==$n' \
@@ -82,7 +75,7 @@ set_runtime(){
   sudo systemctl is-active --quiet ai-server-agent-executor.service || fail 'Executor unhealthy after set'
 }
 reset_runtime(){
-  reset_ci_restart_budget
+  sleep 11
   sudo ai-server-agent-manage runtime-reset "$1" >"$scratch/manage" 2>&1 ||
     fail "runtime-reset failed: $1"
   sudo jq -e --arg key "$1" '.runtime[$key]==null' /etc/ai-server-agent/config.json >/dev/null ||
@@ -304,7 +297,7 @@ jq -e '.result.structuredContent.output | contains("RESTORED")' "$scratch/respon
   fail 'Reset timeout remained effective'
 
 # One-shot real restart failure and verified exact rollback, not a mocked manager.
-reset_ci_restart_budget
+sleep 11
 before="$(sudo sha256sum /etc/ai-server-agent/config.json | awk '{print $1}')"
 mkdir "$scratch/bin"
 cat > "$scratch/bin/systemctl" <<'SYSTEMCTL'
