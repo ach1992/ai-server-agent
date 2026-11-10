@@ -28,6 +28,37 @@ git commit -qm 'squash merged candidate'
 merged="$(git rev-parse HEAD)"
 [ "$(git rev-parse HEAD^{tree})" = "$candidate_tree" ]
 
+# Reproduce a GitHub merge commit: exact validated head as second parent.
+git switch -qc merge-case "$base"
+git merge --no-ff -qm 'merge validated PR' "$candidate"
+[ "$(git rev-parse HEAD^{tree})" = "$candidate_tree" ]
+[ "$(git show -s --format='%P' HEAD)" = "$base $candidate" ]
+
+# Different second parent with an identical tree is not valid PR evidence.
+git switch -qc foreign-head "$base"
+git checkout -q "$candidate" -- source.txt
+git add source.txt
+git commit -qm 'foreign candidate with matching tree'
+foreign_head="$(git rev-parse HEAD)"
+[ "$foreign_head" != "$candidate" ]
+git switch -qc mismatched-parent-case "$base"
+git merge --no-ff -qm 'merge different second parent' "$foreign_head"
+[ "$(git rev-parse HEAD^{tree})" = "$candidate_tree" ]
+
+# A matching second parent still cannot cover additional merge edits.
+git switch -qc changed-merge-case "$base"
+git merge --no-ff --no-commit -q "$candidate"
+printf 'untested merge edit\n' > extra.txt
+git add extra.txt
+git commit -qm 'merge with unreviewed content'
+[ "$(git rev-parse HEAD^{tree})" != "$candidate_tree" ]
+
+# Octopus commits do not represent a single validated PR merge.
+octopus_commit="$(printf 'octopus fixture\n' | git commit-tree "$candidate_tree" -p "$base" -p "$candidate" -p "$foreign_head")"
+git switch -qc octopus-case "$octopus_commit"
+[ "$(git rev-list --parents -n1 HEAD | wc -w)" -eq 4 ]
+git switch -q main
+
 cat > "$tmp/fakebin/gh" <<'MOCK_GH'
 #!/usr/bin/env bash
 set -Eeuo pipefail
@@ -232,6 +263,15 @@ export MOCK_API_LOG="$tmp/gh-api-paths.log"
 jq -n --arg before "$base" --arg after "$merged" --arg repo "$GITHUB_REPOSITORY" \
   '{before:$before,after:$after,ref:"refs/heads/main",repository:{full_name:$repo},forced:false,deleted:false,created:false}' > "$GITHUB_EVENT_PATH"
 
+select_fixture(){
+  git switch -q "$1"
+  GITHUB_SHA="$(git rev-parse HEAD)"
+  TEST_MAIN="$GITHUB_SHA"
+  export GITHUB_SHA TEST_MAIN
+  jq -n --arg before "$base" --arg after "$GITHUB_SHA" --arg repo "$GITHUB_REPOSITORY" \
+    '{before:$before,after:$after,ref:"refs/heads/main",repository:{full_name:$repo},forced:false,deleted:false,created:false}' > "$GITHUB_EVENT_PATH"
+}
+
 cases_checked=0
 check(){
   local what="$1" want="$2" got
@@ -336,6 +376,22 @@ GITHUB_SHA="$base" check matching_squash false
 GH_TOKEN= check matching_squash false
 GITHUB_REPOSITORY=wrong/repo check matching_squash false
 
-# A historical valid squash, checked from the actual public GitHub API in
-# developer smoke checks, provides a non-mock confirmation of API semantics.
+# Preserve the same strict provenance gates for real two-parent PR merges.
+select_fixture merge-case
+check matching_merge true
+for scenario in stale_base changed_tree latest_ci_failure failed_security \
+  newer_ci_missing_link; do
+  check "$scenario" false
+done
+
+select_fixture mismatched-parent-case
+check matching_merge false
+select_fixture changed-merge-case
+check matching_merge false
+select_fixture octopus-case
+check matching_merge false
+select_fixture main
+
+# Valid GitHub squash/merge associations are also checked against real
+# read-only API evidence during developer smoke validation.
 echo "CI PR evidence reuse tests passed ($cases_checked valid, adversarial and fail-closed scenarios)."
