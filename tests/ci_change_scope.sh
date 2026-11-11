@@ -38,6 +38,21 @@ expect_docs_only docs/nested/example.md
 expect_flag false runtime_changed README.md
 expect_flag true stable_provenance_changed README.md
 
+# A version-only PR skips the installed lifecycle fixture. Credential migration
+# acceptance depends on that fixture, so both steps need the same gate.
+expect_installed_lifecycle_gate(){
+  local step="$1" actual expected
+  actual="$(awk -v key="      - name: $step" '$0==key {getline; print; exit}' "$ROOT/.github/workflows/ci.yml")"
+  local dollar='$'
+  expected="        if: $dollar{{ needs.change-scope.outputs.root_trust_security_changed != 'false' }}"
+  [ "$actual" = "$expected" ] || {
+    printf 'installed CI step lacks lifecycle prerequisite guard: %s (found %s)\n' "$step" "$actual" >&2
+    exit 1
+  }
+}
+expect_installed_lifecycle_gate 'Ubuntu 22.04 amd64 lifecycle validation'
+expect_installed_lifecycle_gate 'Legacy bearer migrates without forced rotation'
+
 # A version marker is release *data*, not a workflow implementation edit.
 # Build and verify exact-version artifacts without unrelated Go/race/Browser
 # or privileged history suites. Real code/workflow changes stay fail-closed.
