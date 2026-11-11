@@ -34,8 +34,7 @@ func PythonDebugpy() (interpreter, packageRoot string, err error) {
 	if runtime.GOOS != "linux" || (runtime.GOARCH != "amd64" && runtime.GOARCH != "arm64") {
 		return "", "", errors.New("python_dap_unsupported_platform")
 	}
-	interpreter = First("/usr/bin/python3.15", "/usr/bin/python3.14",
-		"/usr/bin/python3.13", "/usr/bin/python3.12", "/usr/bin/python3.11", "/usr/bin/python3.10")
+	interpreter = newestTrustedVersioned("/usr/bin", "python", 3, 10)
 	if interpreter == "" {
 		return "", "", errors.New("python_dap_trusted_python_3_10_plus_unavailable")
 	}

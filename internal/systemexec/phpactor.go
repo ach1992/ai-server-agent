@@ -24,7 +24,7 @@ func PHPActor() (string, string, error) {
 	if runtime.GOOS != "linux" {
 		return "", "", errors.New("php_lsp_unsupported_platform")
 	}
-	php := First("/usr/bin/php8.4", "/usr/bin/php8.3", "/usr/bin/php8.2")
+	php := newestTrustedVersioned("/usr/bin", "php", 8, 2)
 	if php == "" {
 		return "", "", errors.New("php_lsp_trusted_php_not_found")
 	}
