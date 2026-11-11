@@ -10,7 +10,7 @@ import (
 
 func TestTypeScript7OptionalAndFailClosed(t *testing.T) {
 	path, err := TypeScript7()
-	if err == nil && path != filepath.Join(TypeScript7Library, "tsc") {
+	if err == nil && path != expectedOptionalTestEntry(t, "typescript-lsp", "binary", filepath.Join(TypeScript7Library, "tsc")) {
 		t.Fatalf("trusted adapter selected unexpected path %q", path)
 	}
 	// A complete, correct but worker-owned package is not a production

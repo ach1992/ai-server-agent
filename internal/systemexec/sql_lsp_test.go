@@ -9,7 +9,7 @@ import (
 
 func TestSQLLensPinnedModuleTreeAndExecutionTrust(t *testing.T) {
 	if node, err := SQLLens(); err == nil && node != SQLLensNodeOptional &&
-		node != BashNodeOptional && node != WebNodeOptional && node != bashNodeBrowser {
+		node != BashNodeOptional && node != WebNodeOptional && node != bashNodeBrowser && node != expectedOptionalTestEntry(t, "sql-lsp", "node", bashNodeBrowser) {
 		t.Fatalf("SQL Lens unrecognized root-trusted Node %q", node)
 	}
 	if modules := os.Getenv("AGENT_SQL_LSP_PROOF_MODULES"); modules != "" {

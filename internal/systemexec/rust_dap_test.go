@@ -33,7 +33,7 @@ func TestRustDAPReadinessNeverProvisionsHost(t *testing.T) {
 	// Passive readiness may be unavailable (especially on CI/test images).
 	// An unavailable optional native adapter must not disable the core Agent.
 	got, err := RustLLDBDAP()
-	if err == nil && (runtime.GOOS != "linux" || got != RustDAPBinary) {
+	if err == nil && (runtime.GOOS != "linux" || got != expectedOptionalTestEntry(t, "rust-dap", "lldb", RustDAPBinary)) {
 		t.Fatalf("trusted Rust adapter readiness returned unexpected path: %q", got)
 	}
 	if err != nil && got != "" {

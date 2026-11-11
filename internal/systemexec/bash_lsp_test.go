@@ -10,7 +10,7 @@ import (
 
 func TestBashLSPTrustedDependencyChainAndBounds(t *testing.T) {
 	if selected, err := BashLSP(); err == nil && selected != BashNodeOptional &&
-		selected != bashNodeBrowser {
+		selected != bashNodeBrowser && selected != expectedOptionalTestEntry(t, "bash-lsp", "node", bashNodeBrowser) {
 		t.Fatalf("unexpected Bash LSP executable path: %q", selected)
 	}
 	modules := os.Getenv("AGENT_BASH_LSP_PROOF_MODULES")

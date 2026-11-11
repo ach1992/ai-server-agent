@@ -1,0 +1,18 @@
+{
+  "schema_version": 1,
+  "adapter": "python-lsp",
+  "version": "0.0.87",
+  "source": "Official Python ty manylinux wheel",
+  "artifacts": [
+    {
+      "path": "/usr/local/lib/ai-server-agent/lsp/python/ty/0.0.87/ty",
+      "kind": "file",
+      "sha256": "d90608cd5ccdc786ead2bc0cbf2268dfd6008286f0bd010259221fabe1479658",
+      "max_bytes": 36700160
+    }
+  ],
+  "entrypoints": {
+    "binary": "/usr/local/lib/ai-server-agent/lsp/python/ty/0.0.87/ty"
+  },
+  "source_sha256": "e8caa3316ea81e794fcd98d1e4d3aaa5fae84790154d88c3e85ac3bd01c537bd"
+}

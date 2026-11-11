@@ -1,0 +1,19 @@
+{
+  "schema_version": 1,
+  "adapter": "typescript-lsp",
+  "version": "7.0.2",
+  "source": "@typescript/typescript-linux-x64 npm integrity-pinned artifact",
+  "artifacts": [
+    {
+      "path": "/usr/local/lib/ai-server-agent/lsp/typescript/7.0.2/lib",
+      "kind": "tree",
+      "sha256": "9c0f8c83077a722148cf56c0b91e16fda99ebbac2bf30c667a12ca98e0715dcd",
+      "file_count": 110,
+      "dir_count": 0,
+      "max_bytes": 33554432
+    }
+  ],
+  "entrypoints": {
+    "binary": "/usr/local/lib/ai-server-agent/lsp/typescript/7.0.2/lib/tsc"
+  }
+}

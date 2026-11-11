@@ -11,7 +11,7 @@ import (
 
 func TestPinnedJavaScriptDAPBundleProvenance(t *testing.T) {
 	if node, adapter, err := JavaScriptDAP(); err == nil {
-		if node == "" || adapter != JavaScriptDAPCLI {
+		if node == "" || adapter != expectedOptionalTestEntry(t, "javascript-dap", "cli", JavaScriptDAPCLI) {
 			t.Fatalf("trusted JS DAP resource discovery selected an unexpected endpoint: %q %q", node, adapter)
 		}
 	}

@@ -1,0 +1,34 @@
+{
+  "schema_version": 1,
+  "adapter": "bash-lsp",
+  "version": "5.8.1",
+  "source": "npm ci --ignore-scripts --omit=dev; lockfile in resources/optional-adapters/bash-lsp",
+  "artifacts": [
+    {
+      "path": "/usr/local/lib/ai-server-agent/lsp/bash/5.8.1/node_modules",
+      "kind": "tree",
+      "sha256": "7ffa3d08ae6f41a3f56278cb76fd280b3caff2c585d8cdf5d2a6f94f444d3344",
+      "file_count": 2394,
+      "dir_count": 172,
+      "max_bytes": 26214400
+    },
+    {
+      "path": "/usr/local/lib/ai-server-agent/lsp/bash/5.8.1/shellcheck",
+      "kind": "file",
+      "sha256": "4da528ddb3a4d1b7b24a59d4e16eb2f5fd960f4bd9a3708a15baddbdf1d5a55b",
+      "max_bytes": 19922944
+    },
+    {
+      "path": "/opt/ai-server-agent/browser/node/bin/node",
+      "kind": "file",
+      "sha256": "f3432a45b03b2da0d270095fdd8813dc34cbea73f5fc8b18c7a384b7cf9b333a",
+      "max_bytes": 143654912
+    }
+  ],
+  "entrypoints": {
+    "node": "/opt/ai-server-agent/browser/node/bin/node",
+    "cli": "/usr/local/lib/ai-server-agent/lsp/bash/5.8.1/node_modules/bash-language-server/out/cli.js",
+    "shellcheck": "/usr/local/lib/ai-server-agent/lsp/bash/5.8.1/shellcheck"
+  },
+  "source_sha256": "fa5af0665f44357900f9ba6d8cba83ca4669aa174224c939f454ad62983022b1"
+}

@@ -152,11 +152,10 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 			}
 		} else {
 			var trustErr error
-			node, trustErr = systemexec.SQLLens()
+			node, cli, trustErr = systemexec.SQLLensResources()
 			if trustErr != nil {
-				return fileError("sql_lsp_unavailable", "dependency", errors.New("trusted optional pinned SQL language server and resources are unavailable"))
+				return fileError("sql_lsp_unavailable", "dependency", fmt.Errorf("trusted optional SQL language-server resources unavailable: %w", trustErr))
 			}
-			cli = systemexec.SQLLensCLI
 		}
 		profile, _ = sqlLSPProfile(req.SQLDialect, node, cli)
 	} else if actualLanguage == "html" || actualLanguage == "css" {
@@ -173,9 +172,16 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 			}
 		} else {
 			var trustErr error
-			binary, trustErr = systemexec.WebLSP()
+			var htmlCLI, cssCLI string
+			binary, htmlCLI, cssCLI, trustErr = systemexec.WebLSPResources()
 			if trustErr != nil {
-				return fileError("web_lsp_unavailable", "dependency", errors.New("trusted optional HTML/CSS language-server resources unavailable"))
+				return fileError("web_lsp_unavailable", "dependency", fmt.Errorf("trusted optional HTML/CSS language-server resources unavailable: %w", trustErr))
+			}
+			profile = webLSPProfile(actualLanguage)
+			if actualLanguage == "html" {
+				profile.arguments[0] = htmlCLI
+			} else {
+				profile.arguments[0] = cssCLI
 			}
 		}
 	} else if actualLanguage == "shell" {
@@ -187,10 +193,12 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 			profile = shellLSPProfile(s.bashCLIBinary, s.bashShellcheckBinary)
 		} else {
 			var trustErr error
-			binary, trustErr = systemexec.BashLSP()
+			var cli, shellcheck string
+			binary, cli, shellcheck, trustErr = systemexec.BashLSPResources()
 			if trustErr != nil {
-				return fileError("bash_lsp_unavailable", "dependency", errors.New("trusted optional Bash LSP, pinned Node and ShellCheck resources are unavailable"))
+				return fileError("bash_lsp_unavailable", "dependency", fmt.Errorf("trusted optional Bash LSP, Node and ShellCheck resources unavailable: %w", trustErr))
 			}
+			profile = shellLSPProfile(cli, shellcheck)
 		}
 	} else if actualLanguage == "python" {
 		binary = s.tyBinary // test fixture only; production is always root owned.

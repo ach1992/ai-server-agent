@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "adapter": "javascript-dap",
+  "version": "1.140.0",
+  "source": "Microsoft vscode-js-debug v1.140.0 upstream release",
+  "artifacts": [
+    {
+      "path": "/usr/local/lib/ai-server-agent/dap/javascript/js-debug/1.140.0/js-debug",
+      "kind": "tree",
+      "sha256": "cc53f6d1cd9c1b264dc797fde8f36aedae880fab5e56cba906fbb6f007df1f0c",
+      "file_count": 60,
+      "dir_count": 9,
+      "max_bytes": 4194304
+    },
+    {
+      "path": "/opt/ai-server-agent/browser/node/bin/node",
+      "kind": "file",
+      "sha256": "f3432a45b03b2da0d270095fdd8813dc34cbea73f5fc8b18c7a384b7cf9b333a",
+      "max_bytes": 143654912
+    }
+  ],
+  "entrypoints": {
+    "node": "/opt/ai-server-agent/browser/node/bin/node",
+    "cli": "/usr/local/lib/ai-server-agent/dap/javascript/js-debug/1.140.0/js-debug/src/dapDebugServer.js"
+  },
+  "source_sha256": "27dab92937ec1ab35821ae955aac867544fe06a1b6307229049f2d789af10968"
+}

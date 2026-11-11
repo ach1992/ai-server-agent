@@ -46,7 +46,28 @@ var bashShellCheckDigests = map[string]string{
 	"arm64": "127f13925eadd52c341bca0ebaf9ab0dbd78c6468f30a8f262a528bf8de47546",
 }
 
+func BashLSPResources() (node, cli, shellcheck string, err error) {
+	if entries, _, configured, profileErr := SelectedOptionalAdapter("bash-lsp"); configured {
+		if profileErr != nil {
+			return "", "", "", profileErr
+		}
+		return entries["node"], entries["cli"], entries["shellcheck"], nil
+	} else if profileErr != nil {
+		return "", "", "", profileErr
+	}
+	node, err = legacyBashLSP()
+	if err != nil {
+		return "", "", "", err
+	}
+	return node, BashLSPCLI, BashShellCheck, nil
+}
+
 func BashLSP() (string, error) {
+	node, _, _, err := BashLSPResources()
+	return node, err
+}
+
+func legacyBashLSP() (string, error) {
 	if runtime.GOOS != "linux" || bashNodeDigests[runtime.GOARCH] == "" {
 		return "", errors.New("bash_lsp_unsupported_platform")
 	}

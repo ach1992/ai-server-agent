@@ -9,11 +9,11 @@ import (
 	"strings"
 )
 
-// Rust LLDB DAP is an OPTIONAL platform-managed runtime. The only admitted
-// packaging identity is the exact Debian 13 LLVM 19.1.7-3+b1 distro snapshot
-// with immutable executable/library digests from its official .deb artifacts.
-// This is not a fallback to an unpinned PATH executable, not an Agent
-// installer, and never supplies a project-controlled LD_LIBRARY_PATH.
+// Rust LLDB DAP is an optional platform-managed native runtime. A selected
+// administrator-owned profile verifies its explicit native helper/library
+// files without a compiled-in release/distro ceiling. With no profile, the
+// old Debian 13 LLVM 19.1.7-3+b1 root-pinned snapshot is the fallback.
+// No untrusted PATH, auto-installer or project LD_LIBRARY_PATH is admitted.
 const RustDAPVersion = "19.1.7"
 const RustDAPBinary = "/usr/lib/llvm-19/bin/lldb-dap"
 
@@ -72,6 +72,19 @@ func rustDapDebian13(osRelease string) bool {
 }
 
 func RustLLDBDAP() (string, error) {
+	// A verified operator-selected native bundle replaces the Debian 13
+	// distro-specific legacy pin. The loader/ABI and actual debugger launch
+	// are separate acceptance gates, not arbitrary version ceilings.
+	if runtime.GOOS == "linux" {
+		if entries, _, configured, profileErr := SelectedOptionalAdapter("rust-dap"); configured {
+			if profileErr != nil {
+				return "", profileErr
+			}
+			return entries["lldb"], nil
+		} else if profileErr != nil {
+			return "", profileErr
+		}
+	}
 	artifacts := rustDAPArtifacts(runtime.GOARCH)
 	if runtime.GOOS != "linux" || len(artifacts) == 0 {
 		return "", errors.New("rust_dap_verified_distribution_unavailable")

@@ -83,7 +83,8 @@ func (s *Server) debugAction(ctx context.Context, req Request) Response {
 			}
 			body, _ := json.Marshal(optionalDAPPrerequisite(map[string]any{
 				"adapter": "javascript/js-debug", "installed": available,
-				"modes": modes, "attach_supported": false,
+				"version": systemexec.OptionalAdapterVersion("javascript-dap", systemexec.JavaScriptDAPVersion),
+				"modes":   modes, "attach_supported": false,
 				"precompiled_typescript_source_maps": req.Language == "typescript",
 				"privileged":                         false, "provisioning": "optional_root_owned_pinned_complete_js_debug",
 				"containment": "executor_owned_private_cgroup_v2_required",
@@ -101,7 +102,8 @@ func (s *Server) debugAction(ctx context.Context, req Request) Response {
 				available = true
 			}
 			payload := map[string]any{"adapter": "python/debugpy", "installed": available,
-				"modes": []string{"script", "module", "test"}, "attach_supported": false,
+				"version": systemexec.OptionalAdapterVersion("python-dap", systemexec.PythonDebugpyVersion),
+				"modes":   []string{"script", "module", "test"}, "attach_supported": false,
 				"privileged": false, "provisioning": "optional_root_owned_pinned_wheel_and_interpreter",
 				"containment": "root_owned_cgroup_v2_required_before_launch"}
 			b, _ := json.Marshal(optionalDAPPrerequisite(payload, available, "python"))
@@ -116,7 +118,8 @@ func (s *Server) debugAction(ctx context.Context, req Request) Response {
 			available := trustErr == nil || (s.phpDAPNodeBinary != "" && s.phpDAPCLIBinary != "" && s.phpDAPNativeBinary != "" && s.phpDAPXdebugModule != "")
 			payload, _ := json.Marshal(optionalDAPPrerequisite(map[string]any{
 				"adapter": "php/xdebug", "installed": available,
-				"modes": []string{"cli"}, "attach_supported": false,
+				"version": systemexec.OptionalAdapterVersion("php-dap", systemexec.PHPDAPVersion),
+				"modes":   []string{"cli"}, "attach_supported": false,
 				"http_request_mode": "not_yet_verified", "privileged": false,
 				"transport":   "single_verified_unix_dbgp_peer",
 				"containment": "executor_owned_private_cgroup_v2_required",
@@ -132,8 +135,9 @@ func (s *Server) debugAction(ctx context.Context, req Request) Response {
 			available := trustErr == nil || s.rustLLDBDAPBinary != ""
 			body, _ := json.Marshal(optionalDAPPrerequisite(map[string]any{
 				"adapter": "rust/lldb-dap", "installed": available,
-				"modes": []string{"exec"}, "attach_supported": false,
-				"privileged": false, "provisioning": "optional_verified_LLDB19_native_distribution",
+				"version": systemexec.OptionalAdapterVersion("rust-dap", systemexec.RustDAPVersion),
+				"modes":   []string{"exec"}, "attach_supported": false,
+				"privileged": false, "provisioning": "optional_root_owned_verified_native_LLDB_bundle",
 				"containment": "executor_owned_private_cgroup_v2_required",
 			}, available, "rust"))
 			status := "unavailable"

@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "adapter": "php-lsp",
+  "version": "2026.10.07.0",
+  "source": "Upstream Phpactor PHAR at official immutable release",
+  "artifacts": [
+    {
+      "path": "/usr/local/lib/ai-server-agent/lsp/php/phpactor/2026.10.07.0/phpactor.phar",
+      "kind": "file",
+      "sha256": "b28bf6166e016d539fc2f2aec18ef918b12590e436a6f1ccbdf30b5bbdbdb16b",
+      "max_bytes": 7340032
+    }
+  ],
+  "entrypoints": {
+    "phar": "/usr/local/lib/ai-server-agent/lsp/php/phpactor/2026.10.07.0/phpactor.phar"
+  }
+}

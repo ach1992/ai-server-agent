@@ -17,7 +17,7 @@ func TestPHPDAPOptionalVerifiedNativeChain(t *testing.T) {
 		t.Fatal("PHP DAP accepted unknown architecture or unpinned dependency tree")
 	}
 	node, entry, php, module, err := PHPDAP()
-	if err == nil && (runtime.GOOS != "linux" || node == "" || entry != PHPDAPCLI || php != PHPDAPBinary || module != PHPDAPXdebugModule) {
+	if err == nil && (runtime.GOOS != "linux" || node == "" || entry != expectedOptionalTestEntry(t, "php-dap", "cli", PHPDAPCLI) || php != expectedOptionalTestEntry(t, "php-dap", "php", PHPDAPBinary) || module != expectedOptionalTestEntry(t, "php-dap", "xdebug", PHPDAPXdebugModule)) {
 		t.Fatalf("PHP DAP readiness returned unverified runtime: %s/%s/%s/%s", node, entry, php, module)
 	}
 	if err != nil && (entry != "" || php != "" || module != "") {

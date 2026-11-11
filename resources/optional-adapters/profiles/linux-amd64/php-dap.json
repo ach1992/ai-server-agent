@@ -1,0 +1,40 @@
+{
+  "schema_version": 1,
+  "adapter": "php-dap",
+  "version": "5cee2626f227e0ebe88df2c03a1a88b4b4295173",
+  "source": "Official xdebug/vscode-php-debug source snapshot and compatible native Xdebug 3",
+  "artifacts": [
+    {
+      "path": "/usr/local/lib/ai-server-agent/dap/php/xdebug/5cee2626f227e0ebe88df2c03a1a88b4b4295173/php-debug",
+      "kind": "tree",
+      "sha256": "0e939bb18e6bc314e8c18862664a2b87c0bbb844b3f124bb4df96243daf49f5c",
+      "file_count": 904,
+      "dir_count": 77,
+      "max_bytes": 10485760
+    },
+    {
+      "path": "/opt/ai-server-agent/browser/node/bin/node",
+      "kind": "file",
+      "sha256": "f3432a45b03b2da0d270095fdd8813dc34cbea73f5fc8b18c7a384b7cf9b333a",
+      "max_bytes": 143654912
+    },
+    {
+      "path": "/usr/bin/php8.4",
+      "kind": "file",
+      "sha256": "d19d3ae21e55362a2a116a60209f4e84c1cd23dd96bca09b4e6b17aed6156fb2",
+      "max_bytes": 8388608
+    },
+    {
+      "path": "/usr/lib/php/20240924/xdebug.so",
+      "kind": "file",
+      "sha256": "748d3eb77ea155e938f0c716aeb8fc071b063708d4fa657139c1ab1922155620",
+      "max_bytes": 4194304
+    }
+  ],
+  "entrypoints": {
+    "node": "/opt/ai-server-agent/browser/node/bin/node",
+    "cli": "/usr/local/lib/ai-server-agent/dap/php/xdebug/5cee2626f227e0ebe88df2c03a1a88b4b4295173/php-debug/out/phpDebug.js",
+    "php": "/usr/bin/php8.4",
+    "xdebug": "/usr/lib/php/20240924/xdebug.so"
+  }
+}

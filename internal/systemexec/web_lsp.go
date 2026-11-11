@@ -29,7 +29,28 @@ func verifyWebLSPModules(dir string, rootOwned bool) error {
 	})
 }
 
+func WebLSPResources() (node, html, css string, err error) {
+	if entries, _, configured, profileErr := SelectedOptionalAdapter("web-lsp"); configured {
+		if profileErr != nil {
+			return "", "", "", profileErr
+		}
+		return entries["node"], entries["html"], entries["css"], nil
+	} else if profileErr != nil {
+		return "", "", "", profileErr
+	}
+	node, err = legacyWebLSP()
+	if err != nil {
+		return "", "", "", err
+	}
+	return node, WebLSPHTMLCLI, WebLSPCSSCLI, nil
+}
+
 func WebLSP() (string, error) {
+	node, _, _, err := WebLSPResources()
+	return node, err
+}
+
+func legacyWebLSP() (string, error) {
 	if runtime.GOOS != "linux" || bashNodeDigests[runtime.GOARCH] == "" {
 		return "", errors.New("web_lsp_unsupported_platform")
 	}

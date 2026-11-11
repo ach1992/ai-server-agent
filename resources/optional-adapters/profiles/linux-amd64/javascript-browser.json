@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "adapter": "javascript-browser",
+  "version": "chromium-1228",
+  "source": "Agent-managed verified Playwright Chromium revision 1228 (reuse the coupled Browser engine)",
+  "artifacts": [
+    {
+      "path": "/opt/ai-server-agent/browser/browsers/chromium-1228/chrome-linux64/chrome",
+      "kind": "file",
+      "sha256": "2d18db9d8608b052b6a552ee00ec1e830f93692e928b65ecc67d693bd33fe801",
+      "max_bytes": 419430400
+    }
+  ],
+  "entrypoints": {
+    "binary": "/opt/ai-server-agent/browser/browsers/chromium-1228/chrome-linux64/chrome"
+  }
+}

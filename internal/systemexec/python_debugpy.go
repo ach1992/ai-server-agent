@@ -26,8 +26,9 @@ func verifyPythonDebugpyModules(path string, rootOwned bool) error {
 	})
 }
 
-// PythonDebugpy is passive readiness/provenance discovery. It never installs
-// tools or imports a repository package and does not imply permitted attach.
+// PythonDebugpy selects a complete administrator-verified wheel resource
+// (or legacy pin). It never installs tools or imports a repository package
+// and does not imply permitted attach.
 // Production debugging is worker-only; Python >= 3.10 is optional on all
 // platforms. A file's extension never authorizes running project setup hooks.
 func PythonDebugpy() (interpreter, packageRoot string, err error) {
@@ -37,6 +38,14 @@ func PythonDebugpy() (interpreter, packageRoot string, err error) {
 	interpreter = newestTrustedVersioned("/usr/bin", "python", 3, 10)
 	if interpreter == "" {
 		return "", "", errors.New("python_dap_trusted_python_3_10_plus_unavailable")
+	}
+	if entries, _, configured, profileErr := SelectedOptionalAdapter("python-dap"); configured {
+		if profileErr != nil {
+			return "", "", profileErr
+		}
+		return interpreter, entries["modules"], nil
+	} else if profileErr != nil {
+		return "", "", profileErr
 	}
 	entry := filepath.Join(PythonDebugpyModules, "debugpy", "adapter", "__main__.py")
 	if !TrustedStaticFile(entry) {

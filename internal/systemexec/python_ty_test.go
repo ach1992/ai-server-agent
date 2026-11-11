@@ -8,7 +8,7 @@ import (
 )
 
 func TestNativePythonTyIntegrityAndRootTrust(t *testing.T) {
-	if selected, err := TyPython(); err == nil && selected != PythonTyBinary {
+	if selected, err := TyPython(); err == nil && selected != expectedOptionalTestEntry(t, "python-lsp", "binary", PythonTyBinary) {
 		t.Fatalf("unexpected Python adapter selection: %s", selected)
 	}
 	local := os.Getenv("AGENT_TY_PROOF_BIN")

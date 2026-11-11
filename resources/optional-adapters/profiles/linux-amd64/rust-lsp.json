@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "adapter": "rust-lsp",
+  "version": "2026-10-12",
+  "source": "Official Rust Analyzer + Rust compiler source artifacts",
+  "artifacts": [
+    {
+      "path": "/usr/local/lib/ai-server-agent/lsp/rust/2026-10-12/rust-analyzer",
+      "kind": "file",
+      "sha256": "fd89304c85f6c1996b036ea8f2c9ad9d3e25a197dbd713661c7fe51ec9dc8e49",
+      "max_bytes": 50331648
+    },
+    {
+      "path": "/usr/local/lib/ai-server-agent/lsp/rust/toolchain/1.99.0/bin/rustc",
+      "kind": "file",
+      "sha256": "f3834d26669b03f6855fa54bd2381443123e860167bc0c7a8dd137e5cf6e5e4f",
+      "max_bytes": 2097152
+    },
+    {
+      "path": "/usr/local/lib/ai-server-agent/lsp/rust/toolchain/1.99.0/lib/rustlib/src/rust/library/core/src/lib.rs",
+      "kind": "file",
+      "sha256": "d95a3b55852cc16b69b2cebc86cfd1d5b6232feaa48a6c146403bfd402a6c0c2",
+      "max_bytes": 2097152
+    }
+  ],
+  "entrypoints": {
+    "analyzer": "/usr/local/lib/ai-server-agent/lsp/rust/2026-10-12/rust-analyzer",
+    "rustc": "/usr/local/lib/ai-server-agent/lsp/rust/toolchain/1.99.0/bin/rustc",
+    "sysroot-source": "/usr/local/lib/ai-server-agent/lsp/rust/toolchain/1.99.0/lib/rustlib/src/rust/library/core/src/lib.rs"
+  }
+}

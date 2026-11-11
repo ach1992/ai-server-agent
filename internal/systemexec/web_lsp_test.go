@@ -9,7 +9,7 @@ import (
 
 func TestWebLSPTrustedTransitiveModulesAndBounds(t *testing.T) {
 	if node, err := WebLSP(); err == nil && node != WebNodeOptional &&
-		node != BashNodeOptional && node != bashNodeBrowser {
+		node != BashNodeOptional && node != bashNodeBrowser && node != expectedOptionalTestEntry(t, "web-lsp", "node", bashNodeBrowser) {
 		t.Fatalf("unsafe Web LSP node path %q", node)
 	}
 	fixture := os.Getenv("AGENT_WEB_LSP_PROOF_MODULES")
