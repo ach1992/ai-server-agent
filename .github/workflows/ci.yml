@@ -982,6 +982,7 @@ jobs:
           getent group aiworker >/dev/null
           sudo test -e /srv/ai-workspace/lifecycle-workspace-sentinel
       - name: Legacy bearer migrates without forced rotation
+        if: ${{ needs.change-scope.outputs.root_trust_security_changed != 'false' }}
         run: |
           trap 'rc=$?; printf "credential lifecycle acceptance failed at shell line %s (rc=%s)\\n" "$LINENO" "$rc" >&2' ERR
           legacy="$(od -An -N32 -tx1 /dev/urandom | tr -d ' \n')"
