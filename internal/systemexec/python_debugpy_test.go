@@ -3,13 +3,12 @@ package systemexec
 import (
 	"os"
 	"path/filepath"
-	"strings"
 	"testing"
 )
 
 func TestPythonDebugpyPinnedTrustedOptionalRuntime(t *testing.T) {
 	if p, root, err := PythonDebugpy(); err == nil {
-		if !strings.HasPrefix(p, "/usr/bin/python3.") || root != PythonDebugpyModules {
+		if p != newestTrustedVersioned("/usr/bin", "python", 3, 10) || root != PythonDebugpyModules {
 			t.Fatalf("production selected unexpected Python adapter %s %s", p, root)
 		}
 	}
