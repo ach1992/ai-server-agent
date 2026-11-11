@@ -6,12 +6,13 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"github.com/ach1992/ai-server-agent/internal/systemexec"
 	"net/url"
 	"path/filepath"
 	"sort"
 	"strings"
 	"time"
+
+	"github.com/ach1992/ai-server-agent/internal/systemexec"
 )
 
 // Semantic inspection remains bounded and worker-only: it uses the
@@ -112,7 +113,7 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 			var trustErr error
 			binary, phpArchive, trustErr = systemexec.PHPActor()
 			if trustErr != nil {
-				return fileError("php_lsp_unavailable", "dependency", errors.New("trusted optional pinned PHP CLI and Phpactor resource unavailable"))
+				return fileError("php_lsp_unavailable", "dependency", fmt.Errorf("trusted optional PHP CLI and Phpactor resource unavailable: %w", trustErr))
 			}
 		}
 		var cacheErr error
@@ -133,7 +134,7 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 			var trustErr error
 			analyzer, rustc, sysroot, trustErr = systemexec.RustAnalyzerResources()
 			if trustErr != nil {
-				return fileError("rust_lsp_unavailable", "dependency", errors.New("trusted optional Rust analyzer, rustc and sysroot are unavailable"))
+				return fileError("rust_lsp_unavailable", "dependency", fmt.Errorf("trusted optional Rust analyzer, compiler and sysroot unavailable: %w", trustErr))
 			}
 		} else if rustc == "" || sysroot == "" {
 			return fileError("rust_lsp_fixture_incomplete", "dependency", errors.New("Rust test fixture requires native analyzer, pinned rustc and sysroot"))
@@ -206,7 +207,7 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 			var trustErr error
 			binary, trustErr = systemexec.TyPython()
 			if trustErr != nil {
-				return fileError("python_ty_unavailable", "dependency", errors.New("trusted pinned optional native Python ty 0.0.87 adapter is unavailable"))
+				return fileError("python_ty_unavailable", "dependency", fmt.Errorf("trusted optional Python ty language server unavailable: %w", trustErr))
 			}
 		}
 	} else {
@@ -215,7 +216,7 @@ func (s *Server) codeInspect(parent context.Context, req Request) Response {
 			var trustErr error
 			binary, trustErr = systemexec.TypeScript7()
 			if trustErr != nil {
-				return fileError("typescript7_unavailable", "dependency", errors.New("trusted pinned optional TypeScript 7.0.2 native adapter and resources are unavailable"))
+				return fileError("typescript7_unavailable", "dependency", fmt.Errorf("trusted optional TypeScript language server unavailable: %w", trustErr))
 			}
 		}
 	}
@@ -412,7 +413,7 @@ func rustLSPProfile(file, analyzer, rustc, sysroot string) lspInspectionProfile 
 		"workspace":    map[string]any{"discoverConfig": nil},
 	}
 	return lspInspectionProfile{
-		arguments:            []string{"PATH=/dev/null", "RUSTC=" + rustc, "RUSTUP_AUTO_INSTALL=0", "RUSTUP_TOOLCHAIN=1.99.0", analyzer},
+		arguments:            []string{"PATH=/dev/null", "RUSTC=" + rustc, "RUSTUP_AUTO_INSTALL=0", analyzer},
 		extensions:           map[string]string{".rs": "rust"},
 		initOptions:          settings,
 		staticConfiguration:  map[string]any{"rust-analyzer": settings, "": settings},

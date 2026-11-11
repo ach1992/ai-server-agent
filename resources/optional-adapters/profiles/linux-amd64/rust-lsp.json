@@ -17,15 +17,17 @@
       "max_bytes": 2097152
     },
     {
-      "path": "/usr/local/lib/ai-server-agent/lsp/rust/toolchain/1.99.0/lib/rustlib/src/rust/library/core/src/lib.rs",
-      "kind": "file",
-      "sha256": "d95a3b55852cc16b69b2cebc86cfd1d5b6232feaa48a6c146403bfd402a6c0c2",
-      "max_bytes": 2097152
+      "path": "/usr/local/lib/ai-server-agent/lsp/rust/toolchain/1.99.0/lib/rustlib/src/rust/library",
+      "kind": "tree",
+      "sha256": "315c3ec56c951f35bcbf9184f32b1f92c802167af16d71b9653e14ffaf90482f",
+      "file_count": 3608,
+      "dir_count": 929,
+      "max_bytes": 180000000
     }
   ],
   "entrypoints": {
     "analyzer": "/usr/local/lib/ai-server-agent/lsp/rust/2026-10-12/rust-analyzer",
     "rustc": "/usr/local/lib/ai-server-agent/lsp/rust/toolchain/1.99.0/bin/rustc",
-    "sysroot-source": "/usr/local/lib/ai-server-agent/lsp/rust/toolchain/1.99.0/lib/rustlib/src/rust/library/core/src/lib.rs"
+    "sysroot-source": "/usr/local/lib/ai-server-agent/lsp/rust/toolchain/1.99.0/lib/rustlib/src/rust/library"
   }
 }

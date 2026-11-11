@@ -28,7 +28,7 @@ func RunOptionalAdapter(args []string, stdout, stderr io.Writer) int {
 
 func optionalAdapterCommand(args []string, out io.Writer) error {
 	if len(args) < 1 {
-		return errors.New("usage: optional-adapter [inspect-tree PATH MAX_BYTES|verify NAME [CANDIDATE]|activate NAME CANDIDATE|rollback NAME|deactivate NAME|status NAME]")
+		return errors.New("usage: optional-adapter [inspect-tree PATH MAX_BYTES|verify NAME [CANDIDATE]|activate NAME CANDIDATE|rollback NAME|deactivate NAME|recover NAME|status NAME]")
 	}
 	switch args[0] {
 	case "inspect-tree":
@@ -59,13 +59,24 @@ func optionalAdapterCommand(args []string, out io.Writer) error {
 		if err != nil {
 			return err
 		}
+		status := map[string]any{"adapter": args[1]}
+		if args[0] == "status" {
+			if _, err := os.Lstat(adapterStatePath(OptionalAdapterProfilesDir, args[1], ".pending")); err == nil {
+				status["recovery"] = "pending-root-reconciliation"
+			} else if !errors.Is(err, os.ErrNotExist) {
+				return err
+			}
+		}
 		if !found {
 			if args[0] == "verify" {
 				return errors.New("no active profile to verify")
 			}
-			return json.NewEncoder(out).Encode(map[string]any{"adapter": args[1], "selection": "built-in-legacy"})
+			status["selection"] = "built-in-legacy"
+			return json.NewEncoder(out).Encode(status)
 		}
-		return json.NewEncoder(out).Encode(map[string]any{"adapter": args[1], "selection": "verified-root-profile", "version": p.Version, "source": p.Source, "entrypoints": p.Entrypoints})
+		status["selection"] = "verified-root-profile"
+		status["version"], status["source"], status["entrypoints"] = p.Version, p.Source, p.Entrypoints
+		return json.NewEncoder(out).Encode(status)
 	case "activate":
 		if len(args) != 3 || !knownAdapter(args[1]) {
 			return errors.New("activate NAME CANDIDATE")
@@ -74,13 +85,20 @@ func optionalAdapterCommand(args []string, out io.Writer) error {
 			return err
 		}
 		return optionalAdapterCommand([]string{"status", args[1]}, out)
-	case "rollback", "deactivate":
+	case "rollback", "deactivate", "recover":
 		if len(args) != 2 || !knownAdapter(args[1]) {
-			return errors.New("rollback|deactivate NAME")
+			return errors.New("rollback|deactivate|recover NAME")
 		}
 		action := func() error { return rollbackOptionalAdapter(args[1]) }
 		if args[0] == "deactivate" {
 			action = func() error { return deactivateOptionalAdapter(args[1]) }
+		} else if args[0] == "recover" {
+			action = func() error {
+				if err := trustedAdapterProfilesDirectory(); err != nil {
+					return err
+				}
+				return reconcileAdapterSelection(OptionalAdapterProfilesDir, args[1])
+			}
 		}
 		if err := withAdapterLifecycleLock(action); err != nil {
 			return err
@@ -219,17 +237,11 @@ func trustedAdapterProfilesDirectory() error {
 	return nil
 }
 
-func syncAdapterProfileDirectory() error {
-	d, err := os.Open(OptionalAdapterProfilesDir)
-	if err != nil {
-		return err
-	}
-	defer d.Close()
-	return d.Sync()
-}
-
 func activateOptionalAdapter(name, candidate string) error {
 	if err := trustedAdapterProfilesDirectory(); err != nil {
+		return err
+	}
+	if err := reconcileAdapterSelection(OptionalAdapterProfilesDir, name); err != nil {
 		return err
 	}
 	stage, err := stageOptionalAdapterProfile(name, candidate)
@@ -237,76 +249,85 @@ func activateOptionalAdapter(name, candidate string) error {
 		return err
 	}
 	defer os.Remove(stage)
-	active := filepath.Join(OptionalAdapterProfilesDir, name+".json")
-	prev := filepath.Join(OptionalAdapterProfilesDir, name+".previous.json")
-	if _, err := os.Lstat(active); err == nil {
-		if !trustedRootProfileFile(active) {
-			return errors.New("current profile path is not a safe regular root-owned file")
-		}
-		// An interrupted operator retry of the *same* activation must not
-		// overwrite the previous-good rollback selection with itself.
-		current, readErr := os.ReadFile(active)
-		candidateBytes, candidateErr := os.ReadFile(stage)
-		if readErr != nil || candidateErr != nil {
-			return errors.New("cannot compare current profile with staged selection")
-		}
-		if bytes.Equal(current, candidateBytes) {
-			return nil
-		}
-		// An invalid selected profile must NOT trap the operator. Replace it
-		// with the newly verified candidate without overwriting a previous
-		// known-good rollback profile with the invalid one.
-		if _, _, err := ReadOptionalAdapterProfile(name, active); err == nil {
-			backup, err := stageOptionalAdapterProfile(name, active)
-			if err != nil {
-				return fmt.Errorf("cannot safely back up current profile: %w", err)
-			}
-			defer os.Remove(backup)
-			if err := os.Rename(backup, prev); err != nil {
-				return err
-			}
-			if err := syncAdapterProfileDirectory(); err != nil {
-				return err
-			}
-		}
-	} else if !errors.Is(err, os.ErrNotExist) {
+	selection := adapterStatePath(OptionalAdapterProfilesDir, name, "")
+	current, err := readAdapterStateBytes(selection)
+	if err != nil {
 		return err
 	}
-	if err := os.Rename(stage, active); err != nil {
+	if current != nil && !trustedRootProfileFile(selection) {
+		return errors.New("current profile path is not a safe regular root-owned file")
+	}
+	next, err := os.ReadFile(stage)
+	if err != nil {
 		return err
 	}
-	return syncAdapterProfileDirectory()
+	if bytes.Equal(current, next) {
+		return nil
+	}
+	// A valid current profile is the rollback target. If the current
+	// selection is corrupted, preserve an independently verified previous
+	// profile instead of teaching rollback to select invalid resources.
+	var previous []byte
+	if current != nil {
+		if _, _, err := ReadOptionalAdapterProfile(name, selection); err == nil {
+			previous = current
+		} else {
+			old := adapterStatePath(OptionalAdapterProfilesDir, name, ".previous")
+			if _, exists, err := ReadOptionalAdapterProfile(name, old); err == nil && exists {
+				previous, err = readAdapterStateBytes(old)
+				if err != nil {
+					return err
+				}
+			}
+		}
+	}
+	return switchAdapterSelection(OptionalAdapterProfilesDir, name, adapterSelectionTransition{
+		BeforeActive: current, AfterActive: next, AfterPrevious: previous,
+	})
 }
 
 func rollbackOptionalAdapter(name string) error {
 	if err := trustedAdapterProfilesDirectory(); err != nil {
 		return err
 	}
-	active := filepath.Join(OptionalAdapterProfilesDir, name+".json")
-	prev := filepath.Join(OptionalAdapterProfilesDir, name+".previous.json")
-	if _, exists, err := ReadOptionalAdapterProfile(name, prev); err != nil {
+	if err := reconcileAdapterSelection(OptionalAdapterProfilesDir, name); err != nil {
 		return err
-	} else if !exists {
-		// First activation: the built-in fallback is the previous selection.
-		// Keep the candidate as a recoverable inactive file.
-		return deactivateOptionalAdapter(name)
 	}
-	if _, err := os.Lstat(active); errors.Is(err, os.ErrNotExist) {
-		// Recover even if an interrupted operator action left no active file.
-		if err := os.Rename(prev, active); err != nil {
+	selection := adapterStatePath(OptionalAdapterProfilesDir, name, "")
+	current, err := readAdapterStateBytes(selection)
+	if err != nil {
+		return err
+	}
+	if current != nil && !trustedRootProfileFile(selection) {
+		return errors.New("current profile path is not a safe regular root-owned file")
+	}
+	prev := adapterStatePath(OptionalAdapterProfilesDir, name, ".previous")
+	_, found, err := ReadOptionalAdapterProfile(name, prev)
+	if err != nil {
+		return err
+	}
+	var next, afterPrevious []byte
+	if found {
+		next, err = readAdapterStateBytes(prev)
+		if err != nil {
 			return err
 		}
-		return syncAdapterProfileDirectory()
-	} else if err != nil || !trustedRootProfileFile(active) {
-		return errors.New("current profile path is not a safe root-owned file")
+		if current != nil {
+			if _, _, err := ReadOptionalAdapterProfile(name, selection); err == nil {
+				afterPrevious = current
+			}
+		}
+	} else if current == nil {
+		return errors.New("no active profile or previous rollback selection")
 	}
-	// The current profile may be invalid; the previous profile is verified.
-	// Linux RENAME_EXCHANGE atomically swaps the two root-controlled names;
-	// no momentarily absent profile or implicit version fallback is exposed.
-	if err := renameAdapterProfilesExchange(active, prev); err != nil {
-		return err
+	var inactive []byte
+	if next == nil {
+		inactive = current
 	}
-	return syncAdapterProfileDirectory()
+	return switchAdapterSelection(OptionalAdapterProfilesDir, name, adapterSelectionTransition{
+		BeforeActive: current, AfterActive: next, AfterPrevious: afterPrevious,
+		SaveInactive: next == nil, AfterInactive: inactive,
+	})
 }
 
 func trustedRootProfileFile(path string) bool {
@@ -318,13 +339,19 @@ func deactivateOptionalAdapter(name string) error {
 	if err := trustedAdapterProfilesDirectory(); err != nil {
 		return err
 	}
-	active := filepath.Join(OptionalAdapterProfilesDir, name+".json")
-	if !trustedRootProfileFile(active) {
-		return errors.New("no safe active profile to deactivate")
-	}
-	inactive := filepath.Join(OptionalAdapterProfilesDir, name+".inactive.json")
-	if err := os.Rename(active, inactive); err != nil {
+	if err := reconcileAdapterSelection(OptionalAdapterProfilesDir, name); err != nil {
 		return err
 	}
-	return syncAdapterProfileDirectory()
+	selection := adapterStatePath(OptionalAdapterProfilesDir, name, "")
+	if !trustedRootProfileFile(selection) {
+		return errors.New("no safe active profile to deactivate")
+	}
+	current, err := readAdapterStateBytes(selection)
+	if err != nil {
+		return err
+	}
+	return switchAdapterSelection(OptionalAdapterProfilesDir, name, adapterSelectionTransition{
+		BeforeActive: current, AfterActive: nil, AfterPrevious: nil,
+		SaveInactive: true, AfterInactive: current,
+	})
 }

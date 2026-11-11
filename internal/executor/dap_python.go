@@ -69,7 +69,7 @@ func (s *Server) debugLaunchPython(ctx context.Context, req Request) (response R
 	if python == "" {
 		python, modules, err = systemexec.PythonDebugpy()
 		if err != nil {
-			return fileError("python_debugpy_unavailable", "dependency", errors.New("trusted pinned Python debugpy 1.8.22 optional runtime unavailable"))
+			return fileError("python_debugpy_unavailable", "dependency", fmt.Errorf("trusted optional Python debugpy runtime unavailable: %w", err))
 		}
 	}
 	if blocked := s.beginActionAudit(req, "debug_launch", "worker", workspace+"\x00"+relative+"\x00python/"+mode, "developer_debugger"); blocked != nil {

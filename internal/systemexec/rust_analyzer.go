@@ -40,7 +40,7 @@ func RustAnalyzerResources() (string, string, string, error) {
 		if profileErr != nil {
 			return "", "", "", profileErr
 		}
-		const sourceSuffix = "/lib/rustlib/src/rust/library/core/src/lib.rs"
+		const sourceSuffix = "/lib/rustlib/src/rust/library"
 		source := entries["sysroot-source"]
 		if !strings.HasSuffix(source, sourceSuffix) {
 			return "", "", "", errors.New("rust_lsp_sysroot_layout_unsupported")

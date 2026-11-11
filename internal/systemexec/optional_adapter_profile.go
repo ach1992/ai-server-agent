@@ -172,10 +172,16 @@ func ValidateOptionalAdapterProfile(name string, p OptionalAdapterProfile) error
 		}
 	}
 	for role, path := range p.Entrypoints {
-		if role == "modules" {
+		if role == "modules" || (name == "rust-lsp" && role == "sysroot-source") {
 			info, err := os.Lstat(path)
-			if err != nil || !info.IsDir() || !TrustedStaticFile(filepath.Join(path, "debugpy", "adapter", "__main__.py")) {
+			if err != nil || !info.IsDir() {
+				return fmt.Errorf("adapter_profile_directory_entry_invalid_%s", role)
+			}
+			if role == "modules" && !TrustedStaticFile(filepath.Join(path, "debugpy", "adapter", "__main__.py")) {
 				return errors.New("adapter_profile_modules_root_invalid")
+			}
+			if role == "sysroot-source" && !TrustedStaticFile(filepath.Join(path, "core", "src", "lib.rs")) {
+				return errors.New("adapter_profile_rust_sysroot_root_untrusted")
 			}
 			continue
 		}
@@ -233,20 +239,27 @@ func validateOptionalAdapterFields(name string, p OptionalAdapterProfile) error 
 	}
 	for _, role := range roles {
 		path := p.Entrypoints[role]
-		covered, isTreeRoot := false, false
+		covered, isTreeRoot, treeCovered := false, false, false
 		for _, a := range p.Artifacts {
 			if a.Kind == "file" && path == a.Path {
 				covered = true
 			}
 			if a.Kind == "tree" && (path == a.Path || strings.HasPrefix(path, a.Path+string(filepath.Separator))) {
 				covered = true
-				isTreeRoot = path == a.Path
+				isTreeRoot = isTreeRoot || path == a.Path
+				treeCovered = true
 			}
 		}
 		if !covered {
 			return fmt.Errorf("adapter_profile_unpinned_entry_%s", role)
 		}
-		if isTreeRoot && role != "modules" {
+		if name == "rust-lsp" && role == "sysroot-source" && !isTreeRoot {
+			return errors.New("adapter_profile_rust_sysroot_requires_complete_tree")
+		}
+		if name == "javascript-browser" && role == "binary" && !treeCovered {
+			return errors.New("adapter_profile_browser_requires_complete_bundle")
+		}
+		if isTreeRoot && role != "modules" && !(name == "rust-lsp" && role == "sysroot-source") {
 			return fmt.Errorf("adapter_profile_untrusted_entry_%s", role)
 		}
 	}

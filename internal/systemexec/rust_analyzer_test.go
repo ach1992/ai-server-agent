@@ -13,7 +13,7 @@ func TestRustAnalyzerPinnedNativeExecutables(t *testing.T) {
 	}
 	root := RustCompilerDir
 	if profile, configured, err := ActiveOptionalAdapterProfile("rust-lsp"); err == nil && configured {
-		root = strings.TrimSuffix(profile.Entrypoints["sysroot-source"], "/lib/rustlib/src/rust/library/core/src/lib.rs")
+		root = strings.TrimSuffix(profile.Entrypoints["sysroot-source"], "/lib/rustlib/src/rust/library")
 	}
 	if b, c, r, err := RustAnalyzerResources(); err == nil && (b != expectedOptionalTestEntry(t, "rust-lsp", "analyzer", RustAnalyzerBinary) ||
 		c != expectedOptionalTestEntry(t, "rust-lsp", "rustc", RustCompilerBinary) || r != root) {
