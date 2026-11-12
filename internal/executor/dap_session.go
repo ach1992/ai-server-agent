@@ -512,10 +512,22 @@ type dapRuntimeEvidence struct {
 	finalDrainIncomplete bool // final buffered frames not yet fully reconciled
 }
 
+// A known successful DAP reply that only exceeds the presentation budget
+// is not an uncertain execution outcome; keep errors useful to AI callers.
+func debugCallFailure(err error) Response {
+	if errors.Is(err, errDAPResultTooLarge) {
+		return fileError("debug_result_too_large", "resource", fmt.Errorf("%w: %d-byte debugger reply budget; use a narrower request", err, dapMaxReply))
+	}
+	return fileError("debug_action_uncertain", "runtime", err)
+}
+
 func (s *Server) debugResult(req Request, d *dapState, result json.RawMessage, started time.Time, evidence ...*dapRuntimeEvidence) Response {
 	out, err := normalizeDebugResult(d.workspace, result)
 	if err != nil {
-		return fileError("debug_result_invalid", "runtime", err)
+		if errors.Is(err, errDAPResultTooLarge) {
+			return fileError("debug_result_too_large", "resource", err)
+		}
+		return fileError("debug_result_invalid", "data", err)
 	}
 	stage, events, dropped := d.peek()
 	if len(evidence) > 0 && evidence[0] != nil && evidence[0].finalDrainIncomplete && stage != "failed" {
@@ -756,10 +768,13 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 	defer cancel()
 	out, err := d.call(callCtx, command, args)
 	if err != nil {
+		if errors.Is(err, errDAPResultTooLarge) {
+			return debugCallFailure(err)
+		}
 		if d.adapter == "shell/bash-trap" && method == "configure" {
 			return shellDAPUncertain(d, "shell_dap_configuration_uncertain", err)
 		}
-		return fileError("debug_action_uncertain", "runtime", err)
+		return debugCallFailure(err)
 	}
 	if breakpointStat != nil {
 		stable := s.workerWorkspaceFile(ctx, *breakpointStat)

@@ -25,6 +25,8 @@ const (
 	lspPollInterval         = 20 * time.Millisecond
 )
 
+var errLSPDiagnosticsTooLarge = errors.New("lsp_diagnostics_result_too_large")
+
 type lspWire struct {
 	server    *Server
 	owner     Request
@@ -160,7 +162,11 @@ func (w *lspWire) next(ctx context.Context) (lspPacket, error) {
 			if event.Stream != "stdout" {
 				continue // Diagnostic stderr is never interpreted as JSON-RPC.
 			}
-			if len(w.input)+len(event.Data) > lspMaxFrameBytes+lspMaxHeaderBytes+4 {
+			// A broker event is up to 4 KiB, not one protocol frame. A
+			// completed 256 KiB frame may share this chunk with the next
+			// frame. Parsing immediately after each append keeps only an
+			// incomplete frame plus at most one event in memory.
+			if len(event.Data) > maxStdioEventBytes || len(w.input)+len(event.Data) > lspMaxFrameBytes+lspMaxHeaderBytes+4+maxStdioEventBytes {
 				return lspPacket{}, errors.New("lsp_output_frame_too_large")
 			}
 			w.input = append(w.input, event.Data...)
@@ -256,7 +262,7 @@ func (w *lspWire) recordDiagnostics(packet lspPacket) error {
 		return errors.New("lsp_invalid_diagnostics_notification")
 	}
 	if len(packet.Params) > codeMaxResultBytes {
-		return errors.New("lsp_diagnostics_notification_too_large: exceeds 128 KiB semantic result budget")
+		return fmt.Errorf("%w: notification exceeds %d-byte semantic budget; request a narrower diagnostic scope", errLSPDiagnosticsTooLarge, codeMaxResultBytes)
 	}
 	var payload struct {
 		URI         string          `json:"uri"`
@@ -283,14 +289,14 @@ func (w *lspWire) recordDiagnostics(packet lspPacket) error {
 		return errors.New("lsp_rust_diagnostics_version_required")
 	}
 	if len(payload.Diagnostics) > codeMaxResultBytes {
-		return errors.New("lsp_diagnostics_items_too_large: exceeds 128 KiB semantic result budget")
+		return fmt.Errorf("%w: items exceed %d-byte semantic budget; request a narrower diagnostic scope", errLSPDiagnosticsTooLarge, codeMaxResultBytes)
 	}
 	if len(payload.Diagnostics) == 0 || payload.Diagnostics[0] != '[' || !json.Valid(payload.Diagnostics) {
 		return errors.New("lsp_invalid_diagnostics_items")
 	}
 	report, err := json.Marshal(map[string]any{"kind": "full", "items": payload.Diagnostics})
 	if err != nil || len(report) > codeMaxResultBytes {
-		return errors.New("lsp_diagnostics_result_too_large")
+		return fmt.Errorf("%w: normalized diagnostics exceed %d-byte semantic budget; request a narrower diagnostic scope", errLSPDiagnosticsTooLarge, codeMaxResultBytes)
 	}
 	w.published[payload.URI] = report
 	return nil

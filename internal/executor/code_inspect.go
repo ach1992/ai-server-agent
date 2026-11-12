@@ -25,7 +25,12 @@ const (
 )
 const codeMaxTargetFiles = 16
 
-var errCodeTargetUnstable = errors.New("code_target_changed")
+var (
+	errCodeTargetUnstable = errors.New("code_target_changed")
+	errLSPResultTooLarge  = errors.New("lsp_result_too_large")
+	errCodeResultTooLarge = errors.New("code_result_too_large")
+	errLSPInvalidResult   = errors.New("lsp_invalid_result")
+)
 
 func (s *Server) codeInspect(parent context.Context, req Request) Response {
 	if req.Root || req.Approval || req.Workspace == "" || req.FileVersion == "" {
@@ -523,7 +528,18 @@ func codeInspectionFailure(err error) Response {
 	if strings.HasPrefix(err.Error(), "lsp_capability_not_supported: ") {
 		return fileError("code_capability_unsupported", "validation", err)
 	}
-	return fileError("code_inspection_failed", "runtime", err)
+	switch {
+	case errors.Is(err, errLSPResultTooLarge):
+		return fileError("lsp_result_too_large", "resource", err)
+	case errors.Is(err, errCodeResultTooLarge):
+		return fileError("code_result_too_large", "resource", err)
+	case errors.Is(err, errLSPDiagnosticsTooLarge):
+		return fileError("lsp_diagnostics_result_too_large", "resource", err)
+	case errors.Is(err, errLSPInvalidResult):
+		return fileError("lsp_invalid_result", "data", err)
+	default:
+		return fileError("code_inspection_failed", "runtime", err)
+	}
 }
 
 func (s *Server) workerGoInspection(ctx context.Context, req Request, goplsPath, file, source, method string, line, character int) (json.RawMessage, error) {
@@ -665,10 +681,10 @@ func (s *Server) workerLSPInspection(ctx context.Context, req Request, profile l
 			return nil, queryErr
 		}
 		if len(raw) > codeMaxResultBytes {
-			return nil, fmt.Errorf("lsp_result_too_large: %d bytes exceeds %d-byte semantic result budget; narrow the query or use workspace search", len(raw), codeMaxResultBytes)
+			return nil, fmt.Errorf("%w: %d bytes exceeds %d-byte semantic result budget; narrow the query or use workspace search", errLSPResultTooLarge, len(raw), codeMaxResultBytes)
 		}
 		if !json.Valid(raw) || strings.TrimSpace(string(raw)) == "" {
-			return nil, errors.New("lsp_invalid_result")
+			return nil, errLSPInvalidResult
 		}
 		return normalizeCodeLocations(workspace, raw)
 	}
@@ -860,7 +876,7 @@ func bindCodeLocationVersions(normalized json.RawMessage, versions map[string]st
 		return nil, err
 	}
 	if len(clean) > codeMaxResultBytes {
-		return nil, fmt.Errorf("code_result_too_large: normalized semantic result %d bytes exceeds %d-byte limit; request fewer references or use workspace search", len(clean), codeMaxResultBytes)
+		return nil, fmt.Errorf("%w: normalized semantic result %d bytes exceeds %d-byte limit; request fewer references or use workspace search", errCodeResultTooLarge, len(clean), codeMaxResultBytes)
 	}
 	return clean, nil
 }
@@ -873,12 +889,12 @@ func fileURI(path string) string { return (&url.URL{Scheme: "file", Path: path})
 func normalizeCodeLocations(workspace string, raw json.RawMessage) (json.RawMessage, error) {
 	var data any
 	if err := json.Unmarshal(raw, &data); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w: invalid semantic JSON: %v", errLSPInvalidResult, err)
 	}
 	var normalize func(any, int) (any, error)
 	normalize = func(value any, depth int) (any, error) {
 		if depth > 32 {
-			return nil, errors.New("lsp_result_too_deep")
+			return nil, fmt.Errorf("%w: nested semantic locations exceed supported depth", errLSPInvalidResult)
 		}
 		switch v := value.(type) {
 		case []any:
@@ -894,7 +910,7 @@ func normalizeCodeLocations(workspace string, raw json.RawMessage) (json.RawMess
 				if key == "uri" || key == "targetUri" {
 					str, ok := item.(string)
 					if !ok {
-						return nil, errors.New("lsp_location_malformed")
+						return nil, fmt.Errorf("%w: location URI is not a string", errLSPInvalidResult)
 					}
 					parsed, err := url.Parse(str)
 					if err != nil || parsed.Scheme != "file" || parsed.Host != "" || !filepath.IsAbs(parsed.Path) {
@@ -929,7 +945,7 @@ func normalizeCodeLocations(workspace string, raw json.RawMessage) (json.RawMess
 		return nil, err
 	}
 	if len(clean) > codeMaxResultBytes {
-		return nil, fmt.Errorf("code_result_too_large: normalized semantic result %d bytes exceeds %d-byte limit; request fewer references or use workspace search", len(clean), codeMaxResultBytes)
+		return nil, fmt.Errorf("%w: normalized semantic result %d bytes exceeds %d-byte limit; request fewer references or use workspace search", errCodeResultTooLarge, len(clean), codeMaxResultBytes)
 	}
 	return clean, nil
 }
