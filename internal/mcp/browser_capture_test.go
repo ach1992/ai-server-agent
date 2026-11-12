@@ -24,12 +24,8 @@ import (
 	mcpsdk "github.com/modelcontextprotocol/go-sdk/mcp"
 )
 
-func makeClientCaptureJPEG(t *testing.T, large bool) []byte {
+func makeClientCaptureJPEG(t *testing.T, edge int) []byte {
 	t.Helper()
-	edge := 48
-	if large {
-		edge = 256
-	}
 	img := image.NewRGBA(image.Rect(0, 0, edge, edge))
 	rng := rand.New(rand.NewSource(17))
 	for y := 0; y < edge; y++ {
@@ -41,8 +37,9 @@ func makeClientCaptureJPEG(t *testing.T, large bool) []byte {
 	if err := jpeg.Encode(&b, img, &jpeg.Options{Quality: 40}); err != nil {
 		t.Fatal(err)
 	}
-	if large && (b.Len() <= 16<<10 || b.Len() > 32<<10) {
-		t.Fatalf("invalid test JPEG boundary size=%d", b.Len())
+	if (edge == 360 && (b.Len() <= 32<<10 || b.Len() > browserCaptureTextRawBytes)) ||
+		(edge == 700 && (b.Len() <= browserCaptureTextRawBytes || b.Len() > 256<<10)) {
+		t.Fatalf("invalid test JPEG boundary size=%d for edge=%d", b.Len(), edge)
 	}
 	return b.Bytes()
 }
@@ -64,11 +61,11 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 		t.Fatal(err)
 	}
 	defer ln.Close()
-	small, large := makeClientCaptureJPEG(t, false), makeClientCaptureJPEG(t, true)
-	observed := make(chan executor.Request, 7)
+	small, medium, large := makeClientCaptureJPEG(t, 48), makeClientCaptureJPEG(t, 360), makeClientCaptureJPEG(t, 700)
+	observed := make(chan executor.Request, 8)
 	serverErrors := make(chan error, 1)
 	go func() {
-		for i := 0; i < 7; i++ {
+		for i := 0; i < 8; i++ {
 			c, er := ln.Accept()
 			if er != nil {
 				serverErrors <- er
@@ -82,8 +79,10 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 			}
 			observed <- req
 			payload := small
-			if i >= 2 && i != 4 && i != 5 {
+			if i == 2 || i == 3 {
 				payload = large
+			} else if i == 6 {
+				payload = medium
 			}
 			sha := sha256.Sum256(payload)
 			r := executor.Response{OK: true, Status: "captured", SessionID: "stdio_image_fixture", MIMEType: "image/jpeg", CaptureQuality: 40, OutputEncoding: "base64", Output: base64.StdEncoding.EncodeToString(payload), BytesSeen: int64(len(payload)), BytesReturned: int64(len(payload)), FileVersion: "sha256:" + hex.EncodeToString(sha[:])}
@@ -99,7 +98,7 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 				r.RegionVerified, r.CaptureCropX, r.CaptureCropY = true, 800, 40
 				r.CaptureWidth, r.CaptureHeight = 48, 48
 			}
-			if i == 6 {
+			if i == 7 {
 				// Executor proved the transfer was complete but the JPEG scan
 				// was not fully decodable. MCP MUST never synthesize image content
 				// or success from this explicit upstream failure.
@@ -177,8 +176,9 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 		{"base64", false, small, false, false, false},
 		{"base64", false, large, true, false, false},
 		{"image", false, large, false, true, false},
-		{"image", false, small, false, true, false}, // verified BASE Executor response has no capture_quality
-		{"image", false, small, false, true, true},  // explicit selected region through real SDK and authenticated Executor IPC
+		{"image", false, small, false, true, false},    // verified BASE Executor response has no capture_quality
+		{"image", false, small, false, true, true},     // explicit selected region through real SDK and authenticated Executor IPC
+		{"base64", false, medium, false, false, false}, // 32..64 KiB JPEG requires >32 KiB Base64 text
 	} {
 		got := call(test.mode, test.fit, test.region)
 		if got.IsError != test.wantError {
@@ -219,8 +219,15 @@ func TestBrowserSessionCaptureMCP(t *testing.T) {
 				t.Fatalf("text-only oversize disclosure or silent success: %+v", got)
 			}
 		} else {
-			if len(got.Content) != 1 || !strings.Contains(string(js), encoded) || len(got.Content[0].(*mcpsdk.TextContent).Text) > 32<<10 {
-				t.Fatalf("bounded base64 text fallback incomplete: %+v", got)
+			if len(got.Content) != 1 || len(got.Content[0].(*mcpsdk.TextContent).Text) > 96<<10 || strings.Contains(string(js), encoded) {
+				t.Fatalf("Base64 text not bounded or duplicated in structured metadata: %+v", got)
+			}
+			var delivered executor.Response
+			if err := json.Unmarshal([]byte(got.Content[0].(*mcpsdk.TextContent).Text), &delivered); err != nil || delivered.Output != encoded || delivered.BytesReturned != int64(len(test.payload)) {
+				t.Fatalf("Base64 was summarized, truncated, or mislabeled: %+v err=%v", delivered, err)
+			}
+			if len(test.payload) > 32<<10 && len(got.Content[0].(*mcpsdk.TextContent).Text) <= 32<<10 {
+				t.Fatalf("text-only Base64 was silently constrained by the generic 32 KiB fallback")
 			}
 		}
 	}

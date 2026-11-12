@@ -17,7 +17,7 @@ import (
 )
 
 const (
-	browserCaptureMaxBytes  = 32 << 10
+	browserCaptureMaxBytes  = 256 << 10
 	browserCapturePartChars = 8192
 )
 
@@ -46,8 +46,8 @@ type browserCaptureRegion struct {
 // session. No named artifact file, global artifact ID, URL or second storage
 // service is created: the pinned worker emits bounded base64 frames in the
 // existing per-session broker ring. All bytes are held by the current call
-// and discarded on session close. The tight 32 KiB bound fits the existing
-// 64 KiB broker event ring *even if the worker emits before the first read*.
+// and discarded on session close. The Browser-only bounded event ring retains
+// a complete 256 KiB JPEG burst even before the first read.
 func (s *Server) browserSessionCapture(ctx context.Context, req Request) Response {
 	entry, err := s.browserSessionEntry(req)
 	if err != nil {
@@ -128,7 +128,11 @@ func (s *Server) browserSessionCapture(ctx context.Context, req Request) Respons
 		if start.Reason == "capture_too_large" {
 			code = "too_large"
 			class = "resource"
-			message = "Screenshot exceeds the 32 KiB raw-byte cap; reduce quality/max_width or use the advanced Browser workflow"
+			limit := state.captureMaxBytes
+			if limit <= 0 {
+				limit = 32 << 10
+			}
+			message = fmt.Sprintf("Screenshot exceeds this installed Browser runner cap of %d KiB; reduce quality/max_width or use browser_session_image", limit>>10)
 		} else if start.Reason == "capture_invalid_region" && regionRequested {
 			code = "browser_capture_invalid_region"
 			class = "validation"
@@ -163,7 +167,7 @@ func (s *Server) browserSessionCapture(ctx context.Context, req Request) Respons
 	expectedParts := (base64.StdEncoding.EncodedLen(start.Size) + browserCapturePartChars - 1) / browserCapturePartChars
 	if start.Event != "capture_meta" || start.Mime != "image/jpeg" || start.Size < 4 || start.Size > browserCaptureMaxBytes ||
 		!qualityValid || actualQuality < 15 || actualQuality > p.Quality ||
-		start.Parts != expectedParts || expectedParts < 1 || expectedParts > 6 || len(start.SHA256) != 64 {
+		start.Parts != expectedParts || expectedParts < 1 || expectedParts > (base64.StdEncoding.EncodedLen(browserCaptureMaxBytes)+browserCapturePartChars-1)/browserCapturePartChars || len(start.SHA256) != 64 {
 		return uncertain()
 	}
 	if _, err = hex.DecodeString(start.SHA256); err != nil {

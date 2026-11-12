@@ -233,9 +233,9 @@ func (w *shellDAPWorker) consumeTrace(r *os.File) {
 		}
 		if len(fields) == 3 && fields[0] == "V" {
 			w.mu.Lock()
-			// The Executor's DAP result limit is 16 KiB. Budget the
-			// *whole* scalar snapshot below that limit rather than
-			// relying on a per-variable cap that permits 40*512 bytes.
+			// Keep the Bash scalar snapshot small (10 KiB) even though
+			// DAP now permits 128 KiB: this is a bounded snapshot, not
+			// an instruction to collect maximum-sized variables.
 			cost := len(fields[1]) + len(fields[2]) + 96
 			if len(w.variables) < 40 && len(fields[1]) <= 128 && len(fields[2]) <= 512 &&
 				w.variableBytes+cost <= 10<<10 {

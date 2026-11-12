@@ -25,8 +25,12 @@ const (
 	maxStdioEventBytes           = 4 << 10
 	maxStdioOutputBytes          = 64 << 10
 	maxStdioOutputEvents         = 64
-	maxStdioSessionAge           = time.Hour
-	completedSessionRetain       = 5 * time.Minute
+	// Only Browser and LSP need to retain a full large JPEG/JSON-RPC burst.
+	// Other consumers (including Terminal) keep their 64 KiB ring.
+	largeStdioOutputBytes  = 512 << 10
+	largeStdioOutputEvents = 192
+	maxStdioSessionAge     = time.Hour
+	completedSessionRetain = 5 * time.Minute
 )
 
 var (
@@ -886,7 +890,8 @@ func (w sessionEventWriter) Write(p []byte) (int, error) {
 		chunk := append([]byte(nil), p[:n]...)
 		w.entry.events = append(w.entry.events, stdioSessionEvent{Sequence: w.entry.lastSeq, Stream: w.stream, Data: chunk})
 		w.entry.bytes += n
-		for w.entry.bytes > maxStdioOutputBytes || len(w.entry.events) > maxStdioOutputEvents {
+		capBytes, capEvents := stdioOutputCapacity(w.entry.kind)
+		for w.entry.bytes > capBytes || len(w.entry.events) > capEvents {
 			w.entry.bytes -= len(w.entry.events[0].Data)
 			w.entry.events[0] = stdioSessionEvent{}
 			w.entry.events = w.entry.events[1:]
@@ -896,12 +901,20 @@ func (w sessionEventWriter) Write(p []byte) (int, error) {
 	return total, nil
 }
 
+func stdioOutputCapacity(kind string) (bytes, events int) {
+	if kind == "browser" || kind == "lsp" {
+		return largeStdioOutputBytes, largeStdioOutputEvents
+	}
+	return maxStdioOutputBytes, maxStdioOutputEvents
+}
+
 func (b *stdioSessionBroker) read(req Request, id string, after uint64, byteLimit int) (stdioSessionRead, error) {
 	e, err := b.get(req, id)
 	if err != nil {
 		return stdioSessionRead{}, err
 	}
-	if byteLimit < maxStdioEventBytes || byteLimit > maxStdioOutputBytes {
+	capBytes, _ := stdioOutputCapacity(e.kind)
+	if byteLimit < maxStdioEventBytes || byteLimit > capBytes {
 		return stdioSessionRead{}, errors.New("invalid session read limit")
 	}
 	e.mu.Lock()

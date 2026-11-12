@@ -163,7 +163,7 @@ func TestManagedBrowserSessionRunnerPinnedRuntime(t *testing.T) {
 	scriptCall := func(nonce, script string) map[string]any {
 		t.Helper()
 		wire, _ := json.Marshal(map[string]any{"type": "script", "nonce": nonce, "script": script})
-		if len(wire) > 16384 {
+		if len(wire) > 6*65536+512 {
 			t.Fatal("test script frame oversized")
 		}
 		if _, err := stdin.Write(append(wire, '\n')); err != nil {
@@ -188,6 +188,17 @@ console.log('same live page'); return await page.locator('#state').textContent()
 	stale := call(strings.Repeat("f", 32), []FlowStep{{Action: "click", Ref: newRef}})
 	if stale["ok"] != false || get(stale)[0].(map[string]any)["error"] != "invalid_ref" {
 		t.Fatalf("custom script retained stale accessibility refs: %+v", stale)
+	}
+	// Prove the real pinned Node/Playwright parser accepts exactly 64 KiB
+	// of JavaScript in one managed-session line, without a new process.
+	largePrefix, largeSuffix := "return 42; /*", "*/"
+	largeScript := largePrefix + strings.Repeat("x", (64<<10)-len(largePrefix)-len(largeSuffix)) + largeSuffix
+	if len(largeScript) != 64<<10 {
+		t.Fatal("bad 64 KiB script fixture")
+	}
+	largeResult := scriptCall(strings.Repeat("7", 32), largeScript)
+	if largeResult["ok"] != true || largeResult["value"] != float64(42) {
+		t.Fatalf("real 64 KiB Playwright script failed: %+v", largeResult)
 	}
 	failed := scriptCall(strings.Repeat("a", 32), `throw new Error('action specific failure')`)
 	if failed["ok"] != false || !strings.Contains(failed["error"].(string), "action specific failure") {

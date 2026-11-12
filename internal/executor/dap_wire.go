@@ -18,12 +18,14 @@ import (
 
 // DAP is the private-stream consumer of #66's existing worker process broker.
 // It owns only framed adapter semantics, never a second process registry.
+var errDAPResultTooLarge = errors.New("dap_result_too_large")
+
 const (
-	dapMaxFrame       = 64 << 10
+	dapMaxFrame       = 256 << 10
 	dapMaxHeader      = 1024
-	dapMaxReply       = 16 << 10
+	dapMaxReply       = 128 << 10
 	dapMaxEvents      = 24
-	dapMaxQueuedBytes = 16 << 10
+	dapMaxQueuedBytes = 128 << 10
 )
 
 type dapState struct {
@@ -215,7 +217,10 @@ func (d *dapState) acceptDeferredLaunchReply(packet dapPacket) (bool, error) {
 		return true, d.markUncertain(errors.New("dap_deferred_launch_failed_or_mismatched"))
 	}
 	if len(packet.Body) > dapMaxReply {
-		return true, d.markUncertain(errors.New("dap_deferred_launch_result_too_large"))
+		// This is a complete, identified successful launch reply; the
+		// presentation budget alone cannot make its completion unknown.
+		d.pendingLaunchSeq = 0
+		return true, fmt.Errorf("%w: deferred launch reply exceeds %d-byte budget; use narrower results", errDAPResultTooLarge, dapMaxReply)
 	}
 	d.pendingLaunchSeq = 0
 	return true, nil
@@ -338,7 +343,9 @@ func (d *dapState) callWithMode(ctx context.Context, command string, args any, d
 				return nil, fmt.Errorf("dap_%s_failed: %s", command, msg)
 			}
 			if len(packet.Body) > dapMaxReply {
-				return nil, d.markUncertain(errors.New("dap_result_too_large"))
+				// An intact successful identity-matched reply is known complete.
+				// Allow a narrower follow-up on the same session.
+				return nil, fmt.Errorf("%w: complete %d-byte reply exceeds %d-byte budget; inspect fewer variables or a narrower expression", errDAPResultTooLarge, len(packet.Body), dapMaxReply)
 			}
 			if len(packet.Body) == 0 {
 				ownReply = json.RawMessage(`{}`)
@@ -429,7 +436,10 @@ func (d *dapState) drainFrames(ctx context.Context, afterExit bool) bool {
 				return true
 			}
 		} else if packet.Type == "response" && d.pendingLaunchSeq != 0 {
-			if matched, err := d.acceptDeferredLaunchReply(packet); !matched || err != nil {
+			if matched, err := d.acceptDeferredLaunchReply(packet); !matched || err != nil && !errors.Is(err, errDAPResultTooLarge) {
+				// A mismatch or failed launch is still unproven. A complete,
+				// identity-matched successful reply may simply exceed the
+				// presentation budget; its completion is not uncertain.
 				d.markUncertain(errors.New("dap_drain_unexpected_deferred_response"))
 				return true
 			}
@@ -539,7 +549,7 @@ func normalizeDebugResult(workspace string, raw json.RawMessage) (json.RawMessag
 		return nil, err
 	}
 	if len(b) > dapMaxReply {
-		return nil, errors.New("dap_result_too_large")
+		return nil, fmt.Errorf("%w: normalized debugger result %d bytes exceeds %d-byte budget; inspect fewer variables or a narrower expression", errDAPResultTooLarge, len(b), dapMaxReply)
 	}
 	return b, nil
 }

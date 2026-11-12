@@ -167,7 +167,7 @@ func (s *Server) debugLaunchPHP(ctx context.Context, req Request) (response Resp
 		"supportsVariableType": true, "supportsRunInTerminalRequest": false,
 	})
 	if err != nil {
-		return fileError("php_dap_initialize_failed", "runtime", err)
+		return debugDAPOperationFailure(err, "php_dap_initialize_failed", "runtime")
 	}
 	_, err = d.callDeferredLaunch(callCtx, map[string]any{
 		"request": "launch", "type": "php", "name": "Agent PHP CLI",
@@ -180,7 +180,7 @@ func (s *Server) debugLaunchPHP(ctx context.Context, req Request) (response Resp
 		"console": "internalConsole", "stopOnEntry": req.DebugStopOnEntry, "maxConnections": 1,
 	})
 	if err != nil {
-		return fileError("php_dap_launch_failed", "runtime", err)
+		return debugDAPOperationFailure(err, "php_dap_launch_failed", "runtime")
 	}
 	latest := s.workerWorkspaceFile(ctx, statReq)
 	if !latest.OK || latest.FileVersion != req.FileVersion {

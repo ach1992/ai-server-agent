@@ -470,11 +470,11 @@ func (s *Server) debugLaunch(ctx context.Context, req Request) (response Respons
 	defer cancel()
 	_, err = d.call(initCtx, "initialize", map[string]any{"adapterID": "go", "clientID": "ai-server-agent", "linesStartAt1": true, "columnsStartAt1": true, "pathFormat": "path", "supportsVariableType": true, "supportsRunInTerminalRequest": false})
 	if err != nil {
-		return fileError("debug_initialize_failed", "runtime", err)
+		return debugDAPOperationFailure(err, "debug_initialize_failed", "runtime")
 	}
 	_, err = d.call(initCtx, "launch", map[string]any{"mode": "exec", "program": filename, "stopOnEntry": req.DebugStopOnEntry, "outputMode": "remote"})
 	if err != nil {
-		return fileError("debug_launch_failed", "runtime", err)
+		return debugDAPOperationFailure(err, "debug_launch_failed", "runtime")
 	}
 	// Delve executes the debuggee in a different process group. Do not give
 	// callers a working debugger session until the child's own process
@@ -512,10 +512,28 @@ type dapRuntimeEvidence struct {
 	finalDrainIncomplete bool // final buffered frames not yet fully reconciled
 }
 
+// A complete, identity-verified DAP reply can be too large for presentation
+// without having an unknown outcome. Use the same public classification at
+// startup, normal actions and the Node parent/child handshake, while retaining
+// each operation's original failure code/class for other errors.
+func debugDAPOperationFailure(err error, fallbackCode, fallbackClass string) Response {
+	if errors.Is(err, errDAPResultTooLarge) {
+		return fileError("debug_result_too_large", "resource", fmt.Errorf("%w: %d-byte debugger reply budget; narrow the request where supported (no automatic retry)", err, dapMaxReply))
+	}
+	return fileError(fallbackCode, fallbackClass, err)
+}
+
+func debugCallFailure(err error) Response {
+	return debugDAPOperationFailure(err, "debug_action_uncertain", "runtime")
+}
+
 func (s *Server) debugResult(req Request, d *dapState, result json.RawMessage, started time.Time, evidence ...*dapRuntimeEvidence) Response {
 	out, err := normalizeDebugResult(d.workspace, result)
 	if err != nil {
-		return fileError("debug_result_invalid", "runtime", err)
+		if errors.Is(err, errDAPResultTooLarge) {
+			return fileError("debug_result_too_large", "resource", err)
+		}
+		return fileError("debug_result_invalid", "data", err)
 	}
 	stage, events, dropped := d.peek()
 	if len(evidence) > 0 && evidence[0] != nil && evidence[0].finalDrainIncomplete && stage != "failed" {
@@ -556,7 +574,7 @@ func (s *Server) debugResult(req Request, d *dapState, result json.RawMessage, s
 			break
 		}
 		if len(converted) == 0 {
-			return fileError("debug_result_too_large", "resource", errors.New("debugger result exceeds bounded output limit"))
+			return fileError("debug_result_too_large", "resource", fmt.Errorf("debugger result exceeds %d-byte response budget; inspect fewer variables or a narrower expression", dapMaxReply))
 		}
 		converted[0] = nil
 		converted = converted[1:]
@@ -756,10 +774,13 @@ func (s *Server) debugControl(ctx context.Context, req Request) (response Respon
 	defer cancel()
 	out, err := d.call(callCtx, command, args)
 	if err != nil {
+		if errors.Is(err, errDAPResultTooLarge) {
+			return debugCallFailure(err)
+		}
 		if d.adapter == "shell/bash-trap" && method == "configure" {
 			return shellDAPUncertain(d, "shell_dap_configuration_uncertain", err)
 		}
-		return fileError("debug_action_uncertain", "runtime", err)
+		return debugCallFailure(err)
 	}
 	if breakpointStat != nil {
 		stable := s.workerWorkspaceFile(ctx, *breakpointStat)

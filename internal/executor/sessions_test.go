@@ -222,7 +222,7 @@ func TestWorkerStdioSessionSecretsAndInputBounds(t *testing.T) {
 	if err := s.sessions.write(owner, id2, make([]byte, maxStdioInputBytes+1)); err == nil {
 		t.Fatal("oversize input accepted")
 	}
-	if _, err := s.sessions.read(owner, id2, 0, maxStdioOutputBytes+1); err == nil {
+	if _, err := s.sessions.read(owner, id2, 0, largeStdioOutputBytes+1); err == nil {
 		t.Fatal("oversize read accepted")
 	}
 }

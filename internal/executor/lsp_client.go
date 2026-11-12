@@ -18,10 +18,14 @@ import (
 // private stdio broker instead of opening a second process/control boundary.
 // This is deliberately not a public generic JSON-RPC or MCP session API.
 const (
-	lspMaxFrameBytes  = 128 << 10
-	lspMaxHeaderBytes = 1024
-	lspPollInterval   = 20 * time.Millisecond
+	// Bound server replies independently from the larger didOpen/didChange payload.
+	lspMaxFrameBytes        = 256 << 10
+	lspMaxRequestFrameBytes = 6*codeMaxDocumentBytes + 64<<10 // worst-case JSON escaping plus envelope
+	lspMaxHeaderBytes       = 1024
+	lspPollInterval         = 20 * time.Millisecond
 )
+
+var errLSPDiagnosticsTooLarge = errors.New("lsp_diagnostics_result_too_large")
 
 type lspWire struct {
 	server    *Server
@@ -50,7 +54,7 @@ func (w *lspWire) send(v any) error {
 	if err != nil {
 		return err
 	}
-	if len(body) == 0 || len(body) > lspMaxFrameBytes {
+	if len(body) == 0 || len(body) > lspMaxRequestFrameBytes {
 		return errors.New("lsp_request_too_large")
 	}
 	frame := make([]byte, 0, len(body)+80)
@@ -122,23 +126,31 @@ func readLSPFrame(buffer []byte) (body []byte, consumed int, err error) {
 }
 
 func (w *lspWire) next(ctx context.Context) (lspPacket, error) {
-	for {
-		if body, consumed, err := readLSPFrame(w.input); err != nil {
-			return lspPacket{}, err
-		} else if consumed > 0 {
-			var packet lspPacket
-			if err := json.Unmarshal(body, &packet); err != nil || packet.JSONRPC != "2.0" {
-				return lspPacket{}, errors.New("lsp_invalid_jsonrpc_frame")
-			}
-			w.input = w.input[consumed:]
-			if packet.Method == "textDocument/publishDiagnostics" {
-				if err := w.recordDiagnostics(packet); err != nil {
-					return lspPacket{}, err
-				}
-			}
-			return packet, nil
+	// The broker may return several independently framed notifications/replies
+	// in one read. Parse incrementally so a valid burst larger than one LSP
+	// frame does not produce a false lsp_output_frame_too_large failure.
+	parse := func() (lspPacket, bool, error) {
+		body, consumed, err := readLSPFrame(w.input)
+		if err != nil || consumed == 0 {
+			return lspPacket{}, false, err
 		}
-		state, err := w.server.sessions.read(w.owner, w.sessionID, w.cursor, maxStdioOutputBytes)
+		var packet lspPacket
+		if err := json.Unmarshal(body, &packet); err != nil || packet.JSONRPC != "2.0" {
+			return lspPacket{}, false, errors.New("lsp_invalid_jsonrpc_frame")
+		}
+		w.input = w.input[consumed:]
+		if packet.Method == "textDocument/publishDiagnostics" {
+			if err := w.recordDiagnostics(packet); err != nil {
+				return lspPacket{}, false, err
+			}
+		}
+		return packet, true, nil
+	}
+	for {
+		if packet, found, err := parse(); found || err != nil {
+			return packet, err
+		}
+		state, err := w.server.sessions.read(w.owner, w.sessionID, w.cursor, largeStdioOutputBytes)
 		if err != nil {
 			return lspPacket{}, err
 		}
@@ -150,10 +162,17 @@ func (w *lspWire) next(ctx context.Context) (lspPacket, error) {
 			if event.Stream != "stdout" {
 				continue // Diagnostic stderr is never interpreted as JSON-RPC.
 			}
-			if len(w.input)+len(event.Data) > lspMaxFrameBytes+lspMaxHeaderBytes+4 {
+			// A broker event is up to 4 KiB, not one protocol frame. A
+			// completed 256 KiB frame may share this chunk with the next
+			// frame. Parsing immediately after each append keeps only an
+			// incomplete frame plus at most one event in memory.
+			if len(event.Data) > maxStdioEventBytes || len(w.input)+len(event.Data) > lspMaxFrameBytes+lspMaxHeaderBytes+4+maxStdioEventBytes {
 				return lspPacket{}, errors.New("lsp_output_frame_too_large")
 			}
 			w.input = append(w.input, event.Data...)
+			if packet, found, err := parse(); found || err != nil {
+				return packet, err
+			}
 		}
 		if len(state.Events) != 0 {
 			continue
@@ -239,8 +258,11 @@ func (w *lspWire) replyToServer(packet lspPacket) error {
 // unopened/out-of-scope document URIs. The caller still proves the worker
 // file_version after receiving the result, including for versionless push.
 func (w *lspWire) recordDiagnostics(packet lspPacket) error {
-	if len(packet.ID) != 0 || len(packet.Params) > 16<<10 {
+	if len(packet.ID) != 0 {
 		return errors.New("lsp_invalid_diagnostics_notification")
+	}
+	if len(packet.Params) > codeMaxResultBytes {
+		return fmt.Errorf("%w: notification exceeds %d-byte semantic budget; request a narrower diagnostic scope", errLSPDiagnosticsTooLarge, codeMaxResultBytes)
 	}
 	var payload struct {
 		URI         string          `json:"uri"`
@@ -266,13 +288,15 @@ func (w *lspWire) recordDiagnostics(packet lspPacket) error {
 	if _, synthetic := w.initialSyntheticVersion[payload.URI]; synthetic && payload.Version == nil {
 		return errors.New("lsp_rust_diagnostics_version_required")
 	}
-	if len(payload.Diagnostics) == 0 || len(payload.Diagnostics) > 16<<10 ||
-		payload.Diagnostics[0] != '[' || !json.Valid(payload.Diagnostics) {
+	if len(payload.Diagnostics) > codeMaxResultBytes {
+		return fmt.Errorf("%w: items exceed %d-byte semantic budget; request a narrower diagnostic scope", errLSPDiagnosticsTooLarge, codeMaxResultBytes)
+	}
+	if len(payload.Diagnostics) == 0 || payload.Diagnostics[0] != '[' || !json.Valid(payload.Diagnostics) {
 		return errors.New("lsp_invalid_diagnostics_items")
 	}
 	report, err := json.Marshal(map[string]any{"kind": "full", "items": payload.Diagnostics})
-	if err != nil || len(report) > 16<<10 {
-		return errors.New("lsp_diagnostics_result_too_large")
+	if err != nil || len(report) > codeMaxResultBytes {
+		return fmt.Errorf("%w: normalized diagnostics exceed %d-byte semantic budget; request a narrower diagnostic scope", errLSPDiagnosticsTooLarge, codeMaxResultBytes)
 	}
 	w.published[payload.URI] = report
 	return nil

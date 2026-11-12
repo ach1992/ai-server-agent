@@ -161,14 +161,14 @@ func (s *Server) debugLaunchShell(ctx context.Context, req Request) (response Re
 		"supportsVariableType": true, "supportsRunInTerminalRequest": false,
 	})
 	if err != nil {
-		return fileError("shell_dap_initialize_failed", "runtime", err)
+		return debugDAPOperationFailure(err, "shell_dap_initialize_failed", "runtime")
 	}
 	_, err = d.call(callCtx, "launch", map[string]any{
 		"program": program, "cwd": workspace, "stopOnEntry": req.DebugStopOnEntry,
 		"fileVersion": req.FileVersion,
 	})
 	if err != nil {
-		return fileError("shell_dap_launch_failed", "runtime", err)
+		return debugDAPOperationFailure(err, "shell_dap_launch_failed", "runtime")
 	}
 	after := s.workerWorkspaceFile(ctx, statReq)
 	if !after.OK || after.FileVersion != req.FileVersion {

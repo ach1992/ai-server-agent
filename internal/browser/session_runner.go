@@ -211,7 +211,7 @@ const AsyncFunction = Object.getPrototypeOf(async function () {}).constructor;
 const reply = data => process.stdout.write('ASA_BROWSER_SESSION ' + JSON.stringify(data) + '\n');
 // The ready handshake advertises explicit quality-fitting support. Older
 // runners omit this flag; their default screenshot protocol remains valid.
-reply({ event: 'ready', fit_quality: true, capture_region: true, image_staging: true });
+reply({ event: 'ready', fit_quality: true, capture_region: true, image_staging: true, capture_max_bytes: 262144, script_max_bytes: 65536 });
 try {
   // Browser actions remain capped at 128. Read-only 8 KiB ZIP windows have
   // a distinct *finite* budget: 8192 windows = at most 64 MiB of streamed
@@ -221,7 +221,7 @@ try {
   let traceReads = 0;
   const maxTraceReads = 8192;
   for await (const line of createInterface({input: process.stdin, crlfDelay: Infinity})) {
-    if (Buffer.byteLength(line, 'utf8') > 16384) {
+    if (Buffer.byteLength(line, 'utf8') > 6*65536+512) {
       reply({ event: 'error', reason: 'session_input_limit' }); break;
     }
     let input;
@@ -245,7 +245,7 @@ try {
     // Screenshot is an explicit, bounded image consumer. Opt-in fit_quality
     // keeps the SAME viewport clip but tries at most three JPEG qualities.
     // The default retains exactly one attempt at the requested quality.
-    // No oversized image is emitted into the 64 KiB broker event ring,
+    // No oversized image is emitted into the bounded Browser event ring,
     // written to disk, included in audit, or silently cropped/rescaled.
     if (input?.type === 'capture' && typeof input.nonce === 'string' && /^[0-9a-f]{32}$/.test(input.nonce) &&
         Number.isInteger(input.quality) && input.quality >= 15 && input.quality <= 70 &&
@@ -287,9 +287,9 @@ try {
           jpeg = await page.screenshot({type:'jpeg',quality,animations:'allow',caret:'hide',
             fullPage:false,clip,timeout:attemptTimeout});
           actualQuality = quality;
-          if (jpeg.length >= 4 && jpeg.length <= 32768) break;
+          if (jpeg.length >= 4 && jpeg.length <= 262144) break;
         }
-        if (jpeg.length < 4 || jpeg.length > 32768) {
+        if (jpeg.length < 4 || jpeg.length > 262144) {
           reply({event:'error',nonce:input.nonce,reason:'capture_too_large'}); continue;
         }
         const payload = jpeg.toString('base64');
@@ -645,7 +645,7 @@ try {
     if (input?.type === 'script' && typeof input.nonce === 'string' &&
         /^[0-9a-f]{32}$/.test(input.nonce) &&
         typeof input.script === 'string' && input.script.trim() &&
-        Buffer.byteLength(input.script, 'utf8') <= 15360) {
+        Buffer.byteLength(input.script, 'utf8') <= 65536) {
       state.refs.clear();
       const logs = [];
       let logBytes = 0;
