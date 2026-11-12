@@ -166,7 +166,7 @@ func (s *Server) debugLaunchPython(ctx context.Context, req Request) (response R
 		"supportsRunInTerminalRequest": false,
 	})
 	if err != nil {
-		return fileError("python_dap_initialize_failed", "runtime", err)
+		return debugDAPOperationFailure(err, "python_dap_initialize_failed", "runtime")
 	}
 	args := map[string]any{
 		"type": "debugpy", "request": "launch", "name": "Agent Python",
@@ -192,7 +192,7 @@ func (s *Server) debugLaunchPython(ctx context.Context, req Request) (response R
 	// and configurationDone. The common DAP wire already has this path.
 	_, err = d.callDeferredLaunch(ctxInit, args)
 	if err != nil {
-		return fileError("python_dap_launch_failed", "runtime", err)
+		return debugDAPOperationFailure(err, "python_dap_launch_failed", "runtime")
 	}
 	after := s.workerWorkspaceFile(ctx, st)
 	if !after.OK || after.FileVersion != req.FileVersion {

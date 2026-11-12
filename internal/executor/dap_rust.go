@@ -164,7 +164,7 @@ func (s *Server) debugLaunchRust(ctx context.Context, req Request) (response Res
 		"supportsRunInTerminalRequest": false,
 	})
 	if err != nil {
-		return fileError("rust_dap_initialize_failed", "runtime", err)
+		return debugDAPOperationFailure(err, "rust_dap_initialize_failed", "runtime")
 	}
 	_, err = d.callDeferredLaunch(initCtx, map[string]any{
 		"request": "launch", "type": "lldb-dap", "name": "Agent Rust target",
@@ -172,7 +172,7 @@ func (s *Server) debugLaunchRust(ctx context.Context, req Request) (response Res
 		"stopOnEntry": req.DebugStopOnEntry,
 	})
 	if err != nil {
-		return fileError("rust_dap_launch_failed", "runtime", err)
+		return debugDAPOperationFailure(err, "rust_dap_launch_failed", "runtime")
 	}
 	latest := s.workerWorkspaceFile(ctx, st)
 	if !latest.OK || latest.FileVersion != req.FileVersion {

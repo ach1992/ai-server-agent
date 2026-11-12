@@ -436,7 +436,10 @@ func (d *dapState) drainFrames(ctx context.Context, afterExit bool) bool {
 				return true
 			}
 		} else if packet.Type == "response" && d.pendingLaunchSeq != 0 {
-			if matched, err := d.acceptDeferredLaunchReply(packet); !matched || err != nil {
+			if matched, err := d.acceptDeferredLaunchReply(packet); !matched || err != nil && !errors.Is(err, errDAPResultTooLarge) {
+				// A mismatch or failed launch is still unproven. A complete,
+				// identity-matched successful reply may simply exceed the
+				// presentation budget; its completion is not uncertain.
 				d.markUncertain(errors.New("dap_drain_unexpected_deferred_response"))
 				return true
 			}

@@ -246,7 +246,7 @@ func (s *Server) debugLaunchNode(ctx context.Context, req Request) (response Res
 		"supportsRunInTerminalRequest": false,
 	})
 	if err != nil {
-		return fileError("javascript_dap_initialize_failed", "runtime", err)
+		return debugDAPOperationFailure(err, "javascript_dap_initialize_failed", "runtime")
 	}
 	launch := map[string]any{
 		"request": "launch", "type": "pwa-node", "name": "Agent Node", "program": program,
@@ -264,17 +264,17 @@ func (s *Server) debugLaunchNode(ctx context.Context, req Request) (response Res
 	}
 	_, err = d.callDeferredLaunch(protocolCtx, launch)
 	if err != nil {
-		return fileError("javascript_dap_parent_launch_failed", "runtime", err)
+		return debugDAPOperationFailure(err, "javascript_dap_parent_launch_failed", "runtime")
 	}
 	// js-debug's parent protocol must be configured before it discovers a
 	// single Node target. Child breakpoints are configured later through
 	// the SAME public debug_breakpoints/debug_configure contract.
 	if _, err = d.call(protocolCtx, "configurationDone", map[string]any{}); err != nil {
-		return fileError("javascript_dap_parent_configure_failed", "runtime", err)
+		return debugDAPOperationFailure(err, "javascript_dap_parent_configure_failed", "runtime")
 	}
 	targetID, err := d.receiveTypedNodeChild(protocolCtx)
 	if err != nil {
-		return fileError("javascript_dap_child_reverse_rejected", "security", err)
+		return debugDAPOperationFailure(err, "javascript_dap_child_reverse_rejected", "security")
 	}
 	child, err := waitPinnedNodeDAPPeer(protocolCtx, e, s.workerUID, sock)
 	if err != nil {
@@ -297,13 +297,13 @@ func (s *Server) debugLaunchNode(ctx context.Context, req Request) (response Res
 		"supportsRunInTerminalRequest": false,
 	})
 	if err != nil {
-		return fileError("javascript_dap_child_initialize_failed", "runtime", err)
+		return debugDAPOperationFailure(err, "javascript_dap_child_initialize_failed", "runtime")
 	}
 	_, err = d.callDeferredLaunch(protocolCtx, map[string]any{
 		"request": "launch", "type": adapterType, "name": "Agent local JavaScript target", "__pendingTargetId": targetID,
 	})
 	if err != nil {
-		return fileError("javascript_dap_child_launch_failed", "runtime", err)
+		return debugDAPOperationFailure(err, "javascript_dap_child_launch_failed", "runtime")
 	}
 	stable := s.workerWorkspaceFile(ctx, snapshot)
 	if !stable.OK || stable.FileVersion != req.FileVersion {
