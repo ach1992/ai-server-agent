@@ -380,14 +380,18 @@ type browserStdioState struct {
 	fitQualitySupported   bool   // advertised at ready by newer Agent-provided runners
 	regionSupported       bool   // advertised at ready by region-aware runners
 	imageStagingSupported bool   // optional <=1 MiB private per-session JPEG with pinned windows
+	captureMaxBytes       int    // ready-advertised; older runners support only 32 KiB
+	scriptMaxBytes        int    // ready-advertised; older runners support only 15 KiB
 	credentialRef         string // isolated session derived from a protected service credential
 	credentialAuthOK      bool   // deny further Browser actions after an unverified credential login
 }
 
 const (
-	browserSessionMaxScript = 110 << 10
-	browserSessionMaxFrame  = 18 << 10
-	browserSessionMaxCalls  = 128
+	browserSessionMaxScript       = 110 << 10
+	browserSessionMaxFrame        = 18 << 10
+	browserSessionMaxCalls        = 128
+	managedBrowserScriptBytes     = 64 << 10
+	managedBrowserScriptWireBytes = 6*managedBrowserScriptBytes + 512 // worst-case JSON escape + envelope
 )
 
 func browserSessionError(code, class string, err error) Response {
@@ -617,6 +621,14 @@ func (s *Server) browserSessionOpen(ctx context.Context, req Request) Response {
 	entry.browser.fitQualitySupported = reply.FitQuality
 	entry.browser.regionSupported = reply.CaptureRegion
 	entry.browser.imageStagingSupported = reply.ImageStaging
+	entry.browser.captureMaxBytes = 32 << 10
+	if reply.CaptureMaxBytes > 0 && reply.CaptureMaxBytes <= browserCaptureMaxBytes {
+		entry.browser.captureMaxBytes = reply.CaptureMaxBytes
+	}
+	entry.browser.scriptMaxBytes = 15 << 10
+	if reply.ScriptMaxBytes > 0 && reply.ScriptMaxBytes <= managedBrowserScriptBytes {
+		entry.browser.scriptMaxBytes = reply.ScriptMaxBytes
+	}
 	entry.browser.mu.Unlock()
 	if req.BrowserSandbox {
 		if verifyErr := s.verifyManagedBrowserSandbox(entry); verifyErr != nil {
@@ -631,23 +643,25 @@ func (s *Server) browserSessionOpen(ctx context.Context, req Request) Response {
 }
 
 type browserSessionFrame struct {
-	Event         string          `json:"event"`
-	Nonce         string          `json:"nonce,omitempty"`
-	Reason        string          `json:"reason,omitempty"`
-	Result        json.RawMessage `json:"result,omitempty"`
-	Mime          string          `json:"mime,omitempty"`
-	FitQuality    bool            `json:"fit_quality,omitempty"`
-	CaptureRegion bool            `json:"capture_region,omitempty"`
-	ImageStaging  bool            `json:"image_staging,omitempty"`
-	Region        json.RawMessage `json:"region,omitempty"`
-	Quality       json.RawMessage `json:"quality,omitempty"` // missing vs explicit zero/null matters for legacy compatibility
-	Size          int             `json:"size,omitempty"`
-	SHA256        string          `json:"sha256,omitempty"`
-	Parts         int             `json:"parts,omitempty"`
-	Index         int             `json:"index,omitempty"`
-	Data          string          `json:"data,omitempty"`
-	Offset        int64           `json:"offset,omitempty"`
-	ChunkSHA256   string          `json:"chunk_sha256,omitempty"`
+	Event           string          `json:"event"`
+	Nonce           string          `json:"nonce,omitempty"`
+	Reason          string          `json:"reason,omitempty"`
+	Result          json.RawMessage `json:"result,omitempty"`
+	Mime            string          `json:"mime,omitempty"`
+	FitQuality      bool            `json:"fit_quality,omitempty"`
+	CaptureRegion   bool            `json:"capture_region,omitempty"`
+	ImageStaging    bool            `json:"image_staging,omitempty"`
+	CaptureMaxBytes int             `json:"capture_max_bytes,omitempty"`
+	ScriptMaxBytes  int             `json:"script_max_bytes,omitempty"`
+	Region          json.RawMessage `json:"region,omitempty"`
+	Quality         json.RawMessage `json:"quality,omitempty"` // missing vs explicit zero/null matters for legacy compatibility
+	Size            int             `json:"size,omitempty"`
+	SHA256          string          `json:"sha256,omitempty"`
+	Parts           int             `json:"parts,omitempty"`
+	Index           int             `json:"index,omitempty"`
+	Data            string          `json:"data,omitempty"`
+	Offset          int64           `json:"offset,omitempty"`
+	ChunkSHA256     string          `json:"chunk_sha256,omitempty"`
 }
 
 // The same broker event ring/cursor used by LSP/DAP is the sole output owner.
@@ -687,7 +701,7 @@ func (s *Server) browserSessionReadFrame(ctx context.Context, req Request, state
 		if err := ctx.Err(); err != nil {
 			return browserSessionFrame{}, err
 		}
-		result, err := s.sessions.read(req, id, state.cursor, maxStdioOutputBytes)
+		result, err := s.sessions.read(req, id, state.cursor, largeStdioOutputBytes)
 		if err != nil {
 			return browserSessionFrame{}, err
 		}
@@ -727,7 +741,7 @@ func (s *Server) browserSessionScript(ctx context.Context, req Request) Response
 	if err != nil {
 		return browserSessionError("browser_session_not_found", "authorization", errSessionNotFound)
 	}
-	if strings.TrimSpace(req.Content) == "" || len(req.Content) > maxStdioInputBytes-1024 {
+	if strings.TrimSpace(req.Content) == "" || len(req.Content) > managedBrowserScriptBytes {
 		return browserSessionError("invalid_browser_script", "validation", errors.New("nonempty Playwright script required within session frame budget"))
 	}
 	timeout := time.Duration(req.TimeoutMS) * time.Millisecond
@@ -745,6 +759,11 @@ func (s *Server) browserSessionScript(ctx context.Context, req Request) Response
 	if state.uncertain {
 		return browserSessionError("browser_session_uncertain", "state", errors.New("prior Browser action completion unverified; close this session"))
 	}
+	if len(req.Content) > state.scriptMaxBytes {
+		r := browserSessionError("browser_script_capacity_unavailable", "compatibility", fmt.Errorf("installed Browser runner supports at most %d script bytes; reopen with the upgraded Agent/Executor runner or split the script", state.scriptMaxBytes))
+		r.SessionID, r.Status = entry.id, "not_executed"
+		return r
+	}
 	var random [16]byte
 	if _, err := rand.Read(random[:]); err != nil {
 		return browserSessionError("browser_nonce_unavailable", "security", err)
@@ -755,12 +774,19 @@ func (s *Server) browserSessionScript(ctx context.Context, req Request) Response
 		Nonce  string `json:"nonce"`
 		Script string `json:"script"`
 	}{Type: "script", Nonce: nonce, Script: req.Content})
-	if err != nil || len(payload)+1 > maxStdioInputBytes {
-		return browserSessionError("input_too_large", "validation", errors.New("encoded Playwright script exceeds existing session frame budget"))
+	if err != nil || len(payload)+1 > managedBrowserScriptWireBytes {
+		return browserSessionError("input_too_large", "validation", errors.New("encoded Playwright script exceeds bounded 64 KiB script budget"))
 	}
-	if err := s.workerStdioWrite(req, entry.id, append(payload, '\n')); err != nil {
-		state.uncertain = true
-		return browserSessionError("browser_session_action_uncertain", "state", errors.New("Playwright script delivery unverified; close before retry"))
+	// Preserve the shared 16 KiB broker write bound; split only this
+	// prevalidated, ordered Browser line while holding its action lock.
+	payload = append(payload, '\n')
+	for len(payload) > 0 {
+		n := min(len(payload), maxStdioInputBytes)
+		if err := s.workerStdioWrite(req, entry.id, payload[:n]); err != nil {
+			state.uncertain = true
+			return browserSessionError("browser_session_action_uncertain", "state", fmt.Errorf("Playwright script delivery unverified: %w; close before retry", err))
+		}
+		payload = payload[n:]
 	}
 	frameCtx, cancel := context.WithTimeout(ctx, timeout+time.Second)
 	defer cancel()

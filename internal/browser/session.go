@@ -295,8 +295,8 @@ func (m *Manager) SessionScript(ctx context.Context, opts SessionOptions) (execu
 	if opts.SessionID == "" || opts.Workspace == "" || strings.TrimSpace(opts.Script) == "" {
 		return browserError("invalid_browser_script", "validation", "workspace, session_id and nonempty script are required"), nil
 	}
-	if len(opts.Script) > 15<<10 {
-		return browserError("input_too_large", "validation", "script exceeds the existing 16 KiB managed-session frame; use a shorter script"), nil
+	if len(opts.Script) > 64<<10 {
+		return browserError("input_too_large", "validation", "script exceeds the 64 KiB managed-session limit; use a shorter script or run a file-based tool"), nil
 	}
 	timeout, err := normalizeRunTimeout(opts.TimeoutMS)
 	if err != nil {
@@ -313,6 +313,11 @@ func (m *Manager) SessionScript(ctx context.Context, opts SessionOptions) (execu
 	})
 	if err != nil {
 		return browserUnknown("browser script transport", err, false), nil
+	}
+	if len(opts.Script) > 15<<10 && !resp.OK && resp.ErrorCode == "invalid_browser_script" {
+		r := browserError("browser_script_capacity_unavailable", "compatibility", "installed Executor supports only the original 15 KiB script; upgrade the Agent and Executor together")
+		r.SessionID, r.Status = opts.SessionID, "not_executed"
+		return r, nil
 	}
 	return resp, nil
 }

@@ -13,7 +13,7 @@ import (
 // consumer of broker #66. Protocol input never takes stdioSession.mu: the
 // broker wait/stop path acquires d.mu after e.mu, so reading/writing through
 // e.mu while the DAP wire holds d.mu could deadlock at adapter exit.
-const dapStdioQueueLimit = 64 << 10
+const dapStdioQueueLimit = 2 * dapMaxFrame // tolerate one complete larger response and bounded in-flight output
 
 type dapStdoutQueue struct {
 	mu      sync.Mutex

@@ -577,22 +577,27 @@ page.screenshot = async options => {
 	if fail["event"] != "error" || fail["reason"] != "capture_too_large" || img != nil {
 		t.Fatalf("oversize capture was not explicit: %v", fail)
 	}
-	impossible, out := capture(strings.Repeat("a", 32), 70, 1024, true)
-	if impossible["event"] != "error" || impossible["reason"] != "capture_too_large" || out != nil {
-		t.Fatalf("incompressible screenshot bypassed finite quality fitting: %v", impossible)
+	// With the enlarged JPEG budget the formerly impossible screenshot now
+	// succeeds at the intermediate quality, without cropping or rescaling.
+	fittedNoise, fittedNoiseBytes := capture(strings.Repeat("a", 32), 70, 1024, true)
+	if fittedNoise["event"] != "capture_meta" || len(fittedNoiseBytes) <= 32<<10 || len(fittedNoiseBytes) > 256<<10 ||
+		fittedNoise["quality"].(float64) >= 70 {
+		t.Fatalf("finite JPEG quality fitting failed for a 256 KiB viewport: %v (%d bytes)", fittedNoise, len(fittedNoiseBytes))
 	}
-	// Quality fitting is explicitly opt-in: a high-detail but limited-area
-	// page is rejected unchanged, while the same requested viewport clip
-	// fits under the SAME 32 KiB raw-byte budget with lower JPEG quality.
+	if _, er := jpeg.Decode(bytes.NewReader(fittedNoiseBytes)); er != nil {
+		t.Fatalf("real fitted 256 KiB JPEG cannot be decoded: %v", er)
+	}
+	// A previously oversized 640-pixel area should now succeed on the
+	// requested one-shot quality. Opt-in fitting must not silently reduce
+	// quality when a valid image already fits.
 	goTo(web.URL+"/fit-noise", strings.Repeat("0", 32))
 	normal, ordinary := capture(strings.Repeat("c", 32), 70, 640)
-	if normal["event"] != "error" || normal["reason"] != "capture_too_large" || ordinary != nil {
-		t.Fatalf("fit fixture did not exercise default refusal: %v (%d bytes)", normal, len(ordinary))
+	if normal["event"] != "capture_meta" || len(ordinary) <= 32<<10 || len(ordinary) > 256<<10 || normal["quality"].(float64) != 70 {
+		t.Fatalf("expanded default JPEG budget did not preserve quality: %v (%d bytes)", normal, len(ordinary))
 	}
 	fitted, fittedBytes := capture(strings.Repeat("d", 32), 70, 640, true)
-	if fitted["event"] != "capture_meta" || len(fittedBytes) == 0 || len(fittedBytes) > 32768 ||
-		fitted["quality"].(float64) >= 70 {
-		t.Fatalf("real JPEG fit failed to reduce quality inside budget: %v (%d bytes)", fitted, len(fittedBytes))
+	if fitted["event"] != "capture_meta" || len(fittedBytes) == 0 || len(fittedBytes) > 256<<10 || fitted["quality"].(float64) != 70 {
+		t.Fatalf("unnecessary fitting changed a valid JPEG: %v (%d bytes)", fitted, len(fittedBytes))
 	}
 	if _, er := jpeg.Decode(bytes.NewReader(fittedBytes)); er != nil {
 		t.Fatalf("real fitted JPEG not decodable: %v", er)

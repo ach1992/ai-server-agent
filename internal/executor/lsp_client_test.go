@@ -59,7 +59,7 @@ func fixtureLSPPacket(reader *bufio.Reader) (lspPacket, error) {
 			}
 		}
 	}
-	if length <= 0 || length > lspMaxFrameBytes {
+	if length <= 0 || length > lspMaxRequestFrameBytes {
 		return lspPacket{}, errors.New("invalid fixture frame")
 	}
 	payload := make([]byte, length)
@@ -181,6 +181,16 @@ func TestWorkerGoDefinitionUsesSharedStdioBroker(t *testing.T) {
 	if err != nil || !strings.Contains(string(largeLocation), `"line":1`) {
 		t.Fatalf("larger-source LSP definition: %s (%v)", largeLocation, err)
 	}
+	// The full 512 KiB source is an ordinary didOpen document, not a
+	// truncated first window. A valid Go comment fills the accepted boundary.
+	boundarySource := source + "//" + strings.Repeat("x", codeMaxDocumentBytes-len(source)-3) + "\n"
+	if len(boundarySource) != codeMaxDocumentBytes {
+		t.Fatalf("wrong exact-boundary source length: %d", len(boundarySource))
+	}
+	boundaryLocation, err := s.workerGoDefinition(ctx, owner, script, file, boundarySource, 2, 14)
+	if err != nil || !strings.Contains(string(boundaryLocation), `"line":1`) {
+		t.Fatalf("512 KiB complete LSP didOpen failed: %s (%v)", boundaryLocation, err)
+	}
 	// Keep the bounded frame/source limit: no partial didOpen or silent read.
 	_, err = s.workerGoDefinition(ctx, owner, script, file, strings.Repeat("x", codeMaxDocumentBytes+1), 2, 14)
 	if err == nil || !strings.Contains(err.Error(), "lsp_document_too_large") {
@@ -234,4 +244,18 @@ func TestWorkerGoDefinitionRealGopls(t *testing.T) {
 		t.Fatalf("real gopls did not locate Go declaration: %s", location)
 	}
 	t.Logf("real gopls definition resolved: %s", location)
+	// A real pinned gopls must consume and resolve a complete, version-pinned
+	// 512 KiB file, not merely the new framing fixture or a partial preview.
+	fullSource := source + "//" + strings.Repeat("q", codeMaxDocumentBytes-len(source)-3) + "\n"
+	if len(fullSource) != codeMaxDocumentBytes {
+		t.Fatal("invalid boundary source length")
+	}
+	if err := os.WriteFile(file, []byte(fullSource), 0600); err != nil {
+		t.Fatal(err)
+	}
+	fullLocation, err := s.workerGoDefinition(ctx, owner, wrapper, file, fullSource, 2, 14)
+	if err != nil || (!strings.Contains(string(fullLocation), `"line":1`) && !strings.Contains(string(fullLocation), `"line": 1`)) {
+		t.Fatalf("real gopls 512 KiB source not analyzed: %s (%v)", fullLocation, err)
+	}
+	t.Logf("real gopls full 512 KiB didOpen/definition resolved")
 }

@@ -19,7 +19,7 @@ import (
 // existing #55 worker-authority bounded source read and the #66 stdio broker.
 // Neither the privileged executor nor the network process reads project source
 // directly, and no LSP suggestion is auto-applied to disk.
-const codeMaxDocumentBytes = (lspMaxFrameBytes / 2) - 1
+const codeMaxDocumentBytes = 512 << 10 // full, version-pinned source; never truncate didOpen
 const codeMaxTargetFiles = 16
 
 var errCodeTargetUnstable = errors.New("code_target_changed")
@@ -661,7 +661,7 @@ func (s *Server) workerLSPInspection(ctx context.Context, req Request, profile l
 		if queryErr != nil {
 			return nil, queryErr
 		}
-		if len(raw) > 16<<10 || !json.Valid(raw) || strings.TrimSpace(string(raw)) == "" {
+		if len(raw) > 32<<10 || !json.Valid(raw) || strings.TrimSpace(string(raw)) == "" {
 			return nil, errors.New("invalid_or_oversized_lsp_result")
 		}
 		return normalizeCodeLocations(workspace, raw)
@@ -853,7 +853,7 @@ func bindCodeLocationVersions(normalized json.RawMessage, versions map[string]st
 	if err != nil {
 		return nil, err
 	}
-	if len(clean) > 16<<10 {
+	if len(clean) > 32<<10 {
 		return nil, errors.New("code_result_too_large")
 	}
 	return clean, nil
@@ -922,7 +922,7 @@ func normalizeCodeLocations(workspace string, raw json.RawMessage) (json.RawMess
 	if err != nil {
 		return nil, err
 	}
-	if len(clean) > 16<<10 {
+	if len(clean) > 32<<10 {
 		return nil, errors.New("code_result_too_large")
 	}
 	return clean, nil

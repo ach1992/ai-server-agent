@@ -28,7 +28,7 @@ func makeClientCaptureJPEG(t *testing.T, large bool) []byte {
 	t.Helper()
 	edge := 48
 	if large {
-		edge = 256
+		edge = 700
 	}
 	img := image.NewRGBA(image.Rect(0, 0, edge, edge))
 	rng := rand.New(rand.NewSource(17))
@@ -41,7 +41,7 @@ func makeClientCaptureJPEG(t *testing.T, large bool) []byte {
 	if err := jpeg.Encode(&b, img, &jpeg.Options{Quality: 40}); err != nil {
 		t.Fatal(err)
 	}
-	if large && (b.Len() <= 16<<10 || b.Len() > 32<<10) {
+	if large && (b.Len() <= 32<<10 || b.Len() > 256<<10) {
 		t.Fatalf("invalid test JPEG boundary size=%d", b.Len())
 	}
 	return b.Bytes()
