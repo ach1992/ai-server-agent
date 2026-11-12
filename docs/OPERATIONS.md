@@ -421,7 +421,7 @@ Repair first restarts and validates the existing services. If local health still
 sudo ai-server-agent-manage uninstall
 ```
 
-Safe uninstall removes services, the binary and management command while preserving configuration/state/users/workspace needed for reinstall or repair.
+Safe uninstall removes services, the binary, management command and `/usr/local/lib/ai-server-agent` (including optional language/debug adapter resources installed beneath that directory). It preserves configuration, state, logs, users/groups, `/srv/ai-workspace` and the separately installed `/opt/ai-server-agent` Browser runtime. Reinstallation does **not** implicitly restore removed optional adapter resources: independently re-provision them and check installed readiness before relying on those tools. Purge additionally removes the Agent-owned state and Browser runtime, while preserving the worker/workspace.
 
 ### Purge
 
