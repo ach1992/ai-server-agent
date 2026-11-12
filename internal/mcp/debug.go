@@ -77,7 +77,7 @@ func (s *Server) registerDebugTools() {
 		return s.callDebug(ctx, executor.Request{Action: "debug_action", DebugMethod: "evaluate", Workspace: in.Workspace, SessionID: in.SessionID, DebugFrameID: in.FrameID, DebugExpression: in.Expression})
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{
-		Name: "debug_variables", Description: "Inspect bounded variables (max 40) in the selected debugger; does not read source paths provided by the adapter.", Annotations: annotations(true, false, true, false),
+		Name: "debug_variables", Description: "Inspect up to 40 needed variables; DAP frame <=256 KiB, normalized reply <=128 KiB. Narrow scope on oversize; never read adapter-supplied paths.", Annotations: annotations(true, false, true, false),
 	}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugVariablesInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		return s.callDebug(ctx, executor.Request{Action: "debug_action", DebugMethod: "variables", Workspace: in.Workspace, SessionID: in.SessionID, DebugReference: in.VariablesReference})
 	})
@@ -113,7 +113,7 @@ func (s *Server) registerDebugTools() {
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "debug_scopes", Description: "Inspect variable scopes of a stopped Go/Rust/PHP/Python/Bash stack frame.", Annotations: annotations(true, false, true, false)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugFrameInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		return s.callDebug(ctx, executor.Request{Action: "debug_action", DebugMethod: "scopes", Workspace: in.Workspace, SessionID: in.SessionID, DebugFrameID: in.FrameID})
 	})
-	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "debug_status", Description: "Inspect current debug session state and bounded asynchronous DAP events, including explicit dropped-events accounting. Does not imply the debuggee terminated on client disconnect.", Annotations: annotations(true, false, false, false)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugOwnerInput) (*mcpsdk.CallToolResult, executor.Response, error) {
+	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "debug_status", Description: "Inspect debug state and actual-size DAP events (128 KiB max, explicit dropped-event count). Disconnect does not mean the debuggee exited.", Annotations: annotations(true, false, false, false)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugOwnerInput) (*mcpsdk.CallToolResult, executor.Response, error) {
 		return s.callDebug(ctx, executor.Request{Action: "debug_status", Workspace: in.Workspace, SessionID: in.SessionID})
 	})
 	mcpsdk.AddTool(s.mcp, &mcpsdk.Tool{Name: "debug_http_request", Description: "Explicitly dispatch ONE authorized, version-pinned PHP HTTP DAP request to an already verified local worker Service Job. Side-effecting GET; fixed 127.0.0.1 target, no redirects, no retries, no service start/stop. Inspect debug_status for result.", Annotations: annotations(false, true, false, true)}, func(ctx context.Context, _ *mcpsdk.CallToolRequest, in DebugOwnerInput) (*mcpsdk.CallToolResult, executor.Response, error) {

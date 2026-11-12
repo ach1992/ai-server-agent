@@ -1333,8 +1333,8 @@ func (s *Server) sqlOfflineNavigation(parent context.Context, req Request, sourc
 		locations = []sqlNavLocation{}
 	}
 	data, err := json.Marshal(locations)
-	if err != nil || len(data) > 16<<10 {
-		return fileError("sql_schema_result_too_large", "resource", errors.New("SQL navigation exceeded bounded output")), true
+	if err != nil || len(data) > codeMaxResultBytes {
+		return fileError("sql_schema_result_too_large", "resource", fmt.Errorf("SQL navigation result exceeds %d-byte semantic response budget; narrow the source query", codeMaxResultBytes)), true
 	}
 	return Response{OK: true, Status: "code_" + req.CodeMethod, OutputEncoding: "json", Output: string(data),
 		FileVersion: req.FileVersion, BytesReturned: int64(len(data)), BytesSeen: int64(len(data))}, true

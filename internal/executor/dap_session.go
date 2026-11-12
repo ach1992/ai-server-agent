@@ -556,7 +556,7 @@ func (s *Server) debugResult(req Request, d *dapState, result json.RawMessage, s
 			break
 		}
 		if len(converted) == 0 {
-			return fileError("debug_result_too_large", "resource", errors.New("debugger result exceeds bounded output limit"))
+			return fileError("debug_result_too_large", "resource", fmt.Errorf("debugger result exceeds %d-byte response budget; inspect fewer variables or a narrower expression", dapMaxReply))
 		}
 		converted[0] = nil
 		converted = converted[1:]

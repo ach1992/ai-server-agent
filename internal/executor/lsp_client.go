@@ -252,8 +252,11 @@ func (w *lspWire) replyToServer(packet lspPacket) error {
 // unopened/out-of-scope document URIs. The caller still proves the worker
 // file_version after receiving the result, including for versionless push.
 func (w *lspWire) recordDiagnostics(packet lspPacket) error {
-	if len(packet.ID) != 0 || len(packet.Params) > 32<<10 {
+	if len(packet.ID) != 0 {
 		return errors.New("lsp_invalid_diagnostics_notification")
+	}
+	if len(packet.Params) > codeMaxResultBytes {
+		return errors.New("lsp_diagnostics_notification_too_large: exceeds 128 KiB semantic result budget")
 	}
 	var payload struct {
 		URI         string          `json:"uri"`
@@ -279,12 +282,14 @@ func (w *lspWire) recordDiagnostics(packet lspPacket) error {
 	if _, synthetic := w.initialSyntheticVersion[payload.URI]; synthetic && payload.Version == nil {
 		return errors.New("lsp_rust_diagnostics_version_required")
 	}
-	if len(payload.Diagnostics) == 0 || len(payload.Diagnostics) > 32<<10 ||
-		payload.Diagnostics[0] != '[' || !json.Valid(payload.Diagnostics) {
+	if len(payload.Diagnostics) > codeMaxResultBytes {
+		return errors.New("lsp_diagnostics_items_too_large: exceeds 128 KiB semantic result budget")
+	}
+	if len(payload.Diagnostics) == 0 || payload.Diagnostics[0] != '[' || !json.Valid(payload.Diagnostics) {
 		return errors.New("lsp_invalid_diagnostics_items")
 	}
 	report, err := json.Marshal(map[string]any{"kind": "full", "items": payload.Diagnostics})
-	if err != nil || len(report) > 32<<10 {
+	if err != nil || len(report) > codeMaxResultBytes {
 		return errors.New("lsp_diagnostics_result_too_large")
 	}
 	w.published[payload.URI] = report

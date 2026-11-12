@@ -19,11 +19,11 @@ import (
 // DAP is the private-stream consumer of #66's existing worker process broker.
 // It owns only framed adapter semantics, never a second process registry.
 const (
-	dapMaxFrame       = 128 << 10
+	dapMaxFrame       = 256 << 10
 	dapMaxHeader      = 1024
-	dapMaxReply       = 32 << 10
+	dapMaxReply       = 128 << 10
 	dapMaxEvents      = 24
-	dapMaxQueuedBytes = 32 << 10
+	dapMaxQueuedBytes = 128 << 10
 )
 
 type dapState struct {

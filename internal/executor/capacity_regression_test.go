@@ -102,12 +102,12 @@ func TestLSPBurstParsesFramesIndividuallyAndSupports256KiB(t *testing.T) {
 	}
 }
 
-func TestDAP128KiBFrameAnd32KiBNormalizedResult(t *testing.T) {
+func TestDAP256KiBFrameAnd128KiBNormalizedResult(t *testing.T) {
 	receiver, sender := net.Pipe()
 	defer receiver.Close()
 	defer sender.Close()
 	d := &dapState{conn: receiver}
-	payload := strings.Repeat("z", 100<<10)
+	payload := strings.Repeat("z", 220<<10)
 	written := make(chan error, 1)
 	go func() {
 		written <- dapFrame(sender, map[string]any{"seq": 1, "type": "event", "event": "output", "body": map[string]any{"output": payload}})
@@ -122,11 +122,11 @@ func TestDAP128KiBFrameAnd32KiBNormalizedResult(t *testing.T) {
 	if !bytes.Contains(packet, []byte(payload)) {
 		t.Fatalf("DAP payload missing: %d bytes", len(packet))
 	}
-	body := json.RawMessage(`{"value":"` + strings.Repeat("x", 25<<10) + `"}`)
+	body := json.RawMessage(`{"value":"` + strings.Repeat("x", 100<<10) + `"}`)
 	if _, err := normalizeDebugResult("/workspace", body); err != nil {
-		t.Fatalf("valid 25KiB result was dropped: %v", err)
+		t.Fatalf("valid 100KiB result was dropped: %v", err)
 	}
-	body = json.RawMessage(`{"value":"` + strings.Repeat("x", 34<<10) + `"}`)
+	body = json.RawMessage(`{"value":"` + strings.Repeat("x", 132<<10) + `"}`)
 	if _, err := normalizeDebugResult("/workspace", body); err == nil {
 		t.Fatal("unbounded DAP result accepted")
 	}
@@ -252,20 +252,72 @@ func TestLegacyBrowserRunnerCapacityIsTruthfulAndNonPoisoning(t *testing.T) {
 	}
 }
 
-func TestLSPPushDiagnosticsAccepts32KiBButRejectsLarger(t *testing.T) {
+func TestLSPPushDiagnosticsAccepts128KiBButRejectsLarger(t *testing.T) {
 	uri := "file:///workspace/a.go"
 	w := &lspWire{opened: map[string]int{uri: 1}, published: map[string]json.RawMessage{}}
 	makePacket := func(n int) lspPacket {
 		params, _ := json.Marshal(map[string]any{"uri": uri, "version": 1, "diagnostics": []map[string]any{{"message": strings.Repeat("m", n)}}})
 		return lspPacket{JSONRPC: "2.0", Method: "textDocument/publishDiagnostics", Params: params}
 	}
-	if err := w.recordDiagnostics(makePacket(26 << 10)); err != nil {
-		t.Fatalf("legitimate 26KiB diagnostics were dropped: %v", err)
+	if err := w.recordDiagnostics(makePacket(90 << 10)); err != nil {
+		t.Fatalf("legitimate 90KiB diagnostics were dropped: %v", err)
 	}
 	if len(w.published[uri]) <= 16<<10 {
 		t.Fatal("test did not exceed historical diagnostics budget")
 	}
-	if err := w.recordDiagnostics(makePacket(34 << 10)); err == nil {
+	if err := w.recordDiagnostics(makePacket(132 << 10)); err == nil {
 		t.Fatal("unbounded diagnostics accepted")
+	}
+}
+
+// The response budgets are upper limits, not a request to fill them. Verify
+// complete, version-bound semantics above the old cap and explicit refusal
+// above the current cap without returning partial success.
+func TestSemantic128KiBNormalizedCrossFileResults(t *testing.T) {
+	makeInput := func(size int) json.RawMessage {
+		return json.RawMessage(`{"locations":[{"uri":"file:///workspace/main.go","details":"` + strings.Repeat("x", size) + `"}]}`)
+	}
+	full, err := normalizeCodeLocations("/workspace", makeInput(100<<10))
+	if err != nil || len(full) <= 32<<10 || !bytes.Contains(full, []byte(`"uri":"main.go"`)) {
+		t.Fatalf("legitimate 100KiB semantic output omitted: %d %v", len(full), err)
+	}
+	pinned, err := bindCodeLocationVersions(full, map[string]string{"main.go": "v1"})
+	if err != nil || !bytes.Contains(pinned, []byte(`"file_version":"v1"`)) || len(pinned) <= 32<<10 {
+		t.Fatalf("large semantic cross-file binding failed: %d %v", len(pinned), err)
+	}
+	_, err = normalizeCodeLocations("/workspace", makeInput(132<<10))
+	if err == nil || !strings.Contains(err.Error(), "code_result_too_large") {
+		t.Fatalf("oversized semantic result not explicitly refused: %v", err)
+	}
+}
+
+func TestDAPEventQueueUsesActualBytesWithin128KiB(t *testing.T) {
+	d := &dapState{stage: "running"}
+	d.acceptEvent(dapPacket{Type: "event", Event: "output", Body: json.RawMessage(`{"output":"` + strings.Repeat("x", 96<<10) + `"}`)})
+	if d.eventsDropped != 0 || len(d.events) != 1 || d.eventBytes <= 32<<10 || d.eventBytes >= dapMaxQueuedBytes {
+		t.Fatalf("valid large DAP event lost: events=%d bytes=%d dropped=%d", len(d.events), d.eventBytes, d.eventsDropped)
+	}
+	d.acceptEvent(dapPacket{Type: "event", Event: "output", Body: json.RawMessage(`{"output":"` + strings.Repeat("y", 132<<10) + `"}`)})
+	if d.eventsDropped != 1 || len(d.events) != 1 || d.eventBytes > dapMaxQueuedBytes {
+		t.Fatalf("oversize event was not counted and bounded: events=%d bytes=%d dropped=%d", len(d.events), d.eventBytes, d.eventsDropped)
+	}
+}
+
+func TestDAPStdioQueueRetainsLargeResponseWithoutPartialSuccess(t *testing.T) {
+	q := newDAPStdoutQueue()
+	data := bytes.Repeat([]byte("x"), 380<<10)
+	if n, err := q.Write(data); err != nil || n != len(data) {
+		t.Fatalf("bounded DAP queue rejected valid burst: %d %v", n, err)
+	}
+	received := make([]byte, len(data))
+	n, err, _ := q.consume(received)
+	if err != nil || n != len(data) || !bytes.Equal(received, data) {
+		t.Fatalf("DAP stdio lost a valid 380 KiB response: %d %v", n, err)
+	}
+	if _, err := q.Write(bytes.Repeat([]byte("z"), dapStdioQueueLimit+1)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err, _ := q.consume(received); err == nil || !strings.Contains(err.Error(), "dap_stdio_output_lost") {
+		t.Fatalf("DAP overflow not reported explicitly: %v", err)
 	}
 }

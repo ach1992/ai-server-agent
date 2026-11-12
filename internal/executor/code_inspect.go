@@ -19,7 +19,10 @@ import (
 // existing #55 worker-authority bounded source read and the #66 stdio broker.
 // Neither the privileged executor nor the network process reads project source
 // directly, and no LSP suggestion is auto-applied to disk.
-const codeMaxDocumentBytes = 512 << 10 // full, version-pinned source; never truncate didOpen
+const (
+	codeMaxDocumentBytes = 512 << 10 // complete version-pinned didOpen; never truncate source
+	codeMaxResultBytes   = 128 << 10 // semantic result ceiling; normal responses use actual length
+)
 const codeMaxTargetFiles = 16
 
 var errCodeTargetUnstable = errors.New("code_target_changed")
@@ -661,8 +664,11 @@ func (s *Server) workerLSPInspection(ctx context.Context, req Request, profile l
 		if queryErr != nil {
 			return nil, queryErr
 		}
-		if len(raw) > 32<<10 || !json.Valid(raw) || strings.TrimSpace(string(raw)) == "" {
-			return nil, errors.New("invalid_or_oversized_lsp_result")
+		if len(raw) > codeMaxResultBytes {
+			return nil, fmt.Errorf("lsp_result_too_large: %d bytes exceeds %d-byte semantic result budget; narrow the query or use workspace search", len(raw), codeMaxResultBytes)
+		}
+		if !json.Valid(raw) || strings.TrimSpace(string(raw)) == "" {
+			return nil, errors.New("lsp_invalid_result")
 		}
 		return normalizeCodeLocations(workspace, raw)
 	}
@@ -853,8 +859,8 @@ func bindCodeLocationVersions(normalized json.RawMessage, versions map[string]st
 	if err != nil {
 		return nil, err
 	}
-	if len(clean) > 32<<10 {
-		return nil, errors.New("code_result_too_large")
+	if len(clean) > codeMaxResultBytes {
+		return nil, fmt.Errorf("code_result_too_large: normalized semantic result %d bytes exceeds %d-byte limit; request fewer references or use workspace search", len(clean), codeMaxResultBytes)
 	}
 	return clean, nil
 }
@@ -922,8 +928,8 @@ func normalizeCodeLocations(workspace string, raw json.RawMessage) (json.RawMess
 	if err != nil {
 		return nil, err
 	}
-	if len(clean) > 32<<10 {
-		return nil, errors.New("code_result_too_large")
+	if len(clean) > codeMaxResultBytes {
+		return nil, fmt.Errorf("code_result_too_large: normalized semantic result %d bytes exceeds %d-byte limit; request fewer references or use workspace search", len(clean), codeMaxResultBytes)
 	}
 	return clean, nil
 }

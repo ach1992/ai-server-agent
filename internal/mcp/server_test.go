@@ -523,7 +523,7 @@ func TestOfficialSDKCanDiscoverTools(t *testing.T) {
 						t.Fatalf("screenshot schema missing %s: %s", field, input)
 					}
 				}
-				if !strings.Contains(tool.Description, "256 KiB") || !strings.Contains(tool.Description, "16 KiB") || !strings.Contains(tool.Description, "SHA256") || !strings.Contains(tool.Description, "base64") {
+				if !strings.Contains(tool.Description, "256 KiB") || !strings.Contains(tool.Description, "64 KiB") || !strings.Contains(tool.Description, "SHA256") || !strings.Contains(tool.Description, "base64") {
 					t.Fatal("screenshot missing limits, integrity, or text-only fallback description")
 				}
 			}
