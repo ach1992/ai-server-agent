@@ -326,9 +326,9 @@ The workflow intentionally does **not** treat a missing `bypass_actors` field fr
 
 ## 9. Preservation and removal
 
-Normal uninstall removes executable services/tooling while preserving configuration, Agent state, users, optional runtime data and workspace for reinstall/repair.
+Normal uninstall removes Agent services, binary, management command and `/usr/local/lib/ai-server-agent`, **including optional adapter resources stored beneath that directory**. It preserves Agent configuration/state/logs, identities, `/srv/ai-workspace` and the separate `/opt/ai-server-agent` Browser runtime for reinstall/repair. Reinstalling does not automatically re-provision removed optional adapters; check actual installed readiness before using them.
 
-Purge removes Agent-owned config/state/log/runtime and the `aiagent` identity, but intentionally preserves:
+Purge additionally removes Agent-owned config/state/log/runtime (including the Browser runtime) and the `aiagent`/`aibrowser` identities, but intentionally preserves:
 
 - `/srv/ai-workspace`;
 - `aiworker` and its group.
