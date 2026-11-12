@@ -16,8 +16,8 @@ const (
 	PHPActorPHARSHA256 = "b28bf6166e016d539fc2f2aec18ef918b12590e436a6f1ccbdf30b5bbdbdb16b"
 )
 
-// PHPActor returns only the exact root-owned pinned PHAR and a recognized
-// system-owned versioned PHP CLI path. PHP is optional and never part of the
+// PHPActor returns an operator-selected verified root-owned PHAR (or the
+// legacy bundled pin) with a recognized system-owned versioned PHP CLI. PHP is optional and never part of the
 // Agent control-plane dependency set. There is no PHP executable supplied
 // by a repository, Composer vendor folder or client argument.
 func PHPActor() (string, string, error) {
@@ -27,6 +27,14 @@ func PHPActor() (string, string, error) {
 	php := newestTrustedVersioned("/usr/bin", "php", 8, 2)
 	if php == "" {
 		return "", "", errors.New("php_lsp_trusted_php_not_found")
+	}
+	if entries, _, configured, profileErr := SelectedOptionalAdapter("php-lsp"); configured {
+		if profileErr != nil {
+			return "", "", profileErr
+		}
+		return php, entries["phar"], nil
+	} else if profileErr != nil {
+		return "", "", profileErr
 	}
 	if !TrustedStaticFile(PHPActorPHAR) {
 		return "", "", errors.New("php_lsp_untrusted_phar_resource")

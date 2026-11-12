@@ -36,6 +36,14 @@ func JavaScriptDAP() (node, adapter string, err error) {
 	if runtime.GOOS != "linux" || bashNodeDigests[runtime.GOARCH] == "" {
 		return "", "", errors.New("javascript_dap_unsupported_platform")
 	}
+	if entries, _, configured, profileErr := SelectedOptionalAdapter("javascript-dap"); configured {
+		if profileErr != nil {
+			return "", "", profileErr
+		}
+		return entries["node"], entries["cli"], nil
+	} else if profileErr != nil {
+		return "", "", profileErr
+	}
 	node = First(bashNodeBrowser, BashNodeOptional, WebNodeOptional)
 	if node == "" {
 		return "", "", errors.New("javascript_dap_trusted_node_unavailable")

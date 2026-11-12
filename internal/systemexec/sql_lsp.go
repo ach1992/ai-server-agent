@@ -36,7 +36,28 @@ func verifySQLLensModules(path string, rootOwned bool) error {
 // trusted env binary, with SQLLENS_NO_PLUGINS=1 to block dynamic imports,
 // and explicit per-document sql-postgres / sql-mysql language IDs. No DB
 // connection, credentials, URL, or project executable is accepted.
+func SQLLensResources() (node, cli string, err error) {
+	if entries, _, configured, profileErr := SelectedOptionalAdapter("sql-lsp"); configured {
+		if profileErr != nil {
+			return "", "", profileErr
+		}
+		return entries["node"], entries["cli"], nil
+	} else if profileErr != nil {
+		return "", "", profileErr
+	}
+	node, err = legacySQLLens()
+	if err != nil {
+		return "", "", err
+	}
+	return node, SQLLensCLI, nil
+}
+
 func SQLLens() (string, error) {
+	node, _, err := SQLLensResources()
+	return node, err
+}
+
+func legacySQLLens() (string, error) {
 	if runtime.GOOS != "linux" || bashNodeDigests[runtime.GOARCH] == "" {
 		return "", errors.New("sql_lsp_unsupported_platform")
 	}

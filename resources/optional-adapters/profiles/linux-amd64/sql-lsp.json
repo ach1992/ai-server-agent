@@ -1,0 +1,27 @@
+{
+  "schema_version": 1,
+  "adapter": "sql-lsp",
+  "version": "0.5.0",
+  "source": "npm ci --ignore-scripts --omit=dev; lockfile in resources/optional-adapters/sql-lsp",
+  "artifacts": [
+    {
+      "path": "/usr/local/lib/ai-server-agent/lsp/sql/sqllens/0.5.0/node_modules",
+      "kind": "tree",
+      "sha256": "0bb6017ec25b16ed25e9502dd2c4eac71719b7f7e3baa0b6c073d8cf9a24b758",
+      "file_count": 1289,
+      "dir_count": 111,
+      "max_bytes": 71303168
+    },
+    {
+      "path": "/opt/ai-server-agent/browser/node/bin/node",
+      "kind": "file",
+      "sha256": "f3432a45b03b2da0d270095fdd8813dc34cbea73f5fc8b18c7a384b7cf9b333a",
+      "max_bytes": 143654912
+    }
+  ],
+  "entrypoints": {
+    "node": "/opt/ai-server-agent/browser/node/bin/node",
+    "cli": "/usr/local/lib/ai-server-agent/lsp/sql/sqllens/0.5.0/node_modules/sqllens-language-server/bin/cli.js"
+  },
+  "source_sha256": "073154240b203ecf8120949aa0d6c792d3960c10a7e7419ad59abd3049cffb76"
+}

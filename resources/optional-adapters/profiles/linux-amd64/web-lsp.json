@@ -1,0 +1,28 @@
+{
+  "schema_version": 1,
+  "adapter": "web-lsp",
+  "version": "4.10.0",
+  "source": "npm ci --ignore-scripts --omit=dev; lockfile in resources/optional-adapters/web-lsp",
+  "artifacts": [
+    {
+      "path": "/usr/local/lib/ai-server-agent/lsp/web/4.10.0/node_modules",
+      "kind": "tree",
+      "sha256": "3792c170cae1c1b445c2440aa8d45f2f5cc0d02851589b679806b1e0176b0fa4",
+      "file_count": 4971,
+      "dir_count": 380,
+      "max_bytes": 94371840
+    },
+    {
+      "path": "/opt/ai-server-agent/browser/node/bin/node",
+      "kind": "file",
+      "sha256": "f3432a45b03b2da0d270095fdd8813dc34cbea73f5fc8b18c7a384b7cf9b333a",
+      "max_bytes": 143654912
+    }
+  ],
+  "entrypoints": {
+    "node": "/opt/ai-server-agent/browser/node/bin/node",
+    "html": "/usr/local/lib/ai-server-agent/lsp/web/4.10.0/node_modules/vscode-langservers-extracted/bin/vscode-html-language-server",
+    "css": "/usr/local/lib/ai-server-agent/lsp/web/4.10.0/node_modules/vscode-langservers-extracted/bin/vscode-css-language-server"
+  },
+  "source_sha256": "7f9cd2c88c4c980232ec715784550c6cf03ce73a25b0de21d156137bbd4308af"
+}

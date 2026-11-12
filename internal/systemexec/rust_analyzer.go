@@ -4,6 +4,7 @@ import (
 	"errors"
 	"path/filepath"
 	"runtime"
+	"strings"
 )
 
 const (
@@ -34,6 +35,23 @@ var rustCompilerExecutables = map[string]string{
 func RustAnalyzerResources() (string, string, string, error) {
 	if runtime.GOOS != "linux" || rustAnalyzerExecutables[runtime.GOARCH] == "" {
 		return "", "", "", errors.New("rust_lsp_unsupported_platform")
+	}
+	if entries, _, configured, profileErr := SelectedOptionalAdapter("rust-lsp"); configured {
+		if profileErr != nil {
+			return "", "", "", profileErr
+		}
+		const sourceSuffix = "/lib/rustlib/src/rust/library"
+		source := entries["sysroot-source"]
+		if !strings.HasSuffix(source, sourceSuffix) {
+			return "", "", "", errors.New("rust_lsp_sysroot_layout_unsupported")
+		}
+		sysroot := strings.TrimSuffix(source, sourceSuffix)
+		if sysroot == "" || !strings.HasPrefix(entries["rustc"], sysroot+"/bin/") {
+			return "", "", "", errors.New("rust_lsp_sysroot_compiler_mismatch")
+		}
+		return entries["analyzer"], entries["rustc"], sysroot, nil
+	} else if profileErr != nil {
+		return "", "", "", profileErr
 	}
 	if !Trusted(RustAnalyzerBinary) || !Trusted(RustCompilerBinary) ||
 		!TrustedStaticFile(filepath.Join(RustCompilerSysrootSource, "core", "src", "lib.rs")) {

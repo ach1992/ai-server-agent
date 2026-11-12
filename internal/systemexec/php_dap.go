@@ -1,17 +1,19 @@
 package systemexec
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"runtime"
+	"time"
 )
 
-// This optional, operator-managed PHP CLI DAP profile is a COMPLETE pinned
-// production-only tree built from xdebug/vscode-php-debug at exact upstream
-// commit 5cee2626f227e0ebe88df2c03a1a88b4b4295173 using scripts-disabled
-// npm ci (production dependencies only). The Agent never installs Node/PHP,
-// executes a project-supplied adapter, downloads modules, or opens TCP.
+// Optional PHP CLI DAP resources are either an administrator-selected
+// complete verified bundle with a runtime-tested PHP/Xdebug native ABI, or
+// the legacy pinned Debian 13 bundle/extension fallback. No project adapter,
+// implicit Node/PHP download, package scripts, or TCP listener is involved.
 const (
 	PHPDAPVersion      = "5cee2626f227e0ebe88df2c03a1a88b4b4295173"
 	PHPDAPDir          = "/usr/local/lib/ai-server-agent/dap/php/xdebug/" + PHPDAPVersion
@@ -39,6 +41,20 @@ func PHPDAP() (node, entrypoint, php, module string, err error) {
 	if runtime.GOOS != "linux" || phpDAPXdebugDigests[runtime.GOARCH] == "" {
 		return "", "", "", "", errors.New("php_dap_unsupported_platform")
 	}
+	if entries, _, configured, profileErr := SelectedOptionalAdapter("php-dap"); configured {
+		if profileErr != nil {
+			return "", "", "", "", profileErr
+		}
+		// This compatibility probe is deliberately version-agnostic: only a
+		// native Xdebug 3 extension that can actually load in the chosen PHP
+		// interpreter passes. The legacy Debian/PHP API pin remains a fallback.
+		if err := compatiblePHPXdebug(entries["php"], entries["xdebug"]); err != nil {
+			return "", "", "", "", err
+		}
+		return entries["node"], entries["cli"], entries["php"], entries["xdebug"], nil
+	} else if profileErr != nil {
+		return "", "", "", "", profileErr
+	}
 	release, err := os.ReadFile("/etc/os-release")
 	if err != nil || !rustDapDebian13(string(release)) {
 		return "", "", "", "", errors.New("php_dap_unverified_native_distribution")
@@ -63,4 +79,27 @@ func PHPDAP() (node, entrypoint, php, module string, err error) {
 		return "", "", "", "", fmt.Errorf("php_dap_xdebug_module_integrity_invalid: %w", err)
 	}
 	return node, PHPDAPCLI, PHPDAPBinary, PHPDAPXdebugModule, nil
+}
+
+// The native ABI cannot be inferred from a package version ceiling or a file
+// hash. Probe one isolated, trusted CLI invocation with project/site config
+// disabled, no user environment, and a hard deadline. Never load extensions
+// from an unverified profile or a workspace path.
+func compatiblePHPXdebug(php, module string) error {
+	if !Trusted(php) || !TrustedStaticFile(module) {
+		return errors.New("php_dap_native_runtime_untrusted")
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 4*time.Second)
+	defer cancel()
+	cmd := exec.CommandContext(ctx, php, "-n", "-d", "zend_extension="+module, "-r", "exit(extension_loaded('xdebug') && function_exists('xdebug_info') ? 0 : 1);")
+	cmd.Env = []string{"PATH=/usr/bin:/bin", "HOME=/nonexistent", "XDEBUG_MODE=off", "PHP_INI_SCAN_DIR="}
+	cmd.Stdout = nil
+	cmd.Stderr = nil
+	if err := cmd.Run(); err != nil {
+		if ctx.Err() != nil {
+			return errors.New("php_dap_xdebug_abi_probe_timeout")
+		}
+		return fmt.Errorf("php_dap_xdebug_abi_incompatible_or_load_failed: %w", err)
+	}
+	return nil
 }

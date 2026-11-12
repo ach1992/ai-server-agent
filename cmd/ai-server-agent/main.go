@@ -14,9 +14,13 @@ import (
 	"github.com/ach1992/ai-server-agent/internal/credential"
 	"github.com/ach1992/ai-server-agent/internal/executor"
 	mcpserver "github.com/ach1992/ai-server-agent/internal/mcp"
+	"github.com/ach1992/ai-server-agent/internal/systemexec"
 )
 
 func main() {
+	if len(os.Args) > 1 && os.Args[1] == "optional-adapter" {
+		os.Exit(systemexec.RunOptionalAdapter(os.Args[2:], os.Stdout, os.Stderr))
+	}
 	if len(os.Args) > 1 && os.Args[1] == "cache" {
 		os.Exit(cachemaintenance.Run(os.Args[2:], os.Stdout, os.Stderr))
 	}

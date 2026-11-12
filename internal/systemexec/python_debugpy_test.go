@@ -8,7 +8,7 @@ import (
 
 func TestPythonDebugpyPinnedTrustedOptionalRuntime(t *testing.T) {
 	if p, root, err := PythonDebugpy(); err == nil {
-		if p != newestTrustedVersioned("/usr/bin", "python", 3, 10) || root != PythonDebugpyModules {
+		if p != newestTrustedVersioned("/usr/bin", "python", 3, 10) || root != expectedOptionalTestEntry(t, "python-dap", "modules", PythonDebugpyModules) {
 			t.Fatalf("production selected unexpected Python adapter %s %s", p, root)
 		}
 	}

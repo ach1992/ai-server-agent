@@ -287,6 +287,49 @@ The updater still refuses a target that would reactivate an enabled retired
 Gateway bearer or whose incompatible secondary records could prevent service
 startup. No credential cleanup silently occurs during an update.
 
+## Optional adapter provisioning and version changes
+
+This **operator-selected**, optional resource mechanism applies only to installed Agent binaries that expose `ai-server-agent optional-adapter`. Older immutable releases (including v0.1.28) still use their compiled-in adapter pins and **cannot** activate these profiles by installing a JSON file alone. Agent core, OS-managed development CLIs and the separately coupled Browser runtime keep their established update paths. No general package manager or always-on updater is added.
+
+**Scope:** `bash-lsp`, `web-lsp`, `sql-lsp`, `python-dap`, `python-lsp`, `typescript-lsp`, `php-lsp`, `rust-lsp`, `rust-dap`, `javascript-dap`, `javascript-browser`, `php-dap`. The `javascript-browser` selection is only the local JavaScript DAP browser target: it does **not** independently update Playwright or the main Browser engine. LLDB's native helper/library files and the host loader ABI need matched verification on the intended distribution. An absent active profile selects the legacy built-in resources. An invalid selected profile fails with an actionable resource/ownership/digest error; it never falls back to an unverified alternate executable or project PATH. Rust profiles must cover the **whole standard-library source tree** passed to rust-analyzer (not only core/src/lib.rs); local JavaScript Browser DAP target profiles must cover the **whole selected Chromium runtime bundle**, including non-executable resources. Selected Browser DAP versions do not independently change the main Playwright/Browser engine. Profiles have one `schema_version: 1` JSON object with `adapter`, `version`, optional source receipt, `artifacts` and `entrypoints` (roles fixed by the adapter protocol; version and exact resource paths are operator-selected). Each artifact is a root-owned regular `file` or complete symlink-free `tree`, pinned by `sha256` and positive operator-selected `max_bytes`. Trees also record `file_count` and `dir_count` (zero subdirectories is valid). Each entrypoint must be included in one verified artifact. `source_sha256`, when supplied, records the original fetched artifact or named lockfile receipt; the administrator must **actually check** the authentic upstream download before staging—the source field is not an online certificate or a replacement for artifact verification.
+
+**Preparation (once per new compatible release):** choose the desired upstream version, retrieve it from the authentic publisher, verify its checksum/signature or official registry package integrity, and build a new versioned resource directory. Keep package scripts and plugins disabled for source-analysis adapters. For the three historically broken Node adapters, this repository includes the independently reproducible baseline `package.json` and **full `package-lock.json`** under `resources/optional-adapters/{bash-lsp,web-lsp,sql-lsp}/`. On a disposable worker-owned staging directory, use the appropriate lockfile with:
+
+```bash
+npm ci --ignore-scripts --omit=dev --no-audit --no-fund
+# Only inside the newly created staging tree: discard npm's generated .bin wrappers.
+rm -r node_modules/.bin
+```
+
+`npm ci` verifies every transitive registry integrity entry from the lockfile, but does not by itself verify a mutable upstream repository. Review/verify the lockfile and publisher artifacts first. Run the installed CLI's `inspect-tree` against the prepared `node_modules`, then install those exact bytes as root-owned readable files in a **new** dedicated directory beneath `/usr/local/lib/ai-server-agent`. Reject symlinks/unexpected files and preserve existing version folders. For debugpy, verify the official chosen Wheel's SHA-256 then safely extract its literal members (no `pip install` hooks or user site); its literal package layout need not match an outdated, source-embedded count. Adapt the version, entrypoints, artifact tree checksums/counts and selected Node/Python/native paths in a new candidate JSON. The baseline 11 sample **Linux amd64** manifests and the separately verified debugpy 1.8.21 alternate under `profiles/linux-amd64/alternates/` in `resources/optional-adapters/profiles/linux-amd64/` are examples for specific verified historical artifacts, **not** universal trusted manifests for other versions/architectures/hosts; compare source and host paths before use. For actual version updates, regenerate all affected expected hashes; never merely relabel the old bytes as a new version.
+
+For a build with this CLI, a typical non-destructive validation/selection sequence is:
+
+```bash
+# Read-only: deterministic digest, counts and byte size; adjust MAX_BYTES to the real bundle.
+/usr/local/bin/ai-server-agent optional-adapter inspect-tree /path/to/verified-staged/tree 140000000
+
+# Stage candidate JSON under a root-owned directory; ensure its resource paths
+# already point to the root-owned, immutable, verified installation.
+/usr/local/bin/ai-server-agent optional-adapter verify bash-lsp /usr/local/lib/ai-server-agent/adapter-profiles/candidates/bash-lsp.json
+python3 scripts/optional-adapter-smoke.py bash-lsp /usr/local/lib/ai-server-agent/adapter-profiles/candidates/bash-lsp.json
+
+# Root-only, serialized, revalidates complete resource provenance before switching.
+sudo /usr/local/bin/ai-server-agent optional-adapter activate bash-lsp /usr/local/lib/ai-server-agent/adapter-profiles/candidates/bash-lsp.json
+/usr/local/bin/ai-server-agent optional-adapter status bash-lsp
+
+# After a failed version switch: prior verified profile, or built-in fallback
+# on first activation. Explicit deactivation also selects built-in fallback.
+sudo /usr/local/bin/ai-server-agent optional-adapter rollback bash-lsp
+sudo /usr/local/bin/ai-server-agent optional-adapter deactivate bash-lsp
+
+# After an interrupted selection operation, status reports pending recovery;
+# explicitly reconcile under the existing root-only lifecycle lock.
+sudo /usr/local/bin/ai-server-agent optional-adapter recover bash-lsp
+```
+
+The `activate`/`rollback`/`deactivate`/`recover` commands use the existing root-only lifecycle management lock. The active selection is changed atomically, and a small root-owned `<adapter>.pending.json` intent allows recovery after interruption **without changing previous-good history before commit**. `status` reports `recovery: pending-root-reconciliation` when necessary; the next root lifecycle operation automatically reconciles first, or an operator can use `recover` alone. If the new selection never committed, recovery discards only the pending intent and keeps the original rollback state. If it committed, recovery finishes the matching previous/inactive state; unexpected files remain untouched and require manual investigation. Explicit `deactivate` clears stale previous-selection history, so the next activation rolls back to the built-in fallback. Identical activations do not overwrite previous-good history. Rollback preserves the displaced selection for later inspection; current sessions stay on their already-launched resources. Root-owned manifests/old version directories must not be removed while in use. A failure during switching requires `status` and (when pending) `recover` before retry; do not blindly repeat a privileged operation. **Never execute an agent build or a package from a worker-controlled directory as root.** The sample `scripts/optional-adapter-smoke.py` is an unprivileged, bounded protocol handshake, not an Agent MCP acceptance test: `code_symbols/definition/diagnostics` and real contained DAP `launch/configure/stop` through a connected client remain required after an authorized installed-Agent rollout. Profile verification proves integrity and trusted selection, not protocol compatibility, resource containment, debugger availability, or an update of the running Stable binary. SQLLens stays offline, with explicit dialect and disabled plugins/DB connections.
+
 ## Management commands
 
 Interactive management:

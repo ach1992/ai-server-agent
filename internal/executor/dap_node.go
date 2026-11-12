@@ -85,7 +85,7 @@ func (s *Server) debugLaunchNode(ctx context.Context, req Request) (response Res
 	if node == "" {
 		node, entry, err = systemexec.JavaScriptDAP()
 		if err != nil {
-			return fileError("javascript_dap_unavailable", "dependency", errors.New("trusted pinned Microsoft js-debug 1.140.0 and Node 24.18.1 are unavailable"))
+			return fileError("javascript_dap_unavailable", "dependency", fmt.Errorf("trusted optional JavaScript debugger and Node runtime unavailable: %w", err))
 		}
 	}
 	browserBinary := ""

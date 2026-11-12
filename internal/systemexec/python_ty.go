@@ -29,6 +29,14 @@ func TyPython() (string, error) {
 	if runtime.GOOS != "linux" || expected == "" {
 		return "", errors.New("python_ty_unsupported_platform")
 	}
+	if entries, _, configured, profileErr := SelectedOptionalAdapter("python-lsp"); configured {
+		if profileErr != nil {
+			return "", profileErr
+		}
+		return entries["binary"], nil
+	} else if profileErr != nil {
+		return "", profileErr
+	}
 	if !Trusted(PythonTyBinary) {
 		return "", errors.New("python_ty_untrusted_executable")
 	}

@@ -7,7 +7,7 @@ import (
 
 func TestJavaScriptBrowserOptionalPinnedExecutable(t *testing.T) {
 	browser, err := JavaScriptBrowser()
-	if err == nil && (runtime.GOOS != "linux" || runtime.GOARCH != "amd64" || browser != JavaScriptBrowserExecutableAMD64) {
+	if err == nil && (runtime.GOOS != "linux" || browser != expectedOptionalTestEntry(t, "javascript-browser", "binary", JavaScriptBrowserExecutableAMD64)) {
 		t.Fatalf("untrusted browser executable admitted: %q", browser)
 	}
 	if err != nil && browser != "" {

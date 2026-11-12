@@ -8,7 +8,7 @@ import (
 )
 
 func TestPHPActorTrustedRootAndPublishedArtifact(t *testing.T) {
-	if php, phar, err := PHPActor(); err == nil && (phar != PHPActorPHAR ||
+	if php, phar, err := PHPActor(); err == nil && (phar != expectedOptionalTestEntry(t, "php-lsp", "phar", PHPActorPHAR) ||
 		php != newestTrustedVersioned("/usr/bin", "php", 8, 2)) {
 		t.Fatalf("PHP LSP picked uncontrolled optional dependency: %q %q", php, phar)
 	}

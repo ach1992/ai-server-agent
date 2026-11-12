@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"sort"
 	"syscall"
 	"time"
 
@@ -25,6 +26,7 @@ type Component struct {
 	Services  []string `json:"services,omitempty"`
 	Ports     []string `json:"ports,omitempty"`
 	Notes     string   `json:"notes,omitempty"`
+	Version   string   `json:"version,omitempty"`
 }
 
 type FilesystemInfo struct {
@@ -83,15 +85,15 @@ func Build(c config.Config) Manifest {
 			{Name: "workspace-text-search", Required: false, Installed: systemexec.First("/usr/bin/rg") != "", Paths: []string{"/usr/bin/rg"}, Notes: "Optional trusted system ripgrep is required for workspace_search(mode=text). Without it, the tool returns search_engine_unavailable; structured worker file reads and shell/Git remain independently available. No automatic OS package installation."},
 			{Name: "terminal", Required: false, Installed: systemexec.First("/usr/bin/tmux") != "", Paths: []string{"/usr/bin/tmux"}, Notes: "Optional trusted root-owned, non-symlink tmux provides Control Mode. Worker panes additionally require trusted /usr/bin/setpriv, /usr/bin/env, a trusted bash (/usr/bin/bash or /bin/bash) and Agent-managed private worker HOME; both worker/root tmux sockets are executor-root-owned. This is not a core dependency."},
 			{Name: "go-language-server", Required: false, Installed: systemexec.First("/usr/local/bin/gopls", "/usr/bin/gopls") != "", Paths: []string{"/usr/local/bin/gopls", "/usr/bin/gopls"}, Notes: "Optional Go semantic-code intelligence. code_* requires exact aiworker file_version and does not install gopls or a Go toolchain."},
-			{Name: "typescript-language-server", Required: false, Installed: installed[optionalTypeScript], Paths: []string{systemexec.TypeScript7Library}, Notes: "Optional pinned native TypeScript 7.0.2 LSP for JavaScript/TypeScript. Administrator-controlled complete 110-file resource directory is validated for root ownership, no symlinks and per-architecture SHA-256. Missing or invalid adapters degrade only code_* for JS/TS; no node, global npm, automatic installer, project script or additional broker dependency."},
-			{Name: "python-language-server", Required: false, Installed: installed[optionalPythonTy], Paths: []string{systemexec.PythonTyBinary}, Notes: "Optional native Python ty 0.0.87 LSP. Only administrator-owned, per-architecture SHA-256 pinned binary is launched; does not execute Python source, install packages, use arbitrary project run commands or require a Python interpreter as a control-plane dependency. Not a replacement for Python DAP."},
-			{Name: "shell-language-server", Required: false, Installed: installed[optionalBashLSP], Paths: []string{systemexec.BashLSPDir}, Notes: "Optional Bash/POSIX sh LSP powered by bash-language-server 5.8.1, root-owned checksum-verified complete Node modules, Node v24.18.1 and ShellCheck v0.11.0. Dialect inferred from source shebang, shellcheck external-source execution disabled; no project command or auto-install, Shell DAP is a separate feasibility gate."},
-			{Name: "html-css-language-server", Required: false, Installed: installed[optionalWebLSP], Paths: []string{systemexec.WebLSPDir}, Notes: "Optional HTML/CSS semantic LSP via VS Code Language Servers 4.10.0; trusted Node with a pinned 4948-file root-owned transitive module tree. CSS diagnostics use validated push notifications; HTML structured symbols supported but not all markup problems produce diagnostics. Browser tools remain separately appropriate for render/layout assertions."},
-			{Name: "sql-language-server", Required: false, Installed: installed[optionalSQLLens], Paths: []string{systemexec.SQLLensDir}, Notes: "Optional offline-first SQL semantic LSP via SQLLens 0.5.0 pinned root-owned complete module tree and Node v24.18.1. Requires explicit postgres/mysql/mariadb dialect per call, no project plugin execution (SQLLENS_NO_PLUGINS=1), no user config loading and no DB connections. MariaDB uses MySQL-compatible grammar subset; DB metadata, migrations and vendor-specific semantics need separate acceptance."},
-			{Name: "rust-language-server", Required: false, Installed: installed[optionalRustLSP], Paths: []string{systemexec.RustAnalyzerDir, systemexec.RustCompilerDir}, Notes: "Optional Rust analyzer 2026-10-12 with fixed Rust 1.99.0 compiler and sysroot. Passive per-file LSP graph avoids Cargo metadata, build.rs and proc-macro execution; no automatic dependency resolution or Cargo builds."},
-			{Name: "php-language-server", Required: false, Installed: installed[optionalPHPActor], Paths: []string{systemexec.PHPActorDir}, Notes: "Optional Phpactor 2026.10.07.0 with SHA-256 pinned PHAR and trusted OS-managed PHP 8.x CLI (8.2 or newer); scans installed minor versions without an artificial upper minor bound. Disables php.ini, Composer execution and project configuration. Uses private worker-home index cache; PHP Xdebug DAP remains separate."},
-			{Name: "javascript-debugger", Required: false, Installed: installed[optionalJavaScriptDAP], Paths: []string{systemexec.JavaScriptDAPDir}, Notes: "Optional Microsoft js-debug 1.140.0 Node JavaScript DAP. Complete 60-file upstream bundle and Node v24.18.1 are content and root-provenance checked. Only one local Node target in a private peer-pinned Unix socket pair, atomically executor-owned cgroup-v2. Precompiled TypeScript source maps require an adjacent pinned .js.map and versioned .ts breakpoints; this resource readiness does not prove installed E2E or Browser/extension modes; no TCP/remote attach, runInTerminal or package-script autostart."},
-			{Name: "python-debugger", Required: false, Installed: installed[optionalPythonDAP], Paths: []string{systemexec.PythonDebugpyDir}, Notes: "Optional debugpy 1.8.22 Python script/module/unittest DAP (Python >=3.10). Exact pinned wheel and all 428 transitive files are verified root-owned; -I adapter launch ignores project/user Python site config. Requires executor-owned cgroup-v2 containment and exact worker source file_version. No implicit install or root/remote attach; installed modules alone do not prove a working debug session."},
+			{Name: "typescript-language-server", Required: false, Installed: installed[optionalTypeScript], Paths: optionalAdapterPaths("typescript-lsp", systemexec.TypeScript7Library), Notes: "Optional operator-selected native TypeScript LSP with complete root-owned verified resources. Legacy built-in selection is the stated fallback. No project script or arbitrary PATH execution.", Version: systemexec.OptionalAdapterVersion("typescript-lsp", systemexec.TypeScript7Version)},
+			{Name: "python-language-server", Required: false, Installed: installed[optionalPythonTy], Paths: optionalAdapterPaths("python-lsp", systemexec.PythonTyBinary), Notes: "Optional verified root-owned Python ty language server; independent of the Python debugger and project Python environment.", Version: systemexec.OptionalAdapterVersion("python-lsp", systemexec.PythonTyVersion)},
+			{Name: "shell-language-server", Required: false, Installed: installed[optionalBashLSP], Paths: optionalAdapterPaths("bash-lsp", systemexec.BashLSPDir), Notes: "Optional Bash LSP with verified complete Node modules, trusted Node and ShellCheck. Shell DAP is independent; no project command or automatic npm install.", Version: systemexec.OptionalAdapterVersion("bash-lsp", systemexec.BashLSPVersion)},
+			{Name: "html-css-language-server", Required: false, Installed: installed[optionalWebLSP], Paths: optionalAdapterPaths("web-lsp", systemexec.WebLSPDir), Notes: "Optional root-owned HTML/CSS LSP with a complete verified Node dependency tree. Browser render/layout inspection remains separate.", Version: systemexec.OptionalAdapterVersion("web-lsp", systemexec.WebLSPVersion)},
+			{Name: "sql-language-server", Required: false, Installed: installed[optionalSQLLens], Paths: optionalAdapterPaths("sql-lsp", systemexec.SQLLensDir), Notes: "Optional SQLLens source-only LSP with selected verified Node tree, explicit SQL dialect, no plugins/user config/DB connection or execution.", Version: systemexec.OptionalAdapterVersion("sql-lsp", systemexec.SQLLensVersion)},
+			{Name: "rust-language-server", Required: false, Installed: installed[optionalRustLSP], Paths: optionalAdapterPaths("rust-lsp", systemexec.RustAnalyzerDir, systemexec.RustCompilerDir), Notes: "Optional rust-analyzer with selected verified analyzer/compiler/sysroot source. Source-only graph avoids Cargo metadata, build.rs and project proc-macro execution.", Version: systemexec.OptionalAdapterVersion("rust-lsp", systemexec.RustAnalyzerVersion)},
+			{Name: "php-language-server", Required: false, Installed: installed[optionalPHPActor], Paths: optionalAdapterPaths("php-lsp", systemexec.PHPActorDir), Notes: "Optional selected verified Phpactor PHAR and trusted OS-managed PHP CLI 8.2+. Disables project Composer and PHP ini execution; Xdebug debugger remains independent.", Version: systemexec.OptionalAdapterVersion("php-lsp", systemexec.PHPActorVersion)},
+			{Name: "javascript-debugger", Required: false, Installed: installed[optionalJavaScriptDAP], Paths: optionalAdapterPaths("javascript-dap", systemexec.JavaScriptDAPDir), Notes: "Optional selected verified js-debug bundle plus Node runtime; private worker-only DAP containment. Source maps, browser and extension-host modes have independent contracts.", Version: systemexec.OptionalAdapterVersion("javascript-dap", systemexec.JavaScriptDAPVersion)},
+			{Name: "python-debugger", Required: false, Installed: installed[optionalPythonDAP], Paths: optionalAdapterPaths("python-dap", systemexec.PythonDebugpyDir), Notes: "Optional verified debugpy package and trusted Python 3.10+. No implicit project installation/attach. Containment and real debugging must be tested independently.", Version: systemexec.OptionalAdapterVersion("python-dap", systemexec.PythonDebugpyVersion)},
 			{Name: "go-debugger", Required: false, Installed: systemexec.First("/usr/local/bin/dlv", "/usr/bin/dlv") != "", Paths: []string{"/usr/local/bin/dlv", "/usr/bin/dlv"}, Notes: "Optional Go Delve DAP debugger. v1 launches only prebuilt workspace executables with matching worker file_version; requires trusted admin-owned Delve plus executor-owned root cgroup-v2 containment with cgroup.kill (Linux 5.14+); fails closed before DAP launch without those capabilities. Other Agent capabilities remain usable. Never silently installs/attaches/uses root."},
 			{Name: "browser", Required: false, Installed: fileExists(filepath.Join(browserEngine, "node/bin/node")), Paths: []string{browserEngine, browserData}, Notes: "Optional Playwright/Chromium capability. The executable engine is root-owned under /opt; writable browser profile data is isolated under agent state. Removing it disables browser tools but does not stop the MCP core."},
 		},
@@ -160,4 +162,32 @@ func Write(path string, m Manifest) error {
 		return fmt.Errorf("write manifest: %w", err)
 	}
 	return nil
+}
+
+// Profiles are runtime-selected resource identities, not compiled-in release
+// paths. When a selected profile is unavailable, expose its exact config path
+// so operators can diagnose it rather than falsely reporting an old version.
+func optionalAdapterPaths(name string, fallback ...string) []string {
+	profile, configured, err := systemexec.SelectedOptionalAdapterMetadata(name)
+	if !configured {
+		return fallback
+	}
+	if err != nil {
+		return []string{filepath.Join(systemexec.OptionalAdapterProfilesDir, name+".json")}
+	}
+	keys := make([]string, 0, len(profile.Entrypoints))
+	for key := range profile.Entrypoints {
+		keys = append(keys, key)
+	}
+	sort.Strings(keys)
+	paths := make([]string, 0, len(keys))
+	seen := make(map[string]bool, len(keys))
+	for _, key := range keys {
+		path := profile.Entrypoints[key]
+		if !seen[path] {
+			paths = append(paths, path)
+			seen[path] = true
+		}
+	}
+	return paths
 }

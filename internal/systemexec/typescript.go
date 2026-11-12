@@ -37,6 +37,14 @@ func TypeScript7() (string, error) {
 	if runtime.GOOS != "linux" || typeScript7PinnedTree[runtime.GOARCH] == "" {
 		return "", errors.New("typescript7_unsupported_platform")
 	}
+	if entries, _, configured, profileErr := SelectedOptionalAdapter("typescript-lsp"); configured {
+		if profileErr != nil {
+			return "", profileErr
+		}
+		return entries["binary"], nil
+	} else if profileErr != nil {
+		return "", profileErr
+	}
 	binary := filepath.Join(TypeScript7Library, "tsc")
 	if !Trusted(binary) {
 		return "", errors.New("typescript7_untrusted_executable")

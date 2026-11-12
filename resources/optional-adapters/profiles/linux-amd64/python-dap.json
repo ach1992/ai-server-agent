@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "adapter": "python-dap",
+  "version": "1.8.22",
+  "source": "PyPI debugpy-1.8.22-py2.py3-none-any.whl",
+  "artifacts": [
+    {
+      "path": "/usr/local/lib/ai-server-agent/dap/python/debugpy/1.8.22/package",
+      "kind": "tree",
+      "sha256": "c8c0ae7972b2749576aeb89a1d7c02e6b74fc8f3db9bd23840a11381cbca6491",
+      "file_count": 304,
+      "dir_count": 31,
+      "max_bytes": 33554432
+    }
+  ],
+  "entrypoints": {
+    "modules": "/usr/local/lib/ai-server-agent/dap/python/debugpy/1.8.22/package",
+    "adapter": "/usr/local/lib/ai-server-agent/dap/python/debugpy/1.8.22/package/debugpy/adapter/__main__.py"
+  },
+  "source_sha256": "a9e9d3550e15ca479c59333e90845029190531f0cacfedab3b815a57bd913947"
+}
