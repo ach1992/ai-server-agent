@@ -101,5 +101,6 @@ if [ "$PURGE" -eq 1 ]; then
   }
   cli_success "Purged Agent-owned config, state, logs, optional runtimes, management helpers, and the aiagent/aibrowser service accounts/groups. Workspace /srv/ai-workspace and its aiworker account/group were intentionally preserved."
 else
-  cli_success "Agent services, binary, management command, and installed helper scripts removed. Config, state, logs, optional runtimes, users, groups, and workspace were preserved. Reinstall to restore management, or use --purge to remove Agent-owned state/runtime; aiworker/workspace remain protected."
+  cli_success "Agent services, binary, management command and /usr/local/lib/ai-server-agent (including optional adapter resources stored there) removed."
+  cli_message INFO "Config, state, logs, /opt/ai-server-agent Browser runtime, users/groups and /srv/ai-workspace (aiworker) were preserved. Reinstall may require re-provisioning optional adapters; --purge also removes Agent-owned state/runtime."
 fi
