@@ -179,7 +179,7 @@ func (s *Server) debugLaunchPHPHTTP(ctx context.Context, req Request) (response 
 		"columnsStartAt1": true, "pathFormat": "path", "supportsVariableType": true,
 		"supportsRunInTerminalRequest": false,
 	}); err != nil {
-		return fileError("php_http_initialize_failed", "runtime", err)
+		return debugDAPOperationFailure(err, "php_http_initialize_failed", "runtime")
 	}
 	// Adapter listens ONLY on its private verified Unix side. Crucially it
 	// must not start a PHP script or terminate the separately owned service.
@@ -188,7 +188,7 @@ func (s *Server) debugLaunchPHPHTTP(ctx context.Context, req Request) (response 
 		"hostname": "unix://" + proxy.adapterPath, "cwd": workspace,
 		"console": "internalConsole", "stopOnEntry": false, "maxConnections": 1,
 	}); err != nil {
-		return fileError("php_http_adapter_launch_failed", "runtime", err)
+		return debugDAPOperationFailure(err, "php_http_adapter_launch_failed", "runtime")
 	}
 	if latest := s.workerWorkspaceFile(ctx, statReq); !latest.OK || latest.FileVersion != req.FileVersion {
 		return fileError("debug_program_changed", "conflict", errors.New("PHP HTTP source changed during DAP launch"))

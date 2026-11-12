@@ -279,3 +279,77 @@ func TestDAPSizeFailureResponseIsNotSuccess(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// PHP HTTP is a separately service-owned debugger entrypoint. Its normal
+// initialize and immediate deferred-launch responses share the existing DAP
+// wire and public error mapping, without changing service ownership/cleanup.
+func TestPHPHTTPDAPStartupSizeAndNativeClassification(t *testing.T) {
+	for _, tc := range []struct {
+		name, command, fallback string
+		oversized               bool
+		deferred                bool
+	}{
+		{name: "initialize/oversized", command: "initialize", fallback: "php_http_initialize_failed", oversized: true},
+		{name: "initialize/native-failure", command: "initialize", fallback: "php_http_initialize_failed"},
+		{name: "deferred-launch/oversized", command: "launch", fallback: "php_http_adapter_launch_failed", oversized: true, deferred: true},
+		{name: "deferred-launch/native-failure", command: "launch", fallback: "php_http_adapter_launch_failed", deferred: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			client, peer := net.Pipe()
+			defer client.Close()
+			defer peer.Close()
+			d := &dapState{conn: client, stage: "starting"}
+			done := make(chan error, 1)
+			go func() {
+				request, err := dapFixtureRead(bufio.NewReader(peer))
+				if err != nil {
+					done <- err
+					return
+				}
+				if request.Command != tc.command {
+					done <- fmt.Errorf("expected %s, received %s", tc.command, request.Command)
+					return
+				}
+				body := map[string]any{"capabilities": "ok"}
+				if tc.oversized {
+					body["capabilities"] = strings.Repeat("x", 132<<10)
+				}
+				done <- dapFrame(peer, map[string]any{
+					"seq": 20, "type": "response", "request_seq": request.Seq,
+					"command": tc.command, "success": tc.oversized,
+					"message": "native adapter refused request", "body": body,
+				})
+			}()
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+			var err error
+			if tc.deferred {
+				_, err = d.callDeferredLaunch(ctx, map[string]any{"type": "php", "request": "launch"})
+			} else {
+				_, err = d.call(ctx, "initialize", map[string]any{"adapterID": "php"})
+			}
+			if err == nil || errors.Is(err, errDAPResultTooLarge) != tc.oversized {
+				t.Fatalf("wrong native DAP outcome: oversize=%t err=%v", tc.oversized, err)
+			}
+			response := debugDAPOperationFailure(err, tc.fallback, "runtime")
+			if response.OK || response.Output != "" {
+				t.Fatalf("refused startup exposed as completed: %+v", response)
+			}
+			if tc.oversized {
+				if response.ErrorCode != "debug_result_too_large" || response.ErrorClass != "resource" ||
+					!strings.Contains(response.Error, "131072") || !strings.Contains(response.Error, "narrow") {
+					t.Fatalf("known oversized PHP HTTP %s reported incorrectly: %+v", tc.command, response)
+				}
+			} else if response.ErrorCode != tc.fallback || response.ErrorClass != "runtime" ||
+				!strings.Contains(response.Error, "native adapter refused request") {
+				t.Fatalf("native PHP HTTP %s failure classification changed: %+v", tc.command, response)
+			}
+			if d.uncertain {
+				t.Fatalf("complete authenticated reply poisoned PHP HTTP protocol: %s", tc.command)
+			}
+			if err := <-done; err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+}
